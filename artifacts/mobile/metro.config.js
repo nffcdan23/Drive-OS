@@ -1,0 +1,22 @@
+const { getDefaultConfig } = require('expo/metro-config');
+const path = require('path');
+
+const config = getDefaultConfig(__dirname);
+
+// On web, react-native-maps imports native-only codegen modules and crashes.
+// Redirect it to a no-op stub so the web bundle can compile cleanly.
+const originalResolver = config.resolver.resolveRequest;
+config.resolver.resolveRequest = (context, moduleName, platform) => {
+  if (platform === 'web' && moduleName === 'react-native-maps') {
+    return {
+      filePath: path.resolve(__dirname, 'stubs/react-native-maps.web.js'),
+      type: 'sourceFile',
+    };
+  }
+  if (originalResolver) {
+    return originalResolver(context, moduleName, platform);
+  }
+  return context.resolveRequest(context, moduleName, platform);
+};
+
+module.exports = config;
