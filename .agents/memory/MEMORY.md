@@ -1,0 +1,2 @@
+- [DriveOS persistence decisions](driveos-persistence.md) — auth strategy, offline-first pattern, API hydration rule.
+- [expo-crypto version](expo-crypto-version.md) — pin to ~15.0.9 (SDK 53); higher versions break Metro resolution.

@@ -7,6 +7,8 @@ import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useColors } from '@/hooks/useColors';
 import { useApp, Vehicle } from '@/context/AppContext';
+import { LoadingState } from '@/components/LoadingState';
+import { EmptyState } from '@/components/EmptyState';
 import * as Haptics from 'expo-haptics';
 
 const MINI_IMAGE = require('@/assets/images/mini-cooper.png');
@@ -31,7 +33,7 @@ export default function GarageScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
   const router = useRouter();
-  const { vehicles, setActiveVehicle, deleteVehicle } = useApp();
+  const { vehicles, setActiveVehicle, deleteVehicle, isLoading } = useApp();
 
   const styles = StyleSheet.create({
     container: { flex: 1, backgroundColor: colors.background },
@@ -78,9 +80,6 @@ export default function GarageScreen() {
     setActiveBtn: { borderColor: colors.primary, backgroundColor: colors.primary + '10' },
     setActiveBtnText: { color: colors.primary },
     listContent: { paddingTop: 16, paddingBottom: (Platform.OS === 'web' ? 84 : insets.bottom + 50) + 16 },
-    emptyContainer: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingTop: 80, paddingBottom: 100 },
-    emptyTitle: { fontSize: 18, fontWeight: '600', color: colors.foreground, fontFamily: 'Inter_600SemiBold', marginTop: 12 },
-    emptyText: { fontSize: 14, color: colors.mutedForeground, marginTop: 6, textAlign: 'center', fontFamily: 'Inter_400Regular', paddingHorizontal: 40 },
     noActiveNote: {
       margin: 20, marginBottom: 0, padding: 14, backgroundColor: colors.muted, borderRadius: 12,
       borderWidth: 1, borderColor: colors.border,
@@ -91,7 +90,7 @@ export default function GarageScreen() {
   function handleDelete(v: Vehicle) {
     Alert.alert(
       'Remove this vehicle?',
-      `"${v.nickname}" will be removed from your garage. Saved journeys will keep a historical record of this vehicle — no journey data will be lost.`,
+      `"${v.nickname}" will be removed from your garage. Saved journeys will keep a historical record of this vehicle.`,
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -114,18 +113,15 @@ export default function GarageScreen() {
     return (
       <View style={[styles.vehicleCard, isActive && styles.vehicleCardActive]}>
         {isActive && <View style={styles.activeBadge}><Text style={styles.activeBadgeText}>ACTIVE</Text></View>}
-        <TouchableOpacity
-          onPress={() => router.push(`/vehicle/${vehicle.id}`)}
-          activeOpacity={0.7}
-        >
-        <View style={styles.cardRow}>
-          <VehicleIcon vehicle={vehicle} size={70} />
-          <View style={styles.cardInfo}>
-            <Text style={styles.cardNickname}>{vehicle.nickname}</Text>
-            <Text style={styles.cardSubtitle}>{vehicle.year} {vehicle.make} {vehicle.model}</Text>
-            <Text style={styles.cardSubtitle}>{vehicle.registration} · {vehicle.colour}</Text>
+        <TouchableOpacity onPress={() => router.push(`/vehicle/${vehicle.id}`)} activeOpacity={0.7}>
+          <View style={styles.cardRow}>
+            <VehicleIcon vehicle={vehicle} size={70} />
+            <View style={styles.cardInfo}>
+              <Text style={styles.cardNickname}>{vehicle.nickname}</Text>
+              <Text style={styles.cardSubtitle}>{vehicle.year} {vehicle.make} {vehicle.model}</Text>
+              <Text style={styles.cardSubtitle}>{vehicle.registration} · {vehicle.colour}</Text>
+            </View>
           </View>
-        </View>
         </TouchableOpacity>
         <View style={styles.cardDivider} />
         <View style={styles.statsRow}>
@@ -182,19 +178,24 @@ export default function GarageScreen() {
         </View>
       )}
 
-      <FlatList
-        data={vehicles}
-        keyExtractor={(item) => item.id}
-        contentContainerStyle={styles.listContent}
-        renderItem={({ item }) => <VehicleCard vehicle={item} />}
-        ListEmptyComponent={
-          <View style={styles.emptyContainer}>
-            <Ionicons name="car-outline" size={56} color={colors.mutedForeground} />
-            <Text style={styles.emptyTitle}>Empty Garage</Text>
-            <Text style={styles.emptyText}>Add your first vehicle to get started.</Text>
-          </View>
-        }
-      />
+      {/* Loading skeleton */}
+      {isLoading && vehicles.length === 0 ? (
+        <LoadingState rows={3} style={{ paddingTop: 16 }} />
+      ) : (
+        <FlatList
+          data={vehicles}
+          keyExtractor={(item) => item.id}
+          contentContainerStyle={styles.listContent}
+          renderItem={({ item }) => <VehicleCard vehicle={item} />}
+          ListEmptyComponent={
+            <EmptyState
+              icon="car-outline"
+              title="Empty Garage"
+              subtitle="Add your first vehicle to get started with journey tracking."
+            />
+          }
+        />
+      )}
     </View>
   );
 }
