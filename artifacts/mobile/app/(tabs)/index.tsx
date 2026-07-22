@@ -21,6 +21,17 @@ const NAV_ZOOM = 17;
 // Metres to shift camera centre behind vehicle so it appears ~65% down the screen
 // At zoom 17 the vertical FOV is ~960 m, so 15 % ≈ 144 m; use 160 m for comfort.
 const CAMERA_LOOK_AHEAD_M = 160;
+// Metres to shift map centre south of the vehicle when the location button is
+// tapped in north-up mode.  At zoom 16 this ≈ 80 px — just enough to sit the
+// vehicle above the bottom navigation bar and Start Drive button.
+const LOCATE_VERTICAL_OFFSET_M = 120;
+// Zoom levels: below MIN_ZOOM_TO_PRESERVE the user is too far out, so we
+// reset to STREET_ZOOM on locate.  Above MIN_ZOOM_TO_PRESERVE we keep theirs.
+const MIN_ZOOM_TO_PRESERVE = 13;
+const STREET_ZOOM = 16.5;
+// iOS altitude equivalent for "too zoomed out" (> 8 km → reset to street level)
+const MAX_ALTITUDE_TO_PRESERVE = 8000;
+const STREET_ALTITUDE = 700;
 // Minimum speed (km/h) before GPS course is trusted for heading
 const MIN_SPEED_FOR_GPS_HEADING = 6;
 // Heading smoothing factor (lower = smoother but laggier)
@@ -446,10 +457,67 @@ export default function MapScreen() {
     router.push('/drive-summary');
   }
 
-  // ── Recenter (one-shot) ───────────────────────────────────────────────────
-  const handleRecenter = useCallback(() => {
-    handleResumeFollowing();
-  }, [handleResumeFollowing]);
+  // ── Location button ──────────────────────────────────────────────────────
+  // Smoothly animates to the user's current position, restores follow mode,
+  // and centres the vehicle slightly above the vertical midpoint to leave room
+  // for the bottom navigation bar and Start Drive button.
+  // Zoom is preserved unless the user is too far out (< MIN_ZOOM_TO_PRESERVE).
+  const handleLocateButton = useCallback(async () => {
+    const loc = userLocationRef.current;
+    if (!loc) return;
+
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+
+    // Restore follow mode regardless of platform
+    setFollowMode('following');
+
+    if (Platform.OS === 'web' || !mapRef.current) return;
+
+    // Read the live camera so we can preserve the user's zoom level
+    let targetZoom    = STREET_ZOOM;
+    let targetAlt     = STREET_ALTITUDE;
+    let preserveZoom  = false;
+
+    try {
+      const cam = await mapRef.current.getCamera();
+      // Android exposes `zoom`; iOS exposes `altitude` (and often both)
+      if (cam.zoom != null && cam.zoom >= MIN_ZOOM_TO_PRESERVE) {
+        targetZoom   = cam.zoom;
+        preserveZoom = true;
+      }
+      if (cam.altitude != null && cam.altitude < MAX_ALTITUDE_TO_PRESERVE) {
+        targetAlt    = cam.altitude;
+        preserveZoom = true;
+      }
+    } catch {
+      // getCamera() unavailable — fall through to street defaults
+    }
+
+    const heading    = smoothedHeadingRef.current;
+    const isHeadingUp = headingModeRef.current === 'heading-up';
+
+    // In heading-up mode re-use the nav offset (vehicle appears lower-centre,
+    // looks ahead).  In north-up mode apply a fixed southward shift so the
+    // vehicle sits slightly above the screen midpoint.
+    const center = isHeadingUp
+      ? getOffsetCenter(loc.latitude, loc.longitude, heading, CAMERA_LOOK_AHEAD_M)
+      : {
+          latitude:  loc.latitude  - LOCATE_VERTICAL_OFFSET_M / 111_320,
+          longitude: loc.longitude,
+        };
+
+    programmaticChangeRef.current = true;
+    mapRef.current.animateCamera(
+      {
+        center,
+        heading: isHeadingUp ? heading : 0,
+        zoom:     targetZoom,
+        pitch:    0,
+        altitude: targetAlt,
+      },
+      { duration: 600 },
+    );
+  }, []);
 
   // ── Formatters ────────────────────────────────────────────────────────────
   function formatDriveTime(sec: number) {
@@ -787,7 +855,7 @@ export default function MapScreen() {
         {/* Locate / resume following */}
         <TouchableOpacity
           style={[styles.mapControlBtn, followMode === 'following' && styles.mapControlBtnActive]}
-          onPress={handleRecenter}
+          onPress={handleLocateButton}
         >
           <Ionicons
             name={followMode === 'following' ? 'navigate' : 'navigate-outline'}
