@@ -1,0 +1,38 @@
+Fix active-drive location tracking and implement a proper navigation camera.
+
+Current problem:
+The locate button centres the map once but the map does not continue following the user while driving.
+
+Required behaviour:
+
+1. Use navigator.geolocation.watchPosition rather than one-time geolocation calls.
+2. Start the location watcher when a drive begins.
+3. Stop and clean up the watcher when the drive ends or the component unmounts.
+4. Update the current vehicle marker whenever a valid position arrives.
+5. Smoothly animate between GPS positions instead of teleporting the marker.
+6. While Follow Mode is active, continuously recalculate the map camera.
+7. Position the vehicle approximately 60–70% down the screen so more road is visible ahead.
+8. Add a clear Follow Mode state:
+   - Following
+   - Free look
+9. If the user manually drags, rotates or zooms the map:
+   - temporarily disable automatic following;
+   - show a prominent “Resume following” or current-location button.
+10. Pressing that button must re-enable continuous following, not merely centre the map once.
+
+Heading-up navigation:
+- Rotate the map so the direction of travel points towards the top of the screen.
+- Prefer GPS heading/course when the user is moving above approximately 5–8 km/h.
+- When GPS course is unavailable or the user is stationary, use device orientation where permission is available.
+- Smooth heading changes to prevent jitter.
+- Handle the transition between 359 degrees and 0 degrees correctly.
+- Do not rotate sharply due to one inaccurate GPS reading.
+- Keep the vehicle marker facing upwards in heading-up mode while the map rotates beneath it.
+- Provide an optional north-up mode through the compass control.
+
+Accuracy:
+- Request enableHighAccuracy: true.
+- Ignore clearly invalid or extremely inaccurate readings.
+- Display a subtle warning if GPS accuracy is poor.
+- Do not count implausible GPS jumps towards distance or top-speed statistics.
+- Preserve the existing route and journey-recording functionality.
