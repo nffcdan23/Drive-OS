@@ -9,6 +9,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useColors } from '@/hooks/useColors';
 import { useApp } from '@/context/AppContext';
+import { formatDistance, formatSpeed } from '@/lib/units';
 import { SyncBanner } from '@/components/SyncBanner';
 import * as Haptics from 'expo-haptics';
 
@@ -57,7 +58,7 @@ export default function DriveSummaryScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
   const router = useRouter();
-  const { currentDrive, endDrive, updateJourney, syncStatus, retryJourneySync } = useApp();
+  const { currentDrive, endDrive, updateJourney, syncStatus, retryJourneySync, resolvedUnitSystem } = useApp();
   const [journeyName, setJourneyName] = useState('');
   const [savedJourneyId, setSavedJourneyId] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
@@ -197,7 +198,7 @@ export default function DriveSummaryScreen() {
         <View style={styles.statsGrid}>
           <View style={styles.statCard}>
             <Ionicons name="navigate-outline" size={24} color={colors.primary} />
-            <Text style={styles.statValue}>{driveSnapshot.distance.toFixed(1)} km</Text>
+            <Text style={styles.statValue}>{formatDistance(driveSnapshot.distance, resolvedUnitSystem)}</Text>
             <Text style={styles.statLabel}>Distance</Text>
           </View>
           <View style={styles.statCard}>
@@ -208,13 +209,13 @@ export default function DriveSummaryScreen() {
           <View style={styles.statCard}>
             <Ionicons name="speedometer-outline" size={24} color={colors.primary} />
             <Text style={[styles.statValue, styles.statHighlight]}>
-              {Math.round(driveSnapshot.topSpeed)} km/h
+              {formatSpeed(driveSnapshot.topSpeed, resolvedUnitSystem)}
             </Text>
             <Text style={styles.statLabel}>Top Speed</Text>
           </View>
           <View style={styles.statCard}>
             <Ionicons name="car-outline" size={24} color={colors.primary} />
-            <Text style={styles.statValue}>{driveSnapshot.avgSpeed} km/h</Text>
+            <Text style={styles.statValue}>{formatSpeed(driveSnapshot.avgSpeed, resolvedUnitSystem)}</Text>
             <Text style={styles.statLabel}>Avg Speed</Text>
           </View>
         </View>

@@ -7,6 +7,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useColors } from '@/hooks/useColors';
 import { useApp, Journey, JourneyCategory } from '@/context/AppContext';
+import { formatDistance, formatSpeed } from '@/lib/units';
 import * as Haptics from 'expo-haptics';
 
 function formatDuration(seconds: number): string {
@@ -62,7 +63,7 @@ export default function JourneysScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
   const router = useRouter();
-  const { journeys, vehicles, categories, addCategory, updateCategory, deleteCategory } = useApp();
+  const { journeys, vehicles, categories, addCategory, updateCategory, deleteCategory, resolvedUnitSystem } = useApp();
 
   const [period, setPeriod] = useState<TimePeriod>('all');
   const [sortBy, setSortBy] = useState<SortKey>('date_desc');
@@ -270,7 +271,7 @@ export default function JourneysScreen() {
         <View style={styles.cardDivider} />
         <View style={styles.statsGrid2}>
           <View style={styles.statItem}>
-            <Text style={styles.statItemValue}>{item.distance} km</Text>
+            <Text style={styles.statItemValue}>{formatDistance(item.distance, resolvedUnitSystem)}</Text>
             <Text style={styles.statItemLabel}>Distance</Text>
           </View>
           <View style={styles.statItem}>
@@ -278,11 +279,11 @@ export default function JourneysScreen() {
             <Text style={styles.statItemLabel}>Duration</Text>
           </View>
           <View style={styles.statItem}>
-            <Text style={styles.statItemValue}>{item.averageSpeed} km/h</Text>
+            <Text style={styles.statItemValue}>{formatSpeed(item.averageSpeed, resolvedUnitSystem)}</Text>
             <Text style={styles.statItemLabel}>Avg</Text>
           </View>
           <View style={styles.statItem}>
-            <Text style={[styles.statItemValue, { color: colors.primary }]}>{item.topSpeed} km/h</Text>
+            <Text style={[styles.statItemValue, { color: colors.primary }]}>{formatSpeed(item.topSpeed, resolvedUnitSystem)}</Text>
             <Text style={styles.statItemLabel}>Top</Text>
           </View>
         </View>
@@ -361,7 +362,7 @@ export default function JourneysScreen() {
                   <Text style={styles.primaryLabel}>Total Drives</Text>
                 </View>
                 <View style={styles.primaryCard}>
-                  <Text style={[styles.primaryValue, { color: colors.primary }]}>{stats.totalKm.toFixed(0)} km</Text>
+                  <Text style={[styles.primaryValue, { color: colors.primary }]}>{formatDistance(stats.totalKm, resolvedUnitSystem)}</Text>
                   <Text style={styles.primaryLabel}>Total Distance</Text>
                 </View>
               </View>
@@ -371,19 +372,19 @@ export default function JourneysScreen() {
                   <Text style={styles.secondaryLabel}>Drive Time</Text>
                 </View>
                 <View style={styles.secondaryCard}>
-                  <Text style={styles.secondaryValue}>{stats.total > 0 ? (stats.totalKm / stats.total).toFixed(1) : '0'} km</Text>
+                  <Text style={styles.secondaryValue}>{formatDistance(stats.total > 0 ? stats.totalKm / stats.total : 0, resolvedUnitSystem)}</Text>
                   <Text style={styles.secondaryLabel}>Avg Distance</Text>
                 </View>
                 <View style={styles.secondaryCard}>
-                  <Text style={styles.secondaryValue}>{stats.avgSpeed} km/h</Text>
+                  <Text style={styles.secondaryValue}>{formatSpeed(stats.avgSpeed, resolvedUnitSystem)}</Text>
                   <Text style={styles.secondaryLabel}>Avg Speed</Text>
                 </View>
                 <View style={styles.secondaryCard}>
-                  <Text style={[styles.secondaryValue, { color: colors.primary }]}>{stats.topSpeed} km/h</Text>
+                  <Text style={[styles.secondaryValue, { color: colors.primary }]}>{formatSpeed(stats.topSpeed, resolvedUnitSystem)}</Text>
                   <Text style={styles.secondaryLabel}>Top Speed</Text>
                 </View>
                 <View style={styles.secondaryCard}>
-                  <Text style={styles.secondaryValue}>{stats.longest.toFixed(0)} km</Text>
+                  <Text style={styles.secondaryValue}>{formatDistance(stats.longest, resolvedUnitSystem)}</Text>
                   <Text style={styles.secondaryLabel}>Longest</Text>
                 </View>
                 <View style={styles.secondaryCard}>

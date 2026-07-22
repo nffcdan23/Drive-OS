@@ -11,6 +11,7 @@ export const users = pgTable('users', {
   username:      text('username'),
   bio:           text('bio'),
   friendCode:    text('friend_code'),
+  unitSystem:    text('unit_system').notNull().default('auto'),
   level:         integer('level').notNull().default(1),
   xp:            integer('xp').notNull().default(0),
   xpToNextLevel: integer('xp_to_next_level').notNull().default(1000),

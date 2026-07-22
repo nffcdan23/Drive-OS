@@ -11,13 +11,16 @@ import {
   apiGetMe, apiGetVehicles, apiGetJourneys, apiGetCategories,
   apiGetNotifications, apiStartJourney, apiAddRoutePoints,
   apiCompleteJourney, apiUpdateJourney, apiDeleteJourney, apiCreateVehicle,
-  apiUpdateVehicle, apiDeleteVehicle, apiActivateVehicle,
+  apiUpdateVehicle, apiDeleteVehicle, apiActivateVehicle, apiUpdateMe,
   ApiVehicle, ApiJourney,
 } from '@/lib/apiClient';
 import {
   loadDraft, saveDraft, clearDraft, clearPendingPoints,
   JourneyDraft, DraftRoutePoint,
 } from '@/lib/journeyDraft';
+import {
+  UnitSystem, ResolvedUnitSystem, resolveUnitSystem,
+} from '@/lib/units';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -324,6 +327,11 @@ interface AppContextValue {
   markNotificationRead: (id: string) => void;
   markAllNotificationsRead: () => void;
   unreadNotificationCount: number;
+
+  // Units of measurement
+  unitSystem: UnitSystem;
+  resolvedUnitSystem: ResolvedUnitSystem;
+  setUnitSystem: (s: UnitSystem) => void;
 }
 
 const AppContext = createContext<AppContextValue | null>(null);
@@ -345,6 +353,7 @@ const STORAGE_KEYS = {
   CONVERSATIONS:  '@driveos/conversations',
   MESSAGES:       '@driveos/messages',
   NOTIFICATIONS:  '@driveos/notifications',
+  UNIT_SYSTEM:    '@driveos/unitSystem',
 };
 
 // ─── Default profile ──────────────────────────────────────────────────────────
@@ -447,6 +456,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [conversations,  setConversations]  = useState<Conversation[]>(MOCK_CONVERSATIONS);
   const [messages,       setMessages]       = useState<Message[]>(MOCK_MESSAGES);
   const [notifications,  setNotifications]  = useState<Notification[]>(MOCK_NOTIFICATIONS);
+  const [unitSystem,     setUnitSystemState] = useState<UnitSystem>('auto');
   const [loaded,         setLoaded]         = useState(false);
   const [isLoading,      setIsLoading]      = useState(true);
   const [syncStatus,     setSyncStatus]     = useState<SyncStatus>('idle');
@@ -461,6 +471,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   // Keep activeVehicleRef in sync so callbacks close over the latest value
   const activeVehicle = vehicles.find((v) => v.isActive) ?? vehicles[0] ?? null;
   activeVehicleRef.current = activeVehicle;
+  const resolvedUnitSystem = resolveUnitSystem(unitSystem);
 
   // ── Step 1: Load from AsyncStorage (fast, offline-capable) ──────────────────
   useEffect(() => {
@@ -492,6 +503,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         setConversations(parse(STORAGE_KEYS.CONVERSATIONS, MOCK_CONVERSATIONS));
         setMessages(parse(STORAGE_KEYS.MESSAGES, MOCK_MESSAGES));
         setNotifications(parse(STORAGE_KEYS.NOTIFICATIONS, MOCK_NOTIFICATIONS));
+        setUnitSystemState(parse(STORAGE_KEYS.UNIT_SYSTEM, 'auto') as UnitSystem);
       } catch {
         // Use defaults on failure
       } finally {
@@ -532,6 +544,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             totalDistance: me.totalDistance,
             totalJourneys: me.totalJourneys,
           }));
+          // Restore unit preference saved on the server (cross-device sync)
+          if (me.unitSystem) {
+            setUnitSystemState(me.unitSystem as UnitSystem);
+          }
         }
 
         if (apiVehicles !== null) {
@@ -599,6 +615,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => { if (!loaded) return; AsyncStorage.setItem(STORAGE_KEYS.CONVERSATIONS, JSON.stringify(conversations)); }, [conversations, loaded]);
   useEffect(() => { if (!loaded) return; AsyncStorage.setItem(STORAGE_KEYS.MESSAGES, JSON.stringify(messages)); }, [messages, loaded]);
   useEffect(() => { if (!loaded) return; AsyncStorage.setItem(STORAGE_KEYS.NOTIFICATIONS, JSON.stringify(notifications)); }, [notifications, loaded]);
+  useEffect(() => { if (!loaded) return; AsyncStorage.setItem(STORAGE_KEYS.UNIT_SYSTEM, JSON.stringify(unitSystem)); }, [unitSystem, loaded]);
 
   // ── Flush pending route points every 30 s during a drive ─────────────────────
   const flushPendingPoints = useCallback(async () => {
@@ -1010,6 +1027,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     }
   }, [unsyncedJourneyId]);
 
+  const setUnitSystem = useCallback((s: UnitSystem) => {
+    setUnitSystemState(s);
+    // Persist to server so the preference syncs across devices; fire-and-forget
+    apiUpdateMe({ unitSystem: s }).catch(() => {});
+  }, []);
+
   const togglePassengerMode = useCallback(() => setIsPassengerMode((p) => !p), []);
   const updateProfile       = useCallback((updates: Partial<UserProfile>) => setUserProfile((p) => ({ ...p, ...updates })), []);
 
@@ -1140,6 +1163,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     events, addEvent, rsvpEvent,
     conversations, messages, sendMessage, startConversation, markConversationRead,
     notifications, markNotificationRead, markAllNotificationsRead, unreadNotificationCount,
+    unitSystem, resolvedUnitSystem, setUnitSystem,
   };
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;

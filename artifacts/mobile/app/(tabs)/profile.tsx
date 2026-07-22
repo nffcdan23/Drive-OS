@@ -7,12 +7,13 @@ import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useColors } from '@/hooks/useColors';
 import { useApp } from '@/context/AppContext';
+import { formatDistance, distanceUnit } from '@/lib/units';
 
 export default function ProfileScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
   const router = useRouter();
-  const { userProfile, vehicles, journeys } = useApp();
+  const { userProfile, vehicles, journeys, resolvedUnitSystem } = useApp();
 
   const xpProgress = userProfile.xp / userProfile.xpToNextLevel;
   const unlockedAchievements = userProfile.achievements.filter((a) => a.unlockedAt !== null);
@@ -114,8 +115,8 @@ export default function ProfileScreen() {
           <View style={styles.statsGrid}>
             <View style={styles.statCard}>
               <Ionicons name="navigate-outline" size={20} color={colors.primary} />
-              <Text style={styles.statValue}>{userProfile.totalDistance.toLocaleString()}</Text>
-              <Text style={styles.statLabel}>Total km</Text>
+              <Text style={styles.statValue}>{formatDistance(userProfile.totalDistance, resolvedUnitSystem)}</Text>
+              <Text style={styles.statLabel}>Total {distanceUnit(resolvedUnitSystem)}</Text>
             </View>
             <View style={styles.statCard}>
               <Ionicons name="flag-outline" size={20} color={colors.primary} />

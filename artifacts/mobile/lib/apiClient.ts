@@ -56,6 +56,7 @@ export interface ApiUser {
   username: string | null;
   bio: string | null;
   friendCode: string | null;
+  unitSystem: string;
   level: number;
   xp: number;
   xpToNextLevel: number;
@@ -66,7 +67,7 @@ export interface ApiUser {
 }
 
 export const apiGetMe = () => api<ApiUser>('/users/me');
-export const apiUpdateMe = (data: Partial<Pick<ApiUser, 'name' | 'username' | 'bio'>>) =>
+export const apiUpdateMe = (data: Partial<Pick<ApiUser, 'name' | 'username' | 'bio' | 'unitSystem'>>) =>
   put<ApiUser>('/users/me', data);
 
 // ─── Vehicles ─────────────────────────────────────────────────────────────────

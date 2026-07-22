@@ -10,6 +10,7 @@ import Svg, { Path, Ellipse, Rect, Circle } from 'react-native-svg';
 import * as Haptics from 'expo-haptics';
 import { useColors } from '@/hooks/useColors';
 import { useApp } from '@/context/AppContext';
+import { formatDistance, formatSpeed } from '@/lib/units';
 import { CONFIG } from '@/constants/config';
 import MapView, { Marker, MapType, Camera } from 'react-native-maps';
 import * as Location from 'expo-location';
@@ -157,7 +158,7 @@ export default function MapScreen() {
   const {
     activeVehicle, userProfile, isPassengerMode,
     isDriving, currentDrive, startDrive, endDrive, updateDriveCoordinate,
-    unreadNotificationCount,
+    unreadNotificationCount, resolvedUnitSystem,
   } = useApp();
 
   // ── Map state ──
@@ -912,15 +913,15 @@ export default function MapScreen() {
           </View>
           <View style={styles.driveStats}>
             <View style={styles.driveStatItem}>
-              <Text style={styles.driveStatValue}>{currentDrive ? currentDrive.estimatedDistance.toFixed(1) : '0.0'} km</Text>
+              <Text style={styles.driveStatValue}>{currentDrive ? formatDistance(currentDrive.estimatedDistance, resolvedUnitSystem) : formatDistance(0, resolvedUnitSystem)}</Text>
               <Text style={styles.driveStatLabel}>Distance</Text>
             </View>
             <View style={styles.driveStatItem}>
-              <Text style={styles.driveStatValue}>{currentDrive ? Math.round(currentDrive.currentSpeed) : 0} km/h</Text>
+              <Text style={styles.driveStatValue}>{currentDrive ? formatSpeed(currentDrive.currentSpeed, resolvedUnitSystem) : formatSpeed(0, resolvedUnitSystem)}</Text>
               <Text style={styles.driveStatLabel}>Speed</Text>
             </View>
             <View style={styles.driveStatItem}>
-              <Text style={[styles.driveStatValue, { color: colors.primary }]}>{currentDrive ? Math.round(currentDrive.topSpeed) : 0} km/h</Text>
+              <Text style={[styles.driveStatValue, { color: colors.primary }]}>{currentDrive ? formatSpeed(currentDrive.topSpeed, resolvedUnitSystem) : formatSpeed(0, resolvedUnitSystem)}</Text>
               <Text style={styles.driveStatLabel}>Top Speed</Text>
             </View>
             <View style={styles.driveStatItem}>

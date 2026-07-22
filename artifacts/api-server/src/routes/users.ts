@@ -28,10 +28,11 @@ router.get('/users/me', requireUser, async (req, res, next) => {
 // PUT /api/users/me – update profile fields
 router.put('/users/me', requireUser, async (req, res, next) => {
   try {
-    const { name, username, bio } = req.body as {
+    const { name, username, bio, unitSystem } = req.body as {
       name?: string;
       username?: string;
       bio?: string;
+      unitSystem?: string;
     };
 
     const updates: Partial<typeof users.$inferInsert> = {
@@ -40,6 +41,7 @@ router.put('/users/me', requireUser, async (req, res, next) => {
     if (name !== undefined) updates.name = name;
     if (username !== undefined) updates.username = username;
     if (bio !== undefined) updates.bio = bio;
+    if (unitSystem !== undefined) updates.unitSystem = unitSystem;
 
     const [updated] = await db
       .update(users)

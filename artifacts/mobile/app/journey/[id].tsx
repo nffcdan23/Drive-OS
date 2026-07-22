@@ -9,6 +9,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Svg, { Path, Circle, Defs, LinearGradient as SvgLinearGradient, Stop } from 'react-native-svg';
 import { useColors } from '@/hooks/useColors';
 import { useApp, Coordinate } from '@/context/AppContext';
+import { formatDistance, formatSpeed } from '@/lib/units';
 import * as Haptics from 'expo-haptics';
 
 function formatDuration(seconds: number): string {
@@ -117,7 +118,7 @@ export default function JourneyDetailScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
   const router = useRouter();
-  const { journeys, vehicles, deleteJourney, updateJourney, categories } = useApp();
+  const { journeys, vehicles, deleteJourney, updateJourney, categories, resolvedUnitSystem } = useApp();
 
   const journey = journeys.find((j) => j.id === id);
   const vehicle = journey
@@ -343,7 +344,7 @@ export default function JourneyDetailScreen() {
         {/* Stats grid */}
         <View style={styles.statsGrid}>
           <View style={styles.statCard}>
-            <Text style={styles.statValue}>{journey.distance} km</Text>
+            <Text style={styles.statValue}>{formatDistance(journey.distance, resolvedUnitSystem)}</Text>
             <Text style={styles.statLabel}>Distance</Text>
           </View>
           <View style={styles.statCard}>
@@ -351,11 +352,11 @@ export default function JourneyDetailScreen() {
             <Text style={styles.statLabel}>Duration</Text>
           </View>
           <View style={styles.statCard}>
-            <Text style={styles.statValue}>{journey.averageSpeed} km/h</Text>
+            <Text style={styles.statValue}>{formatSpeed(journey.averageSpeed, resolvedUnitSystem)}</Text>
             <Text style={styles.statLabel}>Avg Speed</Text>
           </View>
           <View style={styles.statCard}>
-            <Text style={[styles.statValue, styles.statHighlight]}>{journey.topSpeed} km/h</Text>
+            <Text style={[styles.statValue, styles.statHighlight]}>{formatSpeed(journey.topSpeed, resolvedUnitSystem)}</Text>
             <Text style={styles.statLabel}>Top Speed</Text>
           </View>
         </View>
@@ -393,7 +394,7 @@ export default function JourneyDetailScreen() {
                   )}
                 </View>
                 <View style={styles.participantStats}>
-                  <Text style={{ fontSize: 13, fontWeight: '600', color: colors.foreground, fontFamily: 'Inter_600SemiBold' }}>{p.distance} km</Text>
+                  <Text style={{ fontSize: 13, fontWeight: '600', color: colors.foreground, fontFamily: 'Inter_600SemiBold' }}>{formatDistance(p.distance, resolvedUnitSystem)}</Text>
                   <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3, marginTop: 2 }}>
                     <Ionicons name="star" size={10} color={colors.primary} />
                     <Text style={{ fontSize: 11, color: colors.primary, fontFamily: 'Inter_500Medium' }}>+{p.xp} XP</Text>
