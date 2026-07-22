@@ -1,6 +1,6 @@
 import { Router } from 'express';
-import { db, users, userAchievements, achievements } from '@workspace/db';
-import { eq } from 'drizzle-orm';
+import { db, users, userAchievements, achievements, vehicles, journeys, friendships } from '@workspace/db';
+import { eq, and, sql } from 'drizzle-orm';
 import { requireUser } from '../middleware/userId';
 
 const router = Router();
@@ -50,6 +50,40 @@ router.put('/users/me', requireUser, async (req, res, next) => {
       .returning();
 
     res.json(updated);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/users/me/stats – live-calculated profile statistics
+router.get('/users/me/stats', requireUser, async (req, res, next) => {
+  try {
+    const uid = req.userId;
+
+    const [[friendRow], [vehicleRow], [journeyRow]] = await Promise.all([
+      db
+        .select({ count: sql<number>`count(*)::int` })
+        .from(friendships)
+        .where(eq(friendships.userId, uid)),
+      db
+        .select({ count: sql<number>`count(*)::int` })
+        .from(vehicles)
+        .where(eq(vehicles.userId, uid)),
+      db
+        .select({
+          count:         sql<number>`count(*)::int`,
+          totalDistance: sql<number>`coalesce(sum(distance_km), 0)::float`,
+        })
+        .from(journeys)
+        .where(and(eq(journeys.userId, uid), eq(journeys.status, 'completed'))),
+    ]);
+
+    res.json({
+      friends:       friendRow?.count         ?? 0,
+      vehicles:      vehicleRow?.count        ?? 0,
+      journeys:      journeyRow?.count        ?? 0,
+      totalDistance: journeyRow?.totalDistance ?? 0,
+    });
   } catch (err) {
     next(err);
   }

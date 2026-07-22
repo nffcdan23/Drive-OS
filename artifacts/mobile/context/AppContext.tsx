@@ -12,7 +12,9 @@ import {
   apiGetNotifications, apiStartJourney, apiAddRoutePoints,
   apiCompleteJourney, apiUpdateJourney, apiDeleteJourney, apiCreateVehicle,
   apiUpdateVehicle, apiDeleteVehicle, apiActivateVehicle, apiUpdateMe,
-  ApiVehicle, ApiJourney,
+  apiGetMyStats, apiGetFriends, apiRemoveFriend,
+  apiAcceptFriendRequest, apiDeclineFriendRequest,
+  ApiVehicle, ApiJourney, ApiProfileStats, ApiFriend,
 } from '@/lib/apiClient';
 import {
   loadDraft, saveDraft, clearDraft, clearPendingPoints,
@@ -332,9 +334,23 @@ interface AppContextValue {
   unitSystem: UnitSystem;
   resolvedUnitSystem: ResolvedUnitSystem;
   setUnitSystem: (s: UnitSystem) => void;
+
+  // Profile statistics (live from server)
+  profileStats: ApiProfileStats;
+  refreshProfileStats: () => Promise<void>;
 }
 
 const AppContext = createContext<AppContextValue | null>(null);
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function apiFriendToLocal(f: ApiFriend): Friend {
+  const parts = f.name.trim().split(/\s+/);
+  const initials = parts.length >= 2
+    ? (parts[0][0] + parts[parts.length - 1][0]).toUpperCase()
+    : (parts[0]?.[0] ?? '?').toUpperCase();
+  return { id: f.id, name: f.name, initials, status: 'offline', location: '' };
+}
 
 // ─── Storage keys ─────────────────────────────────────────────────────────────
 
@@ -457,6 +473,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [messages,       setMessages]       = useState<Message[]>(MOCK_MESSAGES);
   const [notifications,  setNotifications]  = useState<Notification[]>(MOCK_NOTIFICATIONS);
   const [unitSystem,     setUnitSystemState] = useState<UnitSystem>('auto');
+  const [profileStats,   setProfileStats]   = useState<ApiProfileStats>({ friends: 0, vehicles: 0, journeys: 0, totalDistance: 0 });
   const [loaded,         setLoaded]         = useState(false);
   const [isLoading,      setIsLoading]      = useState(true);
   const [syncStatus,     setSyncStatus]     = useState<SyncStatus>('idle');
@@ -520,12 +537,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     const loadFromApi = async () => {
       try {
         // Parallel fetch everything
-        const [me, apiVehicles, apiJourneys, apiCats, apiNotifs] = await Promise.all([
+        const [me, apiVehicles, apiJourneys, apiCats, apiNotifs, apiFriendsList, stats] = await Promise.all([
           apiGetMe().catch(() => null),
           apiGetVehicles().catch(() => null),
           apiGetJourneys().catch(() => null),
           apiGetCategories().catch(() => null),
           apiGetNotifications().catch(() => null),
+          apiGetFriends().catch(() => null),
+          apiGetMyStats().catch(() => null),
         ]);
 
         // Always apply API responses — even empty arrays are authoritative.
@@ -578,6 +597,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
               createdAt: n.createdAt,
             }))
           );
+        }
+
+        if (apiFriendsList !== null) {
+          setFriends(apiFriendsList.map(apiFriendToLocal));
+        }
+
+        if (stats !== null) {
+          setProfileStats(stats);
         }
 
         // Check for an unfinished draft (from a previous session that crashed)
@@ -1029,8 +1056,20 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   const setUnitSystem = useCallback((s: UnitSystem) => {
     setUnitSystemState(s);
-    // Persist to server so the preference syncs across devices; fire-and-forget
     apiUpdateMe({ unitSystem: s }).catch(() => {});
+  }, []);
+
+  const refreshProfileStats = useCallback(async () => {
+    try {
+      const [freshStats, freshFriends] = await Promise.all([
+        apiGetMyStats(),
+        apiGetFriends(),
+      ]);
+      setProfileStats(freshStats);
+      setFriends(freshFriends.map(apiFriendToLocal));
+    } catch {
+      // Silently fail — stale data is better than a crash
+    }
   }, []);
 
   const togglePassengerMode = useCallback(() => setIsPassengerMode((p) => !p), []);
@@ -1053,19 +1092,32 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const acceptFriendRequest = useCallback((id: string) => {
+    // Optimistic update
     setFriendRequests((prev) => prev.map((r) => r.id === id ? { ...r, status: 'accepted' } : r));
     const req = friendRequests.find((r) => r.id === id);
     if (req) {
       setFriends((p) => [...p, { id: req.fromId, name: req.fromName, initials: req.fromInitials, status: 'online', location: '' }]);
     }
+    // Persist to server, then reconcile with authoritative data
+    apiAcceptFriendRequest(id).then(() =>
+      Promise.all([apiGetFriends(), apiGetMyStats()])
+    ).then(([freshFriends, freshStats]) => {
+      setFriends(freshFriends.map(apiFriendToLocal));
+      setProfileStats(freshStats);
+    }).catch(() => {});
   }, [friendRequests]);
 
   const declineFriendRequest = useCallback((id: string) => {
     setFriendRequests((prev) => prev.map((r) => r.id === id ? { ...r, status: 'declined' } : r));
+    apiDeclineFriendRequest(id).catch(() => {});
   }, []);
 
   const removeFriend = useCallback((id: string) => {
+    // Optimistic removal
     setFriends((prev) => prev.filter((f) => f.id !== id));
+    setProfileStats((prev) => ({ ...prev, friends: Math.max(0, prev.friends - 1) }));
+    // Persist and reconcile
+    apiRemoveFriend(id).then(() => apiGetMyStats()).then(setProfileStats).catch(() => {});
   }, []);
 
   const blockUser = useCallback((id: string, name: string) => {
@@ -1164,6 +1216,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     conversations, messages, sendMessage, startConversation, markConversationRead,
     notifications, markNotificationRead, markAllNotificationsRead, unreadNotificationCount,
     unitSystem, resolvedUnitSystem, setUnitSystem,
+    profileStats, refreshProfileStats,
   };
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;

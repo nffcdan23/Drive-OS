@@ -44,7 +44,7 @@ export default function CommunityScreen() {
     groups, addGroup, joinGroup,
     events, addEvent, rsvpEvent,
     conversations, startConversation,
-    userProfile,
+    userProfile, refreshProfileStats,
   } = useApp();
 
   const [activeTab, setActiveTab] = useState<CommunityTab>('convoys');
@@ -306,7 +306,15 @@ export default function CommunityScreen() {
   function handleRemoveFriend(f: Friend) {
     Alert.alert('Remove Friend', `Remove ${f.name} from your friends?`, [
       { text: 'Cancel', style: 'cancel' },
-      { text: 'Remove', style: 'destructive', onPress: () => { removeFriend(f.id); Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); } },
+      {
+        text: 'Remove', style: 'destructive', onPress: () => {
+          removeFriend(f.id);
+          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+          // refreshProfileStats is called inside removeFriend in AppContext
+          // but we also refresh here after the animation to reconcile
+          setTimeout(() => refreshProfileStats(), 500);
+        },
+      },
     ]);
   }
 
@@ -564,7 +572,7 @@ export default function CommunityScreen() {
                   </View>
                   <View style={{ flexDirection: 'row', gap: 6 }}>
                     <TouchableOpacity style={[styles.primaryBtn, { paddingHorizontal: 14, flex: 0 }]}
-                      onPress={() => { acceptFriendRequest(req.id); Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success); }}>
+                      onPress={() => { acceptFriendRequest(req.id); Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success); refreshProfileStats(); }}>
                       <Text style={styles.primaryBtnText}>Accept</Text>
                     </TouchableOpacity>
                     <TouchableOpacity style={[styles.secondaryBtn]}

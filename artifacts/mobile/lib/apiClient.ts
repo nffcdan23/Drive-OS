@@ -70,6 +70,14 @@ export const apiGetMe = () => api<ApiUser>('/users/me');
 export const apiUpdateMe = (data: Partial<Pick<ApiUser, 'name' | 'username' | 'bio' | 'unitSystem'>>) =>
   put<ApiUser>('/users/me', data);
 
+export interface ApiProfileStats {
+  friends: number;
+  vehicles: number;
+  journeys: number;
+  totalDistance: number;
+}
+export const apiGetMyStats = () => api<ApiProfileStats>('/users/me/stats');
+
 // ─── Vehicles ─────────────────────────────────────────────────────────────────
 
 export interface ApiVehicle {

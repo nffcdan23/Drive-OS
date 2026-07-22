@@ -1,8 +1,8 @@
-import React from 'react';
+import React, { useCallback, useEffect, useRef } from 'react';
 import {
-  View, Text, ScrollView, StyleSheet, TouchableOpacity, Platform,
+  View, Text, ScrollView, StyleSheet, TouchableOpacity, Platform, AppState, AppStateStatus,
 } from 'react-native';
-import { useRouter } from 'expo-router';
+import { useRouter, useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useColors } from '@/hooks/useColors';
@@ -13,7 +13,26 @@ export default function ProfileScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
   const router = useRouter();
-  const { userProfile, vehicles, journeys, resolvedUnitSystem } = useApp();
+  const { userProfile, journeys, resolvedUnitSystem, profileStats, refreshProfileStats } = useApp();
+
+  // Refresh stats whenever this screen comes into focus
+  useFocusEffect(
+    useCallback(() => {
+      refreshProfileStats();
+    }, [refreshProfileStats])
+  );
+
+  // Refresh stats when the app returns to the foreground
+  const appState = useRef<AppStateStatus>(AppState.currentState);
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (nextState) => {
+      if (appState.current.match(/inactive|background/) && nextState === 'active') {
+        refreshProfileStats();
+      }
+      appState.current = nextState;
+    });
+    return () => sub.remove();
+  }, [refreshProfileStats]);
 
   const xpProgress = userProfile.xp / userProfile.xpToNextLevel;
   const unlockedAchievements = userProfile.achievements.filter((a) => a.unlockedAt !== null);
@@ -115,22 +134,22 @@ export default function ProfileScreen() {
           <View style={styles.statsGrid}>
             <View style={styles.statCard}>
               <Ionicons name="navigate-outline" size={20} color={colors.primary} />
-              <Text style={styles.statValue}>{formatDistance(userProfile.totalDistance, resolvedUnitSystem)}</Text>
+              <Text style={styles.statValue}>{formatDistance(profileStats.totalDistance, resolvedUnitSystem)}</Text>
               <Text style={styles.statLabel}>Total {distanceUnit(resolvedUnitSystem)}</Text>
             </View>
             <View style={styles.statCard}>
               <Ionicons name="flag-outline" size={20} color={colors.primary} />
-              <Text style={styles.statValue}>{userProfile.totalJourneys}</Text>
+              <Text style={styles.statValue}>{profileStats.journeys}</Text>
               <Text style={styles.statLabel}>Journeys</Text>
             </View>
             <View style={styles.statCard}>
               <Ionicons name="car-outline" size={20} color={colors.primary} />
-              <Text style={styles.statValue}>{vehicles.length}</Text>
+              <Text style={styles.statValue}>{profileStats.vehicles}</Text>
               <Text style={styles.statLabel}>Vehicles</Text>
             </View>
             <View style={styles.statCard}>
               <Ionicons name="people-outline" size={20} color={colors.primary} />
-              <Text style={styles.statValue}>5</Text>
+              <Text style={styles.statValue}>{profileStats.friends}</Text>
               <Text style={styles.statLabel}>Friends</Text>
             </View>
           </View>
