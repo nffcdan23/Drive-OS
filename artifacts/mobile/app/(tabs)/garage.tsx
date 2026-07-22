@@ -53,9 +53,7 @@ export default function GarageScreen() {
       borderRadius: 18, padding: 16,
       borderWidth: StyleSheet.hairlineWidth, borderColor: colors.border,
     },
-    vehicleCardActive: {
-      borderColor: colors.primary, borderWidth: 2,
-    },
+    vehicleCardActive: { borderColor: colors.primary, borderWidth: 2 },
     activeBadge: {
       position: 'absolute', top: 12, right: 12,
       backgroundColor: colors.primary, borderRadius: 10,
@@ -71,8 +69,6 @@ export default function GarageScreen() {
     statItem: { alignItems: 'center' },
     statValue: { fontSize: 14, fontWeight: '600', color: colors.foreground, fontFamily: 'Inter_600SemiBold' },
     statLabel: { fontSize: 11, color: colors.mutedForeground, fontFamily: 'Inter_400Regular', marginTop: 1 },
-    fuelBar: { height: 4, backgroundColor: colors.muted, borderRadius: 2, marginTop: 8 },
-    fuelFill: { height: 4, borderRadius: 2, backgroundColor: colors.primary },
     cardActions: { flexDirection: 'row', gap: 8, marginTop: 12 },
     actionBtn: {
       flex: 1, paddingVertical: 8, borderRadius: 10, borderWidth: 1,
@@ -82,30 +78,46 @@ export default function GarageScreen() {
     setActiveBtn: { borderColor: colors.primary, backgroundColor: colors.primary + '10' },
     setActiveBtnText: { color: colors.primary },
     listContent: { paddingTop: 16, paddingBottom: (Platform.OS === 'web' ? 84 : insets.bottom + 50) + 16 },
-    emptyContainer: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingBottom: 100 },
+    emptyContainer: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingTop: 80, paddingBottom: 100 },
     emptyTitle: { fontSize: 18, fontWeight: '600', color: colors.foreground, fontFamily: 'Inter_600SemiBold', marginTop: 12 },
-    emptyText: { fontSize: 14, color: colors.mutedForeground, marginTop: 6, textAlign: 'center', fontFamily: 'Inter_400Regular' },
+    emptyText: { fontSize: 14, color: colors.mutedForeground, marginTop: 6, textAlign: 'center', fontFamily: 'Inter_400Regular', paddingHorizontal: 40 },
+    noActiveNote: {
+      margin: 20, marginBottom: 0, padding: 14, backgroundColor: colors.muted, borderRadius: 12,
+      borderWidth: 1, borderColor: colors.border,
+    },
+    noActiveText: { fontSize: 13, color: colors.mutedForeground, fontFamily: 'Inter_400Regular' },
   });
 
   function handleDelete(v: Vehicle) {
-    Alert.alert('Remove Vehicle', `Remove ${v.nickname} from your garage?`, [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Remove', style: 'destructive',
-        onPress: () => { deleteVehicle(v.id); Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium); },
-      },
-    ]);
+    Alert.alert(
+      'Remove this vehicle?',
+      `"${v.nickname}" will be removed from your garage. Saved journeys will keep a historical record of this vehicle — no journey data will be lost.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Remove Vehicle',
+          style: 'destructive',
+          onPress: () => {
+            deleteVehicle(v.id);
+            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+          },
+        },
+      ],
+    );
   }
+
+  const activeVehicle = vehicles.find((v) => v.isActive) ?? null;
+  const showNoActiveNote = vehicles.length > 0 && !activeVehicle;
 
   function VehicleCard({ vehicle }: { vehicle: Vehicle }) {
     const isActive = vehicle.isActive;
     return (
-      <TouchableOpacity
-        style={[styles.vehicleCard, isActive && styles.vehicleCardActive]}
-        onPress={() => router.push(`/vehicle/${vehicle.id}`)}
-        activeOpacity={0.85}
-      >
+      <View style={[styles.vehicleCard, isActive && styles.vehicleCardActive]}>
         {isActive && <View style={styles.activeBadge}><Text style={styles.activeBadgeText}>ACTIVE</Text></View>}
+        <TouchableOpacity
+          onPress={() => router.push(`/vehicle/${vehicle.id}`)}
+          activeOpacity={0.7}
+        >
         <View style={styles.cardRow}>
           <VehicleIcon vehicle={vehicle} size={70} />
           <View style={styles.cardInfo}>
@@ -114,6 +126,7 @@ export default function GarageScreen() {
             <Text style={styles.cardSubtitle}>{vehicle.registration} · {vehicle.colour}</Text>
           </View>
         </View>
+        </TouchableOpacity>
         <View style={styles.cardDivider} />
         <View style={styles.statsRow}>
           <View style={styles.statItem}>
@@ -121,25 +134,17 @@ export default function GarageScreen() {
             <Text style={styles.statLabel}>Miles</Text>
           </View>
           <View style={styles.statItem}>
-            <Text style={styles.statValue}>{vehicle.power}</Text>
+            <Text style={styles.statValue}>{vehicle.power || '—'}</Text>
             <Text style={styles.statLabel}>Power</Text>
           </View>
           <View style={styles.statItem}>
-            <Text style={styles.statValue}>{vehicle.zeroToSixty}</Text>
+            <Text style={styles.statValue}>{vehicle.zeroToSixty || '—'}</Text>
             <Text style={styles.statLabel}>0–60</Text>
           </View>
           <View style={styles.statItem}>
-            <Text style={[styles.statValue, { color: vehicle.fuelPercentage > 20 ? colors.foreground : colors.destructive }]}>
-              {vehicle.fuelPercentage}%
-            </Text>
+            <Text style={styles.statValue}>{vehicle.fuelType.charAt(0).toUpperCase() + vehicle.fuelType.slice(1)}</Text>
             <Text style={styles.statLabel}>Fuel</Text>
           </View>
-        </View>
-        <View style={styles.fuelBar}>
-          <View style={[styles.fuelFill, {
-            width: `${vehicle.fuelPercentage}%` as any,
-            backgroundColor: vehicle.fuelPercentage > 20 ? colors.primary : colors.destructive,
-          }]} />
         </View>
         <View style={styles.cardActions}>
           {!isActive && (
@@ -157,7 +162,7 @@ export default function GarageScreen() {
             <Text style={[styles.actionBtnText, { color: colors.destructive }]}>Remove</Text>
           </TouchableOpacity>
         </View>
-      </TouchableOpacity>
+      </View>
     );
   }
 
@@ -170,6 +175,12 @@ export default function GarageScreen() {
           <Text style={styles.addBtnText}>Add Vehicle</Text>
         </TouchableOpacity>
       </View>
+
+      {showNoActiveNote && (
+        <View style={styles.noActiveNote}>
+          <Text style={styles.noActiveText}>No active vehicle. Tap "Set Active" on a vehicle to select it.</Text>
+        </View>
+      )}
 
       <FlatList
         data={vehicles}

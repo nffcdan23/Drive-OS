@@ -1,4 +1,7 @@
-import type { Vehicle, Journey, Friend, Convoy, Destination, Achievement } from '@/context/AppContext';
+import type {
+  Vehicle, Journey, Friend, Convoy, Destination, Achievement,
+  JourneyCategory, Group, DriveOSEvent, Conversation, Message, Notification,
+} from '@/context/AppContext';
 
 export const MOCK_VEHICLES: Vehicle[] = [
   {
@@ -16,7 +19,7 @@ export const MOCK_VEHICLES: Vehicle[] = [
     zeroToSixty: '10.9s',
     topSpeed: '120 mph',
     mileage: 96512,
-    fuelPercentage: 62,
+    fuelPercentage: 0,
     imageUri: null,
     isActive: true,
   },
@@ -35,10 +38,20 @@ export const MOCK_VEHICLES: Vehicle[] = [
     zeroToSixty: '6.8s',
     topSpeed: '155 mph',
     mileage: 42300,
-    fuelPercentage: 85,
+    fuelPercentage: 0,
     imageUri: null,
     isActive: false,
   },
+];
+
+export const DEFAULT_CATEGORIES: JourneyCategory[] = [
+  { id: 'cat-1', name: 'Commute', icon: 'briefcase-outline', colour: '#6B7280' },
+  { id: 'cat-2', name: 'Scenic Drive', icon: 'leaf-outline', colour: '#22c55e' },
+  { id: 'cat-3', name: 'Road Trip', icon: 'map-outline', colour: '#3B82F6' },
+  { id: 'cat-4', name: 'Car Meet', icon: 'people-outline', colour: '#F4631A' },
+  { id: 'cat-5', name: 'Photography', icon: 'camera-outline', colour: '#8B5CF6' },
+  { id: 'cat-6', name: 'Track Day', icon: 'flag-outline', colour: '#EF4444' },
+  { id: 'cat-7', name: 'Holiday', icon: 'sunny-outline', colour: '#F59E0B' },
 ];
 
 export const MOCK_JOURNEYS: Journey[] = [
@@ -60,6 +73,16 @@ export const MOCK_JOURNEYS: Journey[] = [
       { latitude: 54.5100, longitude: -3.1500 },
     ],
     photos: [],
+    categoryId: 'cat-2',
+    journeyType: 'personal',
+    xpEarned: 175,
+    privacy: 'friends',
+    vehicleSnapshot: {
+      vehicleId: 'mock-vehicle-1',
+      make: 'MINI', model: 'Cooper R50', nickname: 'The Green Monster',
+      year: 2003, registration: 'AB12CDE', imageUri: null,
+      power: '115 bhp', engine: '1.6L',
+    },
   },
   {
     id: 'journey-2',
@@ -78,6 +101,16 @@ export const MOCK_JOURNEYS: Journey[] = [
       { latitude: 54.4700, longitude: -3.0700 },
     ],
     photos: [],
+    categoryId: 'cat-1',
+    journeyType: 'personal',
+    xpEarned: 28,
+    privacy: 'private',
+    vehicleSnapshot: {
+      vehicleId: 'mock-vehicle-2',
+      make: 'BMW', model: '3 Series 320d', nickname: 'Daily Driver',
+      year: 2019, registration: 'YD19XKL', imageUri: null,
+      power: '190 bhp', engine: '2.0L',
+    },
   },
   {
     id: 'journey-3',
@@ -97,6 +130,17 @@ export const MOCK_JOURNEYS: Journey[] = [
       { latitude: 54.5600, longitude: -3.2400 },
     ],
     photos: [],
+    categoryId: 'cat-2',
+    journeyType: 'convoy',
+    xpEarned: 128,
+    convoyId: 'convoy-1',
+    privacy: 'friends',
+    vehicleSnapshot: {
+      vehicleId: 'mock-vehicle-1',
+      make: 'MINI', model: 'Cooper R50', nickname: 'The Green Monster',
+      year: 2003, registration: 'AB12CDE', imageUri: null,
+      power: '115 bhp', engine: '1.6L',
+    },
   },
   {
     id: 'journey-4',
@@ -115,6 +159,16 @@ export const MOCK_JOURNEYS: Journey[] = [
       { latitude: 53.4200, longitude: -1.7500 },
     ],
     photos: [],
+    categoryId: 'cat-3',
+    journeyType: 'personal',
+    xpEarned: 285,
+    privacy: 'public',
+    vehicleSnapshot: {
+      vehicleId: 'mock-vehicle-1',
+      make: 'MINI', model: 'Cooper R50', nickname: 'The Green Monster',
+      year: 2003, registration: 'AB12CDE', imageUri: null,
+      power: '115 bhp', engine: '1.6L',
+    },
   },
 ];
 
@@ -138,6 +192,9 @@ export const MOCK_CONVOYS: Convoy[] = [
     startTime: '2026-07-26T10:00:00',
     status: 'forming',
     description: 'Classic B-road loop via Kirkstone and Ullswater.',
+    maxParticipants: 12,
+    isOwn: false,
+    isJoined: false,
   },
   {
     id: 'convoy-2',
@@ -150,6 +207,10 @@ export const MOCK_CONVOYS: Convoy[] = [
     startTime: '2026-07-28T07:30:00',
     status: 'forming',
     description: 'Heading to Croft for track day. Invitation only.',
+    maxParticipants: 8,
+    privacyMethod: 'invite_only',
+    isOwn: false,
+    isJoined: true,
   },
 ];
 
@@ -160,6 +221,152 @@ export const MOCK_ACHIEVEMENTS: Achievement[] = [
   { id: 'ach-4', title: 'Road Warrior', description: 'Drive 1,000km total', icon: 'trophy-outline', unlockedAt: '2026-07-18' },
   { id: 'ach-5', title: 'Convoy Leader', description: 'Lead your first convoy', icon: 'people-outline', unlockedAt: null },
   { id: 'ach-6', title: 'Mountain Road', description: 'Drive over 600m elevation', icon: 'triangle-outline', unlockedAt: null },
+];
+
+export const MOCK_GROUPS: Group[] = [
+  {
+    id: 'group-1',
+    name: 'Lake District MINI Club',
+    description: 'Local MINI owners exploring the fells since 2015. Open to all MINI generations.',
+    logoUri: null,
+    isPublic: true,
+    memberCount: 48,
+    membershipMethod: 'open',
+    myRole: 'member',
+    isMember: true,
+    primaryLocation: 'Keswick, Cumbria',
+    vehicleInterests: 'MINIs',
+    createdAt: '2024-03-12T10:00:00',
+  },
+  {
+    id: 'group-2',
+    name: 'Northern Classic Car Society',
+    description: 'Pre-1990 classics only. Monthly meets, shows and scenic runs throughout the North.',
+    logoUri: null,
+    isPublic: true,
+    memberCount: 124,
+    membershipMethod: 'request',
+    myRole: null,
+    isMember: false,
+    primaryLocation: 'Yorkshire & Cumbria',
+    vehicleInterests: 'Classics',
+    createdAt: '2022-06-01T10:00:00',
+  },
+  {
+    id: 'group-3',
+    name: 'Peak District Performance',
+    description: 'Performance car enthusiasts. Private group — members only events and scenic runs.',
+    logoUri: null,
+    isPublic: false,
+    memberCount: 31,
+    membershipMethod: 'invite',
+    myRole: null,
+    isMember: false,
+    primaryLocation: 'Peak District, Derbyshire',
+    vehicleInterests: 'Performance Cars',
+    createdAt: '2025-01-15T10:00:00',
+  },
+];
+
+export const MOCK_EVENTS: DriveOSEvent[] = [
+  {
+    id: 'event-1',
+    name: 'MINI & German Car Meet — Lakeside',
+    description: 'Relaxed Sunday morning meet at Derwentwater car park. All welcome, bring a flask.',
+    coverUri: null,
+    location: 'Derwentwater Car Park, Keswick CA12 5DJ',
+    date: '2026-07-27',
+    startTime: '09:00',
+    endTime: '12:00',
+    eventType: 'static_car_meet',
+    isPublic: true,
+    groupId: 'group-1',
+    capacity: 60,
+    attendeeCount: 34,
+    organiser: 'Lake District MINI Club',
+    vehicleCategory: 'Open to All',
+    rsvpStatus: 'going',
+    entryCost: 'Free',
+  },
+  {
+    id: 'event-2',
+    name: 'Hardknott Pass Scenic Run',
+    description: "England's steepest road. An early start to avoid traffic. MINI's only this time.",
+    coverUri: null,
+    location: 'Boot, Eskdale CA19 1TH',
+    date: '2026-08-03',
+    startTime: '07:30',
+    endTime: '11:00',
+    eventType: 'scenic_drive',
+    isPublic: true,
+    groupId: null,
+    capacity: 20,
+    attendeeCount: 12,
+    organiser: 'Daniel',
+    vehicleCategory: 'MINIs',
+    rsvpStatus: null,
+    entryCost: 'Free',
+  },
+  {
+    id: 'event-3',
+    name: 'Croft Circuit Track Day',
+    description: 'Full day on track at Croft. Noise limits apply. Open pit lane format.',
+    coverUri: null,
+    location: 'Croft Circuit, Dalton-on-Tees DL2 2PN',
+    date: '2026-08-10',
+    startTime: '08:00',
+    endTime: '17:00',
+    eventType: 'track_day',
+    isPublic: true,
+    groupId: null,
+    capacity: 40,
+    attendeeCount: 28,
+    organiser: 'Mike R.',
+    vehicleCategory: 'Performance Cars',
+    rsvpStatus: 'interested',
+    entryCost: '£195',
+  },
+];
+
+export const MOCK_CONVERSATIONS: Conversation[] = [
+  {
+    id: 'conv-1',
+    participantId: 'friend-1',
+    participantName: 'Sarah T.',
+    participantInitials: 'ST',
+    lastMessage: 'See you Sunday at 10! 🚗',
+    lastMessageAt: '2026-07-20T18:34:00',
+    unreadCount: 1,
+  },
+  {
+    id: 'conv-2',
+    participantId: 'friend-4',
+    participantName: 'Mike R.',
+    participantInitials: 'MR',
+    lastMessage: 'Track day confirmed, entry paid.',
+    lastMessageAt: '2026-07-19T11:22:00',
+    unreadCount: 0,
+  },
+];
+
+export const MOCK_MESSAGES: Message[] = [
+  { id: 'msg-1', conversationId: 'conv-1', senderId: 'friend-1', senderName: 'Sarah T.', content: 'Hey! You coming to the Sunday run?', createdAt: '2026-07-20T18:00:00', isOwn: false },
+  { id: 'msg-2', conversationId: 'conv-1', senderId: 'me', senderName: 'Daniel', content: 'Definitely, just needs a clean first!', createdAt: '2026-07-20T18:15:00', isOwn: true },
+  { id: 'msg-3', conversationId: 'conv-1', senderId: 'friend-1', senderName: 'Sarah T.', content: 'See you Sunday at 10! 🚗', createdAt: '2026-07-20T18:34:00', isOwn: false },
+  { id: 'msg-4', conversationId: 'conv-2', senderId: 'friend-4', senderName: 'Mike R.', content: 'Track day confirmed, entry paid.', createdAt: '2026-07-19T11:22:00', isOwn: false },
+];
+
+export const MOCK_NOTIFICATIONS: Notification[] = [
+  {
+    id: 'notif-1', type: 'convoy_invite',
+    title: 'Convoy Invitation', body: 'Sarah T. invited you to Sunday Scenic Run.',
+    createdAt: '2026-07-20T09:00:00', read: false,
+  },
+  {
+    id: 'notif-2', type: 'event_reminder',
+    title: 'Event Tomorrow', body: 'MINI & German Car Meet starts at 09:00.',
+    createdAt: '2026-07-19T20:00:00', read: true,
+  },
 ];
 
 export const DEMO_DESTINATIONS: Destination[] = [
@@ -173,7 +380,7 @@ export const DEMO_DESTINATIONS: Destination[] = [
 ];
 
 export const SCENIC_ROUTES: { id: string; name: string; distance: string; description: string }[] = [
-  { id: 'scenic-1', name: 'Hardknott Pass Loop', distance: '28 km', description: 'England\'s steepest road — dramatic fellside switchbacks' },
+  { id: 'scenic-1', name: 'Hardknott Pass Loop', distance: '28 km', description: "England's steepest road — dramatic fellside switchbacks" },
   { id: 'scenic-2', name: 'B5289 Borrowdale', distance: '19 km', description: 'Classic valley road alongside Derwent Water' },
   { id: 'scenic-3', name: 'Kirkstone Loop', distance: '42 km', description: 'Via Ullswater and back through Ambleside' },
   { id: 'scenic-4', name: 'North Yorkshire Moors', distance: '88 km', description: 'Open moorland, rolling valleys, perfect on a clear day' },

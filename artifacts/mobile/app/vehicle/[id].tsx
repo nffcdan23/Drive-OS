@@ -12,7 +12,7 @@ import * as ImagePicker from 'expo-image-picker';
 import * as Haptics from 'expo-haptics';
 import { TEST_REGISTRATIONS } from '@/constants/config';
 
-type VehicleForm = Omit<Vehicle, 'id' | 'isActive'>;
+type VehicleForm = Omit<Vehicle, 'id' | 'isActive' | 'fuelPercentage'>;
 
 function generateId(): string {
   return Date.now().toString() + Math.random().toString(36).substring(2, 9);
@@ -32,7 +32,6 @@ const BLANK_FORM: VehicleForm = {
   zeroToSixty: '',
   topSpeed: '',
   mileage: 0,
-  fuelPercentage: 100,
   imageUri: null,
 };
 
@@ -46,10 +45,9 @@ export default function VehicleDetailScreen() {
 
   const existing = isNew ? null : vehicles.find((v) => v.id === id);
 
-  // Stable local form state — only synced from vehicle once on mount
   const [form, setForm] = useState<VehicleForm>(() => {
     if (existing) {
-      const { id: _id, isActive: _isActive, ...rest } = existing;
+      const { id: _id, isActive: _isActive, fuelPercentage: _fuel, ...rest } = existing;
       return rest;
     }
     return BLANK_FORM;
@@ -59,7 +57,6 @@ export default function VehicleDetailScreen() {
   const [lookupLoading, setLookupLoading] = useState(false);
   const [lookupResult, setLookupResult] = useState<string | null>(null);
 
-  // Stable text change handler — does NOT remount inputs
   const handleChange = useCallback(<K extends keyof VehicleForm>(field: K, value: VehicleForm[K]) => {
     setForm((prev) => ({ ...prev, [field]: value }));
   }, []);
@@ -70,7 +67,7 @@ export default function VehicleDetailScreen() {
       return;
     }
     if (isNew) {
-      addVehicle({ ...form, isActive: vehicles.length === 0 });
+      addVehicle({ ...form, fuelPercentage: 0, isActive: vehicles.length === 0 });
     } else {
       updateVehicle(id!, form);
     }
@@ -80,16 +77,20 @@ export default function VehicleDetailScreen() {
 
   const handleDelete = useCallback(() => {
     if (isNew) return;
-    Alert.alert('Remove Vehicle', `Remove ${form.nickname || 'this vehicle'}?`, [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Remove', style: 'destructive', onPress: () => {
-          deleteVehicle(id!);
-          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-          router.back();
+    Alert.alert(
+      'Remove this vehicle?',
+      `"${form.nickname || 'This vehicle'}" will be removed from your garage. Saved journeys will keep a historical record — no journey data will be lost.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Remove Vehicle', style: 'destructive', onPress: () => {
+            deleteVehicle(id!);
+            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+            router.back();
+          },
         },
-      },
-    ]);
+      ],
+    );
   }, [form.nickname, id, isNew]);
 
   const handlePickImage = useCallback(async () => {
@@ -107,6 +108,10 @@ export default function VehicleDetailScreen() {
     if (!result.canceled && result.assets[0]?.uri) {
       handleChange('imageUri', result.assets[0].uri);
     }
+  }, [handleChange]);
+
+  const handleRemoveImage = useCallback(() => {
+    handleChange('imageUri', null);
   }, [handleChange]);
 
   const handleLookup = useCallback(() => {
@@ -161,12 +166,18 @@ export default function VehicleDetailScreen() {
     vehicleImage: { width: '100%', height: '100%' },
     imagePickerOverlay: {
       position: 'absolute', bottom: 0, left: 0, right: 0,
-      backgroundColor: 'rgba(0,0,0,0.4)', paddingVertical: 8, alignItems: 'center', flexDirection: 'row',
-      justifyContent: 'center', gap: 6,
+      backgroundColor: 'rgba(0,0,0,0.45)', paddingVertical: 8, alignItems: 'center',
+      flexDirection: 'row', justifyContent: 'center', gap: 6,
     },
     imagePickerText: { fontSize: 13, color: '#fff', fontFamily: 'Inter_500Medium' },
-    sectionTitle: { fontSize: 14, fontWeight: '600', color: colors.mutedForeground, fontFamily: 'Inter_600SemiBold',
-      textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 10, marginTop: 20 },
+    removeImageBtn: {
+      position: 'absolute', top: 8, right: 8,
+      backgroundColor: 'rgba(0,0,0,0.55)', borderRadius: 14, padding: 6,
+    },
+    sectionTitle: {
+      fontSize: 14, fontWeight: '600', color: colors.mutedForeground, fontFamily: 'Inter_600SemiBold',
+      textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 10, marginTop: 20,
+    },
     lookupCard: {
       backgroundColor: colors.card, borderRadius: 14, padding: 14, marginBottom: 4,
       borderWidth: StyleSheet.hairlineWidth, borderColor: colors.border,
@@ -184,9 +195,7 @@ export default function VehicleDetailScreen() {
       flexDirection: 'row', alignItems: 'center', gap: 6,
     },
     lookupBtnText: { fontSize: 14, fontWeight: '600', color: '#fff', fontFamily: 'Inter_600SemiBold' },
-    lookupResult: {
-      marginTop: 8, fontSize: 12, fontFamily: 'Inter_400Regular',
-    },
+    lookupResult: { marginTop: 8, fontSize: 12, fontFamily: 'Inter_400Regular' },
     lookupSuccess: { color: '#22c55e' },
     lookupFail: { color: colors.mutedForeground },
     inputLabel: { fontSize: 13, color: colors.mutedForeground, fontFamily: 'Inter_500Medium', marginBottom: 5, marginTop: 12 },
@@ -205,16 +214,6 @@ export default function VehicleDetailScreen() {
     fuelOptionActive: { borderColor: colors.primary, backgroundColor: colors.primary + '15' },
     fuelOptionText: { fontSize: 13, color: colors.mutedForeground, fontFamily: 'Inter_500Medium' },
     fuelOptionTextActive: { color: colors.primary },
-    sliderRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 6 },
-    sliderLabel: { fontSize: 14, fontWeight: '600', color: colors.foreground, fontFamily: 'Inter_600SemiBold', width: 42 },
-    fuelBarBg: { flex: 1, height: 8, backgroundColor: colors.muted, borderRadius: 4 },
-    fuelBarFill: { height: 8, borderRadius: 4, backgroundColor: colors.primary },
-    fuelButtons: { flexDirection: 'row', gap: 6 },
-    fuelAdjBtn: {
-      width: 32, height: 32, borderRadius: 16,
-      backgroundColor: colors.muted, alignItems: 'center', justifyContent: 'center',
-      borderWidth: 1, borderColor: colors.border,
-    },
     saveBtn: {
       backgroundColor: colors.primary, borderRadius: 14, paddingVertical: 15,
       alignItems: 'center', marginTop: 28,
@@ -242,7 +241,7 @@ export default function VehicleDetailScreen() {
         showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
 
         {/* Image picker */}
-        <TouchableOpacity style={styles.imagePickerArea} onPress={handlePickImage}>
+        <TouchableOpacity style={styles.imagePickerArea} onPress={handlePickImage} activeOpacity={0.85}>
           {form.imageUri ? (
             <>
               <Image source={{ uri: form.imageUri }} style={styles.vehicleImage} resizeMode="cover" />
@@ -250,6 +249,9 @@ export default function VehicleDetailScreen() {
                 <Ionicons name="camera-outline" size={16} color="#fff" />
                 <Text style={styles.imagePickerText}>Change photo</Text>
               </View>
+              <TouchableOpacity style={styles.removeImageBtn} onPress={(e) => { e.stopPropagation?.(); handleRemoveImage(); }}>
+                <Ionicons name="close" size={14} color="#fff" />
+              </TouchableOpacity>
             </>
           ) : (
             <>
@@ -265,7 +267,7 @@ export default function VehicleDetailScreen() {
         <Text style={styles.sectionTitle}>Registration Lookup</Text>
         <View style={styles.lookupCard}>
           <Text style={styles.lookupNote}>
-            Demo lookup — uses test registrations only. Real DVLA lookup not yet connected.
+            Demo mode — uses test registrations only. Real DVLA lookup not yet connected.
           </Text>
           <View style={styles.lookupRow}>
             <TextInput
@@ -299,8 +301,10 @@ export default function VehicleDetailScreen() {
           placeholder="e.g. The Green Monster" placeholderTextColor={colors.mutedForeground} />
 
         <Text style={styles.inputLabel}>Registration</Text>
-        <TextInput style={styles.input} value={form.registration} onChangeText={(v) => handleChange('registration', v.toUpperCase())}
-          placeholder="AB12 CDE" placeholderTextColor={colors.mutedForeground} autoCapitalize="characters" autoCorrect={false} />
+        <TextInput style={styles.input} value={form.registration}
+          onChangeText={(v) => handleChange('registration', v.toUpperCase())}
+          placeholder="AB12 CDE" placeholderTextColor={colors.mutedForeground}
+          autoCapitalize="characters" autoCorrect={false} />
 
         <View style={styles.row2}>
           <View style={styles.flex1}>
@@ -318,7 +322,8 @@ export default function VehicleDetailScreen() {
         <View style={styles.row2}>
           <View style={styles.flex1}>
             <Text style={styles.inputLabel}>Year</Text>
-            <TextInput style={styles.input} value={form.year.toString()} onChangeText={(v) => handleChange('year', parseInt(v, 10) || 0)}
+            <TextInput style={styles.input} value={form.year.toString()}
+              onChangeText={(v) => handleChange('year', parseInt(v, 10) || 0)}
               placeholder="2003" placeholderTextColor={colors.mutedForeground} keyboardType="numeric" />
           </View>
           <View style={styles.flex1}>
@@ -331,7 +336,8 @@ export default function VehicleDetailScreen() {
         <Text style={styles.inputLabel}>Fuel Type</Text>
         <View style={styles.fuelRow}>
           {fuelTypes.map((ft) => (
-            <TouchableOpacity key={ft} style={[styles.fuelOption, form.fuelType === ft && styles.fuelOptionActive]}
+            <TouchableOpacity key={ft}
+              style={[styles.fuelOption, form.fuelType === ft && styles.fuelOptionActive]}
               onPress={() => handleChange('fuelType', ft)}>
               <Text style={[styles.fuelOptionText, form.fuelType === ft && styles.fuelOptionTextActive]}>
                 {ft.charAt(0).toUpperCase() + ft.slice(1)}
@@ -374,29 +380,12 @@ export default function VehicleDetailScreen() {
           placeholder="120 mph" placeholderTextColor={colors.mutedForeground} />
 
         {/* Odometer */}
-        <Text style={styles.sectionTitle}>Odometer &amp; Fuel</Text>
+        <Text style={styles.sectionTitle}>Odometer</Text>
 
         <Text style={styles.inputLabel}>Mileage</Text>
-        <TextInput style={styles.input} value={form.mileage.toString()} onChangeText={(v) => handleChange('mileage', parseInt(v, 10) || 0)}
+        <TextInput style={styles.input} value={form.mileage.toString()}
+          onChangeText={(v) => handleChange('mileage', parseInt(v, 10) || 0)}
           placeholder="96512" placeholderTextColor={colors.mutedForeground} keyboardType="numeric" />
-
-        <Text style={styles.inputLabel}>Fuel Level: {form.fuelPercentage}%</Text>
-        <View style={styles.sliderRow}>
-          <View style={styles.fuelBarBg}>
-            <View style={[styles.fuelBarFill, {
-              width: `${form.fuelPercentage}%` as any,
-              backgroundColor: form.fuelPercentage > 20 ? colors.primary : colors.destructive,
-            }]} />
-          </View>
-          <View style={styles.fuelButtons}>
-            <TouchableOpacity style={styles.fuelAdjBtn} onPress={() => handleChange('fuelPercentage', Math.max(0, form.fuelPercentage - 5))}>
-              <Ionicons name="remove" size={16} color={colors.foreground} />
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.fuelAdjBtn} onPress={() => handleChange('fuelPercentage', Math.min(100, form.fuelPercentage + 5))}>
-              <Ionicons name="add" size={16} color={colors.foreground} />
-            </TouchableOpacity>
-          </View>
-        </View>
 
         <TouchableOpacity style={styles.saveBtn} onPress={handleSave}>
           <Text style={styles.saveBtnText}>Save Changes</Text>

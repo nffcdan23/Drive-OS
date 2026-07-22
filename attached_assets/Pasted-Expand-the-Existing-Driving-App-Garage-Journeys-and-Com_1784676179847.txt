@@ -1,0 +1,893 @@
+Expand the Existing Driving App: Garage, Journeys and Community
+
+Extend the existing application without rebuilding it from scratch.
+
+Preserve the current:
+
+Mobile-first iPhone layout
+Dark visual design
+Orange accent colour
+Bottom navigation
+Existing map and navigation functionality
+Existing Garage, Journeys, Community and Profile screens
+Existing DVLA registration-lookup preparation
+Existing local or database records
+
+Before making changes:
+
+Inspect the current project structure.
+Identify the existing data models, routes, state management and reusable components.
+Reuse existing components where practical.
+Do not create duplicate Garage, Journey, Friend, Convoy or Community systems.
+Do not replace working functionality unnecessarily.
+Make database/schema migrations safely without deleting existing prototype data.
+Test each feature after implementation.
+
+The application is a driving companion ecosystem combining navigation, journeys, vehicles, friends, convoys, clubs, events and future OBD features.
+
+1. Garage Improvements
+Remove fuel-level entry when adding or editing vehicles
+
+Remove the manual fuel-level slider and fuel-level percentage from:
+
+Add Vehicle
+Edit Vehicle
+Vehicle creation forms
+
+Fuel level is temporary live information rather than permanent vehicle identity data.
+
+Keep the database field optional for future OBD or manual live updates, but do not ask for it during vehicle creation.
+
+Do not display a fixed fuel percentage on Garage cards unless real or recently updated fuel information exists.
+
+When no live fuel data exists, hide the fuel metric rather than displaying a fabricated value.
+
+Fix vehicle deletion
+
+The current Remove button does not successfully delete vehicles.
+
+Implement a reliable vehicle deletion flow:
+
+User presses Remove.
+Open a confirmation dialog:
+“Remove this vehicle?”
+Explain that saved journeys will keep a historical snapshot of the vehicle.
+Buttons:
+Cancel
+Remove Vehicle
+Delete the vehicle only after confirmation.
+Update the Garage list immediately.
+If the deleted vehicle was active:
+Automatically select another vehicle, if one exists.
+Otherwise show a clear “No active vehicle” state.
+Do not delete historical journeys associated with that vehicle.
+Do not leave broken vehicle references.
+
+Historical journey records should store a vehicle snapshot containing:
+
+Vehicle ID
+Make
+Model
+Nickname
+Year
+Registration, subject to privacy settings
+Vehicle image
+Key performance details at the time of the journey
+Vehicle image upload
+
+Ensure Add Vehicle supports:
+
+Selecting an image from the device
+Previewing the image
+Replacing the image
+Removing the image
+Storing the uploaded image persistently
+Showing an appropriate placeholder when no image exists
+
+Do not require an image URL.
+
+DVLA lookup
+
+Keep the prepared registration lookup architecture.
+
+Do not use fabricated lookup data.
+
+Until live API access is available:
+
+Clearly label it as Demo Mode.
+Only return explicitly configured test data.
+Unknown registrations must show that live DVLA lookup is not connected.
+Keep manual vehicle entry available.
+2. Journeys Dashboard Redesign
+
+Improve the Journeys page so it works as both:
+
+An all-time driving statistics dashboard
+A browsable archive of previous journeys
+All-time statistics
+
+At the top of Journeys, show a clean, scrollable summary area containing:
+
+Total journeys
+Total distance
+Total driving time
+Average journey distance
+Average driving speed
+Highest recorded speed
+Longest journey
+Most-driven vehicle
+Number of personal drives
+Number of convoy drives
+Total XP earned
+Achievements unlocked
+Favourite or most-visited area, if available
+
+Do not overload the screen with tiny cards.
+
+Use a clear hierarchy:
+
+Main totals
+Supporting statistics
+Journey filters and categories
+Journey list
+
+Allow switching between:
+
+All Time
+This Year
+This Month
+This Week
+Journey list
+
+Keep the previous-drives list beneath the statistics.
+
+Each journey card should show:
+
+Journey name
+Date and start time
+Journey type: Personal or Convoy
+Custom category
+Distance
+Duration
+Average speed
+Top speed
+Vehicle used
+Participant count for convoy drives
+XP earned
+Achievement indicator where relevant
+
+Add sorting options:
+
+Recent
+Oldest
+Distance
+Duration
+Top speed
+XP earned
+
+Add filtering options:
+
+All
+Personal
+Convoy
+Vehicle
+Category
+Date range
+3. Custom Journey Categories
+
+Allow users to organise journeys using custom categories.
+
+Examples:
+
+Commute
+Scenic Drive
+Road Trip
+Car Meet
+Photography
+Holiday
+Convoy
+Testing
+Track Day
+
+Users must be able to:
+
+Create a category
+Name it
+Choose an icon
+Choose a restrained label colour
+Rename it
+Delete it
+Assign one category to a journey
+Filter the Journey list by category
+
+Deleting a category must not delete journeys.
+
+Journeys previously assigned to a deleted category should become Uncategorised.
+
+Provide sensible default categories, but allow full customisation.
+
+4. Journey Detail Screen
+
+Replace the incomplete journey-detail layout with a complete experience.
+
+Journey route map
+
+The app already has a working map component.
+
+Reuse the existing map provider and map component to render journey routes.
+
+Do not show:
+
+“Connect map API to display”
+
+if a map is already configured elsewhere in the app.
+
+Store journey route coordinates while recording a drive.
+
+On the Journey Detail screen:
+
+Display the stored route as a polyline.
+Fit the map viewport to the complete route.
+Mark start and finish.
+Optionally show important stops.
+Use the same branded map style as the main Map screen.
+If no coordinates exist for an old journey, show:
+“Route data was not recorded for this journey.”
+Do not imply an API is missing when the actual problem is missing route data.
+Personal journey
+
+A Personal journey should display:
+
+Journey name
+Date and time
+Route map
+Distance
+Duration
+Average speed
+Top speed
+XP earned
+Achievements earned
+Category
+Notes
+Photos
+Vehicle used
+Vehicle image
+Make, model and nickname
+Optional journey privacy setting
+Convoy journey
+
+A Convoy journey should display everything above, plus:
+
+Convoy name
+Convoy leader
+Participant list
+Participant count
+Cars used
+Each participant’s convoy stats
+XP earned by each participant
+Achievements earned by each participant
+
+Each participant card can include:
+
+Avatar
+Display name
+Vehicle
+Distance completed
+Time in convoy
+Average speed where appropriate
+XP earned
+Achievements
+Joined late or left early indicator
+
+Do not create competitive public speed leaderboards for public-road journeys.
+
+Performance information should be private to participants unless users explicitly choose to share it.
+
+Editing journey details
+
+Allow users to edit:
+
+Journey name
+Category
+Notes
+Photos
+Privacy
+Personal/Convoy classification only where appropriate
+
+Allow journey deletion with confirmation.
+
+5. Proper User Accounts and Friend System
+
+Build a functional friend system backed by the application database and authentication system.
+
+Do not rely solely on hard-coded mock friends.
+
+Each user account should have:
+
+Unique user ID
+Display name
+Username
+Avatar
+Optional bio
+Friend code or shareable profile link
+Privacy settings
+Garage visibility setting
+Journey visibility setting
+Location-sharing setting
+Group visibility setting
+Adding friends
+
+Support:
+
+Searching by username
+Searching by friend code
+Opening a shared invitation link
+Using the native iOS/Web Share interface where supported
+Copying an invitation link
+Sharing via messaging and social applications
+
+The app cannot automatically access someone’s social-media friend list unless supported by a specific authorised integration.
+
+Use a share link such as:
+
+https://your-app-domain.com/invite/friend/<token>
+
+Friend workflow:
+
+User sends request.
+Recipient accepts or declines.
+Both users appear in each other’s friends list after acceptance.
+Pending requests are shown clearly.
+Removing and blocking friends
+
+Allow users to:
+
+Remove a friend
+Block a user
+Report a user
+Cancel a pending request
+Decline a request
+
+Removing a friend must require confirmation.
+
+Blocking should prevent:
+
+Messaging
+Friend requests
+Convoy invitations
+Location visibility
+Profile interaction, subject to moderation requirements
+Messaging
+
+Add one-to-one messaging with:
+
+Conversation list
+Text messages
+Timestamps
+Unread indicators
+Basic image sharing, if storage is already available
+Block and report actions
+
+Use realtime updates if the existing backend supports them.
+
+Do not expose phone numbers between users.
+
+6. Convoy System
+
+Expand Convoys into a functional social-driving feature.
+
+Creating a convoy
+
+The Create Convoy form should include:
+
+Convoy name
+Description
+Destination
+Optional starting location
+Planned date and time
+Maximum participants
+Public or private
+Allow friend invitations
+Allow group invitations
+Optional cover image
+Vehicle theme or restrictions, if applicable
+Private convoy options
+
+When Private Convoy is enabled, reveal a privacy method selector:
+
+Invite Only
+Passcode
+Group Members Only
+
+If Passcode is selected:
+
+Display a passcode input.
+Allow the creator to generate or enter a code.
+Store the passcode securely as a hash.
+Never expose the raw passcode through APIs or database responses.
+Require the code before joining.
+
+If Invite Only is selected:
+
+Hide the convoy from public discovery.
+Only invited users may join.
+
+If the passcode field is blank, default to Invite Only, but clearly explain that behaviour.
+
+Invitations
+
+Allow users to invite:
+
+Individual friends
+Multiple friends
+Members of an eligible group
+
+Invited users should receive:
+
+In-app notification
+Convoy details
+Accept or Decline action
+Convoy discovery
+
+Create separate sections:
+
+My Convoys
+Invited
+Friends’ Convoys
+Nearby Public Convoys
+Planned Public Convoys
+Active Convoys
+
+Nearby discovery must use approximate area-level location where possible, not expose precise private locations before a user joins.
+
+Convoy deletion
+
+Convoy creators and authorised admins must be able to delete or cancel a convoy.
+
+Deletion flow:
+
+Confirmation dialog
+Notify joined participants
+Mark as cancelled or delete appropriately
+Preserve completed convoy history in Journey records
+Remove active invitations
+
+Participants who are not creators should be able to leave, not delete, a convoy.
+
+7. Groups and Car Communities
+
+Add a third Community tab:
+
+Convoys
+Friends
+Groups
+Events
+
+Groups are for legitimate car clubs, owner communities, local enthusiast groups and organised events.
+
+Do not build features specifically intended to conceal illegal activity or evade law enforcement.
+
+Creating a group
+
+Create Group form:
+
+Group name
+Logo
+Cover image
+Description
+Primary location
+Optional additional locations
+Vehicle interests or categories
+Public or private
+Membership method
+Group rules
+Group contact details
+Allow events
+Allow convoys
+Allow member posts
+
+Membership methods:
+
+Open Join
+Request Approval
+Invite Only
+Access Code
+Verification Required
+Verification
+
+If Verification Required is selected, allow admins to configure which evidence is required:
+
+Confirmed phone number
+Registration ownership declaration
+Vehicle photo
+Short vehicle-verification video
+Agreement to group rules
+
+Important privacy requirements:
+
+Verification submissions must be visible only to authorised group admins.
+Sensitive verification files must never appear publicly.
+Set automatic deletion or retention controls for verification media.
+Do not display phone numbers to other members.
+Do not expose full registration numbers publicly by default.
+Allow administrators to approve, reject or request resubmission.
+Clearly obtain user consent before uploading verification material.
+Group privacy models
+Public group
+
+Contains:
+
+Public news feed
+Public group information
+Public events
+Public member list only where members opt in
+Join or Request to Join
+Private group
+
+Contains:
+
+Public overview page
+Private members-only news feed
+Members-only group chat
+Members-only events
+Members-only convoy invitations
+Optional public announcements
+
+Do not describe the private news feed as a system for hiding illegal locations.
+
+Frame it as restricted information for members-only club activities, private venues and controlled attendance.
+
+Group roles
+
+Support:
+
+Owner
+Administrator
+Moderator
+Verified Member
+Member
+
+Permissions should control:
+
+Editing group details
+Approving members
+Viewing verification submissions
+Creating news posts
+Creating events
+Creating group convoys
+Moderating chat
+Removing members
+Banning users
+Group feeds
+
+Public News:
+
+Visible according to group privacy
+Announcements
+Photos
+Event promotions
+General updates
+
+Members News:
+
+Visible only to members
+Club updates
+Members-only activities
+Internal announcements
+
+Group Chat:
+
+Realtime messages
+Images
+Reply support
+Admin announcements
+Report, mute and moderation tools
+Group member and vehicle directory
+
+Allow members to opt into a directory showing:
+
+Display name
+Avatar
+General area, optional
+Vehicle make/model
+Vehicle image
+Group role
+
+Privacy must be opt-in.
+
+Each user controls:
+
+Show me in member directory
+Show my vehicles
+Show full registration: default OFF
+Show partial registration: optional
+Allow direct messages
+Show journey activity
+
+Never design the privacy controls as a way to obstruct legitimate investigations.
+
+The purpose is normal user privacy and data minimisation.
+
+8. Events System
+
+Add an Events tab to Community.
+
+Groups and authorised users can create legitimate automotive events.
+
+Event types
+
+Use:
+
+Static Car Meet
+Scenic Drive
+Convoy
+Road Trip
+Show or Exhibition
+Track Day
+Closed-Course Motorsport
+Charity Event
+Photography Meet
+Owner Club Meet
+Other
+
+Do not add “Street Racing” as an event category.
+
+Event creation form
+
+Include:
+
+Event name
+Description
+Cover image
+Additional photos
+Location
+Optional meeting point
+Date
+Start time
+Estimated end time or duration
+Public or private
+Hosted independently or inside a group
+Event type
+Vehicle category
+Capacity
+Organiser
+Contact method
+Entry cost, if any
+Requirements
+Rules
+RSVP deadline
+Allow convoy-to-event option
+
+Vehicle category examples:
+
+Open to All
+Japanese
+German
+British
+Italian
+American
+Classics
+Performance Cars
+Modified Cars
+MINIs
+Custom category
+Event privacy
+
+Public:
+
+Discoverable in Events
+Visible event location according to organiser settings
+RSVP available
+
+Private Group Event:
+
+Visible only to group members
+Not listed publicly
+
+Invite Only:
+
+Visible only to invited users
+
+For large public events, exact location can be shown normally.
+
+For controlled private events, organisers may show a general area before acceptance and full details after approval.
+
+Event participation
+
+Allow users to:
+
+RSVP Going
+RSVP Interested
+Decline
+Add to calendar
+Share event
+View attendees, according to privacy
+Join an associated convoy
+Message organiser
+Report event
+
+Add native calendar export where supported.
+
+9. Notifications
+
+Create notification types for:
+
+Friend request
+Friend accepted
+Message
+Convoy invitation
+Convoy updated
+Convoy cancelled
+Group invitation
+Group request approved or rejected
+Group news
+Event invitation
+Event reminder
+Event change
+Verification result
+
+Add notification preferences so users can control each category.
+
+10. Data Models
+
+Create or update database models approximately as follows, adapting them to the existing stack:
+
+User
+UserPrivacySettings
+Vehicle
+Journey
+JourneyParticipant
+JourneyCategory
+Achievement
+JourneyAchievement
+Friendship
+FriendRequest
+Conversation
+Message
+Convoy
+ConvoyParticipant
+ConvoyInvitation
+Group
+GroupMember
+GroupRole
+GroupJoinRequest
+GroupVerificationSubmission
+GroupPost
+GroupMessage
+Event
+EventAttendee
+Notification
+Report
+BlockedUser
+
+Use proper IDs and relations.
+
+Do not store participant statistics only as loose text.
+
+Preserve historical snapshots where records may later change.
+
+11. Security and Privacy
+
+Implement:
+
+Authentication checks
+Authorisation checks
+Group-role permissions
+Convoy creator/admin permissions
+Secure file access
+Passcode hashing
+Rate limiting for friend requests and messages
+Blocking and reporting
+Private-by-default registration display
+Data deletion controls
+Clear consent for location sharing
+Clear consent for group verification uploads
+
+Users must never be able to view private groups, private messages, verification files or invitation-only convoys by manipulating frontend URLs.
+
+Enforce permissions on the server.
+
+12. UX and Visual Requirements
+
+Preserve the current design system for now.
+
+Do not redesign the entire app during this task.
+
+Use:
+
+Dark surfaces
+Orange accents
+Existing typography
+Existing mobile spacing
+Existing bottom navigation
+Large touch targets
+Clear empty states
+Loading indicators
+Error messages
+Confirmation dialogs
+
+Prioritise functionality and information architecture over decorative visual changes.
+
+Ensure every screen is usable on an iPhone-sized viewport.
+
+Do not stretch content into desktop dashboard layouts.
+
+13. Implementation Order
+
+Implement in this order to reduce breakage:
+
+Phase A: Fix existing functionality
+Remove Garage fuel-level input.
+Fix vehicle deletion.
+Reuse the current map in Journey Detail.
+Fix Journey route empty states.
+Add convoy deletion.
+Phase B: Journey improvements
+All-time statistics.
+Journey categories.
+Personal and convoy journey detail.
+Participant statistics and achievements.
+Phase C: Friends and convoys
+Authentication-backed friend requests.
+Remove and block friend.
+Shareable invitation links.
+Messaging.
+Convoy invitations and privacy options.
+Convoy discovery sections.
+Phase D: Groups
+Group creation.
+Membership and permissions.
+Public and private news.
+Group chat.
+Verification workflows.
+Member directory and privacy controls.
+Phase E: Events
+Event creation.
+Event discovery.
+RSVPs.
+Group events.
+Calendar sharing.
+Notifications.
+
+Do not attempt to fake unfinished backend functionality.
+
+If a feature cannot be fully implemented during one Agent run:
+
+Build the correct data model and interface.
+Clearly mark what remains.
+Do not populate it with misleading simulated behaviour.
+Continue from the existing implementation in the next run.
+14. Testing Requirements
+
+After implementation, test:
+
+Adding a vehicle
+Editing continuously without losing focus
+Uploading a vehicle image
+Removing a non-active vehicle
+Removing the active vehicle
+Existing journeys after vehicle deletion
+Journey statistics calculations
+Creating and deleting categories
+Viewing personal journey details
+Viewing convoy participant details
+Rendering stored routes
+Sending and accepting friend requests
+Removing and blocking friends
+Sharing invitation links
+Creating private convoys
+Passcode joining
+Invite-only joining
+Deleting convoys
+Creating groups
+Joining public groups
+Requesting private-group access
+Verification privacy
+Group posts and chat
+Creating events
+RSVP behaviour
+Permission enforcement
+Mobile layout
+Existing Map screen and navigation
+
+Do not mark the work complete until the existing app still runs without compile or runtime errors.

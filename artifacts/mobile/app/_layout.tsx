@@ -28,6 +28,10 @@ function RootLayoutNav() {
       <Stack.Screen name="settings" options={{ headerShown: false, animation: 'slide_from_right' }} />
       <Stack.Screen name="journey/[id]" options={{ headerShown: false, animation: 'slide_from_right' }} />
       <Stack.Screen name="vehicle/[id]" options={{ headerShown: false, animation: 'slide_from_right' }} />
+      <Stack.Screen name="messages" options={{ headerShown: false, animation: 'slide_from_right' }} />
+      <Stack.Screen name="conversation/[id]" options={{ headerShown: false, animation: 'slide_from_right' }} />
+      <Stack.Screen name="group/[id]" options={{ headerShown: false, animation: 'slide_from_right' }} />
+      <Stack.Screen name="event/[id]" options={{ headerShown: false, animation: 'slide_from_right' }} />
     </Stack>
   );
 }
