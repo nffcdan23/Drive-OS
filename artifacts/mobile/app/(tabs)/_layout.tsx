@@ -1,5 +1,6 @@
 import React from 'react';
 import { Platform, StyleSheet, useColorScheme, View } from 'react-native';
+import { useApp } from '@/context/AppContext';
 import { useColors } from '@/hooks/useColors';
 import { Feather, Ionicons } from '@expo/vector-icons';
 import { BlurView } from 'expo-blur';
@@ -43,6 +44,7 @@ function ClassicTabLayout() {
   const isIOS = Platform.OS === 'ios';
   const isWeb = Platform.OS === 'web';
   const insets = useSafeAreaInsets();
+  const { isDriving } = useApp();
 
   return (
     <Tabs
@@ -50,7 +52,7 @@ function ClassicTabLayout() {
         headerShown: false,
         tabBarActiveTintColor: colors.primary,
         tabBarInactiveTintColor: colors.mutedForeground,
-        tabBarStyle: {
+        tabBarStyle: isDriving ? { display: 'none' } : {
           position: 'absolute',
           backgroundColor: isIOS ? 'transparent' : colors.background,
           borderTopWidth: isWeb ? StyleSheet.hairlineWidth : 0,

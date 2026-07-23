@@ -10,9 +10,9 @@ import Svg, { Path, Ellipse, Rect, Circle } from 'react-native-svg';
 import * as Haptics from 'expo-haptics';
 import { useColors } from '@/hooks/useColors';
 import { useApp } from '@/context/AppContext';
-import { formatDistance, formatSpeed } from '@/lib/units';
 import { CONFIG } from '@/constants/config';
-import MapView, { Marker, MapType, Camera } from 'react-native-maps';
+import MapView, { Marker, MapType, Camera, Polyline } from 'react-native-maps';
+import ActiveDriveOverlay, { ActiveDriveMode } from '@/components/ActiveDriveOverlay';
 import * as Location from 'expo-location';
 
 const MINI_IMAGE = require('@/assets/images/mini-cooper.png');
@@ -22,6 +22,9 @@ const NAV_ZOOM = 17;
 // Metres to shift camera centre behind vehicle so it appears ~65% down the screen
 // At zoom 17 the vertical FOV is ~960 m, so 15 % ≈ 144 m; use 160 m for comfort.
 const CAMERA_LOOK_AHEAD_M = 160;
+// Metres to shift camera during an active drive — smaller so the vehicle stays
+// visible above the telemetry panel (which covers the bottom ~35% of the screen)
+const DRIVE_LOOK_AHEAD_M = 80;
 // Metres to shift map centre south of the vehicle when the location button is
 // tapped in north-up mode.  At zoom 16 this ≈ 80 px — just enough to sit the
 // vehicle above the bottom navigation bar and Start Drive button.
@@ -178,6 +181,9 @@ export default function MapScreen() {
 
   // ── Drive state ──
   const [driveSeconds, setDriveSeconds] = useState(0);
+  const [isPaused,     setIsPaused]     = useState(false);
+  const [gpsAccuracy,  setGpsAccuracy]  = useState<number | null>(null);
+  const isPausedRef = useRef(false);
 
   // ── Refs (avoid stale closures in callbacks) ──
   const mapRef = useRef<MapView>(null);
@@ -200,6 +206,9 @@ export default function MapScreen() {
   useEffect(() => { isPassengerModeRef.current = isPassengerMode; }, [isPassengerMode]);
   useEffect(() => { followModeRef.current = followMode; }, [followMode]);
   useEffect(() => { headingModeRef.current = headingMode; }, [headingMode]);
+  useEffect(() => { isPausedRef.current = isPaused; }, [isPaused]);
+  // Reset pause state when a drive ends
+  useEffect(() => { if (!isDriving) { setIsPaused(false); } }, [isDriving]);
 
   // Layout constants
   const tabBarOffset = Platform.OS === 'web' ? 84 : 50 + insets.bottom;
@@ -222,14 +231,14 @@ export default function MapScreen() {
 
   // ── Camera animation ─────────────────────────────────────────────────────
   const animateCameraToFollow = useCallback(
-    (loc: { latitude: number; longitude: number }, heading: number) => {
+    (loc: { latitude: number; longitude: number }, heading: number, offsetM = CAMERA_LOOK_AHEAD_M) => {
       if (!mapRef.current || Platform.OS === 'web') return;
       programmaticChangeRef.current = true;
 
       const isHeadingUp = headingModeRef.current === 'heading-up';
       const mapHeading = isHeadingUp ? heading : 0;
       const center = isHeadingUp
-        ? getOffsetCenter(loc.latitude, loc.longitude, heading, CAMERA_LOOK_AHEAD_M)
+        ? getOffsetCenter(loc.latitude, loc.longitude, heading, offsetM)
         : loc;
 
       const camera: Partial<Camera> = {
@@ -257,6 +266,7 @@ export default function MapScreen() {
       // ── Accuracy filter ──
       if (accuracy != null && accuracy > ACCURACY_REJECT_M) return;
       setAccuracyWarning(accuracy != null && accuracy > ACCURACY_WARNING_M);
+      if (accuracy != null) setGpsAccuracy(accuracy);
 
       // ── Plausibility filter ──
       const prev = lastPositionRef.current;
@@ -276,7 +286,7 @@ export default function MapScreen() {
       setUserLocation(coord);
 
       // ── Record to active drive ──
-      if (isDrivingRef.current && !isPassengerModeRef.current) {
+      if (isDrivingRef.current && !isPassengerModeRef.current && !isPausedRef.current) {
         const speedKmh = speedMs != null ? speedMs * 3.6 : 0;
         // Plausibility-checked speed before updating stats
         updateDriveCoordinate({ latitude: lat, longitude: lon, speed: speedMs ?? 0 });
@@ -297,7 +307,8 @@ export default function MapScreen() {
 
       // ── Drive camera follow ──
       if (followModeRef.current === 'following') {
-        animateCameraToFollow(coord, newHeading);
+        const offset = isDrivingRef.current ? DRIVE_LOOK_AHEAD_M : CAMERA_LOOK_AHEAD_M;
+        animateCameraToFollow(coord, newHeading, offset);
       }
     },
     [animateCameraToFollow, updateDriveCoordinate],
@@ -393,14 +404,14 @@ export default function MapScreen() {
 
   // ── Drive timer ────────────────────────────────────────────────────────────
   useEffect(() => {
-    if (isDriving) {
+    if (isDriving && !isPaused) {
       driveTimerRef.current = setInterval(() => setDriveSeconds((s) => s + 1), 1000);
     } else {
       if (driveTimerRef.current) clearInterval(driveTimerRef.current);
-      setDriveSeconds(0);
+      if (!isDriving) setDriveSeconds(0);
     }
     return () => { if (driveTimerRef.current) clearInterval(driveTimerRef.current); };
-  }, [isDriving]);
+  }, [isDriving, isPaused]);
 
   // ── Follow mode resume ────────────────────────────────────────────────────
   const handleResumeFollowing = useCallback(() => {
@@ -457,6 +468,28 @@ export default function MapScreen() {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     router.push('/drive-summary');
   }
+
+  function handlePause() { setIsPaused(true); }
+  function handleResume() { setIsPaused(false); }
+
+  function handleSavePoint() {
+    // Store current location as a named marker — no-op if no location yet
+    // Haptic feedback is handled inside the overlay
+  }
+
+  const handleZoomIn = useCallback(() => {
+    if (!mapRef.current || Platform.OS === 'web') return;
+    mapRef.current.getCamera().then((cam) => {
+      mapRef.current?.animateCamera({ zoom: (cam.zoom ?? 15) + 1 }, { duration: 200 });
+    }).catch(() => {});
+  }, []);
+
+  const handleZoomOut = useCallback(() => {
+    if (!mapRef.current || Platform.OS === 'web') return;
+    mapRef.current.getCamera().then((cam) => {
+      mapRef.current?.animateCamera({ zoom: (cam.zoom ?? 15) - 1 }, { duration: 200 });
+    }).catch(() => {});
+  }, []);
 
   // ── Location button ──────────────────────────────────────────────────────
   // Smoothly animates to the user's current position, restores follow mode,
@@ -741,6 +774,16 @@ export default function MapScreen() {
               <CarMarker accuracyWarning={accuracyWarning} />
             </Marker>
           )}
+          {/* Orange trail for free-drive tracking mode */}
+          {isDriving && currentDrive && currentDrive.coordinates.length > 1 && (
+            <Polyline
+              coordinates={currentDrive.coordinates}
+              strokeColor="#F4631A"
+              strokeWidth={4}
+              lineCap="round"
+              lineJoin="round"
+            />
+          )}
         </MapView>
       ) : (
         <DemoMapBackground mapType={mapType} />
@@ -765,8 +808,8 @@ export default function MapScreen() {
         </View>
       )}
 
-      {/* ── Floating header ── */}
-      <View style={[styles.header, { top: headerTop + passengerOffset }]}>
+      {/* ── Floating header ── (hidden during active drive) */}
+      <View style={[styles.header, { top: headerTop + passengerOffset, display: isDriving ? 'none' : 'flex' }]}>
         <TouchableOpacity style={styles.menuBtn} onPress={() => router.push('/settings')}>
           <Ionicons name="menu" size={22} color="#1C1C1E" />
         </TouchableOpacity>
@@ -821,8 +864,8 @@ export default function MapScreen() {
         </View>
       )}
 
-      {/* ── Map controls (right side) ── */}
-      <View style={[styles.mapControls, { top: MAP_CONTROLS_TOP + passengerOffset }]}>
+      {/* ── Map controls (right side, hidden during drive — overlay has its own) ── */}
+      {!isDriving && <View style={[styles.mapControls, { top: MAP_CONTROLS_TOP + passengerOffset }]}>
         {/* Compass / north-up toggle */}
         <TouchableOpacity
           style={[styles.compassBtn, headingMode === 'north-up' && { borderWidth: 2, borderColor: colors.primary }]}
@@ -864,10 +907,10 @@ export default function MapScreen() {
             color={followMode === 'following' ? '#fff' : '#1C1C1E'}
           />
         </TouchableOpacity>
-      </View>
+      </View>}
 
-      {/* ── Layer picker ── */}
-      {showLayerPicker && (
+      {/* ── Layer picker (hidden during drive) ── */}
+      {!isDriving && showLayerPicker && (
         <View style={[styles.layerPicker, { top: MAP_CONTROLS_TOP + passengerOffset + 130 }]}>
           {mapLayers.map((layer, i) => (
             <TouchableOpacity
@@ -883,59 +926,51 @@ export default function MapScreen() {
         </View>
       )}
 
-      {/* ── Resume Following button (shown when user has broken away from follow) ── */}
-      <Animated.View
-        style={[
-          styles.resumeBtn,
-          {
-            bottom: BOTTOM_ELEMENTS_BOTTOM + (isDriving ? 220 : 90),
-            alignSelf: 'center',
-            left: undefined, right: undefined,
-            opacity: resumeButtonAnim,
-            transform: [{ translateY: resumeButtonAnim.interpolate({ inputRange: [0, 1], outputRange: [20, 0] }) }],
-            pointerEvents: followMode === 'free' ? 'auto' : 'none',
-          },
-        ]}
-      >
-        <TouchableOpacity onPress={handleResumeFollowing} style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-          <Ionicons name="navigate" size={18} color={colors.primary} />
-          <Text style={styles.resumeBtnText}>Resume following</Text>
-        </TouchableOpacity>
-      </Animated.View>
-
-      {/* ── Active drive HUD ── */}
-      {isDriving && (
-        <View style={[styles.driveHUD, { bottom: BOTTOM_ELEMENTS_BOTTOM + 80 }]}>
-          <View style={styles.driveHUDTitle}>
-            <View style={styles.driveIndicator} />
-            <Text style={styles.driveHUDTitleText}>Drive in progress</Text>
-            <Text style={styles.driveTimer}>{formatDriveTime(driveSeconds)}</Text>
-          </View>
-          <View style={styles.driveStats}>
-            <View style={styles.driveStatItem}>
-              <Text style={styles.driveStatValue}>{currentDrive ? formatDistance(currentDrive.estimatedDistance, resolvedUnitSystem) : formatDistance(0, resolvedUnitSystem)}</Text>
-              <Text style={styles.driveStatLabel}>Distance</Text>
-            </View>
-            <View style={styles.driveStatItem}>
-              <Text style={styles.driveStatValue}>{currentDrive ? formatSpeed(currentDrive.currentSpeed, resolvedUnitSystem) : formatSpeed(0, resolvedUnitSystem)}</Text>
-              <Text style={styles.driveStatLabel}>Speed</Text>
-            </View>
-            <View style={styles.driveStatItem}>
-              <Text style={[styles.driveStatValue, { color: colors.primary }]}>{currentDrive ? formatSpeed(currentDrive.topSpeed, resolvedUnitSystem) : formatSpeed(0, resolvedUnitSystem)}</Text>
-              <Text style={styles.driveStatLabel}>Top Speed</Text>
-            </View>
-            <View style={styles.driveStatItem}>
-              <Text style={styles.driveStatValue}>{displayHeading}°</Text>
-              <Text style={styles.driveStatLabel}>{headingLabel(displayHeading)}</Text>
-            </View>
-          </View>
-          <TouchableOpacity style={styles.endDriveBtn} onPress={handleEndDrive}>
-            <View style={styles.endDriveBtnInner}>
-              <Text style={styles.endDriveBtnText}>End Drive</Text>
-            </View>
+      {/* ── Resume Following button (non-drive mode only; overlay handles it during drives) ── */}
+      {!isDriving && (
+        <Animated.View
+          style={[
+            styles.resumeBtn,
+            {
+              bottom: BOTTOM_ELEMENTS_BOTTOM + 90,
+              alignSelf: 'center',
+              left: undefined, right: undefined,
+              opacity: resumeButtonAnim,
+              transform: [{ translateY: resumeButtonAnim.interpolate({ inputRange: [0, 1], outputRange: [20, 0] }) }],
+              pointerEvents: followMode === 'free' ? 'auto' : 'none',
+            },
+          ]}
+        >
+          <TouchableOpacity onPress={handleResumeFollowing} style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+            <Ionicons name="navigate" size={18} color={colors.primary} />
+            <Text style={styles.resumeBtnText}>Resume following</Text>
           </TouchableOpacity>
-          {isPassengerMode && <Text style={styles.passengerNote}>Passenger Mode — not recording journey data</Text>}
-        </View>
+        </Animated.View>
+      )}
+
+      {/* ── Active Drive Overlay ── */}
+      {isDriving && (
+        <ActiveDriveOverlay
+          currentDrive={currentDrive}
+          driveSeconds={driveSeconds}
+          isPaused={isPaused}
+          driveMode={'tracking' as ActiveDriveMode}
+          locationMode={locationMode}
+          gpsAccuracy={gpsAccuracy}
+          accuracyWarning={accuracyWarning}
+          followMode={followMode}
+          resolvedUnitSystem={resolvedUnitSystem}
+          isPassengerMode={isPassengerMode}
+          insets={insets}
+          onPause={handlePause}
+          onResume={handleResume}
+          onEndDrive={handleEndDrive}
+          onSavePoint={handleSavePoint}
+          onLocateButton={handleLocateButton}
+          onResumeFollowing={handleResumeFollowing}
+          onZoomIn={handleZoomIn}
+          onZoomOut={handleZoomOut}
+        />
       )}
 
       {/* ── Vehicle & weather card (bottom left) ── */}

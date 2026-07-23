@@ -1,0 +1,245 @@
+Rebuild the active Drive screen to closely match the attached reference image while preserving the existing DriveOS architecture, tracking logic, API integration, location permissions and journey persistence.
+
+This screen must support two different active-drive states:
+
+1. Navigation mode
+The user has selected a destination and started navigation.
+
+2. Free drive tracking mode
+The user has started recording a drive without selecting a destination.
+
+Overall layout
+
+Create a full-screen driving interface with the map occupying most of the screen.
+
+Remove the normal app header and bottom navigation while a drive is active. Do not show:
+
+Hamburger menu
+DriveOS logo
+Notifications button
+Profile button
+Standard bottom tab bar
+Search bar
+Home, Work, Favourites or Recent shortcuts
+
+The active-drive screen should be focused entirely on information that is useful while driving.
+
+Use the existing light DriveOS aesthetic:
+
+Bright Apple Maps background
+White translucent cards
+Soft shadows
+Rounded corners
+Black primary text
+Grey secondary text
+DriveOS orange for active actions and recording status
+Blue for navigation routes and navigation-related information
+
+Respect the iPhone safe areas and ensure nothing overlaps the status bar, Dynamic Island or home indicator.
+
+Map behaviour
+
+The map must remain the primary element and occupy roughly the top 65–70% of the display.
+
+During an active drive:
+
+Continuously update the vehicle position using live GPS.
+Smoothly animate the vehicle marker instead of making it jump between updates.
+Keep the vehicle centred horizontally.
+Use a forward-looking camera position so more map is visible ahead of the vehicle.
+Rotate the map based on the user’s direction of travel when heading data is reliable.
+Do not constantly reset the camera if the user manually pans the map.
+When the user manually pans, temporarily disable follow mode.
+Show a recenter button that returns the camera to the vehicle and resumes follow mode.
+
+Use the existing vehicle marker or car icon, but refine it so it remains clearly visible against the map.
+
+Navigation mode
+
+When the active journey has a destination and route:
+
+Display the calculated route as a clear blue line.
+Keep the remaining route visible ahead of the vehicle.
+Show a centred navigation instruction card near the top of the screen, underneath the iOS status bar.
+The navigation card should include:
+Manoeuvre icon
+Distance to manoeuvre
+Instruction text
+Road name
+Optional progress indicator
+Example:
+Right-turn icon
+250 m
+Turn right onto
+Hawthorn Drive
+Update the instruction card as manoeuvres change.
+Hide the instruction card when no valid instruction is available.
+Show the current road name where appropriate.
+Show the current detected speed limit when available.
+Navigation units must respect the user’s selected unit system.
+
+Do not add fake navigation data. Use the current route and navigation state already available in the app.
+
+Free drive tracking mode
+
+When the user starts a drive without a destination:
+
+Do not show the navigation instruction card.
+Do not show a blue route line.
+Keep the vehicle positioned approximately in the centre of the usable map area.
+Draw a continuous orange trail behind the vehicle showing the exact path already travelled.
+The orange trail must be built from the recorded journey route points.
+Extend the trail smoothly as new GPS points are received.
+Do not draw a projected route ahead of the vehicle.
+Preserve the trail throughout the active journey.
+Save the same route-point data used by the trail so the completed journey can later be shown in Journey History.
+Avoid visibly drawing inaccurate GPS spikes. Ignore or filter clearly invalid location points where practical.
+
+The experience should feel like the app is recording the user’s real-world driving line in real time.
+
+Top status cards
+
+In the upper-left area, show a compact status card:
+
+Green status dot
+Drive in progress
+Current duration underneath
+
+In the upper-right area, show a compact GPS status card:
+
+GPS icon
+Signal state such as Strong, Moderate, Weak or Searching
+Small signal indicator
+
+These cards must be compact and should not obstruct important map information.
+
+Drive telemetry panel
+
+Add a fixed telemetry panel at the bottom of the screen, above the home indicator.
+
+The panel should use a white translucent background with rounded upper corners and a subtle shadow.
+
+The centre of the panel should contain a large speed display. It may use a simple circular speedometer presentation like the reference image, but the digital current speed must remain the easiest value to read.
+
+Display:
+
+Current speed
+Total distance
+Average speed
+Top speed
+Drive duration
+
+Layout:
+
+Large current speed in the centre
+Distance and average speed on the left
+Top speed and duration on the right
+
+Current speed should be visually dominant and readable at a glance.
+
+Use the user’s selected units:
+
+Imperial: mph and miles
+Metric: km/h and kilometres
+
+Never display negative speed. Clamp invalid or negative GPS speed values to zero.
+
+Calculate:
+
+Current speed from the latest reliable location update
+Total distance from the recorded route
+Average speed using total moving distance and elapsed drive time, using the project’s existing definition consistently
+Top speed as the highest reliable speed recorded during the current drive
+Duration from the active journey start time
+
+All values must update live without excessive re-rendering or map stuttering.
+
+Controls
+
+Place three controls along the bottom of the telemetry panel:
+
+Pause
+End Drive
+Save Point
+
+End Drive should be the primary control and use DriveOS orange.
+
+Pause behaviour:
+
+Pause journey tracking without ending the journey.
+Stop accumulating distance while paused.
+Clearly change the UI to show that the drive is paused.
+Allow the user to resume.
+
+End Drive behaviour:
+
+Require confirmation to prevent accidental taps while driving.
+Finalise the journey.
+Save duration, distance, average speed, top speed and route points.
+Return the user to the appropriate journey summary screen.
+
+Save Point behaviour:
+
+Save the current coordinate as a temporary journey marker.
+Include the current timestamp.
+Provide brief visual confirmation.
+Do not interrupt the active drive.
+
+Buttons must have large touch targets suitable for use in a mounted phone.
+
+Data and state requirements
+
+Continue using the existing active-journey state and API-backed journey system.
+
+Do not create a second, disconnected drive-tracking implementation.
+
+Use a single source of truth for:
+
+Active journey
+Journey start time
+Pause state
+Location points
+Current speed
+Top speed
+Distance
+Navigation route
+Navigation instructions
+
+The orange tracking trail and completed journey route must use the same recorded route-point data.
+
+Navigation mode and free tracking mode should use the same screen component, with conditional UI based on whether an active destination and route exist.
+
+Suggested state:
+
+type ActiveDriveMode = "navigation" | "tracking";
+
+Determine the mode from the active journey rather than relying only on temporary screen state.
+
+Performance and safety
+Keep map animation smooth during frequent GPS updates.
+Avoid updating the full component tree every second unnecessarily.
+Memoise expensive map overlays and telemetry calculations where appropriate.
+Do not request location permission repeatedly.
+Continue tracking correctly when the app briefly enters the background, within the permissions and capabilities already configured.
+Prevent the phone from sleeping while an active drive is running, if supported by the existing Expo setup.
+Keep text large and high contrast.
+Avoid small controls, dense menus or unnecessary interaction.
+Important constraints
+Match the attached reference image closely in hierarchy, spacing and overall visual quality.
+Do not simply place the existing small drive card over the current home map.
+Build a dedicated active-drive layout.
+Preserve all existing working journey recording and database behaviour.
+Do not replace real map, route or GPS data with mocked values.
+Do not break the normal non-driving Map screen.
+The standard app navigation should return after the drive ends.
+
+After implementation, provide a clear summary of:
+
+Files changed
+How navigation mode is detected
+How free-drive mode is detected
+How the blue navigation route is rendered
+How the orange recorded trail is rendered
+How telemetry values are calculated
+How pause and resume work
+Any database or API changes made
