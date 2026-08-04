@@ -14,7 +14,12 @@ import {
   apiUpdateVehicle, apiDeleteVehicle, apiActivateVehicle, apiUpdateMe,
   apiGetMyStats, apiGetFriends, apiRemoveFriend,
   apiAcceptFriendRequest, apiDeclineFriendRequest,
+  apiGetConvoys, apiCreateConvoy, apiUpdateConvoy, apiDeleteConvoy,
+  apiJoinConvoy, apiLeaveConvoy,
+  apiGetGroups, apiCreateGroup, apiUpdateGroup, apiJoinGroup, apiLeaveGroup,
+  apiGetEvents, apiCreateEvent, apiRsvpEvent,
   ApiVehicle, ApiJourney, ApiProfileStats, ApiFriend,
+  ApiConvoy, ApiGroup, ApiEvent,
 } from '@/lib/apiClient';
 import {
   loadDraft, saveDraft, clearDraft, clearPendingPoints,
@@ -352,6 +357,63 @@ function apiFriendToLocal(f: ApiFriend): Friend {
   return { id: f.id, name: f.name, initials, status: 'offline', location: '' };
 }
 
+function apiConvoyToLocal(c: ApiConvoy): Convoy {
+  return {
+    id:              c.id,
+    name:            c.name,
+    leaderId:        c.ownerId,
+    leaderName:      c.leaderName,
+    destination:     c.destination,
+    driverCount:     c.driverCount,
+    isPrivate:       c.isPrivate,
+    startTime:       c.startTime,
+    status:          (c.status as Convoy['status']) ?? 'forming',
+    description:     c.description,
+    maxParticipants: c.maxParticipants ?? undefined,
+    isOwn:           c.isOwn,
+    isJoined:        c.isJoined,
+  };
+}
+
+function apiGroupToLocal(g: ApiGroup): Group {
+  return {
+    id:                g.id,
+    name:              g.name,
+    description:       g.description,
+    logoUri:           g.logoUrl,
+    isPublic:          g.isPublic,
+    memberCount:       g.memberCount,
+    membershipMethod:  (g.membershipMethod as Group['membershipMethod']) ?? 'open',
+    myRole:            (g.myRole as Group['myRole']) ?? null,
+    isMember:          g.isMember,
+    primaryLocation:   g.primaryLocation,
+    vehicleInterests:  g.vehicleInterests,
+    createdAt:         g.createdAt,
+  };
+}
+
+function apiEventToLocal(e: ApiEvent): DriveOSEvent {
+  return {
+    id:              e.id,
+    name:            e.name,
+    description:     e.description,
+    coverUri:        e.coverUrl,
+    location:        e.location,
+    date:            e.date,
+    startTime:       e.startTime,
+    endTime:         e.endTime,
+    eventType:       e.eventType as EventType,
+    isPublic:        e.isPublic,
+    groupId:         e.groupId,
+    capacity:        e.capacity,
+    attendeeCount:   e.attendeeCount,
+    organiser:       e.organiserName,
+    vehicleCategory: e.vehicleCategory,
+    rsvpStatus:      e.rsvpStatus,
+    entryCost:       e.entryCost,
+  };
+}
+
 // ─── Storage keys ─────────────────────────────────────────────────────────────
 
 const STORAGE_KEYS = {
@@ -537,7 +599,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     const loadFromApi = async () => {
       try {
         // Parallel fetch everything
-        const [me, apiVehicles, apiJourneys, apiCats, apiNotifs, apiFriendsList, stats] = await Promise.all([
+        const [
+          me, apiVehicles, apiJourneys, apiCats, apiNotifs, apiFriendsList, stats,
+          apiConvoys, apiGroups, apiEvents,
+        ] = await Promise.all([
           apiGetMe().catch(() => null),
           apiGetVehicles().catch(() => null),
           apiGetJourneys().catch(() => null),
@@ -545,6 +610,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           apiGetNotifications().catch(() => null),
           apiGetFriends().catch(() => null),
           apiGetMyStats().catch(() => null),
+          apiGetConvoys().catch(() => null),
+          apiGetGroups().catch(() => null),
+          apiGetEvents().catch(() => null),
         ]);
 
         // Always apply API responses — even empty arrays are authoritative.
@@ -601,6 +669,18 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
         if (apiFriendsList !== null) {
           setFriends(apiFriendsList.map(apiFriendToLocal));
+        }
+
+        if (apiConvoys !== null) {
+          setConvoys(apiConvoys.map(apiConvoyToLocal));
+        }
+
+        if (apiGroups !== null) {
+          setGroups(apiGroups.map(apiGroupToLocal));
+        }
+
+        if (apiEvents !== null) {
+          setEvents(apiEvents.map(apiEventToLocal));
         }
 
         if (stats !== null) {
@@ -1131,34 +1211,146 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   // ── Convoy methods ───────────────────────────────────────────────────────────
 
-  const addConvoy    = useCallback((c: Omit<Convoy, 'id'>) => { setConvoys((p) => [{ ...c, id: generateId() }, ...p]); }, []);
-  const updateConvoy = useCallback((id: string, updates: Partial<Convoy>) => { setConvoys((p) => p.map((c) => c.id === id ? { ...c, ...updates } : c)); }, []);
-  const deleteConvoy = useCallback((id: string) => { setConvoys((p) => p.filter((c) => c.id !== id)); }, []);
-  const joinConvoy   = useCallback((id: string) => { setConvoys((p) => p.map((c) => c.id === id ? { ...c, isJoined: true, driverCount: c.driverCount + 1 } : c)); }, []);
-  const leaveConvoy  = useCallback((id: string) => { setConvoys((p) => p.map((c) => c.id === id ? { ...c, isJoined: false, driverCount: Math.max(0, c.driverCount - 1) } : c)); }, []);
+  const addConvoy = useCallback((c: Omit<Convoy, 'id'>) => {
+    const localId = generateId();
+    setConvoys((p) => [{ ...c, id: localId }, ...p]);
+
+    apiCreateConvoy({
+      name:            c.name,
+      destination:     c.destination,
+      isPrivate:       c.isPrivate,
+      startTime:       c.startTime,
+      description:     c.description,
+      maxParticipants: c.maxParticipants ?? null,
+    }).then((serverC) => {
+      // Re-fetch so leaderName/driverCount/isOwn/isJoined are correctly populated
+      apiGetConvoys().then((fresh) => setConvoys(fresh.map(apiConvoyToLocal))).catch(() => {
+        setConvoys((prev) => prev.map((existing) =>
+          existing.id === localId
+            ? { ...existing, id: serverC.id, isOwn: true, isJoined: true, driverCount: 1 }
+            : existing
+        ));
+      });
+    }).catch(() => {
+      // Convoy stays local-only — will sync on next load from API
+    });
+  }, []);
+
+  const updateConvoy = useCallback((id: string, updates: Partial<Convoy>) => {
+    setConvoys((p) => p.map((c) => c.id === id ? { ...c, ...updates } : c));
+    apiUpdateConvoy(id, {
+      name:            updates.name,
+      destination:     updates.destination,
+      isPrivate:       updates.isPrivate,
+      startTime:       updates.startTime,
+      description:     updates.description,
+      status:          updates.status,
+      maxParticipants: updates.maxParticipants,
+    }).catch(() => {});
+  }, []);
+
+  const deleteConvoy = useCallback((id: string) => {
+    setConvoys((p) => p.filter((c) => c.id !== id));
+    apiDeleteConvoy(id).catch(() => {});
+  }, []);
+
+  const joinConvoy = useCallback((id: string) => {
+    setConvoys((p) => p.map((c) => c.id === id ? { ...c, isJoined: true, driverCount: c.driverCount + 1 } : c));
+    apiJoinConvoy(id).catch(() => {
+      setConvoys((p) => p.map((c) => c.id === id ? { ...c, isJoined: false, driverCount: Math.max(0, c.driverCount - 1) } : c));
+    });
+  }, []);
+
+  const leaveConvoy = useCallback((id: string) => {
+    setConvoys((p) => p.map((c) => c.id === id ? { ...c, isJoined: false, driverCount: Math.max(0, c.driverCount - 1) } : c));
+    apiLeaveConvoy(id).catch(() => {
+      setConvoys((p) => p.map((c) => c.id === id ? { ...c, isJoined: true, driverCount: c.driverCount + 1 } : c));
+    });
+  }, []);
 
   // ── Group methods ────────────────────────────────────────────────────────────
 
-  const addGroup  = useCallback((g: Omit<Group, 'id' | 'createdAt' | 'memberCount' | 'myRole' | 'isMember'>) => {
-    setGroups((p) => [{ ...g, id: generateId(), createdAt: new Date().toISOString(), memberCount: 1, myRole: 'owner', isMember: true }, ...p]);
+  const addGroup = useCallback((g: Omit<Group, 'id' | 'createdAt' | 'memberCount' | 'myRole' | 'isMember'>) => {
+    const localId = generateId();
+    setGroups((p) => [{ ...g, id: localId, createdAt: new Date().toISOString(), memberCount: 1, myRole: 'owner', isMember: true }, ...p]);
+
+    apiCreateGroup({
+      name:              g.name,
+      description:       g.description,
+      logoUrl:           g.logoUri,
+      isPublic:          g.isPublic,
+      membershipMethod:  g.membershipMethod,
+      primaryLocation:   g.primaryLocation,
+      vehicleInterests:  g.vehicleInterests,
+    }).then((serverG) => {
+      setGroups((prev) => prev.map((existing) =>
+        existing.id === localId ? { ...existing, id: serverG.id, createdAt: serverG.createdAt } : existing
+      ));
+    }).catch(() => {
+      // Group stays local-only — will sync on next load from API
+    });
   }, []);
-  const joinGroup  = useCallback((id: string) => { setGroups((p) => p.map((g) => g.id === id ? { ...g, isMember: true, myRole: 'member', memberCount: g.memberCount + 1 } : g)); }, []);
-  const leaveGroup = useCallback((id: string) => { setGroups((p) => p.map((g) => g.id === id ? { ...g, isMember: false, myRole: null, memberCount: Math.max(0, g.memberCount - 1) } : g)); }, []);
+
+  const joinGroup = useCallback((id: string) => {
+    setGroups((p) => p.map((g) => g.id === id ? { ...g, isMember: true, myRole: 'member', memberCount: g.memberCount + 1 } : g));
+    apiJoinGroup(id).catch(() => {
+      setGroups((p) => p.map((g) => g.id === id ? { ...g, isMember: false, myRole: null, memberCount: Math.max(0, g.memberCount - 1) } : g));
+    });
+  }, []);
+
+  const leaveGroup = useCallback((id: string) => {
+    setGroups((p) => p.map((g) => g.id === id ? { ...g, isMember: false, myRole: null, memberCount: Math.max(0, g.memberCount - 1) } : g));
+    apiLeaveGroup(id).catch(() => {
+      setGroups((p) => p.map((g) => g.id === id ? { ...g, isMember: true, myRole: 'member', memberCount: g.memberCount + 1 } : g));
+    });
+  }, []);
 
   // ── Event methods ────────────────────────────────────────────────────────────
 
   const addEvent = useCallback((e: Omit<DriveOSEvent, 'id' | 'attendeeCount' | 'rsvpStatus'>) => {
-    setEvents((p) => [{ ...e, id: generateId(), attendeeCount: 1, rsvpStatus: 'going' }, ...p]);
+    const localId = generateId();
+    setEvents((p) => [{ ...e, id: localId, attendeeCount: 1, rsvpStatus: 'going' }, ...p]);
+
+    apiCreateEvent({
+      groupId:         e.groupId,
+      name:            e.name,
+      description:     e.description,
+      coverUrl:        e.coverUri,
+      location:        e.location,
+      date:            e.date,
+      startTime:       e.startTime,
+      endTime:         e.endTime,
+      eventType:       e.eventType,
+      isPublic:        e.isPublic,
+      capacity:        e.capacity,
+      entryCost:       e.entryCost,
+      vehicleCategory: e.vehicleCategory,
+    }).then((serverE) => {
+      setEvents((prev) => prev.map((existing) =>
+        existing.id === localId ? { ...existing, id: serverE.id } : existing
+      ));
+      // Organiser auto-RSVPs 'going' locally, but the server doesn't create
+      // that RSVP row automatically — send it explicitly so it persists.
+      apiRsvpEvent(serverE.id, 'going').catch(() => {});
+    }).catch(() => {
+      // Event stays local-only — will sync on next load from API
+    });
   }, []);
 
   const rsvpEvent = useCallback((id: string, status: DriveOSEvent['rsvpStatus']) => {
+    const previous = events.find((e) => e.id === id)?.rsvpStatus ?? null;
     setEvents((p) => p.map((e) => e.id === id ? {
       ...e, rsvpStatus: status,
       attendeeCount: status === 'going'
         ? e.attendeeCount + (e.rsvpStatus !== 'going' ? 1 : 0)
         : e.attendeeCount - (e.rsvpStatus === 'going' ? 1 : 0),
     } : e));
-  }, []);
+
+    if (status === null) return; // nothing to sync — server has no "clear RSVP" endpoint
+    apiRsvpEvent(id, status).catch(() => {
+      setEvents((p) => p.map((e) => e.id === id ? { ...e, rsvpStatus: previous } : e));
+    });
+  }, [events]);
 
   // ── Messaging ────────────────────────────────────────────────────────────────
 

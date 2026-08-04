@@ -5,7 +5,7 @@ import {
   groups, groupMembers, events, eventRsvps,
   friendships, friendRequests,
 } from '@workspace/db';
-import { eq, and, or, desc } from 'drizzle-orm';
+import { eq, and, or, desc, sql, inArray } from 'drizzle-orm';
 import { requireUser } from '../middleware/userId';
 
 const router = Router();
@@ -14,13 +14,50 @@ const router = Router();
 
 router.get('/convoys', requireUser, async (req, res, next) => {
   try {
-    // Public convoys + user's own
+    // Public convoys + user's own, with the leader's name joined in
     const rows = await db
-      .select()
+      .select({
+        id:              convoys.id,
+        ownerId:         convoys.ownerId,
+        leaderName:      users.name,
+        name:            convoys.name,
+        destination:     convoys.destination,
+        isPrivate:       convoys.isPrivate,
+        startTime:       convoys.startTime,
+        status:          convoys.status,
+        description:     convoys.description,
+        maxParticipants: convoys.maxParticipants,
+        createdAt:       convoys.createdAt,
+      })
       .from(convoys)
+      .innerJoin(users, eq(users.id, convoys.ownerId))
       .orderBy(desc(convoys.createdAt))
       .limit(50);
-    res.json(rows);
+
+    if (rows.length === 0) { res.json([]); return; }
+    const convoyIds = rows.map((r) => r.id);
+
+    // Participant count per convoy
+    const counts = await db
+      .select({ convoyId: convoyParticipants.convoyId, count: sql<number>`count(*)::int` })
+      .from(convoyParticipants)
+      .where(inArray(convoyParticipants.convoyId, convoyIds))
+      .groupBy(convoyParticipants.convoyId);
+    const countMap = new Map(counts.map((c) => [c.convoyId, c.count]));
+
+    // Which of these convoys the current user has joined
+    const mine = await db
+      .select({ convoyId: convoyParticipants.convoyId })
+      .from(convoyParticipants)
+      .where(and(inArray(convoyParticipants.convoyId, convoyIds), eq(convoyParticipants.userId, req.userId)));
+    const joinedSet = new Set(mine.map((m) => m.convoyId));
+
+    res.json(rows.map((r) => ({
+      ...r,
+      driverCount: countMap.get(r.id) ?? 0,
+      isOwn:       r.ownerId === req.userId,
+      isJoined:    joinedSet.has(r.id),
+    })));
   } catch (err) { next(err); }
 });
 
@@ -102,7 +139,28 @@ router.post('/convoys/:id/leave', requireUser, async (req, res, next) => {
 router.get('/groups', requireUser, async (req, res, next) => {
   try {
     const rows = await db.select().from(groups).orderBy(desc(groups.createdAt)).limit(50);
-    res.json(rows);
+    if (rows.length === 0) { res.json([]); return; }
+    const groupIds = rows.map((g) => g.id);
+
+    const counts = await db
+      .select({ groupId: groupMembers.groupId, count: sql<number>`count(*)::int` })
+      .from(groupMembers)
+      .where(inArray(groupMembers.groupId, groupIds))
+      .groupBy(groupMembers.groupId);
+    const countMap = new Map(counts.map((c) => [c.groupId, c.count]));
+
+    const mine = await db
+      .select({ groupId: groupMembers.groupId, role: groupMembers.role })
+      .from(groupMembers)
+      .where(and(inArray(groupMembers.groupId, groupIds), eq(groupMembers.userId, req.userId)));
+    const roleMap = new Map(mine.map((m) => [m.groupId, m.role]));
+
+    res.json(rows.map((g) => ({
+      ...g,
+      memberCount: countMap.get(g.id) ?? 0,
+      myRole:      roleMap.get(g.id) ?? null,
+      isMember:    roleMap.has(g.id),
+    })));
   } catch (err) { next(err); }
 });
 
@@ -176,8 +234,52 @@ router.post('/groups/:id/leave', requireUser, async (req, res, next) => {
 
 router.get('/events', requireUser, async (req, res, next) => {
   try {
-    const rows = await db.select().from(events).orderBy(desc(events.createdAt)).limit(50);
-    res.json(rows);
+    const rows = await db
+      .select({
+        id:              events.id,
+        organiserId:     events.organiserId,
+        organiserName:   users.name,
+        groupId:         events.groupId,
+        name:            events.name,
+        description:     events.description,
+        coverUrl:        events.coverUrl,
+        location:        events.location,
+        date:            events.date,
+        startTime:       events.startTime,
+        endTime:         events.endTime,
+        eventType:       events.eventType,
+        isPublic:        events.isPublic,
+        capacity:        events.capacity,
+        entryCost:       events.entryCost,
+        vehicleCategory: events.vehicleCategory,
+        createdAt:       events.createdAt,
+      })
+      .from(events)
+      .innerJoin(users, eq(users.id, events.organiserId))
+      .orderBy(desc(events.createdAt))
+      .limit(50);
+
+    if (rows.length === 0) { res.json([]); return; }
+    const eventIds = rows.map((e) => e.id);
+
+    const counts = await db
+      .select({ eventId: eventRsvps.eventId, count: sql<number>`count(*)::int` })
+      .from(eventRsvps)
+      .where(and(inArray(eventRsvps.eventId, eventIds), eq(eventRsvps.status, 'going')))
+      .groupBy(eventRsvps.eventId);
+    const countMap = new Map(counts.map((c) => [c.eventId, c.count]));
+
+    const mine = await db
+      .select({ eventId: eventRsvps.eventId, status: eventRsvps.status })
+      .from(eventRsvps)
+      .where(and(inArray(eventRsvps.eventId, eventIds), eq(eventRsvps.userId, req.userId)));
+    const rsvpMap = new Map(mine.map((m) => [m.eventId, m.status]));
+
+    res.json(rows.map((e) => ({
+      ...e,
+      attendeeCount: countMap.get(e.id) ?? 0,
+      rsvpStatus:    rsvpMap.get(e.id) ?? null,
+    })));
   } catch (err) { next(err); }
 });
 

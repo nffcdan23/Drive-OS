@@ -221,6 +221,7 @@ export const apiMarkAllNotificationsRead = () => post<void>('/notifications/read
 export interface ApiConvoy {
   id: string;
   ownerId: string;
+  leaderName: string;
   name: string;
   destination: string;
   isPrivate: boolean;
@@ -229,6 +230,9 @@ export interface ApiConvoy {
   description: string;
   maxParticipants: number | null;
   createdAt: string;
+  driverCount: number;
+  isOwn: boolean;
+  isJoined: boolean;
 }
 
 export interface ApiGroup {
@@ -242,11 +246,15 @@ export interface ApiGroup {
   primaryLocation: string;
   vehicleInterests: string;
   createdAt: string;
+  memberCount: number;
+  myRole: string | null;
+  isMember: boolean;
 }
 
 export interface ApiEvent {
   id: string;
   organiserId: string;
+  organiserName: string;
   groupId: string | null;
   name: string;
   description: string;
@@ -261,6 +269,8 @@ export interface ApiEvent {
   entryCost: string;
   vehicleCategory: string;
   createdAt: string;
+  attendeeCount: number;
+  rsvpStatus: 'going' | 'interested' | 'declined' | null;
 }
 
 export interface ApiFriend {
