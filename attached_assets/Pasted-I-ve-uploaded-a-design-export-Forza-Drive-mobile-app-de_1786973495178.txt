@@ -1,0 +1,49 @@
+I've uploaded a design export (Forza_Drive_mobile_app_design.zip) containing 
+DriveOS.dc.html, which has three variants of four screens (Map, Journeys, 
+Garage, Profile):
+
+- 1a = today's current build recreated (IGNORE THIS — it's just a reference 
+  copy of what already exists, do not implement anything from it)
+- 1b = new DriveOS light theme (Archivo font, hand-built vector map style)
+- 1c = new DriveOS dark theme (same layout/system as 1b, dark surfaces)
+
+1b and 1c are the SAME redesign in two color modes, not two different 
+designs. Implement them as a single theme system with light and dark 
+variants, not as separate screens.
+
+Scope: Map, Journeys, Garage, and Profile screens only. Community was not 
+redesigned — leave it untouched.
+
+Files to work in (per github.md in the zip):
+- app/(tabs)/index.tsx (Map)
+- app/(tabs)/journeys.tsx
+- app/(tabs)/garage.tsx
+- app/(tabs)/profile.tsx
+- app/(tabs)/_layout.tsx (tab bar)
+- constants/colors.ts
+- constants/config.ts
+- lib/units.ts
+- components/EmptyState.tsx
+- context/AppContext.tsx
+
+Requirements:
+1. Read the exact hex colors, spacing, and border-radius values out of the 
+   1b and 1c sections of DriveOS.dc.html — don't approximate them. Add them 
+   to constants/colors.ts as a proper light/dark token set.
+2. Load the Archivo font via expo-font / @expo-google-fonts/archivo. Do not 
+   replace Inter everywhere — only where the redesign uses Archivo.
+3. Rebuild the HTML/SVG markup from 1b/1c using React Native primitives 
+   (View, Text, Pressable, Image, react-native-svg for icons/shapes) — it's 
+   currently raw web HTML and won't run as-is.
+4. Do NOT touch or rewrite existing logic: GPS following, heading rotation, 
+   journey draft/recording, API calls, AsyncStorage, or navigation state. 
+   Only change the presentation layer (styles, layout, colors, fonts, 
+   component structure).
+5. Go one screen at a time — Map first, then Journeys, Garage, Profile, then 
+   the tab bar. Show me the diff for each screen before moving to the next 
+   rather than changing all files at once.
+6. If anything in the design (icons, spacing, a component) isn't clear from 
+   the html, ask rather than guessing.
+
+Start with the Map screen only. Show me what you're changing before touching 
+the others.
