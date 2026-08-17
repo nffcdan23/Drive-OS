@@ -2,7 +2,7 @@ import React from 'react';
 import { Platform, StyleSheet, useColorScheme, View } from 'react-native';
 import { useApp } from '@/context/AppContext';
 import { useColors } from '@/hooks/useColors';
-import { Feather, Ionicons } from '@expo/vector-icons';
+import { Ionicons } from '@expo/vector-icons';
 import { BlurView } from 'expo-blur';
 import { isLiquidGlassAvailable } from 'expo-glass-effect';
 import { Tabs } from 'expo-router';
@@ -46,35 +46,63 @@ function ClassicTabLayout() {
   const insets = useSafeAreaInsets();
   const { isDriving } = useApp();
 
+  // Floating pill dimensions
+  const TAB_H = 66;
+  const TAB_BOTTOM = isWeb ? 16 : Math.max(insets.bottom, 16);
+  const TAB_RADIUS = 26;
+
   return (
     <Tabs
       screenOptions={{
         headerShown: false,
         tabBarActiveTintColor: colors.primary,
-        tabBarInactiveTintColor: colors.mutedForeground,
-        tabBarStyle: isDriving ? { display: 'none' } : {
-          position: 'absolute',
-          backgroundColor: isIOS ? 'transparent' : colors.background,
-          borderTopWidth: isWeb ? StyleSheet.hairlineWidth : 0,
-          borderTopColor: colors.border,
-          elevation: 0,
-          paddingBottom: isWeb ? 0 : insets.bottom,
-          ...(isWeb ? { height: 84 } : {}),
-        },
+        tabBarInactiveTintColor: colors.tabInactive ?? colors.mutedForeground,
+        tabBarStyle: isDriving
+          ? { display: 'none' }
+          : {
+              position: 'absolute',
+              left: 16,
+              right: 16,
+              bottom: TAB_BOTTOM,
+              height: TAB_H,
+              borderRadius: TAB_RADIUS,
+              backgroundColor: isIOS ? 'transparent' : colors.tabBarBg ?? colors.background,
+              borderTopWidth: 0,
+              elevation: 0,
+              // Warm shadow
+              shadowColor: '#2E2414',
+              shadowOffset: { width: 0, height: 8 },
+              shadowOpacity: 0.18,
+              shadowRadius: 24,
+              // Border
+              borderWidth: StyleSheet.hairlineWidth,
+              borderColor: colors.surfaceBorder ?? colors.border,
+              paddingBottom: 0,
+              overflow: isIOS ? 'hidden' : 'visible',
+            },
         tabBarBackground: () =>
-          isIOS ? (
+          isIOS && !isDriving ? (
             <BlurView
-              intensity={100}
+              intensity={80}
               tint={isDark ? 'dark' : 'light'}
-              style={StyleSheet.absoluteFill}
+              style={[StyleSheet.absoluteFill, { borderRadius: TAB_RADIUS, overflow: 'hidden' }]}
             />
-          ) : isWeb ? (
-            <View style={[StyleSheet.absoluteFill, { backgroundColor: colors.background }]} />
+          ) : isWeb && !isDriving ? (
+            <View
+              style={[
+                StyleSheet.absoluteFill,
+                { backgroundColor: colors.tabBarBg ?? colors.background, borderRadius: TAB_RADIUS },
+              ]}
+            />
           ) : null,
         tabBarLabelStyle: {
           fontSize: 11,
           fontFamily: 'Inter_500Medium',
-          marginBottom: 2,
+          marginBottom: 4,
+        },
+        tabBarItemStyle: {
+          paddingTop: 10,
+          paddingBottom: 6,
         },
       }}
     >

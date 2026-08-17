@@ -1,6 +1,7 @@
 /**
  * DriveOS Design Tokens
  * Warm off-white surfaces, charcoal text, warm orange/coral accents.
+ * 1b/1c design system tokens added — do not remove legacy aliases.
  */
 
 const colors = {
@@ -10,7 +11,7 @@ const colors = {
     tint: '#F4631A',
 
     // Core surfaces
-    background: '#FAF9F7',
+    background: '#F7F4EE',
     foreground: '#1C1C1E',
 
     // Cards
@@ -27,7 +28,7 @@ const colors = {
 
     // Muted
     muted: '#F0EDE8',
-    mutedForeground: '#8A8680',
+    mutedForeground: '#8A8375',
 
     // Accent — coral
     accent: '#FF4E3A',
@@ -40,6 +41,14 @@ const colors = {
     // Borders and inputs
     border: '#E8E4DE',
     input: '#E8E4DE',
+
+    // 1b/1c design tokens
+    labelMuted: '#A79E8C',          // caption / secondary label
+    surfaceBorder: 'rgba(28,28,30,0.08)',  // subtle card border
+    warmShadow: 'rgba(46,36,20,0.14)',     // warm brown card shadow
+    tabInactive: '#A79E8C',         // inactive tab icon
+    tabBarBg: 'rgba(247,244,238,0.85)',    // floating tab bar fill
+    scenicGreen: '#1F4D3A',         // scenic route button
   },
 
   dark: {
@@ -59,7 +68,7 @@ const colors = {
     secondaryForeground: '#F0EFE8',
 
     muted: '#252527',
-    mutedForeground: '#888888',
+    mutedForeground: '#8A8680',
 
     accent: '#FF4E3A',
     accentForeground: '#FFFFFF',
@@ -69,6 +78,14 @@ const colors = {
 
     border: '#2C2C2E',
     input: '#2C2C2E',
+
+    // 1b/1c design tokens
+    labelMuted: '#6C6A66',
+    surfaceBorder: 'rgba(255,255,255,0.07)',
+    warmShadow: 'rgba(0,0,0,0.4)',
+    tabInactive: '#6C6A66',
+    tabBarBg: 'rgba(26,26,28,0.85)',
+    scenicGreen: '#1F4D3A',
   },
 
   // Border radius — rounded but not pill

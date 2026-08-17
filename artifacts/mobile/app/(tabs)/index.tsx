@@ -211,13 +211,16 @@ export default function MapScreen() {
   useEffect(() => { if (!isDriving) { setIsPaused(false); } }, [isDriving]);
 
   // Layout constants
-  const tabBarOffset = Platform.OS === 'web' ? 84 : 50 + insets.bottom;
+  // Floating pill tab bar: height 66, bottom = max(insets.bottom, 16)
+  const tabPillBottom = Math.max(insets.bottom, Platform.OS === 'web' ? 16 : insets.bottom);
+  const tabBarOffset = Platform.OS === 'web' ? 82 : 66 + tabPillBottom;
   const headerTop = Platform.OS === 'web' ? 67 + insets.top : insets.top;
   const HEADER_H = 44;
   const SEARCH_TOP = headerTop + HEADER_H + 10;
-  const QUICK_TOP = SEARCH_TOP + 52 + 10;
+  const QUICK_TOP = SEARCH_TOP + 62 + 10;
   const MAP_CONTROLS_TOP = QUICK_TOP + 44 + 16;
-  const BOTTOM_ELEMENTS_BOTTOM = tabBarOffset + 16;
+  // Bottom card sits above the floating tab bar with an 8 px gap
+  const BOTTOM_CARD_BOTTOM = tabBarOffset + 8;
 
   // ── Animate the resume-follow button in/out ──────────────────────────────
   useEffect(() => {
@@ -577,13 +580,18 @@ export default function MapScreen() {
 
   // ─── Styles ────────────────────────────────────────────────────────────────
   const CARD_SHADOW = {
-    shadowColor: '#000', shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.12, shadowRadius: 12, elevation: 8,
+    shadowColor: '#2E2414',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.14,
+    shadowRadius: 20,
+    elevation: 8,
   };
 
   const styles = StyleSheet.create({
     container: { flex: 1, backgroundColor: '#1a3d2a' },
     mapFull: { ...StyleSheet.absoluteFillObject },
+
+    // ── Passenger / accuracy banners ──
     passengerBanner: {
       position: 'absolute', left: 0, right: 0, zIndex: 30,
       backgroundColor: colors.primary, paddingVertical: 7, paddingHorizontal: 16,
@@ -596,21 +604,43 @@ export default function MapScreen() {
       paddingHorizontal: 10, paddingVertical: 5, flexDirection: 'row', alignItems: 'center', gap: 5,
     },
     accuracyWarningText: { fontSize: 11, color: '#1C1C1E', fontFamily: 'Inter_600SemiBold' },
+
+    // ── Header ──
     header: {
       position: 'absolute', left: 12, right: 12, zIndex: 20,
       flexDirection: 'row', alignItems: 'center', gap: 10,
     },
     menuBtn: {
-      width: 44, height: 44, borderRadius: 13, backgroundColor: 'rgba(255,255,255,0.95)',
-      alignItems: 'center', justifyContent: 'center', ...CARD_SHADOW,
+      width: 44, height: 44, borderRadius: 16,
+      backgroundColor: 'rgba(255,255,255,0.97)',
+      alignItems: 'center', justifyContent: 'center',
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: 'rgba(28,28,30,0.08)',
+      ...CARD_SHADOW,
     },
     wordmarkWrap: { flex: 1, alignItems: 'center', justifyContent: 'center' },
-    wordmark: { fontSize: 22, fontWeight: '700', color: '#1C1C1E', fontFamily: 'Inter_700Bold', letterSpacing: -0.5 },
+    // Wordmark uses Archivo; falls back to Inter if not yet loaded
+    wordmark: {
+      fontSize: 17, fontWeight: '700', color: '#1C1C1E',
+      fontFamily: 'Archivo_700Bold',
+      letterSpacing: 2.4,
+      textTransform: 'uppercase',
+    },
     wordmarkAccent: { color: colors.primary },
     headerRight: { flexDirection: 'row', gap: 8 },
-    headerIconBtn: {
-      width: 44, height: 44, borderRadius: 22, backgroundColor: 'rgba(255,255,255,0.95)',
-      alignItems: 'center', justifyContent: 'center', ...CARD_SHADOW,
+    notifBtn: {
+      width: 44, height: 44, borderRadius: 22,
+      backgroundColor: 'rgba(255,255,255,0.97)',
+      alignItems: 'center', justifyContent: 'center',
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: 'rgba(28,28,30,0.08)',
+      ...CARD_SHADOW,
+    },
+    avatarBtn: {
+      width: 44, height: 44, borderRadius: 22,
+      backgroundColor: '#1C1C1E',
+      alignItems: 'center', justifyContent: 'center',
+      ...CARD_SHADOW,
     },
     notifBadge: {
       position: 'absolute', top: 6, right: 6, width: 16, height: 16, borderRadius: 8,
@@ -618,48 +648,91 @@ export default function MapScreen() {
     },
     notifBadgeText: { fontSize: 9, color: '#fff', fontWeight: '700' },
     avatarText: { fontSize: 15, fontWeight: '700', color: '#fff', fontFamily: 'Inter_700Bold' },
+
+    // ── Search bar ──
     searchBarWrap: { position: 'absolute', left: 12, right: 12, zIndex: 15 },
     searchBar: {
-      backgroundColor: 'rgba(255,255,255,0.97)', borderRadius: 18, height: 52,
-      paddingHorizontal: 16, flexDirection: 'row', alignItems: 'center', gap: 10, ...CARD_SHADOW,
+      backgroundColor: 'rgba(255,255,255,0.97)', borderRadius: 20, height: 58,
+      paddingRight: 16, flexDirection: 'row', alignItems: 'center', gap: 0,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: 'rgba(28,28,30,0.06)',
+      ...CARD_SHADOW,
+      overflow: 'hidden',
     },
-    searchPlaceholder: { flex: 1, fontSize: 16, color: '#8A8680', fontFamily: 'Inter_400Regular' },
+    searchIconBox: {
+      width: 58, height: 58, alignItems: 'center', justifyContent: 'center',
+      backgroundColor: colors.primary, borderTopLeftRadius: 20, borderBottomLeftRadius: 20,
+    },
+    searchPlaceholder: { flex: 1, fontSize: 15, color: '#8A8375', fontFamily: 'Inter_400Regular', marginLeft: 12 },
+
+    // ── Quick-destination pills ──
     quickButtonsWrap: { position: 'absolute', left: 0, right: 0, zIndex: 14 },
     quickButtonsScroll: { paddingHorizontal: 12, gap: 8 },
     quickBtn: {
       flexDirection: 'row', alignItems: 'center', gap: 6,
-      backgroundColor: 'rgba(255,255,255,0.95)', borderRadius: 22, paddingHorizontal: 14, paddingVertical: 9,
+      backgroundColor: 'rgba(255,255,255,0.97)', borderRadius: 999,
+      paddingHorizontal: 14, paddingVertical: 10,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: 'rgba(28,28,30,0.08)',
       ...CARD_SHADOW,
     },
-    quickBtnActive: { backgroundColor: colors.primary },
+    quickBtnScenic: {
+      backgroundColor: '#1F4D3A',
+      borderColor: 'transparent',
+    },
+    quickBtnActive: { backgroundColor: colors.primary, borderColor: 'transparent' },
     quickBtnText: { fontSize: 13, fontWeight: '600', color: '#1C1C1E', fontFamily: 'Inter_600SemiBold' },
+    quickBtnTextScenic: { color: '#fff' },
     quickBtnTextActive: { color: '#fff' },
-    mapControls: { position: 'absolute', right: 12, zIndex: 15, gap: 10 },
+
+    // ── Right-side map control pill card ──
+    mapControls: { position: 'absolute', right: 12, zIndex: 15, alignItems: 'center', gap: 10 },
+    mapControlPill: {
+      backgroundColor: 'rgba(255,255,255,0.97)',
+      borderRadius: 24,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: 'rgba(28,28,30,0.08)',
+      alignItems: 'center',
+      overflow: 'hidden',
+      ...CARD_SHADOW,
+    },
+    mapControlPillBtn: {
+      width: 46, height: 46, alignItems: 'center', justifyContent: 'center',
+    },
+    mapControlDivider: {
+      height: StyleSheet.hairlineWidth,
+      width: 26,
+      backgroundColor: 'rgba(28,28,30,0.12)',
+    },
+    mapControlNavigate: {
+      width: 46, height: 46, borderRadius: 23,
+      backgroundColor: colors.primary,
+      alignItems: 'center', justifyContent: 'center',
+      ...CARD_SHADOW,
+    },
+    // Legacy (still used by layer picker positioning)
     mapControlBtn: {
       width: 46, height: 46, borderRadius: 23,
-      backgroundColor: 'rgba(255,255,255,0.95)', alignItems: 'center', justifyContent: 'center',
+      backgroundColor: 'rgba(255,255,255,0.97)', alignItems: 'center', justifyContent: 'center',
       ...CARD_SHADOW,
     },
     mapControlBtnActive: { backgroundColor: colors.primary },
-    // Compass button — shows heading and heading/north-up toggle
-    compassBtn: {
-      width: 46, height: 46, borderRadius: 23,
-      backgroundColor: 'rgba(255,255,255,0.95)', alignItems: 'center', justifyContent: 'center',
-      ...CARD_SHADOW, overflow: 'hidden',
-    },
     compassNorthLabel: { fontSize: 8, fontWeight: '700', color: colors.destructive, fontFamily: 'Inter_700Bold', lineHeight: 10 },
     compassDirLabel: { fontSize: 10, fontWeight: '600', color: '#1C1C1E', fontFamily: 'Inter_600SemiBold', lineHeight: 12 },
-    // Resume following button
+
+    // ── Resume following button ──
     resumeBtn: {
       position: 'absolute', zIndex: 25,
       backgroundColor: 'rgba(255,255,255,0.97)', borderRadius: 24,
       paddingHorizontal: 18, paddingVertical: 12,
       flexDirection: 'row', alignItems: 'center', gap: 8,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: 'rgba(28,28,30,0.08)',
       ...CARD_SHADOW,
     },
     resumeBtnText: { fontSize: 14, fontWeight: '700', color: '#1C1C1E', fontFamily: 'Inter_700Bold' },
-    // Follow mode indicator on compass button
-    compassActive: { backgroundColor: colors.primary },
+
+    // ── Layer picker ──
     layerPicker: {
       position: 'absolute', right: 66, zIndex: 20,
       backgroundColor: 'rgba(255,255,255,0.97)', borderRadius: 14, overflow: 'hidden', ...CARD_SHADOW,
@@ -671,32 +744,42 @@ export default function MapScreen() {
     layerOptionLast: { borderBottomWidth: 0 },
     layerOptionText: { fontSize: 14, color: '#1C1C1E', fontFamily: 'Inter_400Regular' },
     layerOptionTextActive: { fontFamily: 'Inter_600SemiBold', color: colors.primary },
-    vwCard: {
-      position: 'absolute', left: 12, zIndex: 15,
-      backgroundColor: 'rgba(255,255,255,0.97)', borderRadius: 18, padding: 12, maxWidth: 200, ...CARD_SHADOW,
+
+    // ── Unified bottom card ──
+    bottomCard: {
+      position: 'absolute', left: 16, right: 16, zIndex: 15,
+      backgroundColor: 'rgba(255,255,255,0.97)',
+      borderRadius: 26,
+      padding: 16,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: 'rgba(28,28,30,0.06)',
+      ...CARD_SHADOW,
     },
-    weatherRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 8 },
+    weatherRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 12 },
     weatherTemp: { fontSize: 20, fontWeight: '700', color: '#1C1C1E', fontFamily: 'Inter_700Bold' },
     weatherCondition: { fontSize: 12, color: '#1C1C1E', fontFamily: 'Inter_500Medium' },
-    weatherGreeting: { fontSize: 11, color: '#8A8680', fontFamily: 'Inter_400Regular' },
-    cardDivider: { height: StyleSheet.hairlineWidth, backgroundColor: '#E8E4DE', marginBottom: 8 },
-    vehicleRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-    vehicleThumb: { width: 44, height: 44 },
+    weatherGreeting: { fontSize: 11, color: '#8A8375', fontFamily: 'Inter_400Regular' },
+    cardDivider: { height: StyleSheet.hairlineWidth, backgroundColor: 'rgba(28,28,30,0.08)', marginBottom: 12 },
+    vehicleRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+    vehicleThumb: { width: 48, height: 48 },
     vehicleName: { fontSize: 13, fontWeight: '700', color: '#1C1C1E', fontFamily: 'Inter_700Bold' },
     vehicleMeta: { flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 2 },
-    vehicleMetaText: { fontSize: 11, color: '#8A8680', fontFamily: 'Inter_400Regular' },
+    vehicleMetaText: { fontSize: 11, color: '#8A8375', fontFamily: 'Inter_400Regular' },
     demoTag: {
-      backgroundColor: 'rgba(244,99,26,0.15)', borderRadius: 6,
+      backgroundColor: 'rgba(244,99,26,0.12)', borderRadius: 6,
       paddingHorizontal: 6, paddingVertical: 2, marginTop: 4, alignSelf: 'flex-start',
     },
     demoTagText: { fontSize: 9, color: colors.primary, fontFamily: 'Inter_500Medium' },
-    createRouteBtn: { position: 'absolute', right: 12, zIndex: 15, borderRadius: 28, overflow: 'hidden', ...CARD_SHADOW },
-    createRouteBtnGrad: { paddingHorizontal: 22, paddingVertical: 14, flexDirection: 'row', alignItems: 'center', gap: 8 },
-    createRouteBtnText: { fontSize: 15, fontWeight: '700', color: '#fff', fontFamily: 'Inter_700Bold', letterSpacing: 0.5 },
-    driveHUD: {
-      position: 'absolute', left: 12, right: 12, zIndex: 20,
-      backgroundColor: 'rgba(255,255,255,0.97)', borderRadius: 20, padding: 14, ...CARD_SHADOW,
+    startDriveBtn: {
+      backgroundColor: colors.primary, borderRadius: 999,
+      paddingHorizontal: 18, paddingVertical: 11,
+      flexDirection: 'row', alignItems: 'center', gap: 7,
+      marginLeft: 'auto' as any,
     },
+    startDriveBtnText: { fontSize: 13, fontWeight: '700', color: '#fff', fontFamily: 'Inter_700Bold', letterSpacing: 0.4 },
+
+    // ── Retained for drive HUD layout (legacy, unused visually but keeps TS happy) ──
+    driveHUD: { position: 'absolute', left: 12, right: 12, zIndex: 20 },
     driveHUDTitle: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 12 },
     driveIndicator: { width: 8, height: 8, borderRadius: 4, backgroundColor: '#22c55e' },
     driveHUDTitleText: { fontSize: 14, fontWeight: '600', color: '#1C1C1E', fontFamily: 'Inter_600SemiBold', flex: 1 },
@@ -709,7 +792,6 @@ export default function MapScreen() {
     endDriveBtnInner: { paddingVertical: 11, alignItems: 'center', justifyContent: 'center', backgroundColor: '#1C1C1E' },
     endDriveBtnText: { fontSize: 14, fontWeight: '600', color: '#fff', fontFamily: 'Inter_600SemiBold' },
     passengerNote: { fontSize: 10, color: colors.primary, fontFamily: 'Inter_400Regular', textAlign: 'center', marginTop: 6 },
-    // Location mode tag
     locationTag: {
       position: 'absolute', zIndex: 20, right: 66,
       backgroundColor: 'rgba(0,0,0,0.5)', borderRadius: 8,
@@ -814,10 +896,10 @@ export default function MapScreen() {
           <Ionicons name="menu" size={22} color="#1C1C1E" />
         </TouchableOpacity>
         <View style={styles.wordmarkWrap}>
-          <Text style={styles.wordmark}>Drive<Text style={styles.wordmarkAccent}>OS</Text></Text>
+          <Text style={styles.wordmark}>DRIVE<Text style={styles.wordmarkAccent}>OS</Text></Text>
         </View>
         <View style={styles.headerRight}>
-          <TouchableOpacity style={styles.headerIconBtn} onPress={() => router.push('/messages')}>
+          <TouchableOpacity style={styles.notifBtn} onPress={() => router.push('/messages')}>
             <Ionicons name="notifications-outline" size={20} color="#1C1C1E" />
             {(unreadNotificationCount ?? 0) > 0 && (
               <View style={styles.notifBadge}>
@@ -825,10 +907,7 @@ export default function MapScreen() {
               </View>
             )}
           </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.headerIconBtn, { backgroundColor: colors.primary }]}
-            onPress={() => router.push('/(tabs)/profile')}
-          >
+          <TouchableOpacity style={styles.avatarBtn} onPress={() => router.push('/(tabs)/profile')}>
             <Text style={styles.avatarText}>{userProfile.name.charAt(0)}</Text>
           </TouchableOpacity>
         </View>
@@ -838,9 +917,11 @@ export default function MapScreen() {
       {!isDriving && (
         <View style={[styles.searchBarWrap, { top: SEARCH_TOP + passengerOffset }]}>
           <TouchableOpacity style={styles.searchBar} onPress={() => router.push('/search')} activeOpacity={0.85}>
-            <Ionicons name="search" size={20} color="#8A8680" />
+            <View style={styles.searchIconBox}>
+              <Ionicons name="search" size={20} color="#fff" />
+            </View>
             <Text style={styles.searchPlaceholder}>Where are we going?</Text>
-            <Ionicons name="mic-outline" size={20} color="#8A8680" />
+            <Ionicons name="mic-outline" size={20} color="#8A8375" />
           </TouchableOpacity>
         </View>
       )}
@@ -849,65 +930,81 @@ export default function MapScreen() {
       {!isDriving && (
         <View style={[styles.quickButtonsWrap, { top: QUICK_TOP + passengerOffset }]}>
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.quickButtonsScroll}>
-            {quickButtons.map((btn) => (
-              <TouchableOpacity
-                key={btn.id}
-                style={[styles.quickBtn, btn.isActive && styles.quickBtnActive]}
-                onPress={() => router.push('/search')}
-                activeOpacity={0.8}
-              >
-                <Ionicons name={btn.icon} size={15} color={btn.isActive ? '#fff' : '#1C1C1E'} />
-                <Text style={[styles.quickBtnText, btn.isActive && styles.quickBtnTextActive]}>{btn.label}</Text>
-              </TouchableOpacity>
-            ))}
+            {quickButtons.map((btn) => {
+              const isScenic = btn.id === 'scenic';
+              return (
+                <TouchableOpacity
+                  key={btn.id}
+                  style={[styles.quickBtn, isScenic && styles.quickBtnScenic, btn.isActive && styles.quickBtnActive]}
+                  onPress={() => router.push('/search')}
+                  activeOpacity={0.8}
+                >
+                  <Ionicons
+                    name={btn.icon}
+                    size={15}
+                    color={isScenic || btn.isActive ? '#fff' : '#1C1C1E'}
+                  />
+                  <Text style={[
+                    styles.quickBtnText,
+                    isScenic && styles.quickBtnTextScenic,
+                    btn.isActive && styles.quickBtnTextActive,
+                  ]}>{btn.label}</Text>
+                </TouchableOpacity>
+              );
+            })}
           </ScrollView>
         </View>
       )}
 
       {/* ── Map controls (right side, hidden during drive — overlay has its own) ── */}
-      {!isDriving && <View style={[styles.mapControls, { top: MAP_CONTROLS_TOP + passengerOffset }]}>
-        {/* Compass / north-up toggle */}
-        <TouchableOpacity
-          style={[styles.compassBtn, headingMode === 'north-up' && { borderWidth: 2, borderColor: colors.primary }]}
-          onPress={handleToggleHeadingMode}
-        >
-          {/* Rotate the needle indicator based on map heading */}
-          <View style={{ transform: [{ rotate: headingMode === 'heading-up' ? `${-displayHeading}deg` : '0deg' }], alignItems: 'center' }}>
-            <Text style={styles.compassNorthLabel}>N</Text>
+      {!isDriving && (
+        <View style={[styles.mapControls, { top: MAP_CONTROLS_TOP + passengerOffset }]}>
+          {/* Grouped pill: compass + layers + friends */}
+          <View style={styles.mapControlPill}>
+            {/* Compass / north-up toggle */}
+            <TouchableOpacity
+              style={[styles.mapControlPillBtn, headingMode === 'north-up' && { backgroundColor: 'rgba(244,99,26,0.1)' }]}
+              onPress={handleToggleHeadingMode}
+            >
+              <View style={{ transform: [{ rotate: headingMode === 'heading-up' ? `${-displayHeading}deg` : '0deg' }], alignItems: 'center' }}>
+                <Text style={styles.compassNorthLabel}>N</Text>
+              </View>
+              <Text style={[styles.compassDirLabel, { color: headingMode === 'north-up' ? colors.primary : '#1C1C1E' }]}>
+                {headingMode === 'north-up' ? 'N↑' : headingLabel(displayHeading)}
+              </Text>
+            </TouchableOpacity>
+
+            <View style={styles.mapControlDivider} />
+
+            {/* Layer picker toggle */}
+            <TouchableOpacity
+              style={[styles.mapControlPillBtn, showLayerPicker && { backgroundColor: 'rgba(244,99,26,0.1)' }]}
+              onPress={() => { setShowLayerPicker(!showLayerPicker); Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); }}
+            >
+              <Ionicons name="layers-outline" size={20} color={showLayerPicker ? colors.primary : '#1C1C1E'} />
+            </TouchableOpacity>
+
+            <View style={styles.mapControlDivider} />
+
+            {/* Friends toggle */}
+            <TouchableOpacity
+              style={[styles.mapControlPillBtn, showFriends && { backgroundColor: 'rgba(244,99,26,0.1)' }]}
+              onPress={() => { setShowFriends(!showFriends); Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); }}
+            >
+              <Ionicons name="people-outline" size={20} color={showFriends ? colors.primary : '#1C1C1E'} />
+            </TouchableOpacity>
           </View>
-          <Text style={[styles.compassDirLabel, { color: headingMode === 'north-up' ? colors.primary : '#1C1C1E' }]}>
-            {headingMode === 'north-up' ? 'N↑' : headingLabel(displayHeading)}
-          </Text>
-        </TouchableOpacity>
 
-        {/* Friends toggle */}
-        <TouchableOpacity
-          style={[styles.mapControlBtn, showFriends && styles.mapControlBtnActive]}
-          onPress={() => { setShowFriends(!showFriends); Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); }}
-        >
-          <Ionicons name="people-outline" size={20} color={showFriends ? '#fff' : '#1C1C1E'} />
-        </TouchableOpacity>
-
-        {/* Layer picker */}
-        <TouchableOpacity
-          style={[styles.mapControlBtn, showLayerPicker && styles.mapControlBtnActive]}
-          onPress={() => { setShowLayerPicker(!showLayerPicker); Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); }}
-        >
-          <Ionicons name="layers-outline" size={20} color={showLayerPicker ? '#fff' : '#1C1C1E'} />
-        </TouchableOpacity>
-
-        {/* Locate / resume following */}
-        <TouchableOpacity
-          style={[styles.mapControlBtn, followMode === 'following' && styles.mapControlBtnActive]}
-          onPress={handleLocateButton}
-        >
-          <Ionicons
-            name={followMode === 'following' ? 'navigate' : 'navigate-outline'}
-            size={20}
-            color={followMode === 'following' ? '#fff' : '#1C1C1E'}
-          />
-        </TouchableOpacity>
-      </View>}
+          {/* Separate orange navigate / locate circle */}
+          <TouchableOpacity style={styles.mapControlNavigate} onPress={handleLocateButton}>
+            <Ionicons
+              name={followMode === 'following' ? 'navigate' : 'navigate-outline'}
+              size={20}
+              color="#fff"
+            />
+          </TouchableOpacity>
+        </View>
+      )}
 
       {/* ── Layer picker (hidden during drive) ── */}
       {!isDriving && showLayerPicker && (
@@ -932,7 +1029,7 @@ export default function MapScreen() {
           style={[
             styles.resumeBtn,
             {
-              bottom: BOTTOM_ELEMENTS_BOTTOM + 90,
+              bottom: BOTTOM_CARD_BOTTOM + 90,
               alignSelf: 'center',
               left: undefined, right: undefined,
               opacity: resumeButtonAnim,
@@ -973,13 +1070,10 @@ export default function MapScreen() {
         />
       )}
 
-      {/* ── Vehicle & weather card (bottom left) ── */}
+      {/* ── Unified bottom card: weather + vehicle + START DRIVE ── */}
       {!isDriving && (
-        <TouchableOpacity
-          style={[styles.vwCard, { bottom: BOTTOM_ELEMENTS_BOTTOM }]}
-          onPress={() => router.push('/(tabs)/garage')}
-          activeOpacity={0.85}
-        >
+        <View style={[styles.bottomCard, { bottom: BOTTOM_CARD_BOTTOM }]}>
+          {/* Weather row */}
           <View style={styles.weatherRow}>
             <Ionicons name={CONFIG.DEMO_WEATHER.icon} size={22} color="#f59e0b" />
             <View>
@@ -990,52 +1084,53 @@ export default function MapScreen() {
               <Text style={styles.weatherGreeting}>{getGreeting()}, {userProfile.name}</Text>
             </View>
           </View>
-          <View style={styles.cardDivider} />
-          {activeVehicle ? (
-            <View style={styles.vehicleRow}>
-              {activeVehicle.id === 'mock-vehicle-1'
-                ? <Image source={MINI_IMAGE} style={styles.vehicleThumb} resizeMode="contain" />
-                : <Ionicons name="car" size={32} color={colors.primary} />
-              }
-              <View style={{ flex: 1 }}>
-                <Text style={styles.vehicleName}>{activeVehicle.make} {activeVehicle.model}</Text>
-                <View style={styles.vehicleMeta}>
-                  <Ionicons name="speedometer-outline" size={11} color="#8A8680" />
-                  <Text style={styles.vehicleMetaText}>{activeVehicle.mileage.toLocaleString()} mi</Text>
-                  <Text style={styles.vehicleMetaText}>·</Text>
-                  <Text style={styles.vehicleMetaText}>{activeVehicle.fuelType}</Text>
-                </View>
-              </View>
-              <Ionicons name="chevron-forward" size={16} color="#8A8680" />
-            </View>
-          ) : (
-            <Text style={{ fontSize: 13, color: '#8A8680', fontFamily: 'Inter_400Regular' }}>No vehicle — tap to add</Text>
-          )}
-          {locationMode === 'simulated' && (
-            <View style={styles.demoTag}>
-              <Text style={styles.demoTagText}>SIMULATED LOCATION</Text>
-            </View>
-          )}
-        </TouchableOpacity>
-      )}
 
-      {/* ── Start Drive button ── */}
-      {!isDriving && (
-        <TouchableOpacity
-          style={[styles.createRouteBtn, { bottom: BOTTOM_ELEMENTS_BOTTOM }]}
-          onPress={handleStartDrive}
-          activeOpacity={0.85}
-        >
-          <LinearGradient
-            colors={['#F4631A', '#FF4E3A']}
-            start={{ x: 0, y: 0 }}
-            end={{ x: 1, y: 0 }}
-            style={styles.createRouteBtnGrad}
+          <View style={styles.cardDivider} />
+
+          {/* Vehicle row + START DRIVE inline */}
+          <TouchableOpacity
+            style={styles.vehicleRow}
+            onPress={() => router.push('/(tabs)/garage')}
+            activeOpacity={0.75}
           >
-            <Ionicons name="navigate" size={18} color="#fff" />
-            <Text style={styles.createRouteBtnText}>START DRIVE</Text>
-          </LinearGradient>
-        </TouchableOpacity>
+            {activeVehicle ? (
+              <>
+                {activeVehicle.id === 'mock-vehicle-1'
+                  ? <Image source={MINI_IMAGE} style={styles.vehicleThumb} resizeMode="contain" />
+                  : <Ionicons name="car" size={36} color={colors.primary} />
+                }
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.vehicleName}>{activeVehicle.make} {activeVehicle.model}</Text>
+                  <View style={styles.vehicleMeta}>
+                    <Ionicons name="speedometer-outline" size={11} color="#8A8375" />
+                    <Text style={styles.vehicleMetaText}>{activeVehicle.mileage.toLocaleString()} mi</Text>
+                    <Text style={styles.vehicleMetaText}>·</Text>
+                    <Text style={styles.vehicleMetaText}>{activeVehicle.fuelType}</Text>
+                  </View>
+                  {locationMode === 'simulated' && (
+                    <View style={styles.demoTag}>
+                      <Text style={styles.demoTagText}>SIMULATED</Text>
+                    </View>
+                  )}
+                </View>
+              </>
+            ) : (
+              <Text style={{ flex: 1, fontSize: 13, color: '#8A8375', fontFamily: 'Inter_400Regular' }}>
+                No vehicle — tap to add
+              </Text>
+            )}
+
+            {/* START DRIVE pill — right side of vehicle row */}
+            <TouchableOpacity
+              style={styles.startDriveBtn}
+              onPress={handleStartDrive}
+              activeOpacity={0.85}
+            >
+              <Ionicons name="navigate" size={15} color="#fff" />
+              <Text style={styles.startDriveBtnText}>START DRIVE</Text>
+            </TouchableOpacity>
+          </TouchableOpacity>
+        </View>
       )}
     </View>
   );

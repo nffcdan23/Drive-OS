@@ -13,6 +13,10 @@ import {
   Inter_700Bold,
   useFonts,
 } from '@expo-google-fonts/inter';
+import {
+  Archivo_400Regular,
+  Archivo_700Bold,
+} from '@expo-google-fonts/archivo';
 import { Stack } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
 import { AppProvider, useApp } from '@/context/AppContext';
@@ -57,6 +61,8 @@ export default function RootLayout() {
     Inter_500Medium,
     Inter_600SemiBold,
     Inter_700Bold,
+    Archivo_400Regular,
+    Archivo_700Bold,
   });
 
   useEffect(() => {
