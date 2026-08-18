@@ -11,7 +11,9 @@ import * as Haptics from 'expo-haptics';
 import { useColors } from '@/hooks/useColors';
 import { useApp } from '@/context/AppContext';
 import { CONFIG } from '@/constants/config';
-import MapView, { Marker, MapType, Camera, Polyline } from 'react-native-maps';
+import MapView, {
+  MarkerAnimated, AnimatedRegion, MapType, Camera, Polyline,
+} from 'react-native-maps';
 import ActiveDriveOverlay, { ActiveDriveMode } from '@/components/ActiveDriveOverlay';
 import * as Location from 'expo-location';
 
@@ -37,11 +39,26 @@ const HEADING_SMOOTH = 0.18;
 // Minimum heading change (degrees) before the compass re-animates the camera.
 // Without this, magnetometer noise re-animates the map constantly when still.
 const COMPASS_CAMERA_MIN_DELTA_DEG = 2;
+// Heading convergence per GPS fix.  Fixes arrive ~1/s, so a low factor would
+// take many seconds to come round a corner; animateCamera eases the visuals.
+const GPS_HEADING_SMOOTH = 0.5;
+// Camera animation is stretched to cover the gap until the next fix, so the
+// map is always mid-animation.  A duration shorter than the gap is what makes
+// following look like hop-pause-hop rather than a glide.
+const CAMERA_ANIM_MIN_MS = 400;
+const CAMERA_ANIM_MAX_MS = 1500;
+const CAMERA_ANIM_DEFAULT_MS = 1000;
+// Rotation from the compass should feel immediate, so it uses a short fixed one
+const COMPASS_ANIM_MS = 300;
 // Max plausible implied speed (km/h) between two GPS readings
 const MAX_PLAUSIBLE_KMH = 300;
 // Max accuracy (metres) to accept a reading; >50 m shows warning
 const ACCURACY_WARNING_M = 50;
 const ACCURACY_REJECT_M = 120;
+
+// react-native-maps types timing() as requiring a full Region plus a `toValue`
+// its implementation overwrites per key — it animates only the keys it is given.
+type RegionTimingConfig = Parameters<AnimatedRegion['timing']>[0];
 
 type FollowMode = 'following' | 'free';
 type HeadingMode = 'heading-up' | 'north-up';
@@ -194,6 +211,19 @@ export default function MapScreen() {
   const lastSpeedKmhRef = useRef(0);
   // Heading the camera was last animated to, for the compass jitter threshold
   const lastCameraHeadingRef = useRef(0);
+  // Wall-clock of the previous fix, used to size the next camera animation
+  const lastFixTimeRef = useRef<number | null>(null);
+  // Marker position is animated separately from the camera; if it snapped to
+  // each fix while the camera glided, the car would visibly jump then settle.
+  const markerCoordRef = useRef(
+    new AnimatedRegion({
+      latitude: CONFIG.DEMO_REGION.latitude,
+      longitude: CONFIG.DEMO_REGION.longitude,
+      latitudeDelta: 0,
+      longitudeDelta: 0,
+    }),
+  );
+  const hasMarkerPositionRef = useRef(false);
   const lastPositionRef = useRef<{ lat: number; lon: number; time: number } | null>(null);
   const followModeRef = useRef<FollowMode>('following');
   const headingModeRef = useRef<HeadingMode>('heading-up');
@@ -237,7 +267,13 @@ export default function MapScreen() {
 
   // ── Camera animation ─────────────────────────────────────────────────────
   const animateCameraToFollow = useCallback(
-    (loc: { latitude: number; longitude: number }, heading: number, offsetM = 0) => {
+    (
+      loc: { latitude: number; longitude: number },
+      heading: number,
+      offsetM = 0,
+      durationMs = CAMERA_ANIM_DEFAULT_MS,
+      resetZoom = false,
+    ) => {
       if (!mapRef.current || Platform.OS === 'web') return;
       programmaticChangeRef.current = true;
 
@@ -247,14 +283,14 @@ export default function MapScreen() {
         ? getOffsetCenter(loc.latitude, loc.longitude, heading, offsetM)
         : loc;
 
-      const camera: Partial<Camera> = {
-        center,
-        heading: mapHeading,
-        zoom: NAV_ZOOM,
-        pitch: 0,
-        altitude: 800,
-      };
-      mapRef.current.animateCamera(camera, { duration: 350 });
+      // Zoom is omitted while simply following, so a pinch-zoom isn't undone by
+      // the next fix.  Only entering a drive or re-locating resets it.
+      const camera: Partial<Camera> = { center, heading: mapHeading, pitch: 0 };
+      if (resetZoom) {
+        camera.zoom = NAV_ZOOM;
+        camera.altitude = 800;
+      }
+      mapRef.current.animateCamera(camera, { duration: durationMs });
     },
     [],
   );
@@ -291,6 +327,27 @@ export default function MapScreen() {
       userLocationRef.current = coord;
       setUserLocation(coord);
 
+      // ── Size this animation to the gap since the last fix ──
+      const sinceLastFix = lastFixTimeRef.current != null ? now - lastFixTimeRef.current : CAMERA_ANIM_DEFAULT_MS;
+      lastFixTimeRef.current = now;
+      const animMs = Math.min(CAMERA_ANIM_MAX_MS, Math.max(CAMERA_ANIM_MIN_MS, sinceLastFix));
+
+      // ── Glide the marker to the new fix (first fix lands instantly) ──
+      if (!hasMarkerPositionRef.current) {
+        markerCoordRef.current.setValue({ latitude: lat, longitude: lon, latitudeDelta: 0, longitudeDelta: 0 });
+        hasMarkerPositionRef.current = true;
+      } else {
+        // Deltas are deliberately omitted so only the position animates
+        markerCoordRef.current
+          .timing({
+            latitude: lat,
+            longitude: lon,
+            duration: animMs,
+            useNativeDriver: false,
+          } as unknown as RegionTimingConfig)
+          .start();
+      }
+
       // ── Record to active drive ──
       if (isDrivingRef.current && !isPassengerModeRef.current && !isPausedRef.current) {
         const speedKmh = speedMs != null ? speedMs * 3.6 : 0;
@@ -310,15 +367,16 @@ export default function MapScreen() {
         // Stationary or crawling: GPS course is noise, so face where the phone faces
         targetHeading = compassHeadingRef.current;
       }
-      // Smooth toward target heading
-      const newHeading = smoothHeading(smoothedHeadingRef.current, targetHeading, HEADING_SMOOTH);
+      // Smooth toward target heading.  animateCamera eases the rotation itself,
+      // so this only needs to damp GPS jitter, not do the visual smoothing.
+      const newHeading = smoothHeading(smoothedHeadingRef.current, targetHeading, GPS_HEADING_SMOOTH);
       smoothedHeadingRef.current = newHeading;
       setDisplayHeading(Math.round(newHeading));
 
       // ── Drive camera follow ──
       if (followModeRef.current === 'following') {
         const offset = isDrivingRef.current ? DRIVE_LOOK_AHEAD_M : 0;
-        animateCameraToFollow(coord, newHeading, offset);
+        animateCameraToFollow(coord, newHeading, offset, animMs);
         lastCameraHeadingRef.current = newHeading;
       }
     },
@@ -369,7 +427,9 @@ export default function MapScreen() {
           {
             accuracy: Location.Accuracy.BestForNavigation,
             timeInterval: 1000,
-            distanceInterval: 3,
+            // 0 = no distance filter.  A 3 m threshold stalled updates in slow
+            // traffic, which read as the map freezing then lurching.
+            distanceInterval: 0,
           },
           (loc) => {
             if (cancelled) return;
@@ -440,6 +500,7 @@ export default function MapScreen() {
               userLocationRef.current,
               newHeading,
               isDrivingRef.current ? DRIVE_LOOK_AHEAD_M : 0,
+              COMPASS_ANIM_MS,
             );
           }
         });
@@ -466,7 +527,7 @@ export default function MapScreen() {
     if (isDriving) {
       setFollowMode('following');
       if (userLocationRef.current) {
-        animateCameraToFollow(userLocationRef.current, smoothedHeadingRef.current, DRIVE_LOOK_AHEAD_M);
+        animateCameraToFollow(userLocationRef.current, smoothedHeadingRef.current, DRIVE_LOOK_AHEAD_M, 600, true);
       }
     }
   }, [isDriving, animateCameraToFollow]);
@@ -491,6 +552,8 @@ export default function MapScreen() {
         userLocationRef.current,
         smoothedHeadingRef.current,
         isDrivingRef.current ? DRIVE_LOOK_AHEAD_M : 0,
+        600,
+        true,
       );
     }
   }, [animateCameraToFollow]);
@@ -915,14 +978,14 @@ export default function MapScreen() {
           }
         >
           {userLocation && (
-            <Marker
-              coordinate={userLocation}
+            <MarkerAnimated
+              coordinate={markerCoordRef.current}
               anchor={{ x: 0.5, y: 0.5 }}
               rotation={markerRotation}
               tracksViewChanges={false}
             >
               <CarMarker accuracyWarning={accuracyWarning} />
-            </Marker>
+            </MarkerAnimated>
           )}
           {/* Orange trail for free-drive tracking mode */}
           {isDriving && currentDrive && currentDrive.coordinates.length > 1 && (
