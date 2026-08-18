@@ -50,6 +50,12 @@ const CAMERA_ANIM_MAX_MS = 1500;
 const CAMERA_ANIM_DEFAULT_MS = 1000;
 // Rotation from the compass should feel immediate, so it uses a short fixed one
 const COMPASS_ANIM_MS = 300;
+// Camera tilt during an active drive, for the forward-looking 3D nav view.
+// Apple sits near 60 and Google near 45; 50 splits them.  Only ever applied
+// heading-up — a tilted north-up map is disorienting rather than useful.
+const DRIVE_PITCH = 50;
+// How long the tilt takes to come in at the start of a drive and drop at the end
+const PITCH_TRANSITION_MS = 800;
 // Max plausible implied speed (km/h) between two GPS readings
 const MAX_PLAUSIBLE_KMH = 300;
 // Max accuracy (metres) to accept a reading; >50 m shows warning
@@ -78,6 +84,11 @@ function haversineMeters(
       Math.cos(lat2 * (Math.PI / 180)) *
       Math.sin(dLon / 2) ** 2;
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+/** Camera tilt for a given state — flat unless driving heading-up */
+function pitchFor(isDriving: boolean, headingMode: HeadingMode): number {
+  return isDriving && headingMode === 'heading-up' ? DRIVE_PITCH : 0;
 }
 
 /** Smooth heading transition that correctly wraps across 0/360 */
@@ -224,6 +235,8 @@ export default function MapScreen() {
     }),
   );
   const hasMarkerPositionRef = useRef(false);
+  // Distinguishes "a drive just ended" from "no drive has started yet"
+  const wasDrivingRef = useRef(false);
   const lastPositionRef = useRef<{ lat: number; lon: number; time: number } | null>(null);
   const followModeRef = useRef<FollowMode>('following');
   const headingModeRef = useRef<HeadingMode>('heading-up');
@@ -285,7 +298,11 @@ export default function MapScreen() {
 
       // Zoom is omitted while simply following, so a pinch-zoom isn't undone by
       // the next fix.  Only entering a drive or re-locating resets it.
-      const camera: Partial<Camera> = { center, heading: mapHeading, pitch: 0 };
+      const camera: Partial<Camera> = {
+        center,
+        heading: mapHeading,
+        pitch: pitchFor(isDrivingRef.current, headingModeRef.current),
+      };
       if (resetZoom) {
         camera.zoom = NAV_ZOOM;
         camera.altitude = 800;
@@ -527,9 +544,21 @@ export default function MapScreen() {
     if (isDriving) {
       setFollowMode('following');
       if (userLocationRef.current) {
-        animateCameraToFollow(userLocationRef.current, smoothedHeadingRef.current, DRIVE_LOOK_AHEAD_M, 600, true);
+        animateCameraToFollow(
+          userLocationRef.current,
+          smoothedHeadingRef.current,
+          DRIVE_LOOK_AHEAD_M,
+          PITCH_TRANSITION_MS,
+          true,
+        );
       }
+    } else if (wasDrivingRef.current && mapRef.current && Platform.OS !== 'web') {
+      // Drive over: drop the tilt back to flat, leaving position and zoom alone.
+      // Guarded so mounting flat doesn't fire a pointless camera animation.
+      programmaticChangeRef.current = true;
+      mapRef.current.animateCamera({ pitch: 0 }, { duration: PITCH_TRANSITION_MS });
     }
+    wasDrivingRef.current = isDriving;
   }, [isDriving, animateCameraToFollow]);
 
   // ── Drive timer ────────────────────────────────────────────────────────────
@@ -570,7 +599,16 @@ export default function MapScreen() {
         : userLocationRef.current;
       if (mapRef.current && Platform.OS !== 'web') {
         programmaticChangeRef.current = true;
-        mapRef.current.animateCamera({ center, heading: mapHeading, zoom: NAV_ZOOM, pitch: 0, altitude: 800 }, { duration: 600 });
+        mapRef.current.animateCamera(
+          {
+            center,
+            heading: mapHeading,
+            zoom: NAV_ZOOM,
+            pitch: pitchFor(isDrivingRef.current, next),
+            altitude: 800,
+          },
+          { duration: 600 },
+        );
       }
     }
   }, [headingMode, followMode]);
@@ -679,7 +717,7 @@ export default function MapScreen() {
         center,
         heading: isHeadingUp ? heading : 0,
         zoom:     targetZoom,
-        pitch:    0,
+        pitch:    pitchFor(isDrivingRef.current, headingModeRef.current),
         altitude: targetAlt,
       },
       { duration: 600 },
@@ -968,7 +1006,7 @@ export default function MapScreen() {
           rotateEnabled
           scrollEnabled
           zoomEnabled
-          pitchEnabled={false}
+          pitchEnabled
           onPanDrag={handleMapPanDrag}
           onRegionChangeComplete={handleRegionChangeComplete}
           initialRegion={
