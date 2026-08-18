@@ -123,9 +123,15 @@ function getOffsetCenter(
 // shaded trailing half so the direction reads at a glance.  Rotated by the
 // marker to point where the vehicle is heading.  Poor GPS accuracy is surfaced
 // by the "Poor GPS signal" banner rather than anything on the marker itself.
-function LocationArrow() {
+function LocationArrow({ rotation }: { rotation: number }) {
   return (
-    <View style={{ width: 40, height: 44, alignItems: 'center', justifyContent: 'center' }}>
+    <View style={{
+      width: 40,
+      height: 44,
+      alignItems: 'center',
+      justifyContent: 'center',
+      transform: [{ rotate: `${rotation}deg` }],
+    }}>
       <Svg width={35} height={40} viewBox="0 0 34 40">
         {/* Soft ground shadow, offset down a touch to lift the arrow off the map */}
         <Path
@@ -204,6 +210,9 @@ export default function MapScreen() {
   const [followMode, setFollowMode] = useState<FollowMode>('following');
   const [headingMode, setHeadingMode] = useState<HeadingMode>('heading-up');
   const [displayHeading, setDisplayHeading] = useState(0); // smoothed heading for UI
+  // Heading the map itself is rotated to.  Needed because Apple Maps annotations
+  // do not rotate with the map, so the arrow's on-screen angle is the difference.
+  const [mapHeading, setMapHeading] = useState(0);
 
   // ── Drive state ──
   const [driveSeconds, setDriveSeconds] = useState(0);
@@ -307,6 +316,8 @@ export default function MapScreen() {
       const center = isHeadingUp
         ? getOffsetCenter(loc.latitude, loc.longitude, heading, offsetM)
         : loc;
+
+      setMapHeading(Math.round(mapHeading));
 
       const camera: Partial<Camera> = {
         center,
@@ -504,6 +515,13 @@ export default function MapScreen() {
 
     async function startCompass() {
       try {
+        // watchHeadingAsync rejects if it runs before location access is
+        // granted.  This previously raced the location watcher's own request,
+        // lost, and the rejection was swallowed — so the compass never started
+        // and heading only ever came from GPS course while actually moving.
+        const { status } = await Location.requestForegroundPermissionsAsync();
+        if (cancelled || status !== 'granted') return;
+
         const sub = await Location.watchHeadingAsync((h) => {
           if (cancelled) return;
           // trueHeading is -1 until the compass calibrates; magHeading always works
@@ -610,6 +628,7 @@ export default function MapScreen() {
       const center = next === 'heading-up' && isDrivingRef.current
         ? getOffsetCenter(userLocationRef.current.latitude, userLocationRef.current.longitude, smoothedHeadingRef.current, DRIVE_LOOK_AHEAD_M)
         : userLocationRef.current;
+      setMapHeading(Math.round(mapHeading));
       if (mapRef.current && Platform.OS !== 'web') {
         programmaticUntilRef.current = Date.now() + 900;
         mapRef.current.animateCamera(
@@ -643,6 +662,7 @@ export default function MapScreen() {
         .then((cam) => {
           if (cam.zoom != null) desiredZoomRef.current = cam.zoom;
           if (cam.altitude != null && cam.altitude > 0) desiredAltitudeRef.current = cam.altitude;
+          if (cam.heading != null) setMapHeading(Math.round(cam.heading));
         })
         .catch(() => {});
     }
@@ -743,6 +763,7 @@ export default function MapScreen() {
       ? getOffsetCenter(loc.latitude, loc.longitude, heading, DRIVE_LOOK_AHEAD_M)
       : loc;
 
+    setMapHeading(isHeadingUp ? Math.round(heading) : 0);
     programmaticUntilRef.current = Date.now() + 900;
     mapRef.current.animateCamera(
       {
@@ -1021,7 +1042,13 @@ export default function MapScreen() {
   // In north-up mode: map bearing=0, marker points its heading direction.
   // In heading-up mode: map bearing=heading, marker counter-rotates back to
   //   "face screen-up" which also equals heading degrees.
-  const markerRotation = displayHeading;
+  // Apple Maps ignores the Marker `rotation` prop entirely — it is only wired up
+  // for the Google provider — and its annotations stay upright as the map turns.
+  // So on iOS the arrow's own content is rotated by the difference between where
+  // the phone points and where the map is turned to.  Android's rotation prop is
+  // map-relative and works natively, which is cheaper, so it is kept there.
+  const screenHeading = ((displayHeading - mapHeading) % 360 + 360) % 360;
+  const markerRotation = Platform.OS === 'ios' ? 0 : displayHeading;
 
   return (
     <View style={styles.container}>
@@ -1052,9 +1079,9 @@ export default function MapScreen() {
               coordinate={markerCoordRef.current}
               anchor={{ x: 0.5, y: 0.5 }}
               rotation={markerRotation}
-              tracksViewChanges={false}
+              tracksViewChanges={Platform.OS === 'ios'}
             >
-              <LocationArrow />
+              <LocationArrow rotation={Platform.OS === 'ios' ? screenHeading : 0} />
             </MarkerAnimated>
           )}
           {/* Orange trail for free-drive tracking mode */}
