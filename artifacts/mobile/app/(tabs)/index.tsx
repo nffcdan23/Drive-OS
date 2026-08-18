@@ -56,6 +56,9 @@ const COMPASS_ANIM_MS = 300;
 const DRIVE_PITCH = 50;
 // How long the tilt takes to come in at the start of a drive and drop at the end
 const PITCH_TRANSITION_MS = 800;
+// Camera altitude (metres) during a drive.  Tilt is only rendered by iOS below
+// a certain altitude — too high and it silently flattens the camera instead.
+const DRIVE_ALTITUDE = 450;
 // Max plausible implied speed (km/h) between two GPS readings
 const MAX_PLAUSIBLE_KMH = 300;
 // Max accuracy (metres) to accept a reading; >50 m shows warning
@@ -243,8 +246,14 @@ export default function MapScreen() {
   const userLocationRef = useRef<{ latitude: number; longitude: number } | null>(null);
   const isDrivingRef = useRef(isDriving);
   const isPassengerModeRef = useRef(isPassengerMode);
-  // Tracks whether the next onRegionChangeComplete is ours (programmatic)
-  const programmaticChangeRef = useRef(false);
+  // Timestamp until which region changes are ours rather than the user's.  A
+  // one-shot boolean was consumed by the first of the several events a single
+  // animation emits, so the rest looked like gestures and cancelled follow mode.
+  const programmaticUntilRef = useRef(0);
+  // The zoom/altitude we intend to hold.  Asserted on every camera animation so
+  // nothing can drift, and re-read from the map after a real pinch gesture.
+  const desiredZoomRef = useRef(NAV_ZOOM);
+  const desiredAltitudeRef = useRef(STREET_ALTITUDE);
   const resumeButtonAnim = useRef(new Animated.Value(0)).current;
 
   // Keep refs in sync
@@ -288,7 +297,12 @@ export default function MapScreen() {
       resetZoom = false,
     ) => {
       if (!mapRef.current || Platform.OS === 'web') return;
-      programmaticChangeRef.current = true;
+      programmaticUntilRef.current = Date.now() + durationMs + 300;
+
+      if (resetZoom) {
+        desiredZoomRef.current = NAV_ZOOM;
+        desiredAltitudeRef.current = isDrivingRef.current ? DRIVE_ALTITUDE : STREET_ALTITUDE;
+      }
 
       const isHeadingUp = headingModeRef.current === 'heading-up';
       const mapHeading = isHeadingUp ? heading : 0;
@@ -296,17 +310,18 @@ export default function MapScreen() {
         ? getOffsetCenter(loc.latitude, loc.longitude, heading, offsetM)
         : loc;
 
-      // Zoom is omitted while simply following, so a pinch-zoom isn't undone by
-      // the next fix.  Only entering a drive or re-locating resets it.
       const camera: Partial<Camera> = {
         center,
         heading: mapHeading,
         pitch: pitchFor(isDrivingRef.current, headingModeRef.current),
       };
-      if (resetZoom) {
-        camera.zoom = NAV_ZOOM;
-        camera.altitude = 800;
-      }
+      // The zoom is always stated outright.  Leaving it out let each call
+      // re-derive altitude from the previous (often still animating) camera,
+      // which ratcheted the map outward a little at a time.
+      // iOS reads altitude and Android reads zoom; setting both lets them fight.
+      if (Platform.OS === 'ios') camera.altitude = desiredAltitudeRef.current;
+      else camera.zoom = desiredZoomRef.current;
+
       mapRef.current.animateCamera(camera, { duration: durationMs });
     },
     [],
@@ -555,7 +570,7 @@ export default function MapScreen() {
     } else if (wasDrivingRef.current && mapRef.current && Platform.OS !== 'web') {
       // Drive over: drop the tilt back to flat, leaving position and zoom alone.
       // Guarded so mounting flat doesn't fire a pointless camera animation.
-      programmaticChangeRef.current = true;
+      programmaticUntilRef.current = Date.now() + PITCH_TRANSITION_MS + 300;
       mapRef.current.animateCamera({ pitch: 0 }, { duration: PITCH_TRANSITION_MS });
     }
     wasDrivingRef.current = isDriving;
@@ -598,7 +613,7 @@ export default function MapScreen() {
         ? getOffsetCenter(userLocationRef.current.latitude, userLocationRef.current.longitude, smoothedHeadingRef.current, DRIVE_LOOK_AHEAD_M)
         : userLocationRef.current;
       if (mapRef.current && Platform.OS !== 'web') {
-        programmaticChangeRef.current = true;
+        programmaticUntilRef.current = Date.now() + 900;
         mapRef.current.animateCamera(
           {
             center,
@@ -622,10 +637,20 @@ export default function MapScreen() {
   }, []);
 
   const handleRegionChangeComplete = useCallback(() => {
-    if (programmaticChangeRef.current) {
-      programmaticChangeRef.current = false;
-      return;
+    // Adopt whatever zoom the map settled at, so a pinch is respected on the
+    // next follow update instead of being overwritten by a stale target.
+    if (Platform.OS !== 'web' && mapRef.current) {
+      mapRef.current
+        .getCamera()
+        .then((cam) => {
+          if (cam.zoom != null) desiredZoomRef.current = cam.zoom;
+          if (cam.altitude != null && cam.altitude > 0) desiredAltitudeRef.current = cam.altitude;
+        })
+        .catch(() => {});
     }
+
+    if (Date.now() < programmaticUntilRef.current) return;
+
     // User triggered this change
     if (followModeRef.current === 'following') {
       setFollowMode('free');
@@ -654,6 +679,7 @@ export default function MapScreen() {
   const handleZoomIn = useCallback(() => {
     if (!mapRef.current || Platform.OS === 'web') return;
     mapRef.current.getCamera().then((cam) => {
+      programmaticUntilRef.current = Date.now() + 500;
       mapRef.current?.animateCamera({ zoom: (cam.zoom ?? 15) + 1 }, { duration: 200 });
     }).catch(() => {});
   }, []);
@@ -661,6 +687,7 @@ export default function MapScreen() {
   const handleZoomOut = useCallback(() => {
     if (!mapRef.current || Platform.OS === 'web') return;
     mapRef.current.getCamera().then((cam) => {
+      programmaticUntilRef.current = Date.now() + 500;
       mapRef.current?.animateCamera({ zoom: (cam.zoom ?? 15) - 1 }, { duration: 200 });
     }).catch(() => {});
   }, []);
@@ -697,6 +724,13 @@ export default function MapScreen() {
         targetAlt    = cam.altitude;
         preserveZoom = true;
       }
+      // A drive always uses the nav altitude, or iOS may refuse to tilt
+      if (isDrivingRef.current) {
+        targetZoom   = NAV_ZOOM;
+        targetAlt    = DRIVE_ALTITUDE;
+      }
+      desiredZoomRef.current     = targetZoom;
+      desiredAltitudeRef.current = targetAlt;
     } catch {
       // getCamera() unavailable — fall through to street defaults
     }
@@ -711,7 +745,7 @@ export default function MapScreen() {
       ? getOffsetCenter(loc.latitude, loc.longitude, heading, DRIVE_LOOK_AHEAD_M)
       : loc;
 
-    programmaticChangeRef.current = true;
+    programmaticUntilRef.current = Date.now() + 900;
     mapRef.current.animateCamera(
       {
         center,

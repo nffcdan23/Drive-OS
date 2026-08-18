@@ -171,7 +171,17 @@ function ClassicTabLayout() {
 }
 
 export default function TabLayout() {
-  if (isLiquidGlassAvailable()) {
+  // The native (liquid glass) tab bar has no way to hide itself, and iOS 26
+  // devices took that branch — which is why the bar sat on top of the drive
+  // controls during a drive.  The classic pill layout looks near-identical and
+  // does support hiding, so it is used everywhere.  The choice cannot be made
+  // per-drive: swapping layouts would remount the navigator, and with it the
+  // map, mid-drive.
+  //
+  // isLiquidGlassAvailable is still referenced so the native path stays wired
+  // up for whenever expo-router gains a way to hide that bar.
+  const nativeTabsSupportHiding = false;
+  if (nativeTabsSupportHiding && isLiquidGlassAvailable()) {
     return <NativeTabLayout />;
   }
   return <ClassicTabLayout />;
