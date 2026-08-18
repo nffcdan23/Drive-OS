@@ -6,7 +6,7 @@ import { useRouter } from 'expo-router';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
-import Svg, { Path, Ellipse, Rect, Circle } from 'react-native-svg';
+import Svg, { Path, Ellipse, Circle } from 'react-native-svg';
 import * as Haptics from 'expo-haptics';
 import { useColors } from '@/hooks/useColors';
 import { useApp } from '@/context/AppContext';
@@ -118,33 +118,41 @@ function getOffsetCenter(
   return { latitude: lat + dLat, longitude: lon + dLon };
 }
 
-// ─── Car Marker SVG ──────────────────────────────────────────────────────────
-function CarMarker({ accuracyWarning }: { accuracyWarning: boolean }) {
+// ─── Location Arrow ──────────────────────────────────────────────────────────
+// Navigation arrow in place of a vehicle icon: white body, dark outline, and a
+// shaded right half so the direction reads at a glance.  Rotated by the marker
+// to point where the vehicle is heading.
+function LocationArrow({ accuracyWarning }: { accuracyWarning: boolean }) {
   return (
-    <View style={{ width: 36, height: 50, alignItems: 'center', justifyContent: 'center' }}>
+    <View style={{ width: 48, height: 48, alignItems: 'center', justifyContent: 'center' }}>
+      {/* Accuracy halo — amber while the GPS fix is poor */}
       <View style={{
-        position: 'absolute', width: 52, height: 52, borderRadius: 26,
+        position: 'absolute', width: 46, height: 46, borderRadius: 23,
         backgroundColor: accuracyWarning
           ? 'rgba(234,179,8,0.22)'
-          : 'rgba(244, 99, 26, 0.18)',
+          : 'rgba(244, 99, 26, 0.16)',
         borderWidth: 1.5,
         borderColor: accuracyWarning
           ? 'rgba(234,179,8,0.45)'
-          : 'rgba(244, 99, 26, 0.35)',
+          : 'rgba(244, 99, 26, 0.32)',
       }} />
-      <Svg width={28} height={44} viewBox="0 0 28 44">
-        <Rect x="6" y="6" width="16" height="32" rx="4" fill="white" stroke="#1C1C1E" strokeWidth="1.5" />
-        <Rect x="8" y="8" width="12" height="10" rx="2" fill="#A8D4F0" opacity="0.9" />
-        <Rect x="9" y="26" width="10" height="7" rx="1.5" fill="#A8D4F0" opacity="0.7" />
-        <Rect x="2" y="10" width="4" height="8" rx="2" fill="#444" />
-        <Rect x="22" y="10" width="4" height="8" rx="2" fill="#444" />
-        <Rect x="2" y="26" width="4" height="8" rx="2" fill="#444" />
-        <Rect x="22" y="26" width="4" height="8" rx="2" fill="#444" />
-        <Ellipse cx="9" cy="6" rx="2.5" ry="1.5" fill="#FFEFC0" />
-        <Ellipse cx="19" cy="6" rx="2.5" ry="1.5" fill="#FFEFC0" />
-        <Ellipse cx="9" cy="38" rx="2.5" ry="1.5" fill="#FFB0B0" />
-        <Ellipse cx="19" cy="38" rx="2.5" ry="1.5" fill="#FFB0B0" />
-        <Rect x="9" y="20" width="10" height="6" rx="1" fill="#E0E0E0" opacity="0.6" />
+      <Svg width={30} height={34} viewBox="0 0 34 40">
+        {/* Soft ground shadow, offset down a touch to lift the arrow off the map */}
+        <Path
+          d="M17 5 L31 37 L17 29 L3 37 Z"
+          fill="#000000"
+          opacity={0.18}
+        />
+        <Path
+          d="M17 3 L31 35 L17 27 L3 35 Z"
+          fill="#FFFFFF"
+          stroke="#1C1C1E"
+          strokeWidth={2.5}
+          strokeLinejoin="round"
+          strokeLinecap="round"
+        />
+        {/* Fold shading on the trailing half */}
+        <Path d="M17 3 L31 35 L17 27 Z" fill="#1C1C1E" opacity={0.13} />
       </Svg>
     </View>
   );
@@ -1056,7 +1064,7 @@ export default function MapScreen() {
               rotation={markerRotation}
               tracksViewChanges={false}
             >
-              <CarMarker accuracyWarning={accuracyWarning} />
+              <LocationArrow accuracyWarning={accuracyWarning} />
             </MarkerAnimated>
           )}
           {/* Orange trail for free-drive tracking mode */}
