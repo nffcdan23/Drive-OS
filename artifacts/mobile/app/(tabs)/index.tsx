@@ -19,16 +19,10 @@ const MINI_IMAGE = require('@/assets/images/mini-cooper.png');
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const NAV_ZOOM = 17;
-// Metres to shift camera centre behind vehicle so it appears ~65% down the screen
-// At zoom 17 the vertical FOV is ~960 m, so 15 % ≈ 144 m; use 160 m for comfort.
-const CAMERA_LOOK_AHEAD_M = 160;
-// Metres to shift camera during an active drive — smaller so the vehicle stays
-// visible above the telemetry panel (which covers the bottom ~35% of the screen)
+// Metres to shift camera during an active drive — keeps the vehicle visible
+// above the telemetry panel (which covers the bottom ~35% of the screen).
+// Outside an active drive the camera centres exactly on the vehicle.
 const DRIVE_LOOK_AHEAD_M = 80;
-// Metres to shift map centre south of the vehicle when the location button is
-// tapped in north-up mode.  At zoom 16 this ≈ 80 px — just enough to sit the
-// vehicle above the bottom navigation bar and Start Drive button.
-const LOCATE_VERTICAL_OFFSET_M = 120;
 // Zoom levels: below MIN_ZOOM_TO_PRESERVE the user is too far out, so we
 // reset to STREET_ZOOM on locate.  Above MIN_ZOOM_TO_PRESERVE we keep theirs.
 const MIN_ZOOM_TO_PRESERVE = 13;
@@ -40,6 +34,9 @@ const STREET_ALTITUDE = 700;
 const MIN_SPEED_FOR_GPS_HEADING = 6;
 // Heading smoothing factor (lower = smoother but laggier)
 const HEADING_SMOOTH = 0.18;
+// Minimum heading change (degrees) before the compass re-animates the camera.
+// Without this, magnetometer noise re-animates the map constantly when still.
+const COMPASS_CAMERA_MIN_DELTA_DEG = 2;
 // Max plausible implied speed (km/h) between two GPS readings
 const MAX_PLAUSIBLE_KMH = 300;
 // Max accuracy (metres) to accept a reading; >50 m shows warning
@@ -190,7 +187,13 @@ export default function MapScreen() {
   const driveTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const webWatchIdRef = useRef<number | null>(null);
   const expoWatchRef = useRef<Location.LocationSubscription | null>(null);
+  const headingSubRef = useRef<Location.LocationSubscription | null>(null);
   const smoothedHeadingRef = useRef(0);
+  // Latest device-compass bearing, used whenever GPS course is untrustworthy
+  const compassHeadingRef = useRef<number | null>(null);
+  const lastSpeedKmhRef = useRef(0);
+  // Heading the camera was last animated to, for the compass jitter threshold
+  const lastCameraHeadingRef = useRef(0);
   const lastPositionRef = useRef<{ lat: number; lon: number; time: number } | null>(null);
   const followModeRef = useRef<FollowMode>('following');
   const headingModeRef = useRef<HeadingMode>('heading-up');
@@ -234,7 +237,7 @@ export default function MapScreen() {
 
   // ── Camera animation ─────────────────────────────────────────────────────
   const animateCameraToFollow = useCallback(
-    (loc: { latitude: number; longitude: number }, heading: number, offsetM = CAMERA_LOOK_AHEAD_M) => {
+    (loc: { latitude: number; longitude: number }, heading: number, offsetM = 0) => {
       if (!mapRef.current || Platform.OS === 'web') return;
       programmaticChangeRef.current = true;
 
@@ -297,11 +300,15 @@ export default function MapScreen() {
 
       // ── Smooth heading ──
       const speedKmh = speedMs != null ? speedMs * 3.6 : 0;
+      lastSpeedKmhRef.current = speedKmh;
       let targetHeading = smoothedHeadingRef.current;
 
       if (gpsHeading != null && gpsHeading >= 0 && speedKmh >= MIN_SPEED_FOR_GPS_HEADING) {
         // Trust GPS course when moving fast enough
         targetHeading = gpsHeading;
+      } else if (compassHeadingRef.current != null) {
+        // Stationary or crawling: GPS course is noise, so face where the phone faces
+        targetHeading = compassHeadingRef.current;
       }
       // Smooth toward target heading
       const newHeading = smoothHeading(smoothedHeadingRef.current, targetHeading, HEADING_SMOOTH);
@@ -310,8 +317,9 @@ export default function MapScreen() {
 
       // ── Drive camera follow ──
       if (followModeRef.current === 'following') {
-        const offset = isDrivingRef.current ? DRIVE_LOOK_AHEAD_M : CAMERA_LOOK_AHEAD_M;
+        const offset = isDrivingRef.current ? DRIVE_LOOK_AHEAD_M : 0;
         animateCameraToFollow(coord, newHeading, offset);
+        lastCameraHeadingRef.current = newHeading;
       }
     },
     [animateCameraToFollow, updateDriveCoordinate],
@@ -395,12 +403,70 @@ export default function MapScreen() {
     // drive-recording closure sees fresh isDriving/isPassengerMode values.
   }, [processPosition]);
 
+  // ── Compass heading watcher ───────────────────────────────────────────────
+  // GPS only reports a course once you're actually moving, so while stationary
+  // the map has no idea which way the phone points.  Apple/Google Maps read the
+  // magnetometer instead — this does the same.  It drives the camera itself
+  // because position updates stop arriving when you stand still.
+  useEffect(() => {
+    if (Platform.OS === 'web') return;
+    let cancelled = false;
+
+    async function startCompass() {
+      try {
+        const sub = await Location.watchHeadingAsync((h) => {
+          if (cancelled) return;
+          // trueHeading is -1 until the compass calibrates; magHeading always works
+          const raw = h.trueHeading != null && h.trueHeading >= 0 ? h.trueHeading : h.magHeading;
+          if (raw == null || raw < 0) return;
+          compassHeadingRef.current = raw;
+
+          // Once moving, GPS course is the better signal and processPosition drives
+          if (lastSpeedKmhRef.current >= MIN_SPEED_FOR_GPS_HEADING) return;
+
+          const newHeading = smoothHeading(smoothedHeadingRef.current, raw, HEADING_SMOOTH);
+          smoothedHeadingRef.current = newHeading;
+          setDisplayHeading(Math.round(newHeading));
+
+          const delta = Math.abs(((newHeading - lastCameraHeadingRef.current + 540) % 360) - 180);
+          if (
+            delta >= COMPASS_CAMERA_MIN_DELTA_DEG &&
+            followModeRef.current === 'following' &&
+            headingModeRef.current === 'heading-up' &&
+            userLocationRef.current
+          ) {
+            lastCameraHeadingRef.current = newHeading;
+            animateCameraToFollow(
+              userLocationRef.current,
+              newHeading,
+              isDrivingRef.current ? DRIVE_LOOK_AHEAD_M : 0,
+            );
+          }
+        });
+        if (cancelled) { sub.remove(); return; }
+        headingSubRef.current = sub;
+      } catch {
+        // No magnetometer (simulator, some Android hardware) — GPS course only
+      }
+    }
+
+    startCompass();
+
+    return () => {
+      cancelled = true;
+      if (headingSubRef.current) {
+        headingSubRef.current.remove();
+        headingSubRef.current = null;
+      }
+    };
+  }, [animateCameraToFollow]);
+
   // When a drive starts, immediately enter follow mode and animate to location
   useEffect(() => {
     if (isDriving) {
       setFollowMode('following');
       if (userLocationRef.current) {
-        animateCameraToFollow(userLocationRef.current, smoothedHeadingRef.current);
+        animateCameraToFollow(userLocationRef.current, smoothedHeadingRef.current, DRIVE_LOOK_AHEAD_M);
       }
     }
   }, [isDriving, animateCameraToFollow]);
@@ -421,7 +487,11 @@ export default function MapScreen() {
     setFollowMode('following');
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     if (userLocationRef.current) {
-      animateCameraToFollow(userLocationRef.current, smoothedHeadingRef.current);
+      animateCameraToFollow(
+        userLocationRef.current,
+        smoothedHeadingRef.current,
+        isDrivingRef.current ? DRIVE_LOOK_AHEAD_M : 0,
+      );
     }
   }, [animateCameraToFollow]);
 
@@ -432,8 +502,8 @@ export default function MapScreen() {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     if (followMode === 'following' && userLocationRef.current) {
       const mapHeading = next === 'heading-up' ? smoothedHeadingRef.current : 0;
-      const center = next === 'heading-up'
-        ? getOffsetCenter(userLocationRef.current.latitude, userLocationRef.current.longitude, smoothedHeadingRef.current, CAMERA_LOOK_AHEAD_M)
+      const center = next === 'heading-up' && isDrivingRef.current
+        ? getOffsetCenter(userLocationRef.current.latitude, userLocationRef.current.longitude, smoothedHeadingRef.current, DRIVE_LOOK_AHEAD_M)
         : userLocationRef.current;
       if (mapRef.current && Platform.OS !== 'web') {
         programmaticChangeRef.current = true;
@@ -533,15 +603,12 @@ export default function MapScreen() {
     const heading    = smoothedHeadingRef.current;
     const isHeadingUp = headingModeRef.current === 'heading-up';
 
-    // In heading-up mode re-use the nav offset (vehicle appears lower-centre,
-    // looks ahead).  In north-up mode apply a fixed southward shift so the
-    // vehicle sits slightly above the screen midpoint.
-    const center = isHeadingUp
-      ? getOffsetCenter(loc.latitude, loc.longitude, heading, CAMERA_LOOK_AHEAD_M)
-      : {
-          latitude:  loc.latitude  - LOCATE_VERTICAL_OFFSET_M / 111_320,
-          longitude: loc.longitude,
-        };
+    // Centre exactly on the user.  The only exception is an active drive in
+    // heading-up mode, where the telemetry panel covers the lower screen and
+    // the vehicle needs to sit above it.
+    const center = isHeadingUp && isDrivingRef.current
+      ? getOffsetCenter(loc.latitude, loc.longitude, heading, DRIVE_LOOK_AHEAD_M)
+      : loc;
 
     programmaticChangeRef.current = true;
     mapRef.current.animateCamera(
@@ -554,6 +621,7 @@ export default function MapScreen() {
       },
       { duration: 600 },
     );
+    lastCameraHeadingRef.current = isHeadingUp ? heading : 0;
   }, []);
 
   // ── Formatters ────────────────────────────────────────────────────────────
