@@ -120,23 +120,13 @@ function getOffsetCenter(
 
 // ─── Location Arrow ──────────────────────────────────────────────────────────
 // Navigation arrow in place of a vehicle icon: white body, dark outline, and a
-// shaded right half so the direction reads at a glance.  Rotated by the marker
-// to point where the vehicle is heading.
-function LocationArrow({ accuracyWarning }: { accuracyWarning: boolean }) {
+// shaded trailing half so the direction reads at a glance.  Rotated by the
+// marker to point where the vehicle is heading.  Poor GPS accuracy is surfaced
+// by the "Poor GPS signal" banner rather than anything on the marker itself.
+function LocationArrow() {
   return (
-    <View style={{ width: 48, height: 48, alignItems: 'center', justifyContent: 'center' }}>
-      {/* Accuracy halo — amber while the GPS fix is poor */}
-      <View style={{
-        position: 'absolute', width: 46, height: 46, borderRadius: 23,
-        backgroundColor: accuracyWarning
-          ? 'rgba(234,179,8,0.22)'
-          : 'rgba(244, 99, 26, 0.16)',
-        borderWidth: 1.5,
-        borderColor: accuracyWarning
-          ? 'rgba(234,179,8,0.45)'
-          : 'rgba(244, 99, 26, 0.32)',
-      }} />
-      <Svg width={30} height={34} viewBox="0 0 34 40">
+    <View style={{ width: 40, height: 44, alignItems: 'center', justifyContent: 'center' }}>
+      <Svg width={35} height={40} viewBox="0 0 34 40">
         {/* Soft ground shadow, offset down a touch to lift the arrow off the map */}
         <Path
           d="M17 5 L31 37 L17 29 L3 37 Z"
@@ -1064,7 +1054,7 @@ export default function MapScreen() {
               rotation={markerRotation}
               tracksViewChanges={false}
             >
-              <LocationArrow accuracyWarning={accuracyWarning} />
+              <LocationArrow />
             </MarkerAnimated>
           )}
           {/* Orange trail for free-drive tracking mode */}
