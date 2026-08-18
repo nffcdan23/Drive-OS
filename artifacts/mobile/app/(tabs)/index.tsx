@@ -896,7 +896,7 @@ export default function MapScreen() {
           <Ionicons name="menu" size={22} color="#1C1C1E" />
         </TouchableOpacity>
         <View style={styles.wordmarkWrap}>
-          <Text style={styles.wordmark}>FORZA <Text style={styles.wordmarkAccent}>DRIVE</Text></Text>
+          <Text style={styles.wordmark}>Drive <Text style={styles.wordmarkAccent}>OS</Text></Text>
         </View>
         <View style={styles.headerRight}>
           <TouchableOpacity style={styles.notifBtn} onPress={() => router.push('/messages')}>
