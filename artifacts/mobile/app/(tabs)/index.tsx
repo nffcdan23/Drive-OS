@@ -123,14 +123,20 @@ function getOffsetCenter(
 // shaded trailing half so the direction reads at a glance.  Rotated by the
 // marker to point where the vehicle is heading.  Poor GPS accuracy is surfaced
 // by the "Poor GPS signal" banner rather than anything on the marker itself.
-function LocationArrow({ rotation }: { rotation: number }) {
+const LocationArrow = React.memo(function LocationArrow(
+  { rotation }: { rotation: Animated.Value },
+) {
+  const spin = rotation.interpolate({
+    inputRange: [0, 360],
+    outputRange: ['0deg', '360deg'],
+  });
   return (
-    <View style={{
+    <Animated.View style={{
       width: 40,
       height: 44,
       alignItems: 'center',
       justifyContent: 'center',
-      transform: [{ rotate: `${rotation}deg` }],
+      transform: [{ rotate: spin }],
     }}>
       <Svg width={35} height={40} viewBox="0 0 34 40">
         {/* Soft ground shadow, offset down a touch to lift the arrow off the map */}
@@ -150,9 +156,35 @@ function LocationArrow({ rotation }: { rotation: number }) {
         {/* Fold shading on the trailing half */}
         <Path d="M17 3 L31 35 L17 27 Z" fill="#1C1C1E" opacity={0.13} />
       </Svg>
-    </View>
+    </Animated.View>
   );
-}
+});
+
+// The whole marker is memoised so a heading tick never re-renders it.  On iOS
+// the arrow turns via the Animated transform above, which updates the native
+// view directly; re-rendering the annotation instead made it blink.  Android's
+// Google provider rasterises marker content, so it uses the native map-relative
+// rotation prop and leaves the content still.
+const UserMarker = React.memo(function UserMarker({
+  coordinate,
+  rotationValue,
+  nativeRotation,
+}: {
+  coordinate: AnimatedRegion;
+  rotationValue: Animated.Value;
+  nativeRotation: number;
+}) {
+  return (
+    <MarkerAnimated
+      coordinate={coordinate}
+      anchor={{ x: 0.5, y: 0.5 }}
+      rotation={nativeRotation}
+      tracksViewChanges={false}
+    >
+      <LocationArrow rotation={rotationValue} />
+    </MarkerAnimated>
+  );
+});
 
 // ─── Demo map background (web only) ─────────────────────────────────────────
 function DemoMapBackground({ mapType }: { mapType: MapType }) {
@@ -212,7 +244,10 @@ export default function MapScreen() {
   const [displayHeading, setDisplayHeading] = useState(0); // smoothed heading for UI
   // Heading the map itself is rotated to.  Needed because Apple Maps annotations
   // do not rotate with the map, so the arrow's on-screen angle is the difference.
-  const [mapHeading, setMapHeading] = useState(0);
+  // Kept in a ref, not state: it changes as often as the compass reports, and
+  // re-rendering the screen at that rate is what made the marker blink.
+  const mapHeadingRef = useRef(0);
+  const arrowRotation = useRef(new Animated.Value(0)).current;
 
   // ── Drive state ──
   const [driveSeconds, setDriveSeconds] = useState(0);
@@ -262,6 +297,14 @@ export default function MapScreen() {
   const desiredZoomRef = useRef(NAV_ZOOM);
   const desiredAltitudeRef = useRef(STREET_ALTITUDE);
   const resumeButtonAnim = useRef(new Animated.Value(0)).current;
+
+  // Push the arrow's on-screen angle straight to the native view, bypassing
+  // React entirely.  Apple Maps annotations stay upright as the map turns, so
+  // the angle is where the phone points minus where the map is turned to.
+  const syncArrowRotation = useCallback(() => {
+    const angle = ((smoothedHeadingRef.current - mapHeadingRef.current) % 360 + 360) % 360;
+    arrowRotation.setValue(angle);
+  }, [arrowRotation]);
 
   // Keep refs in sync
   useEffect(() => { isDrivingRef.current = isDriving; }, [isDriving]);
@@ -317,7 +360,8 @@ export default function MapScreen() {
         ? getOffsetCenter(loc.latitude, loc.longitude, heading, offsetM)
         : loc;
 
-      setMapHeading(Math.round(mapHeading));
+      mapHeadingRef.current = mapHeading;
+      syncArrowRotation();
 
       const camera: Partial<Camera> = {
         center,
@@ -333,7 +377,7 @@ export default function MapScreen() {
 
       mapRef.current.animateCamera(camera, { duration: durationMs });
     },
-    [],
+    [syncArrowRotation],
   );
 
   // ── Process a new GPS position ────────────────────────────────────────────
@@ -413,6 +457,7 @@ export default function MapScreen() {
       const newHeading = smoothHeading(smoothedHeadingRef.current, targetHeading, GPS_HEADING_SMOOTH);
       smoothedHeadingRef.current = newHeading;
       setDisplayHeading(Math.round(newHeading));
+      syncArrowRotation();
 
       // ── Drive camera follow ──
       if (followModeRef.current === 'following') {
@@ -535,6 +580,7 @@ export default function MapScreen() {
           const newHeading = smoothHeading(smoothedHeadingRef.current, raw, HEADING_SMOOTH);
           smoothedHeadingRef.current = newHeading;
           setDisplayHeading(Math.round(newHeading));
+          syncArrowRotation();
 
           const delta = Math.abs(((newHeading - lastCameraHeadingRef.current + 540) % 360) - 180);
           if (
@@ -628,7 +674,8 @@ export default function MapScreen() {
       const center = next === 'heading-up' && isDrivingRef.current
         ? getOffsetCenter(userLocationRef.current.latitude, userLocationRef.current.longitude, smoothedHeadingRef.current, DRIVE_LOOK_AHEAD_M)
         : userLocationRef.current;
-      setMapHeading(Math.round(mapHeading));
+      mapHeadingRef.current = mapHeading;
+      syncArrowRotation();
       if (mapRef.current && Platform.OS !== 'web') {
         programmaticUntilRef.current = Date.now() + 900;
         mapRef.current.animateCamera(
@@ -662,7 +709,10 @@ export default function MapScreen() {
         .then((cam) => {
           if (cam.zoom != null) desiredZoomRef.current = cam.zoom;
           if (cam.altitude != null && cam.altitude > 0) desiredAltitudeRef.current = cam.altitude;
-          if (cam.heading != null) setMapHeading(Math.round(cam.heading));
+          if (cam.heading != null) {
+            mapHeadingRef.current = cam.heading;
+            syncArrowRotation();
+          }
         })
         .catch(() => {});
     }
@@ -763,7 +813,8 @@ export default function MapScreen() {
       ? getOffsetCenter(loc.latitude, loc.longitude, heading, DRIVE_LOOK_AHEAD_M)
       : loc;
 
-    setMapHeading(isHeadingUp ? Math.round(heading) : 0);
+    mapHeadingRef.current = isHeadingUp ? heading : 0;
+    syncArrowRotation();
     programmaticUntilRef.current = Date.now() + 900;
     mapRef.current.animateCamera(
       {
@@ -1047,7 +1098,8 @@ export default function MapScreen() {
   // So on iOS the arrow's own content is rotated by the difference between where
   // the phone points and where the map is turned to.  Android's rotation prop is
   // map-relative and works natively, which is cheaper, so it is kept there.
-  const screenHeading = ((displayHeading - mapHeading) % 360 + 360) % 360;
+  // On iOS this stays constant so the memoised marker never re-renders; Android
+  // needs the prop to change, which is cheap there because it is a native rotation.
   const markerRotation = Platform.OS === 'ios' ? 0 : displayHeading;
 
   return (
@@ -1075,14 +1127,11 @@ export default function MapScreen() {
           }
         >
           {userLocation && (
-            <MarkerAnimated
+            <UserMarker
               coordinate={markerCoordRef.current}
-              anchor={{ x: 0.5, y: 0.5 }}
-              rotation={markerRotation}
-              tracksViewChanges={Platform.OS === 'ios'}
-            >
-              <LocationArrow rotation={Platform.OS === 'ios' ? screenHeading : 0} />
-            </MarkerAnimated>
+              rotationValue={arrowRotation}
+              nativeRotation={markerRotation}
+            />
           )}
           {/* Orange trail for free-drive tracking mode */}
           {isDriving && currentDrive && currentDrive.coordinates.length > 1 && (
