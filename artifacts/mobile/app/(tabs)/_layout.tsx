@@ -4,7 +4,7 @@ import { useApp } from '@/context/AppContext';
 import { useColors } from '@/hooks/useColors';
 import { Ionicons } from '@expo/vector-icons';
 import { BlurView } from 'expo-blur';
-import { isLiquidGlassAvailable } from 'expo-glass-effect';
+import { GlassView, isLiquidGlassAvailable } from 'expo-glass-effect';
 import { Tabs } from 'expo-router';
 import { Icon, Label, NativeTabs } from 'expo-router/unstable-native-tabs';
 import { SymbolView } from 'expo-symbols';
@@ -45,6 +45,9 @@ function ClassicTabLayout() {
   const isWeb = Platform.OS === 'web';
   const insets = useSafeAreaInsets();
   const { isDriving } = useApp();
+  // iOS 26 exposes the real liquid glass material, so the pill uses it directly
+  // rather than a blur approximation.  Older iOS falls back to BlurView.
+  const liquidGlass = isIOS && isLiquidGlassAvailable();
 
   // Floating pill dimensions
   const TAB_H = 66;
@@ -75,13 +78,18 @@ function ClassicTabLayout() {
               shadowOpacity: 0.18,
               shadowRadius: 24,
               // Border
-              borderWidth: StyleSheet.hairlineWidth,
+              borderWidth: liquidGlass ? 0 : StyleSheet.hairlineWidth,
               borderColor: colors.surfaceBorder ?? colors.border,
               paddingBottom: 0,
               overflow: isIOS ? 'hidden' : 'visible',
             },
         tabBarBackground: () =>
-          isIOS && !isDriving ? (
+          liquidGlass && !isDriving ? (
+            <GlassView
+              glassEffectStyle="regular"
+              style={[StyleSheet.absoluteFill, { borderRadius: TAB_RADIUS, overflow: 'hidden' }]}
+            />
+          ) : isIOS && !isDriving ? (
             <BlurView
               intensity={80}
               tint={isDark ? 'dark' : 'light'}
@@ -171,17 +179,16 @@ function ClassicTabLayout() {
 }
 
 export default function TabLayout() {
-  // The native (liquid glass) tab bar has no way to hide itself, and iOS 26
-  // devices took that branch — which is why the bar sat on top of the drive
-  // controls during a drive.  The classic pill layout looks near-identical and
-  // does support hiding, so it is used everywhere.  The choice cannot be made
-  // per-drive: swapping layouts would remount the navigator, and with it the
-  // map, mid-drive.
+  // expo-router's native tabs cannot hide their tab bar — only individual
+  // triggers — so on iOS 26 the bar sat on top of the drive controls.  The
+  // classic layout can hide, and on iOS 26 it renders the genuine liquid glass
+  // material via GlassView, so nothing is given up by using it everywhere.
+  // The choice cannot be made per-drive: swapping layouts would remount the
+  // navigator, and the map with it, mid-drive.
   //
-  // isLiquidGlassAvailable is still referenced so the native path stays wired
-  // up for whenever expo-router gains a way to hide that bar.
+  // NativeTabLayout is kept for whenever expo-router gains a way to hide it.
   const nativeTabsSupportHiding = false;
-  if (nativeTabsSupportHiding && isLiquidGlassAvailable()) {
+  if (nativeTabsSupportHiding) {
     return <NativeTabLayout />;
   }
   return <ClassicTabLayout />;
