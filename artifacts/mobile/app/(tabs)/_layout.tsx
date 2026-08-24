@@ -179,16 +179,16 @@ function ClassicTabLayout() {
 }
 
 export default function TabLayout() {
-  // expo-router's native tabs cannot hide their tab bar — only individual
-  // triggers — so on iOS 26 the bar sat on top of the drive controls.  The
-  // classic layout can hide, and on iOS 26 it renders the genuine liquid glass
-  // material via GlassView, so nothing is given up by using it everywhere.
-  // The choice cannot be made per-drive: swapping layouts would remount the
-  // navigator, and the map with it, mid-drive.
+  // Apple's own tab bar is the only thing that renders true liquid glass, so
+  // iOS 26 uses it.  The trade-off is that expo-router 6 cannot hide a native
+  // tab bar — only individual triggers — so it stays visible during a drive.
+  // Hiding it properly means presenting the drive UI as a route outside this
+  // navigator, which is the intended fix; the classic layout's display:'none'
+  // trick cannot reach the native bar.
   //
-  // NativeTabLayout is kept for whenever expo-router gains a way to hide it.
-  const nativeTabsSupportHiding = false;
-  if (nativeTabsSupportHiding) {
+  // Everything else (Android, web, pre-26 iOS) uses the classic pill, which
+  // does hide during a drive and approximates glass with GlassView/BlurView.
+  if (isLiquidGlassAvailable()) {
     return <NativeTabLayout />;
   }
   return <ClassicTabLayout />;
