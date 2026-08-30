@@ -5,16 +5,18 @@
  * @workspace/api-client-react so every request automatically carries the
  * device-ID Bearer token and resolves to the correct API origin.
  */
-import { Platform } from 'react-native';
 import { customFetch, setBaseUrl, setAuthTokenGetter } from '@workspace/api-client-react';
 import { getDeviceId } from './deviceId';
 
-// On web, the Replit proxy routes /api → API server (same origin, relative URL).
-// On native, prepend the full dev domain so Expo Go can reach the API.
+// Base URL of the deployed API server. Set EXPO_PUBLIC_API_URL to point at a
+// local or staging server without editing this file.
+//
+// This deliberately no longer derives from EXPO_PUBLIC_DOMAIN: the Replit dev
+// script always sets that to the Replit domain, so requests would go back to
+// the old backend whenever the app was started from there.
 const API_BASE =
-  Platform.OS === 'web'
-    ? ''
-    : `https://${process.env.EXPO_PUBLIC_DOMAIN ?? ''}`;
+  process.env.EXPO_PUBLIC_API_URL ??
+  'https://workspaceapi-server-production-eef3.up.railway.app';
 
 setBaseUrl(API_BASE || null);
 
