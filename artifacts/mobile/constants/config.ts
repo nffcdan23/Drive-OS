@@ -1,8 +1,9 @@
 // DriveOS Configuration
-// Set DEMO_MODE = false when connecting real APIs
 
 export const CONFIG = {
-  DEMO_MODE: true,
+  // Demo data is shown only in development. Production and TestFlight builds
+  // hide anything that would present invented data as real.
+  DEMO_MODE: __DEV__,
 
   // Map API Keys — set in .env as EXPO_PUBLIC_MAPBOX_TOKEN
   MAPBOX_TOKEN: process.env.EXPO_PUBLIC_MAPBOX_TOKEN ?? null,

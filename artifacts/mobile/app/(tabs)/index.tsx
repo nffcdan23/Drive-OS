@@ -1350,14 +1350,20 @@ export default function MapScreen() {
       {/* ── Unified bottom card: weather + vehicle + START DRIVE ── */}
       {!isDriving && (
         <View style={[styles.bottomCard, { bottom: BOTTOM_CARD_BOTTOM }]}>
-          {/* Weather row */}
+          {/* Weather row — the reading itself is demo data, so it is shown only
+              in development until a real weather API is connected.  The greeting
+              is real and stays either way. */}
           <View style={styles.weatherRow}>
-            <Ionicons name={CONFIG.DEMO_WEATHER.icon} size={22} color="#f59e0b" />
+            {CONFIG.DEMO_MODE && (
+              <Ionicons name={CONFIG.DEMO_WEATHER.icon} size={22} color="#f59e0b" />
+            )}
             <View>
-              <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 4 }}>
-                <Text style={styles.weatherTemp}>{CONFIG.DEMO_WEATHER.temperature}°</Text>
-                <Text style={styles.weatherCondition}>{CONFIG.DEMO_WEATHER.condition}</Text>
-              </View>
+              {CONFIG.DEMO_MODE && (
+                <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 4 }}>
+                  <Text style={styles.weatherTemp}>{CONFIG.DEMO_WEATHER.temperature}°</Text>
+                  <Text style={styles.weatherCondition}>{CONFIG.DEMO_WEATHER.condition}</Text>
+                </View>
+              )}
               <Text style={styles.weatherGreeting}>{getGreeting()}, {userProfile.name}</Text>
             </View>
           </View>

@@ -233,9 +233,10 @@ export default function SearchScreen() {
 
       <FlatList
         data={[null]}
-        renderItem={() => <View contentContainerStyle={styles.listContent}>{renderContent()}</View>}
+        renderItem={() => <View>{renderContent()}</View>}
         keyExtractor={() => 'content'}
         keyboardShouldPersistTaps="handled"
+        contentContainerStyle={styles.listContent}
       />
     </KeyboardAvoidingView>
   );

@@ -8,16 +8,10 @@
     "scheme": "mobile",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
-    "splash": {
-      "image": "./assets/images/splash.png",
-      "resizeMode": "cover",
-      "backgroundColor": "#F4631A"
-    },
     "ios": {
       "supportsTablet": false,
       "infoPlist": {
-        "NSLocationWhenInUseUsageDescription": "DriveOS uses your location to show your position on the map and track your drives.",
-        "NSLocationAlwaysAndWhenInUseUsageDescription": "DriveOS uses your location to track your drives even when in the background.",
+        "NSLocationWhenInUseUsageDescription": "DriveOS uses your location to show your position on the map and record your drives while the app is open.",
         "NSPhotoLibraryUsageDescription": "DriveOS needs access to your photos to set your vehicle image.",
         "NSPhotoLibraryAddUsageDescription": "DriveOS needs to save journey photos to your library."
       }
@@ -34,15 +28,18 @@
       "favicon": "./assets/images/icon.png"
     },
     "plugins": [
-      [
-        "expo-router",
-        {
-          "origin": "https://replit.com/"
-        }
-      ],
+      "expo-router",
       "expo-font",
       "expo-web-browser",
-      "expo-image-picker"
+      "expo-image-picker",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/images/splash.png",
+          "resizeMode": "cover",
+          "backgroundColor": "#F4631A"
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true,
