@@ -176,7 +176,9 @@ const UserMarker = React.memo(function UserMarker({
 }) {
   return (
     <MarkerAnimated
-      coordinate={coordinate}
+      // react-native-maps types coordinate as a plain LatLng even on the
+      // animated marker, which is the one thing an AnimatedRegion cannot be
+      coordinate={coordinate as never}
       anchor={{ x: 0.5, y: 0.5 }}
       rotation={nativeRotation}
       tracksViewChanges={false}
@@ -862,7 +864,7 @@ export default function MapScreen() {
 
   const styles = StyleSheet.create({
     container: { flex: 1, backgroundColor: '#1a3d2a' },
-    mapFull: { ...StyleSheet.absoluteFillObject },
+    mapFull: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 },
 
     // ── Passenger / accuracy banners ──
     passengerBanner: {

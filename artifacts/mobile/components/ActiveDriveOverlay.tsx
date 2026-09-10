@@ -263,7 +263,7 @@ export default function ActiveDriveOverlay({
   const spdUnit         = speedUnit(unit);
 
   return (
-    <View style={[StyleSheet.absoluteFillObject, { pointerEvents: 'box-none' as any }]}>
+    <View style={[StyleSheet.absoluteFill, { pointerEvents: 'box-none' as any }]}>
       {/* ── Transparent map area ── */}
       <View style={[styles.mapArea, { pointerEvents: 'box-none' as any }]}>
 
