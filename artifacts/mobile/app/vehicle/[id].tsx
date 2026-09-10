@@ -11,6 +11,7 @@ import { useApp, Vehicle } from '@/context/AppContext';
 import * as ImagePicker from 'expo-image-picker';
 import * as Haptics from 'expo-haptics';
 import { TEST_REGISTRATIONS } from '@/constants/config';
+import { apiLookupVehicle } from '@/lib/apiClient';
 
 type VehicleForm = Omit<Vehicle, 'id' | 'isActive' | 'fuelPercentage'>;
 
@@ -114,7 +115,16 @@ export default function VehicleDetailScreen() {
     handleChange('imageUri', null);
   }, [handleChange]);
 
-  const handleLookup = useCallback(() => {
+  /** Turns a failed lookup into something the user can act on. */
+  function lookupErrorMessage(status: number | undefined): string {
+    if (status === 404) return 'No vehicle found with that registration. Enter the details manually.';
+    if (status === 400) return "That doesn't look like a valid UK registration.";
+    if (status === 429) return 'Too many lookups just now — try again shortly.';
+    if (status === 503) return 'Vehicle lookup is not set up on the server yet.';
+    return 'Could not reach the lookup service. Check your connection and try again.';
+  }
+
+  const handleLookup = useCallback(async () => {
     const cleaned = lookupReg.replace(/\s+/g, '').toUpperCase();
     if (!cleaned) {
       Alert.alert('Enter registration', 'Type a registration number to look up.');
@@ -122,26 +132,47 @@ export default function VehicleDetailScreen() {
     }
     setLookupLoading(true);
     setLookupResult(null);
-    setTimeout(() => {
-      const found = TEST_REGISTRATIONS[cleaned];
-      if (found) {
+
+    try {
+      const found = await apiLookupVehicle(cleaned);
+      setForm((prev) => ({
+        ...prev,
+        registration: found.registration,
+        // Blank fields are left as they were rather than wiping what was typed
+        make:     found.make   || prev.make,
+        colour:   found.colour || prev.colour,
+        engine:   found.engine || prev.engine,
+        year:     found.year   ?? prev.year,
+        fuelType: found.fuelType ?? prev.fuelType,
+      }));
+      const label = [found.year, found.make, found.colour].filter(Boolean).join(' ');
+      setLookupResult(`Found: ${label || cleaned}. DVLA doesn't publish the model — add it below.`);
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    } catch (err) {
+      const status = (err as { status?: number }).status;
+      // In development, fall back to the test plates so the form can be
+      // exercised without a configured key or a real API call.
+      const demo = __DEV__ ? TEST_REGISTRATIONS[cleaned] : undefined;
+      if (demo && (status === 503 || status === undefined)) {
         setForm((prev) => ({
           ...prev,
           registration: cleaned,
-          make: found.make,
-          model: found.model,
-          year: found.year,
-          colour: found.colour,
-          fuelType: found.fuelType as VehicleForm['fuelType'],
-          engine: found.engine,
+          make: demo.make,
+          model: demo.model,
+          year: demo.year,
+          colour: demo.colour,
+          fuelType: demo.fuelType as VehicleForm['fuelType'],
+          engine: demo.engine,
         }));
-        setLookupResult(`Found: ${found.year} ${found.make} ${found.model}`);
+        setLookupResult(`Found (test data): ${demo.year} ${demo.make} ${demo.model}`);
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       } else {
-        setLookupResult('Live vehicle lookup is not connected. Unknown registration — please enter details manually.');
+        setLookupResult(lookupErrorMessage(status));
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
       }
+    } finally {
       setLookupLoading(false);
-    }, 900);
+    }
   }, [lookupReg]);
 
   const styles = StyleSheet.create({
@@ -267,7 +298,8 @@ export default function VehicleDetailScreen() {
         <Text style={styles.sectionTitle}>Registration Lookup</Text>
         <View style={styles.lookupCard}>
           <Text style={styles.lookupNote}>
-            Demo mode — uses test registrations only. Real DVLA lookup not yet connected.
+            Fills in make, colour, fuel and engine size from DVLA. Model and performance
+            figures aren't published by DVLA — add those yourself.
           </Text>
           <View style={styles.lookupRow}>
             <TextInput

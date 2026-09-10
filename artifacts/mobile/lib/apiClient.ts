@@ -113,6 +113,25 @@ export const apiUpdateVehicle = (id: string, data: UpdateVehicleInput) => put<Ap
 export const apiDeleteVehicle = (id: string) => del(`/vehicles/${id}`);
 export const apiActivateVehicle = (id: string) => post<ApiVehicle>(`/vehicles/${id}/activate`, {});
 
+/**
+ * DVLA Vehicle Enquiry Service lookup, proxied by the API server so the key
+ * never ships in the app. DVLA publishes no model, power, torque, 0-60 or top
+ * speed, so those fields are not returned and stay manual.
+ */
+export interface ApiVehicleLookup {
+  registration: string;
+  make: string;
+  colour: string;
+  fuelType: 'petrol' | 'diesel' | 'electric' | 'hybrid' | null;
+  year: number | null;
+  engine: string;
+  motStatus: string | null;
+  taxStatus: string | null;
+}
+
+export const apiLookupVehicle = (registration: string) =>
+  post<ApiVehicleLookup>('/vehicles/lookup', { registration });
+
 // ─── Journeys ─────────────────────────────────────────────────────────────────
 
 export interface ApiJourney {
