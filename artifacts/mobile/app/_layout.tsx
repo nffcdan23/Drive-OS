@@ -1,3 +1,4 @@
+import { MaterialProvider } from "@/components/Glass";
 import React, { useEffect } from "react";
 import { StatusBar } from "expo-status-bar";
 import { View } from "react-native";
@@ -124,13 +125,15 @@ export default function RootLayout() {
           <ErrorBoundary>
             <QueryClientProvider client={queryClient}>
               <AppProvider>
-                <View style={{ flex: 1 }}>
-                  <>
-                    <StatusBar style="light" />
-                    <RootLayoutNav />
-                  </>
-                  <GlobalSyncBanner />
-                </View>
+                <MaterialProvider>
+                  <View style={{ flex: 1 }}>
+                    <>
+                      <StatusBar style="light" />
+                      <RootLayoutNav />
+                    </>
+                    <GlobalSyncBanner />
+                  </View>
+                </MaterialProvider>
               </AppProvider>
             </QueryClientProvider>
           </ErrorBoundary>

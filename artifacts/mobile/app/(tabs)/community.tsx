@@ -1,3 +1,4 @@
+import { GlassSurface, GlassButton } from "@/components/Glass";
 import { KeyboardAwareScrollViewCompat } from "@/components/KeyboardAwareScrollViewCompat";
 import { ScreenTitle, Disclosure } from "@/components/Cockpit";
 import React, { useState } from "react";
@@ -1078,10 +1079,14 @@ export default function CommunityScreen() {
       <View style={styles.header}>
         <ScreenTitle title="Community" eyebrow="Better roads. Together." />
         {action && (
-          <TouchableOpacity style={styles.addBtn} onPress={action.onPress}>
+          <GlassButton
+            material="accent"
+            style={styles.addBtn}
+            onPress={action.onPress}
+          >
             <Ionicons name="add" size={14} color="#fff" />
             <Text style={styles.addBtnText}>{action.label}</Text>
-          </TouchableOpacity>
+          </GlassButton>
         )}
       </View>
 
@@ -1401,7 +1406,7 @@ export default function CommunityScreen() {
               { position: "relative", backgroundColor: "transparent" },
             ]}
           >
-            <View style={styles.modalContent}>
+            <GlassSurface material="dense" style={styles.modalContent}>
               <View style={styles.modalHandle} />
               <Text style={styles.modalTitle}>Create Convoy</Text>
               <Text style={styles.inputLabel}>Convoy Name *</Text>
@@ -1510,7 +1515,7 @@ export default function CommunityScreen() {
               >
                 <Text style={styles.submitBtnText}>Create Convoy</Text>
               </TouchableOpacity>
-            </View>
+            </GlassSurface>
           </View>
         </KeyboardAwareScrollViewCompat>
       </Modal>
@@ -1523,7 +1528,7 @@ export default function CommunityScreen() {
         onRequestClose={() => setShowAddFriend(false)}
       >
         <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
+          <GlassSurface material="dense" style={styles.modalContent}>
             <View style={styles.modalHandle} />
             <Text style={styles.modalTitle}>Add Friend</Text>
             <Text style={styles.inputLabel}>
@@ -1604,7 +1609,7 @@ export default function CommunityScreen() {
             >
               <Text style={styles.submitBtnText}>Send Request</Text>
             </TouchableOpacity>
-          </View>
+          </GlassSurface>
         </View>
       </Modal>
 
@@ -1626,7 +1631,7 @@ export default function CommunityScreen() {
               { position: "relative", backgroundColor: "transparent" },
             ]}
           >
-            <View style={styles.modalContent}>
+            <GlassSurface material="dense" style={styles.modalContent}>
               <View style={styles.modalHandle} />
               <Text style={styles.modalTitle}>Create Group</Text>
               <Text style={styles.inputLabel}>Group Name *</Text>
@@ -1716,7 +1721,7 @@ export default function CommunityScreen() {
               >
                 <Text style={styles.submitBtnText}>Create Group</Text>
               </TouchableOpacity>
-            </View>
+            </GlassSurface>
           </View>
         </KeyboardAwareScrollViewCompat>
       </Modal>
@@ -1739,7 +1744,7 @@ export default function CommunityScreen() {
               { position: "relative", backgroundColor: "transparent" },
             ]}
           >
-            <View style={styles.modalContent}>
+            <GlassSurface material="dense" style={styles.modalContent}>
               <View style={styles.modalHandle} />
               <Text style={styles.modalTitle}>Create Event</Text>
               <Text style={styles.inputLabel}>Event Name *</Text>
@@ -1872,7 +1877,7 @@ export default function CommunityScreen() {
               >
                 <Text style={styles.submitBtnText}>Create Event</Text>
               </TouchableOpacity>
-            </View>
+            </GlassSurface>
           </View>
         </KeyboardAwareScrollViewCompat>
       </Modal>

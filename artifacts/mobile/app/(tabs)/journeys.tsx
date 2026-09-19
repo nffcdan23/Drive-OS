@@ -1,3 +1,4 @@
+import { GlassSurface, GlassButton } from "@/components/Glass";
 import { RouteTrace } from "@/components/RouteTrace";
 import { ScreenTitle, Disclosure } from "@/components/Cockpit";
 import React, { useState, useMemo } from "react";
@@ -647,8 +648,9 @@ export default function JourneysScreen() {
       <View style={styles.header}>
         <ScreenTitle title="Journeys" eyebrow="Your driving archive" />
         <View style={styles.headerActions}>
-          <TouchableOpacity
+          <GlassButton
             style={styles.iconBtn}
+            accessibilityLabel="Manage journey categories"
             onPress={() => setShowCategories(true)}
           >
             <Ionicons
@@ -656,8 +658,9 @@ export default function JourneysScreen() {
               size={16}
               color={colors.foreground}
             />
-          </TouchableOpacity>
-          <TouchableOpacity
+          </GlassButton>
+          <GlassButton
+            accessibilityLabel="Sort journeys"
             style={styles.iconBtn}
             onPress={() => setShowSort(true)}
           >
@@ -666,7 +669,7 @@ export default function JourneysScreen() {
               size={16}
               color={colors.foreground}
             />
-          </TouchableOpacity>
+          </GlassButton>
         </View>
       </View>
 
@@ -865,7 +868,7 @@ export default function JourneysScreen() {
                 {filtered.length} journey{filtered.length !== 1 ? "s" : ""}
                 {activeCatFilter ? ` · ${activeCatFilter.name}` : ""}
               </Text>
-              <TouchableOpacity
+              <GlassButton
                 style={styles.sortBtn}
                 onPress={() => setShowSort(true)}
               >
@@ -875,7 +878,7 @@ export default function JourneysScreen() {
                   color={colors.foreground}
                 />
                 <Text style={styles.sortBtnText}>{currentSortLabel}</Text>
-              </TouchableOpacity>
+              </GlassButton>
             </View>
           </>
         }
@@ -905,7 +908,7 @@ export default function JourneysScreen() {
         onRequestClose={() => setShowSort(false)}
       >
         <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
+          <GlassSurface material="dense" style={styles.modalContent}>
             <View style={styles.modalHandle} />
             <Text style={styles.modalTitle}>Sort journeys</Text>
             {SORT_OPTIONS.map((opt) => (
@@ -930,7 +933,7 @@ export default function JourneysScreen() {
                 )}
               </TouchableOpacity>
             ))}
-          </View>
+          </GlassSurface>
         </View>
       </Modal>
 
@@ -946,7 +949,7 @@ export default function JourneysScreen() {
             style={{ flex: 1 }}
             contentContainerStyle={{ justifyContent: "flex-end", flex: 1 }}
           >
-            <View style={styles.modalContent}>
+            <GlassSurface material="dense" style={styles.modalContent}>
               <View style={styles.modalHandle} />
               <Text style={styles.modalTitle}>Journey Categories</Text>
               {categories.map((cat) => (
@@ -1049,7 +1052,7 @@ export default function JourneysScreen() {
                   Add Category
                 </Text>
               </TouchableOpacity>
-            </View>
+            </GlassSurface>
           </ScrollView>
         </View>
       </Modal>

@@ -63,3 +63,20 @@ but a navigation provider is still required. No invented route progress is shown
 Stop Expo, run `git switch main`, then restart Expo with `--clear`.
 To return to this version, run `git switch ui/astra-redesign-v2`.
 No merge or push has been performed. Switching branches does not reset app data.
+
+## Glass refinement
+
+`components/Glass.tsx` supplies shared chrome, dense and amber action materials.
+Compatible iOS builds use Expo's native glass; older iOS uses the existing blur
+package. Android deliberately uses a solid graphite fallback to avoid repeated
+live blur over the map. Web uses CSS backdrop blur through Expo.
+
+The map search, floating controls, vehicle sheet, tab dock, drive HUD, search
+input and journey/community modal sheets share the material. List content and
+vehicle imagery remain opaque. Press feedback uses a small native-driver spring;
+Reduce Motion disables it. iOS Reduce Transparency selects solid surfaces and
+removes the sheen. HUD and form sheets use denser scrims for legibility.
+
+No dependencies added. Check the native material on an iPhone, including Reduce
+Transparency and Reduce Motion, and verify foreground text against bright and
+dark map tiles. Browser preview validates layout, not Apple's native glass.

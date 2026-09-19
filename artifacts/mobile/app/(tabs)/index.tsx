@@ -1,3 +1,4 @@
+import { GlassSurface, GlassButton } from "@/components/Glass";
 import palette from "@/constants/colors";
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import {
@@ -471,7 +472,7 @@ export default function MapScreen() {
 
   // Layout constants
   // Floating pill tab bar: height 66, bottom = max(insets.bottom, 16)
-  const tabBarOffset = 70 + Math.max(insets.bottom, 12);
+  const tabBarOffset = 72 + Math.max(insets.bottom, 12);
   const headerTop = insets.top + 12;
   const HEADER_H = 44;
   const SEARCH_TOP = headerTop + HEADER_H + 10;
@@ -1091,9 +1092,9 @@ export default function MapScreen() {
 
   // ─── Styles ────────────────────────────────────────────────────────────────
   const CARD_SHADOW = {
-    shadowColor: "#2E2414",
+    shadowColor: "#000",
     shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.14,
+    shadowOpacity: 0.24,
     shadowRadius: 20,
     elevation: 8,
   };
@@ -1232,11 +1233,11 @@ export default function MapScreen() {
       overflow: "hidden",
     },
     searchIconBox: {
-      width: 58,
+      width: 46,
       height: 58,
       alignItems: "center",
       justifyContent: "center",
-      backgroundColor: colors.primary,
+      backgroundColor: "transparent",
       borderTopLeftRadius: 20,
       borderBottomLeftRadius: 20,
     },
@@ -1728,21 +1729,21 @@ export default function MapScreen() {
           },
         ]}
       >
-        <TouchableOpacity
+        <GlassButton
           accessibilityRole="button"
           accessibilityLabel="Settings"
           style={styles.menuBtn}
           onPress={() => router.push("/settings")}
         >
           <Ionicons name="menu" size={22} color={colors.foreground} />
-        </TouchableOpacity>
+        </GlassButton>
         <View style={styles.wordmarkWrap}>
           <Text style={styles.wordmark}>
             <Text style={styles.wordmarkAccent}>DRIVE</Text> / EXPLORE
           </Text>
         </View>
         <View style={styles.headerRight}>
-          <TouchableOpacity
+          <GlassButton
             accessibilityRole="button"
             accessibilityLabel="Messages and notifications"
             style={styles.notifBtn}
@@ -1760,15 +1761,15 @@ export default function MapScreen() {
                 </Text>
               </View>
             )}
-          </TouchableOpacity>
-          <TouchableOpacity
+          </GlassButton>
+          <GlassButton
             accessibilityRole="button"
             accessibilityLabel="Driver profile"
             style={styles.avatarBtn}
             onPress={() => router.push("/(tabs)/profile")}
           >
             <Text style={styles.avatarText}>{userProfile.name.charAt(0)}</Text>
-          </TouchableOpacity>
+          </GlassButton>
         </View>
       </View>
 
@@ -1777,21 +1778,26 @@ export default function MapScreen() {
         <View
           style={[styles.searchBarWrap, { top: SEARCH_TOP + passengerOffset }]}
         >
-          <TouchableOpacity
-            style={styles.searchBar}
-            onPress={() => router.push("/search")}
-            activeOpacity={0.85}
-          >
-            <View style={styles.searchIconBox}>
-              <Ionicons
-                name="search"
-                size={20}
-                color={colors.primaryForeground}
-              />
-            </View>
-            <Text style={styles.searchPlaceholder}>
-              Find your next destination
-            </Text>
+          <GlassSurface style={styles.searchBar}>
+            <TouchableOpacity
+              accessibilityRole="button"
+              accessibilityLabel="Search destinations"
+              onPress={() => router.push("/search")}
+              activeOpacity={0.8}
+              style={{
+                flex: 1,
+                height: 58,
+                flexDirection: "row",
+                alignItems: "center",
+              }}
+            >
+              <View style={styles.searchIconBox}>
+                <Ionicons name="search" size={20} color={colors.primary} />
+              </View>
+              <Text style={styles.searchPlaceholder}>
+                Find your next destination
+              </Text>
+            </TouchableOpacity>
             <TouchableOpacity
               accessibilityRole="button"
               accessibilityLabel="Saved and recent destinations"
@@ -1814,7 +1820,7 @@ export default function MapScreen() {
                 color={colors.mutedForeground}
               />
             </TouchableOpacity>
-          </TouchableOpacity>
+          </GlassSurface>
         </View>
       )}
 
@@ -1834,7 +1840,7 @@ export default function MapScreen() {
             {quickButtons.map((btn) => {
               const isScenic = btn.id === "scenic";
               return (
-                <TouchableOpacity
+                <GlassButton
                   key={btn.id}
                   style={[
                     styles.quickBtn,
@@ -1860,7 +1866,7 @@ export default function MapScreen() {
                   >
                     {btn.label}
                   </Text>
-                </TouchableOpacity>
+                </GlassButton>
               );
             })}
           </ScrollView>
@@ -1876,7 +1882,7 @@ export default function MapScreen() {
           ]}
         >
           {/* Grouped pill: compass + layers + friends */}
-          <View style={styles.mapControlPill}>
+          <GlassSurface style={styles.mapControlPill}>
             {/* Compass / north-up toggle */}
             <TouchableOpacity
               style={[
@@ -1958,10 +1964,11 @@ export default function MapScreen() {
                 color={showFriends ? colors.primary : colors.foreground}
               />
             </TouchableOpacity>
-          </View>
+          </GlassSurface>
 
           {/* Separate orange navigate / locate circle */}
-          <TouchableOpacity
+          <GlassButton
+            accessibilityLabel="Recenter map"
             style={styles.mapControlNavigate}
             onPress={handleLocateButton}
           >
@@ -1972,13 +1979,13 @@ export default function MapScreen() {
               size={20}
               color="#fff"
             />
-          </TouchableOpacity>
+          </GlassButton>
         </View>
       )}
 
       {/* ── Layer picker (hidden during drive) ── */}
       {!isDriving && showLayerPicker && (
-        <View
+        <GlassSurface
           style={[
             styles.layerPicker,
             { top: MAP_CONTROLS_TOP + passengerOffset + 130 },
@@ -2024,7 +2031,7 @@ export default function MapScreen() {
               )}
             </TouchableOpacity>
           ))}
-        </View>
+        </GlassSurface>
       )}
 
       {/* ── Resume Following button (non-drive mode only; overlay handles it during drives) ── */}
@@ -2087,7 +2094,10 @@ export default function MapScreen() {
 
       {/* ── Unified bottom card: weather + vehicle + START DRIVE ── */}
       {!isDriving && (
-        <View style={[styles.bottomCard, { bottom: BOTTOM_CARD_BOTTOM }]}>
+        <GlassSurface
+          material="dense"
+          style={[styles.bottomCard, { bottom: BOTTOM_CARD_BOTTOM + 4 }]}
+        >
           <TouchableOpacity
             accessibilityRole="button"
             accessibilityLabel="Vehicle details"
@@ -2211,7 +2221,8 @@ export default function MapScreen() {
             </>
           )}
           {/* START DRIVE pill — right side of vehicle row */}
-          <TouchableOpacity
+          <GlassButton
+            material="accent"
             style={styles.startDriveBtn}
             onPress={handleStartDrive}
             activeOpacity={0.85}
@@ -2222,8 +2233,8 @@ export default function MapScreen() {
               color={colors.primaryForeground}
             />
             <Text style={styles.startDriveBtnText}>START DRIVE</Text>
-          </TouchableOpacity>
-        </View>
+          </GlassButton>
+        </GlassSurface>
       )}
     </View>
   );

@@ -1,3 +1,4 @@
+import { GlassSurface, GlassButton } from "@/components/Glass";
 import palette from "@/constants/colors";
 /**
  * ActiveDriveOverlay
@@ -214,7 +215,7 @@ function GpsSignal({
   const barColor = (i: number) => (i <= bars ? "#22c55e" : palette.dark.border);
 
   return (
-    <View style={styles.gpsCard}>
+    <GlassSurface style={styles.gpsCard}>
       <Ionicons name="hardware-chip-outline" size={16} color={TEXT_PRIMARY} />
       <View>
         <Text style={styles.gpsLabel}>GPS</Text>
@@ -233,14 +234,14 @@ function GpsSignal({
           </View>
         </View>
       </View>
-    </View>
+    </GlassSurface>
   );
 }
 
 // ─── Navigation instruction card ─────────────────────────────────────────────
 function NavCard({ instruction }: { instruction: NavInstruction }) {
   return (
-    <View style={styles.navCard}>
+    <GlassSurface material="dense" style={styles.navCard}>
       <Ionicons
         name={instruction.manoeuvreIcon as any}
         size={36}
@@ -261,7 +262,7 @@ function NavCard({ instruction }: { instruction: NavInstruction }) {
       </View>
       {/* Orange progress bar */}
       <View style={styles.navProgress}></View>
-    </View>
+    </GlassSurface>
   );
 }
 
@@ -336,7 +337,7 @@ export default function ActiveDriveOverlay({
           ]}
         >
           {/* Left: Drive in progress */}
-          <View style={[styles.statusCard, styles.driveStatusCard]}>
+          <GlassSurface style={[styles.statusCard, styles.driveStatusCard]}>
             <View style={styles.driveStatusDot} />
             <View>
               <Text style={styles.driveStatusTitle}>
@@ -346,7 +347,7 @@ export default function ActiveDriveOverlay({
                 {formatDriveTime(driveSeconds)}
               </Text>
             </View>
-          </View>
+          </GlassSurface>
 
           {/* Right: GPS */}
           <GpsSignal accuracy={gpsAccuracy} locationMode={locationMode} />
@@ -384,7 +385,7 @@ export default function ActiveDriveOverlay({
 
         {/* Left map controls: locate + zoom */}
         <View style={styles.mapControls}>
-          <TouchableOpacity
+          <GlassButton
             style={styles.mapBtn}
             onPress={onLocateButton}
             activeOpacity={0.8}
@@ -396,27 +397,27 @@ export default function ActiveDriveOverlay({
               size={20}
               color={followMode === "following" ? ORANGE : TEXT_PRIMARY}
             />
-          </TouchableOpacity>
-          <TouchableOpacity
+          </GlassButton>
+          <GlassButton
             style={styles.mapBtn}
             onPress={onZoomIn}
             activeOpacity={0.8}
           >
             <Ionicons name="add" size={22} color={TEXT_PRIMARY} />
-          </TouchableOpacity>
-          <TouchableOpacity
+          </GlassButton>
+          <GlassButton
             style={styles.mapBtn}
             onPress={onZoomOut}
             activeOpacity={0.8}
           >
             <Ionicons name="remove" size={22} color={TEXT_PRIMARY} />
-          </TouchableOpacity>
+          </GlassButton>
         </View>
 
         {/* Resume following pill */}
         {followMode === "free" && (
           <View style={styles.resumePill}>
-            <TouchableOpacity
+            <GlassButton
               style={styles.resumePillInner}
               onPress={() => {
                 Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
@@ -425,7 +426,7 @@ export default function ActiveDriveOverlay({
             >
               <Ionicons name="navigate" size={16} color={ORANGE} />
               <Text style={styles.resumePillText}>Resume following</Text>
-            </TouchableOpacity>
+            </GlassButton>
           </View>
         )}
 
@@ -441,7 +442,8 @@ export default function ActiveDriveOverlay({
       </View>
 
       {/* ── Solid telemetry panel ── */}
-      <View
+      <GlassSurface
+        material="dense"
         style={[
           styles.panel,
           { paddingBottom: Math.max(insets.bottom, 8) + 8 },
@@ -567,7 +569,8 @@ export default function ActiveDriveOverlay({
           </TouchableOpacity>
 
           {/* End Drive (primary) */}
-          <TouchableOpacity
+          <GlassButton
+            material="accent"
             style={styles.endDriveBtn}
             onPress={handleEndDrive}
             activeOpacity={0.85}
@@ -580,7 +583,7 @@ export default function ActiveDriveOverlay({
               />
               <Text style={styles.endDriveBtnText}>END DRIVE</Text>
             </View>
-          </TouchableOpacity>
+          </GlassButton>
 
           {/* Save Point */}
           <TouchableOpacity
@@ -603,7 +606,7 @@ export default function ActiveDriveOverlay({
             </Text>
           </TouchableOpacity>
         </View>
-      </View>
+      </GlassSurface>
     </View>
   );
 }

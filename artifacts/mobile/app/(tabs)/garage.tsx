@@ -1,3 +1,4 @@
+import { GlassButton } from "@/components/Glass";
 import { ScreenTitle, Disclosure } from "@/components/Cockpit";
 import React, { useState } from "react";
 import {
@@ -323,13 +324,14 @@ export default function GarageScreen() {
     <View style={styles.container}>
       <View style={styles.header}>
         <ScreenTitle title="Garage" eyebrow="Your collection" />
-        <TouchableOpacity
+        <GlassButton
+          material="accent"
           style={styles.addBtn}
           onPress={() => router.push("/vehicle/new")}
         >
           <Ionicons name="add" size={16} color={colors.primaryForeground} />
           <Text style={styles.addBtnText}>Add Vehicle</Text>
-        </TouchableOpacity>
+        </GlassButton>
       </View>
 
       {showNoActiveNote && (
