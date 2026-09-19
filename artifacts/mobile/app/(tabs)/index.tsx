@@ -1,23 +1,37 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import palette from "@/constants/colors";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import {
-  View, Text, StyleSheet, TouchableOpacity, Platform, ScrollView, Image, Animated,
-} from 'react-native';
-import { useRouter } from 'expo-router';
-import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { LinearGradient } from 'expo-linear-gradient';
-import Svg, { Path, Ellipse, Circle } from 'react-native-svg';
-import * as Haptics from 'expo-haptics';
-import { useColors } from '@/hooks/useColors';
-import { useApp } from '@/context/AppContext';
-import { CONFIG } from '@/constants/config';
+  View,
+  Text,
+  StyleSheet,
+  TouchableOpacity,
+  Platform,
+  ScrollView,
+  Image,
+  Animated,
+} from "react-native";
+import { useRouter } from "expo-router";
+import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { LinearGradient } from "expo-linear-gradient";
+import Svg, { Path, Ellipse, Circle } from "react-native-svg";
+import * as Haptics from "expo-haptics";
+import { useColors } from "@/hooks/useColors";
+import { useApp } from "@/context/AppContext";
+import { CONFIG } from "@/constants/config";
 import MapView, {
-  MarkerAnimated, AnimatedRegion, MapType, Camera, Polyline,
-} from 'react-native-maps';
-import ActiveDriveOverlay, { ActiveDriveMode } from '@/components/ActiveDriveOverlay';
-import * as Location from 'expo-location';
+  MarkerAnimated,
+  AnimatedRegion,
+  MapType,
+  Camera,
+  Polyline,
+} from "react-native-maps";
+import ActiveDriveOverlay, {
+  ActiveDriveMode,
+} from "@/components/ActiveDriveOverlay";
+import * as Location from "expo-location";
 
-const MINI_IMAGE = require('@/assets/images/mini-cooper.png');
+const MINI_IMAGE = require("@/assets/images/mini-cooper.png");
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const NAV_ZOOM = 17;
@@ -67,16 +81,19 @@ const ACCURACY_REJECT_M = 120;
 
 // react-native-maps types timing() as requiring a full Region plus a `toValue`
 // its implementation overwrites per key — it animates only the keys it is given.
-type RegionTimingConfig = Parameters<AnimatedRegion['timing']>[0];
+type RegionTimingConfig = Parameters<AnimatedRegion["timing"]>[0];
 
-type FollowMode = 'following' | 'free';
-type HeadingMode = 'heading-up' | 'north-up';
+type FollowMode = "following" | "free";
+type HeadingMode = "heading-up" | "north-up";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 /** Haversine distance in metres between two lat/lon pairs */
 function haversineMeters(
-  lat1: number, lon1: number, lat2: number, lon2: number,
+  lat1: number,
+  lon1: number,
+  lat2: number,
+  lon2: number,
 ): number {
   const R = 6371000;
   const dLat = (lat2 - lat1) * (Math.PI / 180);
@@ -91,13 +108,17 @@ function haversineMeters(
 
 /** Camera tilt for a given state — flat unless driving heading-up */
 function pitchFor(isDriving: boolean, headingMode: HeadingMode): number {
-  return isDriving && headingMode === 'heading-up' ? DRIVE_PITCH : 0;
+  return isDriving && headingMode === "heading-up" ? DRIVE_PITCH : 0;
 }
 
 /** Smooth heading transition that correctly wraps across 0/360 */
-function smoothHeading(current: number, target: number, factor: number): number {
+function smoothHeading(
+  current: number,
+  target: number,
+  factor: number,
+): number {
   const diff = ((target - current + 540) % 360) - 180; // [-180, 180]
-  return ((current + diff * factor) % 360 + 360) % 360;
+  return (((current + diff * factor) % 360) + 360) % 360;
 }
 
 /**
@@ -105,7 +126,10 @@ function smoothHeading(current: number, target: number, factor: number): number 
  * vehicle marker appears in the lower portion of the screen.
  */
 function getOffsetCenter(
-  lat: number, lon: number, headingDeg: number, offsetMeters: number,
+  lat: number,
+  lon: number,
+  headingDeg: number,
+  offsetMeters: number,
 ): { latitude: number; longitude: number } {
   const R = 6371000;
   const reverseDeg = (headingDeg + 180) % 360;
@@ -123,28 +147,28 @@ function getOffsetCenter(
 // shaded trailing half so the direction reads at a glance.  Rotated by the
 // marker to point where the vehicle is heading.  Poor GPS accuracy is surfaced
 // by the "Poor GPS signal" banner rather than anything on the marker itself.
-const LocationArrow = React.memo(function LocationArrow(
-  { rotation }: { rotation: Animated.Value },
-) {
+const LocationArrow = React.memo(function LocationArrow({
+  rotation,
+}: {
+  rotation: Animated.Value;
+}) {
   const spin = rotation.interpolate({
     inputRange: [0, 360],
-    outputRange: ['0deg', '360deg'],
+    outputRange: ["0deg", "360deg"],
   });
   return (
-    <Animated.View style={{
-      width: 40,
-      height: 44,
-      alignItems: 'center',
-      justifyContent: 'center',
-      transform: [{ rotate: spin }],
-    }}>
+    <Animated.View
+      style={{
+        width: 40,
+        height: 44,
+        alignItems: "center",
+        justifyContent: "center",
+        transform: [{ rotate: spin }],
+      }}
+    >
       <Svg width={35} height={40} viewBox="0 0 34 40">
         {/* Soft ground shadow, offset down a touch to lift the arrow off the map */}
-        <Path
-          d="M17 5 L31 37 L17 29 L3 37 Z"
-          fill="#000000"
-          opacity={0.18}
-        />
+        <Path d="M17 5 L31 37 L17 29 L3 37 Z" fill="#000000" opacity={0.18} />
         <Path
           d="M17 3 L31 35 L17 27 L3 35 Z"
           fill="#FFFFFF"
@@ -190,29 +214,120 @@ const UserMarker = React.memo(function UserMarker({
 
 // ─── Demo map background (web only) ─────────────────────────────────────────
 function DemoMapBackground({ mapType }: { mapType: MapType }) {
-  const isSatellite = mapType === 'satellite' || mapType === 'hybrid';
+  const isSatellite = mapType === "satellite" || mapType === "hybrid";
   const bgColors: [string, string, string, string] = isSatellite
-    ? ['#1a3d2a', '#2d5a3c', '#254e34', '#1e4530']
-    : ['#c8d8b0', '#b2cb96', '#9aba7a', '#aec98e'];
+    ? ["#111D20", "#182627", "#142124", "#10191E"]
+    : ["#10161C", "#17212A", "#131D25", "#10161C"];
   return (
     <View style={StyleSheet.absoluteFill}>
       <LinearGradient colors={bgColors} style={StyleSheet.absoluteFill} />
-      <Svg style={StyleSheet.absoluteFill as any} viewBox="0 0 400 850" preserveAspectRatio="xMidYMid slice">
-        <Ellipse cx={75} cy={240} rx={72} ry={44} fill={isSatellite ? '#1a4a6e' : '#5a9fc4'} opacity={isSatellite ? 0.85 : 0.65} />
-        <Ellipse cx={50} cy={275} rx={35} ry={20} fill={isSatellite ? '#1a4a6e' : '#5a9fc4'} opacity={isSatellite ? 0.75 : 0.55} />
-        <Ellipse cx={320} cy={370} rx={45} ry={28} fill={isSatellite ? '#1a4a6e' : '#5a9fc4'} opacity={isSatellite ? 0.7 : 0.5} />
-        <Ellipse cx={290} cy={180} rx={80} ry={55} fill={isSatellite ? '#1d4a28' : '#7aac62'} opacity={0.6} />
-        <Ellipse cx={130} cy={520} rx={90} ry={60} fill={isSatellite ? '#1f5530' : '#88b86e'} opacity={0.5} />
-        <Path d="M 200 0 Q 190 150 195 300 Q 200 450 215 600 L 210 850" stroke={isSatellite ? 'rgba(220,210,185,0.7)' : 'rgba(180,170,150,0.8)'} strokeWidth={5} fill="none" strokeLinecap="round" />
-        <Path d="M 0 380 Q 80 370 160 385 Q 250 400 350 390 L 400 388" stroke={isSatellite ? 'rgba(220,210,185,0.55)' : 'rgba(180,170,150,0.7)'} strokeWidth={4} fill="none" strokeLinecap="round" />
-        <Path d="M 0 480 Q 100 465 200 475 Q 290 485 370 470 L 400 465" stroke={isSatellite ? 'rgba(220,210,185,0.4)' : 'rgba(180,170,150,0.5)'} strokeWidth={2.5} fill="none" strokeLinecap="round" />
-        <Path d="M 155 0 Q 160 120 155 250 Q 150 350 165 420" stroke={isSatellite ? 'rgba(220,210,185,0.45)' : 'rgba(180,170,150,0.55)'} strokeWidth={2} fill="none" strokeLinecap="round" />
-        <Circle cx={198} cy={390} r={6} fill={isSatellite ? 'rgba(240,230,200,0.35)' : 'rgba(160,140,110,0.35)'} />
-        <Circle cx={205} cy={395} r={4} fill={isSatellite ? 'rgba(240,230,200,0.3)' : 'rgba(160,140,110,0.3)'} />
+      <Svg
+        style={StyleSheet.absoluteFill as any}
+        viewBox="0 0 400 850"
+        preserveAspectRatio="xMidYMid slice"
+      >
+        <Ellipse
+          cx={75}
+          cy={240}
+          rx={72}
+          ry={44}
+          fill={isSatellite ? "#1a4a6e" : "#203D50"}
+          opacity={isSatellite ? 0.85 : 0.65}
+        />
+        <Ellipse
+          cx={50}
+          cy={275}
+          rx={35}
+          ry={20}
+          fill={isSatellite ? "#1a4a6e" : "#203D50"}
+          opacity={isSatellite ? 0.75 : 0.55}
+        />
+        <Ellipse
+          cx={320}
+          cy={370}
+          rx={45}
+          ry={28}
+          fill={isSatellite ? "#1a4a6e" : "#203D50"}
+          opacity={isSatellite ? 0.7 : 0.5}
+        />
+        <Ellipse
+          cx={290}
+          cy={180}
+          rx={80}
+          ry={55}
+          fill={isSatellite ? "#1d4a28" : "#233C32"}
+          opacity={0.6}
+        />
+        <Ellipse
+          cx={130}
+          cy={520}
+          rx={90}
+          ry={60}
+          fill={isSatellite ? "#1f5530" : "#233C32"}
+          opacity={0.5}
+        />
+        <Path
+          d="M 200 0 Q 190 150 195 300 Q 200 450 215 600 L 210 850"
+          stroke={isSatellite ? "rgba(220,210,185,0.7)" : "#52616D"}
+          strokeWidth={5}
+          fill="none"
+          strokeLinecap="round"
+        />
+        <Path
+          d="M 0 380 Q 80 370 160 385 Q 250 400 350 390 L 400 388"
+          stroke={isSatellite ? "rgba(220,210,185,0.55)" : "#475460"}
+          strokeWidth={4}
+          fill="none"
+          strokeLinecap="round"
+        />
+        <Path
+          d="M 0 480 Q 100 465 200 475 Q 290 485 370 470 L 400 465"
+          stroke={isSatellite ? "rgba(220,210,185,0.4)" : "#35434E"}
+          strokeWidth={2.5}
+          fill="none"
+          strokeLinecap="round"
+        />
+        <Path
+          d="M 155 0 Q 160 120 155 250 Q 150 350 165 420"
+          stroke={isSatellite ? "rgba(220,210,185,0.45)" : "#35434E"}
+          strokeWidth={2}
+          fill="none"
+          strokeLinecap="round"
+        />
+        <Circle
+          cx={198}
+          cy={390}
+          r={6}
+          fill={
+            isSatellite ? "rgba(240,230,200,0.35)" : "rgba(160,140,110,0.35)"
+          }
+        />
+        <Circle
+          cx={205}
+          cy={395}
+          r={4}
+          fill={isSatellite ? "rgba(240,230,200,0.3)" : "rgba(160,140,110,0.3)"}
+        />
       </Svg>
-      <View style={{ position: 'absolute', bottom: 130, left: 12, backgroundColor: 'rgba(0,0,0,0.5)', borderRadius: 8, paddingHorizontal: 8, paddingVertical: 4 }}>
-        <Text style={{ color: 'rgba(255,255,255,0.7)', fontSize: 10, fontFamily: 'Inter_500Medium' }}>
-          DEMO MAP · No API key connected
+      <View
+        style={{
+          position: "absolute",
+          top: "48%",
+          left: 12,
+          backgroundColor: "rgba(0,0,0,0.5)",
+          borderRadius: 8,
+          paddingHorizontal: 8,
+          paddingVertical: 4,
+        }}
+      >
+        <Text
+          style={{
+            color: "rgba(255,255,255,0.7)",
+            fontSize: 10,
+            fontFamily: "Inter_500Medium",
+          }}
+        >
+          ILLUSTRATIVE MAP / Native maps on device
         </Text>
       </View>
     </View>
@@ -225,24 +340,38 @@ export default function MapScreen() {
   const insets = useSafeAreaInsets();
   const router = useRouter();
   const {
-    activeVehicle, userProfile, isPassengerMode,
-    isDriving, currentDrive, startDrive, endDrive, updateDriveCoordinate,
-    unreadNotificationCount, resolvedUnitSystem,
+    activeVehicle,
+    userProfile,
+    isPassengerMode,
+    isDriving,
+    currentDrive,
+    startDrive,
+    endDrive,
+    updateDriveCoordinate,
+    unreadNotificationCount,
+    resolvedUnitSystem,
   } = useApp();
 
   // ── Map state ──
-  const [mapType, setMapType] = useState<MapType>('satellite');
+  const [mapType, setMapType] = useState<MapType>("standard");
+  const [showQuickPlaces, setShowQuickPlaces] = useState(false);
+  const [showVehicleDetails, setShowVehicleDetails] = useState(false);
   const [showLayerPicker, setShowLayerPicker] = useState(false);
   const [showFriends, setShowFriends] = useState(false);
 
   // ── Location state ──
-  const [locationMode, setLocationMode] = useState<'live' | 'simulated'>('simulated');
-  const [userLocation, setUserLocation] = useState<{ latitude: number; longitude: number } | null>(null);
+  const [locationMode, setLocationMode] = useState<"live" | "simulated">(
+    "simulated",
+  );
+  const [userLocation, setUserLocation] = useState<{
+    latitude: number;
+    longitude: number;
+  } | null>(null);
   const [accuracyWarning, setAccuracyWarning] = useState(false);
 
   // ── Navigation camera state ──
-  const [followMode, setFollowMode] = useState<FollowMode>('following');
-  const [headingMode, setHeadingMode] = useState<HeadingMode>('heading-up');
+  const [followMode, setFollowMode] = useState<FollowMode>("following");
+  const [headingMode, setHeadingMode] = useState<HeadingMode>("heading-up");
   const [displayHeading, setDisplayHeading] = useState(0); // smoothed heading for UI
   // Heading the map itself is rotated to.  Needed because Apple Maps annotations
   // do not rotate with the map, so the arrow's on-screen angle is the difference.
@@ -253,8 +382,8 @@ export default function MapScreen() {
 
   // ── Drive state ──
   const [driveSeconds, setDriveSeconds] = useState(0);
-  const [isPaused,     setIsPaused]     = useState(false);
-  const [gpsAccuracy,  setGpsAccuracy]  = useState<number | null>(null);
+  const [isPaused, setIsPaused] = useState(false);
+  const [gpsAccuracy, setGpsAccuracy] = useState<number | null>(null);
   const isPausedRef = useRef(false);
 
   // ── Refs (avoid stale closures in callbacks) ──
@@ -284,10 +413,17 @@ export default function MapScreen() {
   const hasMarkerPositionRef = useRef(false);
   // Distinguishes "a drive just ended" from "no drive has started yet"
   const wasDrivingRef = useRef(false);
-  const lastPositionRef = useRef<{ lat: number; lon: number; time: number } | null>(null);
-  const followModeRef = useRef<FollowMode>('following');
-  const headingModeRef = useRef<HeadingMode>('heading-up');
-  const userLocationRef = useRef<{ latitude: number; longitude: number } | null>(null);
+  const lastPositionRef = useRef<{
+    lat: number;
+    lon: number;
+    time: number;
+  } | null>(null);
+  const followModeRef = useRef<FollowMode>("following");
+  const headingModeRef = useRef<HeadingMode>("heading-up");
+  const userLocationRef = useRef<{
+    latitude: number;
+    longitude: number;
+  } | null>(null);
   const isDrivingRef = useRef(isDriving);
   const isPassengerModeRef = useRef(isPassengerMode);
   // Timestamp until which region changes are ours rather than the user's.  A
@@ -304,36 +440,51 @@ export default function MapScreen() {
   // React entirely.  Apple Maps annotations stay upright as the map turns, so
   // the angle is where the phone points minus where the map is turned to.
   const syncArrowRotation = useCallback(() => {
-    const angle = ((smoothedHeadingRef.current - mapHeadingRef.current) % 360 + 360) % 360;
+    const angle =
+      (((smoothedHeadingRef.current - mapHeadingRef.current) % 360) + 360) %
+      360;
     arrowRotation.setValue(angle);
   }, [arrowRotation]);
 
   // Keep refs in sync
-  useEffect(() => { isDrivingRef.current = isDriving; }, [isDriving]);
-  useEffect(() => { isPassengerModeRef.current = isPassengerMode; }, [isPassengerMode]);
-  useEffect(() => { followModeRef.current = followMode; }, [followMode]);
-  useEffect(() => { headingModeRef.current = headingMode; }, [headingMode]);
-  useEffect(() => { isPausedRef.current = isPaused; }, [isPaused]);
+  useEffect(() => {
+    isDrivingRef.current = isDriving;
+  }, [isDriving]);
+  useEffect(() => {
+    isPassengerModeRef.current = isPassengerMode;
+  }, [isPassengerMode]);
+  useEffect(() => {
+    followModeRef.current = followMode;
+  }, [followMode]);
+  useEffect(() => {
+    headingModeRef.current = headingMode;
+  }, [headingMode]);
+  useEffect(() => {
+    isPausedRef.current = isPaused;
+  }, [isPaused]);
   // Reset pause state when a drive ends
-  useEffect(() => { if (!isDriving) { setIsPaused(false); } }, [isDriving]);
+  useEffect(() => {
+    if (!isDriving) {
+      setIsPaused(false);
+    }
+  }, [isDriving]);
 
   // Layout constants
   // Floating pill tab bar: height 66, bottom = max(insets.bottom, 16)
-  const tabPillBottom = Math.max(insets.bottom, Platform.OS === 'web' ? 16 : insets.bottom);
-  const tabBarOffset = Platform.OS === 'web' ? 82 : 66 + tabPillBottom;
-  const headerTop = Platform.OS === 'web' ? 67 + insets.top : insets.top;
+  const tabBarOffset = 70 + Math.max(insets.bottom, 12);
+  const headerTop = insets.top + 12;
   const HEADER_H = 44;
   const SEARCH_TOP = headerTop + HEADER_H + 10;
   const QUICK_TOP = SEARCH_TOP + 62 + 10;
-  const MAP_CONTROLS_TOP = QUICK_TOP + 44 + 16;
+  const MAP_CONTROLS_TOP = QUICK_TOP + (showQuickPlaces ? 60 : 4);
   // Bottom card sits above the floating tab bar with an 8 px gap
   const BOTTOM_CARD_BOTTOM = tabBarOffset + 8;
 
   // ── Animate the resume-follow button in/out ──────────────────────────────
   useEffect(() => {
     Animated.spring(resumeButtonAnim, {
-      toValue: followMode === 'free' ? 1 : 0,
-      useNativeDriver: Platform.OS !== 'web',
+      toValue: followMode === "free" ? 1 : 0,
+      useNativeDriver: Platform.OS !== "web",
       tension: 60,
       friction: 10,
     }).start();
@@ -348,15 +499,17 @@ export default function MapScreen() {
       durationMs = CAMERA_ANIM_DEFAULT_MS,
       resetZoom = false,
     ) => {
-      if (!mapRef.current || Platform.OS === 'web') return;
+      if (!mapRef.current || Platform.OS === "web") return;
       programmaticUntilRef.current = Date.now() + durationMs + 300;
 
       if (resetZoom) {
         desiredZoomRef.current = NAV_ZOOM;
-        desiredAltitudeRef.current = isDrivingRef.current ? DRIVE_ALTITUDE : STREET_ALTITUDE;
+        desiredAltitudeRef.current = isDrivingRef.current
+          ? DRIVE_ALTITUDE
+          : STREET_ALTITUDE;
       }
 
-      const isHeadingUp = headingModeRef.current === 'heading-up';
+      const isHeadingUp = headingModeRef.current === "heading-up";
       const mapHeading = isHeadingUp ? heading : 0;
       const center = isHeadingUp
         ? getOffsetCenter(loc.latitude, loc.longitude, heading, offsetM)
@@ -374,7 +527,7 @@ export default function MapScreen() {
       // re-derive altitude from the previous (often still animating) camera,
       // which ratcheted the map outward a little at a time.
       // iOS reads altitude and Android reads zoom; setting both lets them fight.
-      if (Platform.OS === 'ios') camera.altitude = desiredAltitudeRef.current;
+      if (Platform.OS === "ios") camera.altitude = desiredAltitudeRef.current;
       else camera.zoom = desiredZoomRef.current;
 
       mapRef.current.animateCamera(camera, { duration: durationMs });
@@ -385,7 +538,8 @@ export default function MapScreen() {
   // ── Process a new GPS position ────────────────────────────────────────────
   const processPosition = useCallback(
     (
-      lat: number, lon: number,
+      lat: number,
+      lon: number,
       speedMs: number | null,
       gpsHeading: number | null,
       accuracy: number | null,
@@ -415,13 +569,24 @@ export default function MapScreen() {
       setUserLocation(coord);
 
       // ── Size this animation to the gap since the last fix ──
-      const sinceLastFix = lastFixTimeRef.current != null ? now - lastFixTimeRef.current : CAMERA_ANIM_DEFAULT_MS;
+      const sinceLastFix =
+        lastFixTimeRef.current != null
+          ? now - lastFixTimeRef.current
+          : CAMERA_ANIM_DEFAULT_MS;
       lastFixTimeRef.current = now;
-      const animMs = Math.min(CAMERA_ANIM_MAX_MS, Math.max(CAMERA_ANIM_MIN_MS, sinceLastFix));
+      const animMs = Math.min(
+        CAMERA_ANIM_MAX_MS,
+        Math.max(CAMERA_ANIM_MIN_MS, sinceLastFix),
+      );
 
       // ── Glide the marker to the new fix (first fix lands instantly) ──
       if (!hasMarkerPositionRef.current) {
-        markerCoordRef.current.setValue({ latitude: lat, longitude: lon, latitudeDelta: 0, longitudeDelta: 0 });
+        markerCoordRef.current.setValue({
+          latitude: lat,
+          longitude: lon,
+          latitudeDelta: 0,
+          longitudeDelta: 0,
+        });
         hasMarkerPositionRef.current = true;
       } else {
         // Deltas are deliberately omitted so only the position animates
@@ -436,10 +601,18 @@ export default function MapScreen() {
       }
 
       // ── Record to active drive ──
-      if (isDrivingRef.current && !isPassengerModeRef.current && !isPausedRef.current) {
+      if (
+        isDrivingRef.current &&
+        !isPassengerModeRef.current &&
+        !isPausedRef.current
+      ) {
         const speedKmh = speedMs != null ? speedMs * 3.6 : 0;
         // Plausibility-checked speed before updating stats
-        updateDriveCoordinate({ latitude: lat, longitude: lon, speed: speedMs ?? 0 });
+        updateDriveCoordinate({
+          latitude: lat,
+          longitude: lon,
+          speed: speedMs ?? 0,
+        });
       }
 
       // ── Smooth heading ──
@@ -447,7 +620,11 @@ export default function MapScreen() {
       lastSpeedKmhRef.current = speedKmh;
       let targetHeading = smoothedHeadingRef.current;
 
-      if (gpsHeading != null && gpsHeading >= 0 && speedKmh >= MIN_SPEED_FOR_GPS_HEADING) {
+      if (
+        gpsHeading != null &&
+        gpsHeading >= 0 &&
+        speedKmh >= MIN_SPEED_FOR_GPS_HEADING
+      ) {
         // Trust GPS course when moving fast enough
         targetHeading = gpsHeading;
       } else if (compassHeadingRef.current != null) {
@@ -456,13 +633,17 @@ export default function MapScreen() {
       }
       // Smooth toward target heading.  animateCamera eases the rotation itself,
       // so this only needs to damp GPS jitter, not do the visual smoothing.
-      const newHeading = smoothHeading(smoothedHeadingRef.current, targetHeading, GPS_HEADING_SMOOTH);
+      const newHeading = smoothHeading(
+        smoothedHeadingRef.current,
+        targetHeading,
+        GPS_HEADING_SMOOTH,
+      );
       smoothedHeadingRef.current = newHeading;
       setDisplayHeading(Math.round(newHeading));
       syncArrowRotation();
 
       // ── Drive camera follow ──
-      if (followModeRef.current === 'following') {
+      if (followModeRef.current === "following") {
         const offset = isDrivingRef.current ? DRIVE_LOOK_AHEAD_M : 0;
         animateCameraToFollow(coord, newHeading, offset, animMs);
         lastCameraHeadingRef.current = newHeading;
@@ -476,16 +657,16 @@ export default function MapScreen() {
     let cancelled = false;
 
     async function startWatcher() {
-      if (Platform.OS === 'web') {
-        if (typeof navigator === 'undefined' || !('geolocation' in navigator)) {
+      if (Platform.OS === "web") {
+        if (typeof navigator === "undefined" || !("geolocation" in navigator)) {
           setUserLocation(CONFIG.DEMO_REGION);
-          setLocationMode('simulated');
+          setLocationMode("simulated");
           return;
         }
         const watchId = navigator.geolocation.watchPosition(
           (pos) => {
             if (cancelled) return;
-            setLocationMode('live');
+            setLocationMode("live");
             processPosition(
               pos.coords.latitude,
               pos.coords.longitude,
@@ -497,7 +678,7 @@ export default function MapScreen() {
           () => {
             if (cancelled) return;
             setUserLocation(CONFIG.DEMO_REGION);
-            setLocationMode('simulated');
+            setLocationMode("simulated");
           },
           { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 },
         );
@@ -505,12 +686,12 @@ export default function MapScreen() {
       } else {
         const { status } = await Location.requestForegroundPermissionsAsync();
         if (cancelled) return;
-        if (status !== 'granted') {
+        if (status !== "granted") {
           setUserLocation(CONFIG.DEMO_REGION);
-          setLocationMode('simulated');
+          setLocationMode("simulated");
           return;
         }
-        setLocationMode('live');
+        setLocationMode("live");
         const sub = await Location.watchPositionAsync(
           {
             accuracy: Location.Accuracy.BestForNavigation,
@@ -557,7 +738,7 @@ export default function MapScreen() {
   // magnetometer instead — this does the same.  It drives the camera itself
   // because position updates stop arriving when you stand still.
   useEffect(() => {
-    if (Platform.OS === 'web') return;
+    if (Platform.OS === "web") return;
     let cancelled = false;
 
     async function startCompass() {
@@ -567,28 +748,37 @@ export default function MapScreen() {
         // lost, and the rejection was swallowed — so the compass never started
         // and heading only ever came from GPS course while actually moving.
         const { status } = await Location.requestForegroundPermissionsAsync();
-        if (cancelled || status !== 'granted') return;
+        if (cancelled || status !== "granted") return;
 
         const sub = await Location.watchHeadingAsync((h) => {
           if (cancelled) return;
           // trueHeading is -1 until the compass calibrates; magHeading always works
-          const raw = h.trueHeading != null && h.trueHeading >= 0 ? h.trueHeading : h.magHeading;
+          const raw =
+            h.trueHeading != null && h.trueHeading >= 0
+              ? h.trueHeading
+              : h.magHeading;
           if (raw == null || raw < 0) return;
           compassHeadingRef.current = raw;
 
           // Once moving, GPS course is the better signal and processPosition drives
           if (lastSpeedKmhRef.current >= MIN_SPEED_FOR_GPS_HEADING) return;
 
-          const newHeading = smoothHeading(smoothedHeadingRef.current, raw, HEADING_SMOOTH);
+          const newHeading = smoothHeading(
+            smoothedHeadingRef.current,
+            raw,
+            HEADING_SMOOTH,
+          );
           smoothedHeadingRef.current = newHeading;
           setDisplayHeading(Math.round(newHeading));
           syncArrowRotation();
 
-          const delta = Math.abs(((newHeading - lastCameraHeadingRef.current + 540) % 360) - 180);
+          const delta = Math.abs(
+            ((newHeading - lastCameraHeadingRef.current + 540) % 360) - 180,
+          );
           if (
             delta >= COMPASS_CAMERA_MIN_DELTA_DEG &&
-            followModeRef.current === 'following' &&
-            headingModeRef.current === 'heading-up' &&
+            followModeRef.current === "following" &&
+            headingModeRef.current === "heading-up" &&
             userLocationRef.current
           ) {
             lastCameraHeadingRef.current = newHeading;
@@ -600,7 +790,10 @@ export default function MapScreen() {
             );
           }
         });
-        if (cancelled) { sub.remove(); return; }
+        if (cancelled) {
+          sub.remove();
+          return;
+        }
         headingSubRef.current = sub;
       } catch {
         // No magnetometer (simulator, some Android hardware) — GPS course only
@@ -621,7 +814,7 @@ export default function MapScreen() {
   // When a drive starts, immediately enter follow mode and animate to location
   useEffect(() => {
     if (isDriving) {
-      setFollowMode('following');
+      setFollowMode("following");
       if (userLocationRef.current) {
         animateCameraToFollow(
           userLocationRef.current,
@@ -631,11 +824,18 @@ export default function MapScreen() {
           true,
         );
       }
-    } else if (wasDrivingRef.current && mapRef.current && Platform.OS !== 'web') {
+    } else if (
+      wasDrivingRef.current &&
+      mapRef.current &&
+      Platform.OS !== "web"
+    ) {
       // Drive over: drop the tilt back to flat, leaving position and zoom alone.
       // Guarded so mounting flat doesn't fire a pointless camera animation.
       programmaticUntilRef.current = Date.now() + PITCH_TRANSITION_MS + 300;
-      mapRef.current.animateCamera({ pitch: 0 }, { duration: PITCH_TRANSITION_MS });
+      mapRef.current.animateCamera(
+        { pitch: 0 },
+        { duration: PITCH_TRANSITION_MS },
+      );
     }
     wasDrivingRef.current = isDriving;
   }, [isDriving, animateCameraToFollow]);
@@ -643,17 +843,22 @@ export default function MapScreen() {
   // ── Drive timer ────────────────────────────────────────────────────────────
   useEffect(() => {
     if (isDriving && !isPaused) {
-      driveTimerRef.current = setInterval(() => setDriveSeconds((s) => s + 1), 1000);
+      driveTimerRef.current = setInterval(
+        () => setDriveSeconds((s) => s + 1),
+        1000,
+      );
     } else {
       if (driveTimerRef.current) clearInterval(driveTimerRef.current);
       if (!isDriving) setDriveSeconds(0);
     }
-    return () => { if (driveTimerRef.current) clearInterval(driveTimerRef.current); };
+    return () => {
+      if (driveTimerRef.current) clearInterval(driveTimerRef.current);
+    };
   }, [isDriving, isPaused]);
 
   // ── Follow mode resume ────────────────────────────────────────────────────
   const handleResumeFollowing = useCallback(() => {
-    setFollowMode('following');
+    setFollowMode("following");
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     if (userLocationRef.current) {
       animateCameraToFollow(
@@ -668,17 +873,24 @@ export default function MapScreen() {
 
   // ── Heading mode toggle ───────────────────────────────────────────────────
   const handleToggleHeadingMode = useCallback(() => {
-    const next: HeadingMode = headingMode === 'heading-up' ? 'north-up' : 'heading-up';
+    const next: HeadingMode =
+      headingMode === "heading-up" ? "north-up" : "heading-up";
     setHeadingMode(next);
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    if (followMode === 'following' && userLocationRef.current) {
-      const mapHeading = next === 'heading-up' ? smoothedHeadingRef.current : 0;
-      const center = next === 'heading-up' && isDrivingRef.current
-        ? getOffsetCenter(userLocationRef.current.latitude, userLocationRef.current.longitude, smoothedHeadingRef.current, DRIVE_LOOK_AHEAD_M)
-        : userLocationRef.current;
+    if (followMode === "following" && userLocationRef.current) {
+      const mapHeading = next === "heading-up" ? smoothedHeadingRef.current : 0;
+      const center =
+        next === "heading-up" && isDrivingRef.current
+          ? getOffsetCenter(
+              userLocationRef.current.latitude,
+              userLocationRef.current.longitude,
+              smoothedHeadingRef.current,
+              DRIVE_LOOK_AHEAD_M,
+            )
+          : userLocationRef.current;
       mapHeadingRef.current = mapHeading;
       syncArrowRotation();
-      if (mapRef.current && Platform.OS !== 'web') {
+      if (mapRef.current && Platform.OS !== "web") {
         programmaticUntilRef.current = Date.now() + 900;
         mapRef.current.animateCamera(
           {
@@ -696,8 +908,8 @@ export default function MapScreen() {
 
   // ── Map user-interaction detection ────────────────────────────────────────
   const handleMapPanDrag = useCallback(() => {
-    if (followModeRef.current === 'following') {
-      setFollowMode('free');
+    if (followModeRef.current === "following") {
+      setFollowMode("free");
       Haptics.selectionAsync();
     }
   }, []);
@@ -705,12 +917,13 @@ export default function MapScreen() {
   const handleRegionChangeComplete = useCallback(() => {
     // Adopt whatever zoom the map settled at, so a pinch is respected on the
     // next follow update instead of being overwritten by a stale target.
-    if (Platform.OS !== 'web' && mapRef.current) {
+    if (Platform.OS !== "web" && mapRef.current) {
       mapRef.current
         .getCamera()
         .then((cam) => {
           if (cam.zoom != null) desiredZoomRef.current = cam.zoom;
-          if (cam.altitude != null && cam.altitude > 0) desiredAltitudeRef.current = cam.altitude;
+          if (cam.altitude != null && cam.altitude > 0)
+            desiredAltitudeRef.current = cam.altitude;
           if (cam.heading != null) {
             mapHeadingRef.current = cam.heading;
             syncArrowRotation();
@@ -722,8 +935,8 @@ export default function MapScreen() {
     if (Date.now() < programmaticUntilRef.current) return;
 
     // User triggered this change
-    if (followModeRef.current === 'following') {
-      setFollowMode('free');
+    if (followModeRef.current === "following") {
+      setFollowMode("free");
     }
   }, []);
 
@@ -735,11 +948,15 @@ export default function MapScreen() {
 
   function handleEndDrive() {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    router.push('/drive-summary');
+    router.push("/drive-summary");
   }
 
-  function handlePause() { setIsPaused(true); }
-  function handleResume() { setIsPaused(false); }
+  function handlePause() {
+    setIsPaused(true);
+  }
+  function handleResume() {
+    setIsPaused(false);
+  }
 
   function handleSavePoint() {
     // Store current location as a named marker — no-op if no location yet
@@ -747,19 +964,31 @@ export default function MapScreen() {
   }
 
   const handleZoomIn = useCallback(() => {
-    if (!mapRef.current || Platform.OS === 'web') return;
-    mapRef.current.getCamera().then((cam) => {
-      programmaticUntilRef.current = Date.now() + 500;
-      mapRef.current?.animateCamera({ zoom: (cam.zoom ?? 15) + 1 }, { duration: 200 });
-    }).catch(() => {});
+    if (!mapRef.current || Platform.OS === "web") return;
+    mapRef.current
+      .getCamera()
+      .then((cam) => {
+        programmaticUntilRef.current = Date.now() + 500;
+        mapRef.current?.animateCamera(
+          { zoom: (cam.zoom ?? 15) + 1 },
+          { duration: 200 },
+        );
+      })
+      .catch(() => {});
   }, []);
 
   const handleZoomOut = useCallback(() => {
-    if (!mapRef.current || Platform.OS === 'web') return;
-    mapRef.current.getCamera().then((cam) => {
-      programmaticUntilRef.current = Date.now() + 500;
-      mapRef.current?.animateCamera({ zoom: (cam.zoom ?? 15) - 1 }, { duration: 200 });
-    }).catch(() => {});
+    if (!mapRef.current || Platform.OS === "web") return;
+    mapRef.current
+      .getCamera()
+      .then((cam) => {
+        programmaticUntilRef.current = Date.now() + 500;
+        mapRef.current?.animateCamera(
+          { zoom: (cam.zoom ?? 15) - 1 },
+          { duration: 200 },
+        );
+      })
+      .catch(() => {});
   }, []);
 
   // ── Location button ──────────────────────────────────────────────────────
@@ -774,46 +1003,52 @@ export default function MapScreen() {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
 
     // Restore follow mode regardless of platform
-    setFollowMode('following');
+    setFollowMode("following");
 
-    if (Platform.OS === 'web' || !mapRef.current) return;
+    if (Platform.OS === "web" || !mapRef.current) return;
 
     // Read the live camera so we can preserve the user's zoom level
-    let targetZoom    = STREET_ZOOM;
-    let targetAlt     = STREET_ALTITUDE;
-    let preserveZoom  = false;
+    let targetZoom = STREET_ZOOM;
+    let targetAlt = STREET_ALTITUDE;
+    let preserveZoom = false;
 
     try {
       const cam = await mapRef.current.getCamera();
       // Android exposes `zoom`; iOS exposes `altitude` (and often both)
       if (cam.zoom != null && cam.zoom >= MIN_ZOOM_TO_PRESERVE) {
-        targetZoom   = cam.zoom;
+        targetZoom = cam.zoom;
         preserveZoom = true;
       }
       if (cam.altitude != null && cam.altitude < MAX_ALTITUDE_TO_PRESERVE) {
-        targetAlt    = cam.altitude;
+        targetAlt = cam.altitude;
         preserveZoom = true;
       }
       // A drive always uses the nav altitude, or iOS may refuse to tilt
       if (isDrivingRef.current) {
-        targetZoom   = NAV_ZOOM;
-        targetAlt    = DRIVE_ALTITUDE;
+        targetZoom = NAV_ZOOM;
+        targetAlt = DRIVE_ALTITUDE;
       }
-      desiredZoomRef.current     = targetZoom;
+      desiredZoomRef.current = targetZoom;
       desiredAltitudeRef.current = targetAlt;
     } catch {
       // getCamera() unavailable — fall through to street defaults
     }
 
-    const heading    = smoothedHeadingRef.current;
-    const isHeadingUp = headingModeRef.current === 'heading-up';
+    const heading = smoothedHeadingRef.current;
+    const isHeadingUp = headingModeRef.current === "heading-up";
 
     // Centre exactly on the user.  The only exception is an active drive in
     // heading-up mode, where the telemetry panel covers the lower screen and
     // the vehicle needs to sit above it.
-    const center = isHeadingUp && isDrivingRef.current
-      ? getOffsetCenter(loc.latitude, loc.longitude, heading, DRIVE_LOOK_AHEAD_M)
-      : loc;
+    const center =
+      isHeadingUp && isDrivingRef.current
+        ? getOffsetCenter(
+            loc.latitude,
+            loc.longitude,
+            heading,
+            DRIVE_LOOK_AHEAD_M,
+          )
+        : loc;
 
     mapHeadingRef.current = isHeadingUp ? heading : 0;
     syncArrowRotation();
@@ -822,8 +1057,8 @@ export default function MapScreen() {
       {
         center,
         heading: isHeadingUp ? heading : 0,
-        zoom:     targetZoom,
-        pitch:    pitchFor(isDrivingRef.current, headingModeRef.current),
+        zoom: targetZoom,
+        pitch: pitchFor(isDrivingRef.current, headingModeRef.current),
         altitude: targetAlt,
       },
       { duration: 600 },
@@ -836,26 +1071,27 @@ export default function MapScreen() {
     const h = Math.floor(sec / 3600);
     const m = Math.floor((sec % 3600) / 60);
     const s = sec % 60;
-    if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
-    return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+    if (h > 0)
+      return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+    return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
   }
 
   function getGreeting() {
     const hour = new Date().getHours();
-    if (hour < 12) return 'Good morning';
-    if (hour < 17) return 'Good afternoon';
-    return 'Good evening';
+    if (hour < 12) return "Good morning";
+    if (hour < 17) return "Good afternoon";
+    return "Good evening";
   }
 
   // Compass rose display (N / NE / E …)
   function headingLabel(deg: number): string {
-    const dirs = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+    const dirs = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
     return dirs[Math.round(deg / 45) % 8];
   }
 
   // ─── Styles ────────────────────────────────────────────────────────────────
   const CARD_SHADOW = {
-    shadowColor: '#2E2414',
+    shadowColor: "#2E2414",
     shadowOffset: { width: 0, height: 6 },
     shadowOpacity: 0.14,
     shadowRadius: 20,
@@ -863,232 +1099,517 @@ export default function MapScreen() {
   };
 
   const styles = StyleSheet.create({
-    container: { flex: 1, backgroundColor: '#1a3d2a' },
-    mapFull: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 },
+    container: { flex: 1, backgroundColor: "#1a3d2a" },
+    mapFull: { position: "absolute", top: 0, left: 0, right: 0, bottom: 0 },
 
     // ── Passenger / accuracy banners ──
     passengerBanner: {
-      position: 'absolute', left: 0, right: 0, zIndex: 30,
-      backgroundColor: colors.primary, paddingVertical: 7, paddingHorizontal: 16,
-      flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
+      position: "absolute",
+      left: 0,
+      right: 0,
+      zIndex: 30,
+      backgroundColor: colors.primary,
+      paddingVertical: 7,
+      paddingHorizontal: 16,
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 6,
     },
-    passengerBannerText: { fontSize: 13, fontWeight: '600', color: '#fff', fontFamily: 'Inter_600SemiBold' },
+    passengerBannerText: {
+      fontSize: 13,
+      fontWeight: "600",
+      color: "#fff",
+      fontFamily: "Inter_600SemiBold",
+    },
     accuracyWarning: {
-      position: 'absolute', left: 12, zIndex: 20,
-      backgroundColor: 'rgba(234,179,8,0.9)', borderRadius: 8,
-      paddingHorizontal: 10, paddingVertical: 5, flexDirection: 'row', alignItems: 'center', gap: 5,
+      position: "absolute",
+      left: 12,
+      zIndex: 20,
+      backgroundColor: "rgba(234,179,8,0.9)",
+      borderRadius: 8,
+      paddingHorizontal: 10,
+      paddingVertical: 5,
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 5,
     },
-    accuracyWarningText: { fontSize: 11, color: '#1C1C1E', fontFamily: 'Inter_600SemiBold' },
+    accuracyWarningText: {
+      fontSize: 11,
+      color: colors.foreground,
+      fontFamily: "Inter_600SemiBold",
+    },
 
     // ── Header ──
     header: {
-      position: 'absolute', left: 12, right: 12, zIndex: 20,
-      flexDirection: 'row', alignItems: 'center', gap: 10,
+      position: "absolute",
+      left: 12,
+      right: 12,
+      zIndex: 20,
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 10,
     },
     menuBtn: {
-      width: 44, height: 44, borderRadius: 16,
-      backgroundColor: 'rgba(255,255,255,0.97)',
-      alignItems: 'center', justifyContent: 'center',
+      width: 44,
+      height: 44,
+      borderRadius: 16,
+      backgroundColor: colors.card,
+      alignItems: "center",
+      justifyContent: "center",
       borderWidth: StyleSheet.hairlineWidth,
-      borderColor: 'rgba(28,28,30,0.08)',
+      borderColor: colors.border,
       ...CARD_SHADOW,
     },
-    wordmarkWrap: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+    wordmarkWrap: {
+      flex: 1,
+      alignItems: "flex-start",
+      justifyContent: "center",
+    },
     // Wordmark uses Archivo; falls back to Inter if not yet loaded
     wordmark: {
-      fontSize: 17, fontWeight: '700', color: '#1C1C1E',
-      fontFamily: 'Archivo_700Bold',
+      fontSize: 14,
+      fontWeight: "700",
+      color: colors.foreground,
+      fontFamily: "Archivo_700Bold",
       letterSpacing: 2.4,
-      textTransform: 'uppercase',
+      textTransform: "uppercase",
     },
     wordmarkAccent: { color: colors.primary },
-    headerRight: { flexDirection: 'row', gap: 8 },
+    headerRight: { flexDirection: "row", gap: 8 },
     notifBtn: {
-      width: 44, height: 44, borderRadius: 22,
-      backgroundColor: 'rgba(255,255,255,0.97)',
-      alignItems: 'center', justifyContent: 'center',
+      width: 44,
+      height: 44,
+      borderRadius: 22,
+      backgroundColor: colors.card,
+      alignItems: "center",
+      justifyContent: "center",
       borderWidth: StyleSheet.hairlineWidth,
-      borderColor: 'rgba(28,28,30,0.08)',
+      borderColor: colors.border,
       ...CARD_SHADOW,
     },
     avatarBtn: {
-      width: 44, height: 44, borderRadius: 22,
-      backgroundColor: '#1C1C1E',
-      alignItems: 'center', justifyContent: 'center',
+      width: 44,
+      height: 44,
+      borderRadius: 22,
+      backgroundColor: colors.secondary,
+      alignItems: "center",
+      justifyContent: "center",
       ...CARD_SHADOW,
     },
     notifBadge: {
-      position: 'absolute', top: 6, right: 6, width: 16, height: 16, borderRadius: 8,
-      backgroundColor: colors.destructive, alignItems: 'center', justifyContent: 'center',
+      position: "absolute",
+      top: 6,
+      right: 6,
+      width: 16,
+      height: 16,
+      borderRadius: 8,
+      backgroundColor: colors.destructive,
+      alignItems: "center",
+      justifyContent: "center",
     },
-    notifBadgeText: { fontSize: 9, color: '#fff', fontWeight: '700' },
-    avatarText: { fontSize: 15, fontWeight: '700', color: '#fff', fontFamily: 'Inter_700Bold' },
+    notifBadgeText: { fontSize: 9, color: "#fff", fontWeight: "700" },
+    avatarText: {
+      fontSize: 15,
+      fontWeight: "700",
+      color: "#fff",
+      fontFamily: "Inter_700Bold",
+    },
 
     // ── Search bar ──
-    searchBarWrap: { position: 'absolute', left: 12, right: 12, zIndex: 15 },
+    searchBarWrap: { position: "absolute", left: 12, right: 12, zIndex: 15 },
     searchBar: {
-      backgroundColor: 'rgba(255,255,255,0.97)', borderRadius: 20, height: 58,
-      paddingRight: 16, flexDirection: 'row', alignItems: 'center', gap: 0,
+      backgroundColor: colors.card,
+      borderRadius: 20,
+      height: 58,
+      paddingRight: 16,
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 0,
       borderWidth: StyleSheet.hairlineWidth,
-      borderColor: 'rgba(28,28,30,0.06)',
+      borderColor: colors.border,
       ...CARD_SHADOW,
-      overflow: 'hidden',
+      overflow: "hidden",
     },
     searchIconBox: {
-      width: 58, height: 58, alignItems: 'center', justifyContent: 'center',
-      backgroundColor: colors.primary, borderTopLeftRadius: 20, borderBottomLeftRadius: 20,
+      width: 58,
+      height: 58,
+      alignItems: "center",
+      justifyContent: "center",
+      backgroundColor: colors.primary,
+      borderTopLeftRadius: 20,
+      borderBottomLeftRadius: 20,
     },
-    searchPlaceholder: { flex: 1, fontSize: 15, color: '#8A8375', fontFamily: 'Inter_400Regular', marginLeft: 12 },
+    searchPlaceholder: {
+      flex: 1,
+      fontSize: 15,
+      color: colors.mutedForeground,
+      fontFamily: "Inter_400Regular",
+      marginLeft: 12,
+    },
 
     // ── Quick-destination pills ──
-    quickButtonsWrap: { position: 'absolute', left: 0, right: 0, zIndex: 14 },
+    quickButtonsWrap: { position: "absolute", left: 0, right: 0, zIndex: 14 },
     quickButtonsScroll: { paddingHorizontal: 12, gap: 8 },
     quickBtn: {
-      flexDirection: 'row', alignItems: 'center', gap: 6,
-      backgroundColor: 'rgba(255,255,255,0.97)', borderRadius: 999,
-      paddingHorizontal: 14, paddingVertical: 10,
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 6,
+      backgroundColor: colors.card,
+      borderRadius: 999,
+      paddingHorizontal: 14,
+      paddingVertical: 10,
       borderWidth: StyleSheet.hairlineWidth,
-      borderColor: 'rgba(28,28,30,0.08)',
+      borderColor: colors.border,
       ...CARD_SHADOW,
     },
     quickBtnScenic: {
-      backgroundColor: '#1F4D3A',
-      borderColor: 'transparent',
+      backgroundColor: "#1F4D3A",
+      borderColor: "transparent",
     },
-    quickBtnActive: { backgroundColor: colors.primary, borderColor: 'transparent' },
-    quickBtnText: { fontSize: 13, fontWeight: '600', color: '#1C1C1E', fontFamily: 'Inter_600SemiBold' },
-    quickBtnTextScenic: { color: '#fff' },
-    quickBtnTextActive: { color: '#fff' },
+    quickBtnActive: {
+      backgroundColor: colors.primary,
+      borderColor: "transparent",
+    },
+    quickBtnText: {
+      fontSize: 13,
+      fontWeight: "600",
+      color: colors.foreground,
+      fontFamily: "Inter_600SemiBold",
+    },
+    quickBtnTextScenic: { color: "#fff" },
+    quickBtnTextActive: { color: colors.primaryForeground },
 
     // ── Right-side map control pill card ──
-    mapControls: { position: 'absolute', right: 12, zIndex: 15, alignItems: 'center', gap: 10 },
+    mapControls: {
+      position: "absolute",
+      right: 12,
+      zIndex: 15,
+      alignItems: "center",
+      gap: 10,
+    },
     mapControlPill: {
-      backgroundColor: 'rgba(255,255,255,0.97)',
+      backgroundColor: colors.card,
       borderRadius: 24,
       borderWidth: StyleSheet.hairlineWidth,
-      borderColor: 'rgba(28,28,30,0.08)',
-      alignItems: 'center',
-      overflow: 'hidden',
+      borderColor: colors.border,
+      alignItems: "center",
+      overflow: "hidden",
       ...CARD_SHADOW,
     },
     mapControlPillBtn: {
-      width: 46, height: 46, alignItems: 'center', justifyContent: 'center',
+      width: 46,
+      height: 46,
+      alignItems: "center",
+      justifyContent: "center",
     },
     mapControlDivider: {
       height: StyleSheet.hairlineWidth,
       width: 26,
-      backgroundColor: 'rgba(28,28,30,0.12)',
+      backgroundColor: colors.border,
     },
     mapControlNavigate: {
-      width: 46, height: 46, borderRadius: 23,
+      width: 46,
+      height: 46,
+      borderRadius: 23,
       backgroundColor: colors.primary,
-      alignItems: 'center', justifyContent: 'center',
+      alignItems: "center",
+      justifyContent: "center",
       ...CARD_SHADOW,
     },
     // Legacy (still used by layer picker positioning)
     mapControlBtn: {
-      width: 46, height: 46, borderRadius: 23,
-      backgroundColor: 'rgba(255,255,255,0.97)', alignItems: 'center', justifyContent: 'center',
+      width: 46,
+      height: 46,
+      borderRadius: 23,
+      backgroundColor: colors.card,
+      alignItems: "center",
+      justifyContent: "center",
       ...CARD_SHADOW,
     },
     mapControlBtnActive: { backgroundColor: colors.primary },
-    compassNorthLabel: { fontSize: 8, fontWeight: '700', color: colors.destructive, fontFamily: 'Inter_700Bold', lineHeight: 10 },
-    compassDirLabel: { fontSize: 10, fontWeight: '600', color: '#1C1C1E', fontFamily: 'Inter_600SemiBold', lineHeight: 12 },
+    compassNorthLabel: {
+      fontSize: 8,
+      fontWeight: "700",
+      color: colors.destructive,
+      fontFamily: "Inter_700Bold",
+      lineHeight: 10,
+    },
+    compassDirLabel: {
+      fontSize: 10,
+      fontWeight: "600",
+      color: colors.foreground,
+      fontFamily: "Inter_600SemiBold",
+      lineHeight: 12,
+    },
 
     // ── Resume following button ──
     resumeBtn: {
-      position: 'absolute', zIndex: 25,
-      backgroundColor: 'rgba(255,255,255,0.97)', borderRadius: 24,
-      paddingHorizontal: 18, paddingVertical: 12,
-      flexDirection: 'row', alignItems: 'center', gap: 8,
+      position: "absolute",
+      zIndex: 25,
+      backgroundColor: colors.card,
+      borderRadius: 24,
+      paddingHorizontal: 18,
+      paddingVertical: 12,
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 8,
       borderWidth: StyleSheet.hairlineWidth,
-      borderColor: 'rgba(28,28,30,0.08)',
+      borderColor: colors.border,
       ...CARD_SHADOW,
     },
-    resumeBtnText: { fontSize: 14, fontWeight: '700', color: '#1C1C1E', fontFamily: 'Inter_700Bold' },
+    resumeBtnText: {
+      fontSize: 14,
+      fontWeight: "700",
+      color: colors.foreground,
+      fontFamily: "Inter_700Bold",
+    },
 
     // ── Layer picker ──
     layerPicker: {
-      position: 'absolute', right: 66, zIndex: 20,
-      backgroundColor: 'rgba(255,255,255,0.97)', borderRadius: 14, overflow: 'hidden', ...CARD_SHADOW,
+      position: "absolute",
+      right: 66,
+      zIndex: 20,
+      backgroundColor: colors.card,
+      borderRadius: 14,
+      overflow: "hidden",
+      ...CARD_SHADOW,
     },
     layerOption: {
-      paddingHorizontal: 14, paddingVertical: 10, flexDirection: 'row', alignItems: 'center', gap: 8,
-      borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: '#E8E4DE',
+      paddingHorizontal: 14,
+      paddingVertical: 10,
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 8,
+      borderBottomWidth: StyleSheet.hairlineWidth,
+      borderBottomColor: colors.border,
     },
     layerOptionLast: { borderBottomWidth: 0 },
-    layerOptionText: { fontSize: 14, color: '#1C1C1E', fontFamily: 'Inter_400Regular' },
-    layerOptionTextActive: { fontFamily: 'Inter_600SemiBold', color: colors.primary },
+    layerOptionText: {
+      fontSize: 14,
+      color: colors.foreground,
+      fontFamily: "Inter_400Regular",
+    },
+    layerOptionTextActive: {
+      fontFamily: "Inter_600SemiBold",
+      color: colors.primary,
+    },
 
     // ── Unified bottom card ──
     bottomCard: {
-      position: 'absolute', left: 16, right: 16, zIndex: 15,
-      backgroundColor: 'rgba(255,255,255,0.97)',
+      position: "absolute",
+      left: 16,
+      right: 16,
+      zIndex: 15,
+      backgroundColor: colors.card,
       borderRadius: 26,
       padding: 16,
       borderWidth: StyleSheet.hairlineWidth,
-      borderColor: 'rgba(28,28,30,0.06)',
+      borderColor: colors.border,
       ...CARD_SHADOW,
     },
-    weatherRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 12 },
-    weatherTemp: { fontSize: 20, fontWeight: '700', color: '#1C1C1E', fontFamily: 'Inter_700Bold' },
-    weatherCondition: { fontSize: 12, color: '#1C1C1E', fontFamily: 'Inter_500Medium' },
-    weatherGreeting: { fontSize: 11, color: '#8A8375', fontFamily: 'Inter_400Regular' },
-    cardDivider: { height: StyleSheet.hairlineWidth, backgroundColor: 'rgba(28,28,30,0.08)', marginBottom: 12 },
-    vehicleRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+    weatherRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 6,
+      marginBottom: 12,
+    },
+    weatherTemp: {
+      fontSize: 20,
+      fontWeight: "700",
+      color: colors.foreground,
+      fontFamily: "Inter_700Bold",
+    },
+    weatherCondition: {
+      fontSize: 12,
+      color: colors.foreground,
+      fontFamily: "Inter_500Medium",
+    },
+    weatherGreeting: {
+      fontSize: 11,
+      color: colors.mutedForeground,
+      fontFamily: "Inter_400Regular",
+    },
+    cardDivider: {
+      height: StyleSheet.hairlineWidth,
+      backgroundColor: colors.border,
+      marginBottom: 12,
+    },
+    vehicleRow: { flexDirection: "row", alignItems: "center", gap: 10 },
     vehicleThumb: { width: 48, height: 48 },
-    vehicleName: { fontSize: 13, fontWeight: '700', color: '#1C1C1E', fontFamily: 'Inter_700Bold' },
-    vehicleMeta: { flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 2 },
-    vehicleMetaText: { fontSize: 11, color: '#8A8375', fontFamily: 'Inter_400Regular' },
+    vehicleName: {
+      fontSize: 13,
+      fontWeight: "700",
+      color: colors.foreground,
+      fontFamily: "Inter_700Bold",
+    },
+    vehicleMeta: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 4,
+      marginTop: 2,
+    },
+    vehicleMetaText: {
+      fontSize: 11,
+      color: colors.mutedForeground,
+      fontFamily: "Inter_400Regular",
+    },
     demoTag: {
-      backgroundColor: 'rgba(244,99,26,0.12)', borderRadius: 6,
-      paddingHorizontal: 6, paddingVertical: 2, marginTop: 4, alignSelf: 'flex-start',
+      backgroundColor: "rgba(244,99,26,0.12)",
+      borderRadius: 6,
+      paddingHorizontal: 6,
+      paddingVertical: 2,
+      marginTop: 4,
+      alignSelf: "flex-start",
     },
-    demoTagText: { fontSize: 9, color: colors.primary, fontFamily: 'Inter_500Medium' },
+    demoTagText: {
+      fontSize: 9,
+      color: colors.primary,
+      fontFamily: "Inter_500Medium",
+    },
     startDriveBtn: {
-      backgroundColor: colors.primary, borderRadius: 999,
-      paddingHorizontal: 18, paddingVertical: 11,
-      flexDirection: 'row', alignItems: 'center', gap: 7,
-      marginLeft: 'auto' as any,
+      backgroundColor: colors.primary,
+      borderRadius: 12,
+      minHeight: 50,
+      justifyContent: "center",
+      paddingHorizontal: 18,
+      paddingVertical: 11,
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 7,
+      marginTop: 12,
     },
-    startDriveBtnText: { fontSize: 13, fontWeight: '700', color: '#fff', fontFamily: 'Inter_700Bold', letterSpacing: 0.4 },
+    startDriveBtnText: {
+      fontSize: 13,
+      fontWeight: "700",
+      color: colors.primaryForeground,
+      fontFamily: "Inter_700Bold",
+      letterSpacing: 0.4,
+    },
 
     // ── Retained for drive HUD layout (legacy, unused visually but keeps TS happy) ──
-    driveHUD: { position: 'absolute', left: 12, right: 12, zIndex: 20 },
-    driveHUDTitle: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 12 },
-    driveIndicator: { width: 8, height: 8, borderRadius: 4, backgroundColor: '#22c55e' },
-    driveHUDTitleText: { fontSize: 14, fontWeight: '600', color: '#1C1C1E', fontFamily: 'Inter_600SemiBold', flex: 1 },
-    driveTimer: { fontSize: 22, fontWeight: '700', color: '#1C1C1E', fontFamily: 'Inter_700Bold' },
-    driveStats: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 10 },
-    driveStatItem: { alignItems: 'center' },
-    driveStatValue: { fontSize: 16, fontWeight: '600', color: '#1C1C1E', fontFamily: 'Inter_600SemiBold' },
-    driveStatLabel: { fontSize: 10, color: '#8A8680', fontFamily: 'Inter_400Regular', marginTop: 1 },
-    endDriveBtn: { marginTop: 12, borderRadius: 12, overflow: 'hidden' },
-    endDriveBtnInner: { paddingVertical: 11, alignItems: 'center', justifyContent: 'center', backgroundColor: '#1C1C1E' },
-    endDriveBtnText: { fontSize: 14, fontWeight: '600', color: '#fff', fontFamily: 'Inter_600SemiBold' },
-    passengerNote: { fontSize: 10, color: colors.primary, fontFamily: 'Inter_400Regular', textAlign: 'center', marginTop: 6 },
-    locationTag: {
-      position: 'absolute', zIndex: 20, right: 66,
-      backgroundColor: 'rgba(0,0,0,0.5)', borderRadius: 8,
-      paddingHorizontal: 8, paddingVertical: 4, flexDirection: 'row', alignItems: 'center', gap: 4,
+    driveHUD: { position: "absolute", left: 12, right: 12, zIndex: 20 },
+    driveHUDTitle: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 6,
+      marginBottom: 12,
     },
-    locationTagText: { fontSize: 10, color: 'rgba(255,255,255,0.8)', fontFamily: 'Inter_500Medium' },
+    driveIndicator: {
+      width: 8,
+      height: 8,
+      borderRadius: 4,
+      backgroundColor: "#22c55e",
+    },
+    driveHUDTitleText: {
+      fontSize: 14,
+      fontWeight: "600",
+      color: colors.foreground,
+      fontFamily: "Inter_600SemiBold",
+      flex: 1,
+    },
+    driveTimer: {
+      fontSize: 22,
+      fontWeight: "700",
+      color: colors.foreground,
+      fontFamily: "Inter_700Bold",
+    },
+    driveStats: {
+      flexDirection: "row",
+      justifyContent: "space-between",
+      marginTop: 10,
+    },
+    driveStatItem: { alignItems: "center" },
+    driveStatValue: {
+      fontSize: 16,
+      fontWeight: "600",
+      color: colors.foreground,
+      fontFamily: "Inter_600SemiBold",
+    },
+    driveStatLabel: {
+      fontSize: 10,
+      color: colors.mutedForeground,
+      fontFamily: "Inter_400Regular",
+      marginTop: 1,
+    },
+    endDriveBtn: { marginTop: 12, borderRadius: 12, overflow: "hidden" },
+    endDriveBtnInner: {
+      paddingVertical: 11,
+      alignItems: "center",
+      justifyContent: "center",
+      backgroundColor: colors.foreground,
+    },
+    endDriveBtnText: {
+      fontSize: 14,
+      fontWeight: "600",
+      color: "#fff",
+      fontFamily: "Inter_600SemiBold",
+    },
+    passengerNote: {
+      fontSize: 10,
+      color: colors.primary,
+      fontFamily: "Inter_400Regular",
+      textAlign: "center",
+      marginTop: 6,
+    },
+    locationTag: {
+      position: "absolute",
+      zIndex: 20,
+      right: 66,
+      backgroundColor: "rgba(0,0,0,0.5)",
+      borderRadius: 8,
+      paddingHorizontal: 8,
+      paddingVertical: 4,
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 4,
+    },
+    locationTagText: {
+      fontSize: 10,
+      color: "rgba(255,255,255,0.8)",
+      fontFamily: "Inter_500Medium",
+    },
   });
 
   const passengerOffset = isPassengerMode ? 34 : 0;
 
   const quickButtons = [
-    { id: 'home', label: 'Home', icon: 'home-outline' as const, isActive: false },
-    { id: 'work', label: 'Work', icon: 'briefcase-outline' as const, isActive: false },
-    { id: 'favs', label: 'Favourites', icon: 'star-outline' as const, isActive: false },
-    { id: 'recent', label: 'Recent', icon: 'time-outline' as const, isActive: false },
-    { id: 'scenic', label: 'Scenic', icon: 'triangle-outline' as const, isActive: false },
+    {
+      id: "home",
+      label: "Home",
+      icon: "home-outline" as const,
+      isActive: false,
+    },
+    {
+      id: "work",
+      label: "Work",
+      icon: "briefcase-outline" as const,
+      isActive: false,
+    },
+    {
+      id: "favs",
+      label: "Favourites",
+      icon: "star-outline" as const,
+      isActive: false,
+    },
+    {
+      id: "recent",
+      label: "Recent",
+      icon: "time-outline" as const,
+      isActive: false,
+    },
+    {
+      id: "scenic",
+      label: "Scenic",
+      icon: "triangle-outline" as const,
+      isActive: false,
+    },
   ];
 
   const mapLayers: Array<{ type: MapType; label: string; icon: string }> = [
-    { type: 'standard', label: 'Standard', icon: 'map-outline' },
-    { type: 'terrain', label: 'Terrain', icon: 'earth-outline' },
-    { type: 'satellite', label: 'Satellite', icon: 'planet-outline' },
+    { type: "standard", label: "Standard", icon: "map-outline" },
+    { type: "terrain", label: "Terrain", icon: "earth-outline" },
+    { type: "satellite", label: "Satellite", icon: "planet-outline" },
   ];
 
   // The marker rotation always equals the vehicle's actual heading.
@@ -1102,13 +1623,14 @@ export default function MapScreen() {
   // map-relative and works natively, which is cheaper, so it is kept there.
   // On iOS this stays constant so the memoised marker never re-renders; Android
   // needs the prop to change, which is cheap there because it is a native rotation.
-  const markerRotation = Platform.OS === 'ios' ? 0 : displayHeading;
+  const markerRotation = Platform.OS === "ios" ? 0 : displayHeading;
 
   return (
     <View style={styles.container}>
       {/* ── Map ── */}
-      {Platform.OS !== 'web' ? (
+      {Platform.OS !== "web" ? (
         <MapView
+          userInterfaceStyle="dark"
           ref={mapRef}
           style={styles.mapFull}
           mapType={mapType}
@@ -1125,7 +1647,11 @@ export default function MapScreen() {
           initialRegion={
             userLocation
               ? { ...userLocation, latitudeDelta: 0.012, longitudeDelta: 0.012 }
-              : { ...CONFIG.DEMO_REGION, latitudeDelta: 0.012, longitudeDelta: 0.012 }
+              : {
+                  ...CONFIG.DEMO_REGION,
+                  latitudeDelta: 0.012,
+                  longitudeDelta: 0.012,
+                }
           }
         >
           {userLocation && (
@@ -1139,7 +1665,7 @@ export default function MapScreen() {
           {isDriving && currentDrive && currentDrive.coordinates.length > 1 && (
             <Polyline
               coordinates={currentDrive.coordinates}
-              strokeColor="#F4631A"
+              strokeColor={colors.primary}
               strokeWidth={4}
               lineCap="round"
               lineJoin="round"
@@ -1154,39 +1680,93 @@ export default function MapScreen() {
       {isPassengerMode && (
         <View style={[styles.passengerBanner, { top: headerTop }]}>
           <Ionicons name="walk-outline" size={14} color="#fff" />
-          <Text style={styles.passengerBannerText}>Passenger Mode — Journey not recording</Text>
-          <TouchableOpacity onPress={() => router.push('/settings')} style={{ marginLeft: 8 }}>
-            <Text style={{ fontSize: 12, color: 'rgba(255,255,255,0.7)', fontFamily: 'Inter_400Regular', textDecorationLine: 'underline' }}>Settings</Text>
+          <Text style={styles.passengerBannerText}>
+            Passenger Mode — Journey not recording
+          </Text>
+          <TouchableOpacity
+            onPress={() => router.push("/settings")}
+            style={{ marginLeft: 8 }}
+          >
+            <Text
+              style={{
+                fontSize: 12,
+                color: "rgba(255,255,255,0.7)",
+                fontFamily: "Inter_400Regular",
+                textDecorationLine: "underline",
+              }}
+            >
+              Settings
+            </Text>
           </TouchableOpacity>
         </View>
       )}
 
       {/* ── GPS accuracy warning ── */}
       {accuracyWarning && (
-        <View style={[styles.accuracyWarning, { top: headerTop + HEADER_H + 60 + passengerOffset }]}>
-          <Ionicons name="warning-outline" size={12} color="#1C1C1E" />
+        <View
+          style={[
+            styles.accuracyWarning,
+            { top: headerTop + HEADER_H + 60 + passengerOffset },
+          ]}
+        >
+          <Ionicons
+            name="warning-outline"
+            size={12}
+            color={colors.foreground}
+          />
           <Text style={styles.accuracyWarningText}>Poor GPS signal</Text>
         </View>
       )}
 
       {/* ── Floating header ── (hidden during active drive) */}
-      <View style={[styles.header, { top: headerTop + passengerOffset, display: isDriving ? 'none' : 'flex' }]}>
-        <TouchableOpacity style={styles.menuBtn} onPress={() => router.push('/settings')}>
-          <Ionicons name="menu" size={22} color="#1C1C1E" />
+      <View
+        style={[
+          styles.header,
+          {
+            top: headerTop + passengerOffset,
+            display: isDriving ? "none" : "flex",
+          },
+        ]}
+      >
+        <TouchableOpacity
+          accessibilityRole="button"
+          accessibilityLabel="Settings"
+          style={styles.menuBtn}
+          onPress={() => router.push("/settings")}
+        >
+          <Ionicons name="menu" size={22} color={colors.foreground} />
         </TouchableOpacity>
         <View style={styles.wordmarkWrap}>
-          <Text style={styles.wordmark}>Drive <Text style={styles.wordmarkAccent}>OS</Text></Text>
+          <Text style={styles.wordmark}>
+            <Text style={styles.wordmarkAccent}>DRIVE</Text> / EXPLORE
+          </Text>
         </View>
         <View style={styles.headerRight}>
-          <TouchableOpacity style={styles.notifBtn} onPress={() => router.push('/messages')}>
-            <Ionicons name="notifications-outline" size={20} color="#1C1C1E" />
+          <TouchableOpacity
+            accessibilityRole="button"
+            accessibilityLabel="Messages and notifications"
+            style={styles.notifBtn}
+            onPress={() => router.push("/messages")}
+          >
+            <Ionicons
+              name="notifications-outline"
+              size={20}
+              color={colors.foreground}
+            />
             {(unreadNotificationCount ?? 0) > 0 && (
               <View style={styles.notifBadge}>
-                <Text style={styles.notifBadgeText}>{unreadNotificationCount}</Text>
+                <Text style={styles.notifBadgeText}>
+                  {unreadNotificationCount}
+                </Text>
               </View>
             )}
           </TouchableOpacity>
-          <TouchableOpacity style={styles.avatarBtn} onPress={() => router.push('/(tabs)/profile')}>
+          <TouchableOpacity
+            accessibilityRole="button"
+            accessibilityLabel="Driver profile"
+            style={styles.avatarBtn}
+            onPress={() => router.push("/(tabs)/profile")}
+          >
             <Text style={styles.avatarText}>{userProfile.name.charAt(0)}</Text>
           </TouchableOpacity>
         </View>
@@ -1194,40 +1774,92 @@ export default function MapScreen() {
 
       {/* ── Search bar ── */}
       {!isDriving && (
-        <View style={[styles.searchBarWrap, { top: SEARCH_TOP + passengerOffset }]}>
-          <TouchableOpacity style={styles.searchBar} onPress={() => router.push('/search')} activeOpacity={0.85}>
+        <View
+          style={[styles.searchBarWrap, { top: SEARCH_TOP + passengerOffset }]}
+        >
+          <TouchableOpacity
+            style={styles.searchBar}
+            onPress={() => router.push("/search")}
+            activeOpacity={0.85}
+          >
             <View style={styles.searchIconBox}>
-              <Ionicons name="search" size={20} color="#fff" />
+              <Ionicons
+                name="search"
+                size={20}
+                color={colors.primaryForeground}
+              />
             </View>
-            <Text style={styles.searchPlaceholder}>Where are we going?</Text>
-            <Ionicons name="mic-outline" size={20} color="#8A8375" />
+            <Text style={styles.searchPlaceholder}>
+              Find your next destination
+            </Text>
+            <TouchableOpacity
+              accessibilityRole="button"
+              accessibilityLabel="Saved and recent destinations"
+              accessibilityState={{ expanded: showQuickPlaces }}
+              onPress={(event) => {
+                event.stopPropagation();
+                setShowQuickPlaces(!showQuickPlaces);
+                setShowVehicleDetails(false);
+              }}
+              style={{
+                width: 48,
+                height: 48,
+                alignItems: "center",
+                justifyContent: "center",
+              }}
+            >
+              <Ionicons
+                name={showQuickPlaces ? "chevron-up" : "bookmark-outline"}
+                size={20}
+                color={colors.mutedForeground}
+              />
+            </TouchableOpacity>
           </TouchableOpacity>
         </View>
       )}
 
       {/* ── Quick destination buttons ── */}
-      {!isDriving && (
-        <View style={[styles.quickButtonsWrap, { top: QUICK_TOP + passengerOffset }]}>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.quickButtonsScroll}>
+      {!isDriving && showQuickPlaces && (
+        <View
+          style={[
+            styles.quickButtonsWrap,
+            { top: QUICK_TOP + passengerOffset },
+          ]}
+        >
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.quickButtonsScroll}
+          >
             {quickButtons.map((btn) => {
-              const isScenic = btn.id === 'scenic';
+              const isScenic = btn.id === "scenic";
               return (
                 <TouchableOpacity
                   key={btn.id}
-                  style={[styles.quickBtn, isScenic && styles.quickBtnScenic, btn.isActive && styles.quickBtnActive]}
-                  onPress={() => router.push('/search')}
+                  style={[
+                    styles.quickBtn,
+                    isScenic && styles.quickBtnScenic,
+                    btn.isActive && styles.quickBtnActive,
+                  ]}
+                  onPress={() => router.push("/search")}
                   activeOpacity={0.8}
                 >
                   <Ionicons
                     name={btn.icon}
                     size={15}
-                    color={isScenic || btn.isActive ? '#fff' : '#1C1C1E'}
+                    color={
+                      isScenic || btn.isActive ? "#fff" : colors.foreground
+                    }
                   />
-                  <Text style={[
-                    styles.quickBtnText,
-                    isScenic && styles.quickBtnTextScenic,
-                    btn.isActive && styles.quickBtnTextActive,
-                  ]}>{btn.label}</Text>
+                  <Text
+                    style={[
+                      styles.quickBtnText,
+                      isScenic && styles.quickBtnTextScenic,
+                      btn.isActive && styles.quickBtnTextActive,
+                    ]}
+                  >
+                    {btn.label}
+                  </Text>
                 </TouchableOpacity>
               );
             })}
@@ -1237,19 +1869,53 @@ export default function MapScreen() {
 
       {/* ── Map controls (right side, hidden during drive — overlay has its own) ── */}
       {!isDriving && (
-        <View style={[styles.mapControls, { top: MAP_CONTROLS_TOP + passengerOffset }]}>
+        <View
+          style={[
+            styles.mapControls,
+            { top: MAP_CONTROLS_TOP + passengerOffset },
+          ]}
+        >
           {/* Grouped pill: compass + layers + friends */}
           <View style={styles.mapControlPill}>
             {/* Compass / north-up toggle */}
             <TouchableOpacity
-              style={[styles.mapControlPillBtn, headingMode === 'north-up' && { backgroundColor: 'rgba(244,99,26,0.1)' }]}
+              style={[
+                styles.mapControlPillBtn,
+                headingMode === "north-up" && {
+                  backgroundColor: "rgba(244,99,26,0.1)",
+                },
+              ]}
               onPress={handleToggleHeadingMode}
             >
-              <View style={{ transform: [{ rotate: headingMode === 'heading-up' ? `${-displayHeading}deg` : '0deg' }], alignItems: 'center' }}>
+              <View
+                style={{
+                  transform: [
+                    {
+                      rotate:
+                        headingMode === "heading-up"
+                          ? `${-displayHeading}deg`
+                          : "0deg",
+                    },
+                  ],
+                  alignItems: "center",
+                }}
+              >
                 <Text style={styles.compassNorthLabel}>N</Text>
               </View>
-              <Text style={[styles.compassDirLabel, { color: headingMode === 'north-up' ? colors.primary : '#1C1C1E' }]}>
-                {headingMode === 'north-up' ? 'N↑' : headingLabel(displayHeading)}
+              <Text
+                style={[
+                  styles.compassDirLabel,
+                  {
+                    color:
+                      headingMode === "north-up"
+                        ? colors.primary
+                        : colors.foreground,
+                  },
+                ]}
+              >
+                {headingMode === "north-up"
+                  ? "N↑"
+                  : headingLabel(displayHeading)}
               </Text>
             </TouchableOpacity>
 
@@ -1257,27 +1923,52 @@ export default function MapScreen() {
 
             {/* Layer picker toggle */}
             <TouchableOpacity
-              style={[styles.mapControlPillBtn, showLayerPicker && { backgroundColor: 'rgba(244,99,26,0.1)' }]}
-              onPress={() => { setShowLayerPicker(!showLayerPicker); Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); }}
+              style={[
+                styles.mapControlPillBtn,
+                showLayerPicker && { backgroundColor: "rgba(244,99,26,0.1)" },
+              ]}
+              onPress={() => {
+                setShowLayerPicker(!showLayerPicker);
+                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+              }}
             >
-              <Ionicons name="layers-outline" size={20} color={showLayerPicker ? colors.primary : '#1C1C1E'} />
+              <Ionicons
+                name="layers-outline"
+                size={20}
+                color={showLayerPicker ? colors.primary : colors.foreground}
+              />
             </TouchableOpacity>
 
             <View style={styles.mapControlDivider} />
 
             {/* Friends toggle */}
             <TouchableOpacity
-              style={[styles.mapControlPillBtn, showFriends && { backgroundColor: 'rgba(244,99,26,0.1)' }]}
-              onPress={() => { setShowFriends(!showFriends); Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); }}
+              style={[
+                styles.mapControlPillBtn,
+                showFriends && { backgroundColor: "rgba(244,99,26,0.1)" },
+              ]}
+              onPress={() => {
+                setShowFriends(!showFriends);
+                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+              }}
             >
-              <Ionicons name="people-outline" size={20} color={showFriends ? colors.primary : '#1C1C1E'} />
+              <Ionicons
+                name="people-outline"
+                size={20}
+                color={showFriends ? colors.primary : colors.foreground}
+              />
             </TouchableOpacity>
           </View>
 
           {/* Separate orange navigate / locate circle */}
-          <TouchableOpacity style={styles.mapControlNavigate} onPress={handleLocateButton}>
+          <TouchableOpacity
+            style={styles.mapControlNavigate}
+            onPress={handleLocateButton}
+          >
             <Ionicons
-              name={followMode === 'following' ? 'navigate' : 'navigate-outline'}
+              name={
+                followMode === "following" ? "navigate" : "navigate-outline"
+              }
               size={20}
               color="#fff"
             />
@@ -1287,16 +1978,50 @@ export default function MapScreen() {
 
       {/* ── Layer picker (hidden during drive) ── */}
       {!isDriving && showLayerPicker && (
-        <View style={[styles.layerPicker, { top: MAP_CONTROLS_TOP + passengerOffset + 130 }]}>
+        <View
+          style={[
+            styles.layerPicker,
+            { top: MAP_CONTROLS_TOP + passengerOffset + 130 },
+          ]}
+        >
           {mapLayers.map((layer, i) => (
             <TouchableOpacity
               key={layer.type}
-              style={[styles.layerOption, i === mapLayers.length - 1 && styles.layerOptionLast]}
-              onPress={() => { setMapType(layer.type); setShowLayerPicker(false); Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); }}
+              style={[
+                styles.layerOption,
+                i === mapLayers.length - 1 && styles.layerOptionLast,
+              ]}
+              onPress={() => {
+                setMapType(layer.type);
+                setShowLayerPicker(false);
+                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+              }}
             >
-              <Ionicons name={layer.icon as any} size={16} color={mapType === layer.type ? colors.primary : '#8A8680'} />
-              <Text style={[styles.layerOptionText, mapType === layer.type && styles.layerOptionTextActive]}>{layer.label}</Text>
-              {mapType === layer.type && <Ionicons name="checkmark" size={14} color={colors.primary} style={{ marginLeft: 'auto' as any }} />}
+              <Ionicons
+                name={layer.icon as any}
+                size={16}
+                color={
+                  mapType === layer.type
+                    ? colors.primary
+                    : colors.mutedForeground
+                }
+              />
+              <Text
+                style={[
+                  styles.layerOptionText,
+                  mapType === layer.type && styles.layerOptionTextActive,
+                ]}
+              >
+                {layer.label}
+              </Text>
+              {mapType === layer.type && (
+                <Ionicons
+                  name="checkmark"
+                  size={14}
+                  color={colors.primary}
+                  style={{ marginLeft: "auto" as any }}
+                />
+              )}
             </TouchableOpacity>
           ))}
         </View>
@@ -1309,15 +2034,26 @@ export default function MapScreen() {
             styles.resumeBtn,
             {
               bottom: BOTTOM_CARD_BOTTOM + 90,
-              alignSelf: 'center',
-              left: undefined, right: undefined,
+              alignSelf: "center",
+              left: undefined,
+              right: undefined,
               opacity: resumeButtonAnim,
-              transform: [{ translateY: resumeButtonAnim.interpolate({ inputRange: [0, 1], outputRange: [20, 0] }) }],
-              pointerEvents: followMode === 'free' ? 'auto' : 'none',
+              transform: [
+                {
+                  translateY: resumeButtonAnim.interpolate({
+                    inputRange: [0, 1],
+                    outputRange: [20, 0],
+                  }),
+                },
+              ],
+              pointerEvents: followMode === "free" ? "auto" : "none",
             },
           ]}
         >
-          <TouchableOpacity onPress={handleResumeFollowing} style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+          <TouchableOpacity
+            onPress={handleResumeFollowing}
+            style={{ flexDirection: "row", alignItems: "center", gap: 8 }}
+          >
             <Ionicons name="navigate" size={18} color={colors.primary} />
             <Text style={styles.resumeBtnText}>Resume following</Text>
           </TouchableOpacity>
@@ -1330,7 +2066,7 @@ export default function MapScreen() {
           currentDrive={currentDrive}
           driveSeconds={driveSeconds}
           isPaused={isPaused}
-          driveMode={'tracking' as ActiveDriveMode}
+          driveMode={"tracking" as ActiveDriveMode}
           locationMode={locationMode}
           gpsAccuracy={gpsAccuracy}
           accuracyWarning={accuracyWarning}
@@ -1352,68 +2088,140 @@ export default function MapScreen() {
       {/* ── Unified bottom card: weather + vehicle + START DRIVE ── */}
       {!isDriving && (
         <View style={[styles.bottomCard, { bottom: BOTTOM_CARD_BOTTOM }]}>
-          {/* Weather row — the reading itself is demo data, so it is shown only
-              in development until a real weather API is connected.  The greeting
-              is real and stays either way. */}
-          <View style={styles.weatherRow}>
-            {CONFIG.DEMO_MODE && (
-              <Ionicons name={CONFIG.DEMO_WEATHER.icon} size={22} color="#f59e0b" />
-            )}
-            <View>
-              {CONFIG.DEMO_MODE && (
-                <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 4 }}>
-                  <Text style={styles.weatherTemp}>{CONFIG.DEMO_WEATHER.temperature}°</Text>
-                  <Text style={styles.weatherCondition}>{CONFIG.DEMO_WEATHER.condition}</Text>
-                </View>
-              )}
-              <Text style={styles.weatherGreeting}>{getGreeting()}, {userProfile.name}</Text>
-            </View>
-          </View>
-
-          <View style={styles.cardDivider} />
-
-          {/* Vehicle row + START DRIVE inline */}
           <TouchableOpacity
-            style={styles.vehicleRow}
-            onPress={() => router.push('/(tabs)/garage')}
-            activeOpacity={0.75}
+            accessibilityRole="button"
+            accessibilityLabel="Vehicle details"
+            accessibilityState={{ expanded: showVehicleDetails }}
+            onPress={() => {
+              setShowVehicleDetails(!showVehicleDetails);
+              setShowQuickPlaces(false);
+            }}
+            style={{
+              flexDirection: "row",
+              alignItems: "center",
+              minHeight: 44,
+              gap: 12,
+            }}
           >
-            {activeVehicle ? (
-              <>
-                {activeVehicle.id === 'mock-vehicle-1'
-                  ? <Image source={MINI_IMAGE} style={styles.vehicleThumb} resizeMode="contain" />
-                  : <Ionicons name="car" size={36} color={colors.primary} />
-                }
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.vehicleName}>{activeVehicle.make} {activeVehicle.model}</Text>
-                  <View style={styles.vehicleMeta}>
-                    <Ionicons name="speedometer-outline" size={11} color="#8A8375" />
-                    <Text style={styles.vehicleMetaText}>{activeVehicle.mileage.toLocaleString()} mi</Text>
-                    <Text style={styles.vehicleMetaText}>·</Text>
-                    <Text style={styles.vehicleMetaText}>{activeVehicle.fuelType}</Text>
-                  </View>
-                  {locationMode === 'simulated' && (
-                    <View style={styles.demoTag}>
-                      <Text style={styles.demoTagText}>SIMULATED</Text>
-                    </View>
-                  )}
-                </View>
-              </>
-            ) : (
-              <Text style={{ flex: 1, fontSize: 13, color: '#8A8375', fontFamily: 'Inter_400Regular' }}>
-                No vehicle — tap to add
+            <Ionicons
+              name="car-sport-outline"
+              size={24}
+              color={colors.primary}
+            />
+            <View style={{ flex: 1 }}>
+              <Text
+                style={{
+                  color: colors.mutedForeground,
+                  fontSize: 10,
+                  letterSpacing: 1.6,
+                  fontFamily: "Inter_600SemiBold",
+                }}
+              >
+                YOUR DRIVE /{" "}
+                {locationMode === "live" ? "LIVE GPS" : "SIMULATED"}
               </Text>
-            )}
-
-            {/* START DRIVE pill — right side of vehicle row */}
-            <TouchableOpacity
-              style={styles.startDriveBtn}
-              onPress={handleStartDrive}
-              activeOpacity={0.85}
-            >
-              <Ionicons name="navigate" size={15} color="#fff" />
-              <Text style={styles.startDriveBtnText}>START DRIVE</Text>
-            </TouchableOpacity>
+              <Text
+                numberOfLines={1}
+                style={{
+                  color: colors.foreground,
+                  fontSize: 18,
+                  fontFamily: "Archivo_700Bold",
+                  marginTop: 4,
+                }}
+              >
+                {activeVehicle
+                  ? `${activeVehicle.make} ${activeVehicle.model}`
+                  : "Ready when you are"}
+              </Text>
+            </View>
+            <Ionicons
+              name={showVehicleDetails ? "chevron-up" : "chevron-down"}
+              size={18}
+              color={colors.mutedForeground}
+            />
+          </TouchableOpacity>
+          {showVehicleDetails && (
+            <>
+              <View style={styles.weatherRow}>
+                <Text style={styles.weatherGreeting}>
+                  {getGreeting()}, {userProfile.name}
+                </Text>
+                {CONFIG.DEMO_MODE && (
+                  <Text style={styles.weatherCondition}>
+                    {CONFIG.DEMO_WEATHER.temperature} degrees /{" "}
+                    {CONFIG.DEMO_WEATHER.condition} (demo)
+                  </Text>
+                )}
+              </View>
+              {/* Vehicle row + START DRIVE inline */}
+              <TouchableOpacity
+                style={styles.vehicleRow}
+                onPress={() => router.push("/(tabs)/garage")}
+                activeOpacity={0.75}
+              >
+                {activeVehicle ? (
+                  <>
+                    {activeVehicle.id === "mock-vehicle-1" ? (
+                      <Image
+                        source={MINI_IMAGE}
+                        style={styles.vehicleThumb}
+                        resizeMode="contain"
+                      />
+                    ) : (
+                      <Ionicons name="car" size={36} color={colors.primary} />
+                    )}
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.vehicleName}>
+                        {activeVehicle.make} {activeVehicle.model}
+                      </Text>
+                      <View style={styles.vehicleMeta}>
+                        <Ionicons
+                          name="speedometer-outline"
+                          size={11}
+                          color={colors.mutedForeground}
+                        />
+                        <Text style={styles.vehicleMetaText}>
+                          {activeVehicle.mileage.toLocaleString()} mi
+                        </Text>
+                        <Text style={styles.vehicleMetaText}>·</Text>
+                        <Text style={styles.vehicleMetaText}>
+                          {activeVehicle.fuelType}
+                        </Text>
+                      </View>
+                      {locationMode === "simulated" && (
+                        <View style={styles.demoTag}>
+                          <Text style={styles.demoTagText}>SIMULATED</Text>
+                        </View>
+                      )}
+                    </View>
+                  </>
+                ) : (
+                  <Text
+                    style={{
+                      flex: 1,
+                      fontSize: 13,
+                      color: colors.mutedForeground,
+                      fontFamily: "Inter_400Regular",
+                    }}
+                  >
+                    No vehicle — tap to add
+                  </Text>
+                )}
+              </TouchableOpacity>
+            </>
+          )}
+          {/* START DRIVE pill — right side of vehicle row */}
+          <TouchableOpacity
+            style={styles.startDriveBtn}
+            onPress={handleStartDrive}
+            activeOpacity={0.85}
+          >
+            <Ionicons
+              name="navigate"
+              size={15}
+              color={colors.primaryForeground}
+            />
+            <Text style={styles.startDriveBtnText}>START DRIVE</Text>
           </TouchableOpacity>
         </View>
       )}

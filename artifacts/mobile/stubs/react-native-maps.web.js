@@ -7,6 +7,13 @@ const MapView = React.forwardRef(function MapView({ children, style }, ref) {
 });
 
 export const Marker = () => null;
+export const MarkerAnimated = Marker;
+// Shared location code creates this object on web even though the map is illustrative.
+export class AnimatedRegion {
+  constructor(value) { this.value = value; }
+  setValue(value) { this.value = { ...this.value, ...value }; }
+  timing(value) { return { start: (callback) => { this.setValue(value); callback?.({ finished: true }); } }; }
+}
 export const Polyline = () => null;
 export const Circle = () => null;
 export const Polygon = () => null;
