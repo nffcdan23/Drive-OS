@@ -1,3 +1,4 @@
+import { GlassSurface } from '@/components/Glass';
 import React, { useState, useMemo } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, FlatList, TextInput,
@@ -27,6 +28,7 @@ export default function SearchScreen() {
   const insets = useSafeAreaInsets();
   const router = useRouter();
   const [query, setQuery] = useState('');
+  const [searchFocused, setSearchFocused] = useState(false);
   const [activeSection, setActiveSection] = useState<SearchSection>('recent');
 
   const recentDests = DEMO_DESTINATIONS.filter((d) => d.type === 'recent' || d.type === 'home' || d.type === 'work').slice(0, 5);
@@ -51,7 +53,7 @@ export default function SearchScreen() {
   const styles = StyleSheet.create({
     container: { flex: 1, backgroundColor: colors.background },
     searchHeader: {
-      paddingTop: Platform.OS === 'web' ? 67 + insets.top : insets.top + 8,
+      paddingTop: insets.top + 16,
       paddingHorizontal: 16, paddingBottom: 12,
       backgroundColor: colors.background,
       borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border,
@@ -63,6 +65,7 @@ export default function SearchScreen() {
       borderWidth: StyleSheet.hairlineWidth, borderColor: colors.border, height: 46,
     },
     searchInput: {
+      outlineWidth: 0,
       flex: 1, fontSize: 16, color: colors.foreground, fontFamily: 'Inter_400Regular',
     },
     cancelBtn: { paddingVertical: 8 },
@@ -193,10 +196,12 @@ export default function SearchScreen() {
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
     >
       <View style={styles.searchHeader}>
-        <View style={styles.searchInputWrap}>
+        <GlassSurface focused={searchFocused} style={styles.searchInputWrap}>
           <Ionicons name="search" size={18} color={colors.mutedForeground} />
           <TextInput
             style={styles.searchInput}
+            onFocus={() => setSearchFocused(true)}
+            onBlur={() => setSearchFocused(false)}
             placeholder="Where are we going?"
             placeholderTextColor={colors.mutedForeground}
             value={query}
@@ -209,7 +214,7 @@ export default function SearchScreen() {
               <Ionicons name="close-circle" size={18} color={colors.mutedForeground} />
             </TouchableOpacity>
           )}
-        </View>
+        </GlassSurface>
         <TouchableOpacity style={styles.cancelBtn} onPress={() => router.back()}>
           <Text style={styles.cancelBtnText}>Cancel</Text>
         </TouchableOpacity>
