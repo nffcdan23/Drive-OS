@@ -11,9 +11,10 @@ Anonymous auth via device UUID. No real login. On every request:
 - API middleware (`artifacts/api-server/src/middleware/userId.ts`) upserts a `users` row, attaches `req.userId`
 
 ## Database
-- Schema: `lib/db/src/schema/index.ts` — 15 Drizzle tables (users, vehicles, journeys, route_points, categories, achievements, friendships, convoys, groups, events, notifications, etc.)
+- LEGACY schema: `lib/db/src/schema/index.ts` (16 tables, device-UUID users) — still used by the Express API until the Supabase integration.
+- NEW schema: SQL migrations in `supabase/migrations` are the source of truth; `lib/db/src/schema/supabase.ts` is a typed Drizzle mirror, checked by `pnpm run db:verify-local`.
 - All PKs are UUIDs via `uuid_generate_v4()` default
-- Push with: `pnpm --filter @workspace/db push`
+- NEVER run `drizzle-kit push`. Schema changes are new SQL migration files (see `supabase/README.md`).
 
 ## API routes
 All mounted in `artifacts/api-server/src/routes/index.ts`:

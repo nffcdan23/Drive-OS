@@ -1,3 +1,6 @@
+// LEGACY schema, still used by the running Express API. It is being replaced
+// by the Supabase schema (supabase/migrations, mirrored in ./supabase.ts) and
+// will be removed when the API is moved over. Never push it to a database.
 import {
   pgTable, uuid, text, integer, real, boolean, timestamp, jsonb, primaryKey,
 } from 'drizzle-orm/pg-core';

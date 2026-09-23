@@ -5,11 +5,11 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./schema": "./src/schema/index.ts"
+    "./schema": "./src/schema/index.ts",
+    "./supabase-schema": "./src/schema/supabase.ts"
   },
   "scripts": {
-    "push": "drizzle-kit push --config ./drizzle.config.ts",
-    "push-force": "drizzle-kit push --force --config ./drizzle.config.ts"
+    "check-drift": "node --experimental-strip-types --no-warnings ./scripts/check-drift.mjs"
   },
   "dependencies": {
     "drizzle-orm": "catalog:",
