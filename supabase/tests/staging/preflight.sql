@@ -5,15 +5,27 @@
 -- compatible staging project, or if the connecting role lacks a permission
 -- the migrations rely on — so an incompatibility is found before anything is
 -- changed rather than half-way through the migrations.
--- The workflow runs this with default_transaction_read_only=on.
+-- Everything runs inside one READ ONLY transaction that is rolled back at
+-- the end. (Startup options such as PGOPTIONS are not forwarded by the
+-- Supabase connection pooler, so read-only mode is set here, in-session,
+-- and verified before anything else runs.)
 -- ============================================================================
 \set ON_ERROR_STOP on
 \pset footer off
 
+begin transaction read only;
+do $$
+begin
+  if current_setting('transaction_read_only') <> 'on' then
+    raise exception 'pre-flight refused to run: the session is not read-only';
+  end if;
+end;
+$$;
+
 \echo '--- connection'
 select current_user as connected_as,
        current_setting('server_version') as postgres_version,
-       current_setting('default_transaction_read_only') as read_only_session;
+       current_setting('transaction_read_only') as read_only_transaction;
 
 \echo '--- current contents (expected: empty staging project)'
 select (select count(*) from pg_tables where schemaname = 'public')                              as public_tables,
@@ -103,3 +115,5 @@ begin
   raise notice 'PRE-FLIGHT PASSED: empty staging project with every permission the migrations need';
 end;
 $$;
+
+rollback;

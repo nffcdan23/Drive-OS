@@ -5,4 +5,4 @@ Production is never deployed from this branch.
 
 | Date (UTC) | Target | Migrations | Trigger | Result |
 |---|---|---|---|---|
-| 2026-09-23 | staging (existing project) | 0001–0015 | `[deploy supabase-staging]` commit, approved by project owner | see the "Supabase staging deploy" run in GitHub Actions |
+| 2026-09-23 | staging (existing project) | 0001–0015 | `[deploy supabase-staging]` commit, approved by project owner | **Not applied.** Attempt 1: secrets not visible to the workflow. Attempt 2: stopped by the pre-flight — `postgres` does not own `storage.objects`, so migration 0013 could not create Storage policies. Nothing was changed. |
