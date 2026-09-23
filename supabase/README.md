@@ -94,9 +94,31 @@ Requires PostgreSQL server binaries and PostGIS 3 for the same major version
 `PG_BIN` to choose a version, `KEEP_DB=1` to keep the database for inspection, `MIGRATIONS_DIR` to test
 a modified copy of the migrations.
 
-## Applying to a hosted project (later phases)
+## Applying to staging
 
-Not done yet. Migrations will be applied to the staging project with the
-Supabase CLI (`supabase db push`) from a manually triggered GitHub Action,
-after review. Secrets (access token, database password) live only in GitHub
-Actions / Railway settings, never in this repository.
+`.github/workflows/supabase-staging.yml` applies the migrations to the
+**staging** project (never production) and verifies them against the real
+Supabase services. It runs only when deliberately triggered — a commit on the
+working branch whose message contains `[deploy supabase-staging]`, or "Run
+workflow" once the file is on the default branch — and stops at the first
+failing step:
+
+1. Checks the secrets are set and all refer to the same project.
+2. **Pre-flight** (`tests/staging/preflight.sql`, read-only session): the
+   project must be empty and must grant every permission the migrations use
+   (trigger on `auth.users`, policies on `storage.objects`, buckets, PostGIS).
+   Nothing is changed if it fails.
+3. `supabase db push --dry-run`, then `supabase db push` (the Supabase CLI —
+   not drizzle-kit), then confirms every migration is recorded.
+4. The schema smoke tests and the RLS/security suite, each inside a
+   transaction that is always rolled back, then a check that nothing was left
+   behind.
+5. Live checks (`tests/staging/api_checks.mjs`) against the real Auth, Data
+   API and Storage API with two throwaway users, which are deleted afterwards.
+6. Security Advisor results via the Management API
+   (`tests/staging/security_advisor.mjs`).
+
+Secrets (GitHub → Settings → Secrets and variables → Actions) — never commit
+them: `SUPABASE_STAGING_DB_URL`, `SUPABASE_STAGING_URL`,
+`SUPABASE_STAGING_PUBLISHABLE_KEY`, `SUPABASE_STAGING_SECRET_KEY`,
+`SUPABASE_STAGING_PROJECT_REF`, and optionally `SUPABASE_ACCESS_TOKEN`.

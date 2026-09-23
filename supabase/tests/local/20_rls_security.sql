@@ -1,7 +1,11 @@
 -- ============================================================================
--- LOCAL VERIFICATION ONLY — RLS and security tests (Phase 2).
+-- RLS and security tests.
 --
--- Runs in its own throwaway database (stub + all migrations, no other data).
+-- Runs in its own throwaway database locally (stub + all migrations, no other
+-- data), and against the real staging project from the staging workflow
+-- INSIDE A TRANSACTION THAT IS ALWAYS ROLLED BACK: the fixture rows and the
+-- worst-case GRANTs below are never committed, so they are never visible to
+-- the Data API. Never run it any other way against a hosted project.
 -- Every check executes as a real `authenticated` or `anon` session with the
 -- JWT claims Supabase would set, so policies, helper functions, column
 -- guards, constraints and privileges are all exercised together.

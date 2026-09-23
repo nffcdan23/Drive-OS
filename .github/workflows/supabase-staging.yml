@@ -1,0 +1,135 @@
+name: Supabase staging deploy
+
+# Applies supabase/migrations to the STAGING Supabase project and verifies it
+# against the real Auth, Data API and Storage services. Never production.
+#
+# Runs only when deliberately triggered:
+#   * a commit on the working branch whose message contains
+#     "[deploy supabase-staging]", or
+#   * "Run workflow" in the Actions tab once this file is on the default
+#     branch (type deploy-staging to confirm).
+# Every other push to the branch shows this workflow as skipped.
+#
+# Stops at the first step that fails: nothing is applied unless the read-only
+# pre-flight passes, and the verification suites that write test data run
+# inside transactions that are always rolled back.
+#
+# Secrets are passed through environment variables only and never echoed;
+# GitHub masks them in logs, and the database password and user tokens are
+# masked explicitly as well.
+
+on:
+  push:
+    branches: [claude/determined-cray-hjv7aq]
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type deploy-staging to apply the migrations to the STAGING project'
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: supabase-staging
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy and verify staging
+    if: >-
+      (github.event_name == 'push' && contains(github.event.head_commit.message, '[deploy supabase-staging]')) ||
+      (github.event_name == 'workflow_dispatch' && inputs.confirm == 'deploy-staging')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      STAGING_DB_URL: ${{ secrets.SUPABASE_STAGING_DB_URL }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_STAGING_URL }}
+      SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_STAGING_PUBLISHABLE_KEY }}
+      SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_STAGING_SECRET_KEY }}
+      SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_STAGING_PROJECT_REF }}
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the required secrets are set
+        run: |
+          missing=0
+          for name in STAGING_DB_URL SUPABASE_URL SUPABASE_PUBLISHABLE_KEY SUPABASE_SECRET_KEY SUPABASE_PROJECT_REF; do
+            if [ -z "${!name}" ]; then echo "::error::Secret for $name is not set"; missing=1; fi
+          done
+          [ "$missing" = 0 ] || exit 1
+          # Mask the database password on its own as well as the full URL.
+          password=$(python3 -c "import os,urllib.parse as u; print(u.unquote(u.urlsplit(os.environ['STAGING_DB_URL']).password or ''))")
+          [ -n "$password" ] && echo "::add-mask::$password"
+          # Guard against pointing this workflow at the wrong project.
+          case "$SUPABASE_URL" in
+            "https://$SUPABASE_PROJECT_REF.supabase.co"|"https://$SUPABASE_PROJECT_REF.supabase.co/") ;;
+            *) echo "::error::SUPABASE_STAGING_URL does not match SUPABASE_STAGING_PROJECT_REF"; exit 1 ;;
+          esac
+          case "$STAGING_DB_URL" in
+            *"$SUPABASE_PROJECT_REF"*) ;;
+            *) echo "::error::SUPABASE_STAGING_DB_URL is not for SUPABASE_STAGING_PROJECT_REF"; exit 1 ;;
+          esac
+          echo "All required secrets are set and refer to the same project."
+
+      - name: Install PostgreSQL client
+        run: |
+          sudo apt-get update -q
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q postgresql-client-16
+
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Pre-flight (read-only)
+        env:
+          PGOPTIONS: -c default_transaction_read_only=on
+        run: psql "$STAGING_DB_URL" -X -q -f supabase/tests/staging/preflight.sql
+
+      - name: Show the migrations that will be applied (dry run)
+        run: supabase db push --db-url "$STAGING_DB_URL" --dry-run
+
+      - name: Apply migrations to staging
+        # The CLI asks for confirmation before applying; answer it non-interactively.
+        run: echo y | supabase db push --db-url "$STAGING_DB_URL"
+
+      - name: Confirm every migration is recorded
+        run: |
+          expected=$(ls supabase/migrations/*.sql | wc -l)
+          applied=$(psql "$STAGING_DB_URL" -X -A -t -c "select count(*) from supabase_migrations.schema_migrations")
+          echo "Migrations in repo: $expected, recorded on staging: $applied"
+          [ "$expected" = "$applied" ]
+
+      - name: Schema smoke tests (inside a rolled-back transaction)
+        run: |
+          psql "$STAGING_DB_URL" -X -q -v ON_ERROR_STOP=1 \
+            -c 'begin' -f supabase/tests/local/10_schema_smoke.sql -c 'rollback' 2>&1 \
+            | sed -e 's/^psql:[^ ]* NOTICE:  /    /' -e 's/^NOTICE:  /    /'
+          exit "${PIPESTATUS[0]}"
+
+      - name: RLS and security tests (inside a rolled-back transaction)
+        run: |
+          psql "$STAGING_DB_URL" -X -q -v ON_ERROR_STOP=1 \
+            -c 'begin' -f supabase/tests/local/20_rls_security.sql -c 'rollback' 2>&1 \
+            | sed -e 's/^psql:[^ ]* NOTICE:  /    /' -e 's/^NOTICE:  /    /'
+          exit "${PIPESTATUS[0]}"
+
+      - name: Confirm the test transactions left nothing behind
+        run: |
+          leftovers=$(psql "$STAGING_DB_URL" -X -A -t -c "
+            select (select count(*) from auth.users where email like '%@example.test')
+                 + (select count(*) from public.profiles)
+                 + (select count(*) from storage.objects where bucket_id in
+                      ('avatars','community-media','vehicle-photos','journey-photos','location-photos','vehicle-documents'))
+                 + (select count(*) from private.storage_delete_queue)
+                 + (select count(*) from information_schema.role_table_grants
+                      where table_schema = 'public' and grantee in ('anon', 'authenticated'))")
+          echo "Leftover test rows / client grants: $leftovers"
+          [ "$leftovers" = "0" ]
+
+      - name: Live checks against Auth, Data API and Storage
+        run: node supabase/tests/staging/api_checks.mjs
+
+      - name: Security Advisor
+        run: node supabase/tests/staging/security_advisor.mjs

@@ -1,7 +1,10 @@
 -- ============================================================================
--- LOCAL VERIFICATION ONLY — schema smoke tests (Phase 1).
+-- Schema smoke tests.
 -- Run by supabase/tests/local/run.sh against a throwaway database after the
--- stub and all migrations. Any failed check raises and stops the run.
+-- stub and all migrations, and by the staging workflow against the real
+-- staging project INSIDE A TRANSACTION THAT IS ALWAYS ROLLED BACK (it writes
+-- test rows, so never run it any other way against a hosted project).
+-- Any failed check raises and stops the run.
 -- Per-user RLS behaviour is covered separately in Phase 2.
 -- ============================================================================
 \set ON_ERROR_STOP on
@@ -89,7 +92,8 @@ select pg_temp.ok(
   'PostGIS objects are not in the public schema');
 
 select pg_temp.ok(
-  (select count(*) from storage.buckets) = 6
+  (select count(*) from storage.buckets where id in
+     ('avatars','community-media','vehicle-photos','journey-photos','location-photos','vehicle-documents')) = 6
   and (select public from storage.buckets where id = 'vehicle-documents') = false
   and (select public from storage.buckets where id = 'vehicle-photos') = false
   and (select public from storage.buckets where id = 'avatars') = true,
