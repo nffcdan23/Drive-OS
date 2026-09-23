@@ -42,10 +42,10 @@ select pg_temp.ok(
   (select array_agg(tablename::text order by tablename) from pg_tables where schemaname = 'public') =
   array['achievements','content_reports','convoy_participants','convoys','event_rsvps','events',
         'friend_requests','friendships','group_members','groups','journey_categories',
-        'journey_route_points','journeys','notifications','photos','profiles','push_devices',
+        'journey_route_points','journey_routes','journeys','notifications','photos','profiles','push_devices',
         'saved_locations','user_achievements','user_blocks','user_settings','vehicle_documents',
         'vehicle_modifications','vehicle_service_records','vehicles'],
-  'public schema contains exactly the 25 DriveOS tables');
+  'public schema contains exactly the 26 DriveOS tables');
 
 select pg_temp.ok(
   not exists (select 1 from pg_class c join pg_namespace n on n.oid = c.relnamespace
@@ -155,7 +155,7 @@ select pg_temp.expect_error($$insert into vehicles (owner_id, nickname, client_r
     ('aaaaaaaa-0000-0000-0000-000000000001', 'P1', 'local-1'), ('aaaaaaaa-0000-0000-0000-000000000001', 'P2', 'local-1')$$,
   '23505', 'client_ref is unique per owner (idempotent offline creates / imports)');
 select pg_temp.expect_error($$insert into vehicle_documents (vehicle_id, owner_id, doc_type, storage_path, mime_type, size_bytes)
-    values ('b1000000-0000-0000-0000-000000000001', 'aaaaaaaa-0000-0000-0000-000000000001', 'mot', 'x/y.pdf', 'application/pdf', 100)$$,
+    values ('b1000000-0000-0000-0000-000000000001', 'aaaaaaaa-0000-0000-0000-000000000001', 'mot', 'aaaaaaaa-0000-0000-0000-000000000001/y.pdf', 'application/pdf', 100)$$,
   '23503', 'a document cannot be attached to another user''s vehicle');
 select pg_temp.expect_error($$insert into vehicle_service_records (vehicle_id, owner_id, record_type, performed_on, title)
     values ('b1000000-0000-0000-0000-000000000001', 'aaaaaaaa-0000-0000-0000-000000000001', 'service', current_date, 'Oil')$$,
@@ -186,6 +186,12 @@ select pg_temp.ok((select latitude from journey_route_points limit 1) = 54.46091
 select pg_temp.expect_error($$insert into journey_route_points (journey_id, recorded_at, latitude, longitude)
     values ('a2000000-0000-0000-0000-000000000001', now(), 91, 0)$$,
   '23514', 'latitude range enforced');
+
+select pg_temp.expect_error($$insert into journey_routes (journey_id, owner_id)
+    values ('a2000000-0000-0000-0000-000000000001', 'bbbbbbbb-0000-0000-0000-000000000002')$$,
+  '23503', 'a route summary belongs to its journey''s owner');
+insert into journey_routes (journey_id, owner_id, route_polyline, point_count)
+  values ('a2000000-0000-0000-0000-000000000001', 'aaaaaaaa-0000-0000-0000-000000000001', '_p~iF~ps|U_ulLnnqC', 1);
 
 delete from vehicles where id = 'a1000000-0000-0000-0000-000000000001';
 select pg_temp.ok((select vehicle_id is null and owner_id = 'aaaaaaaa-0000-0000-0000-000000000001'
@@ -244,17 +250,26 @@ insert into vehicles (id, owner_id, nickname) values
 
 select pg_temp.expect_error($$insert into photos (owner_id, vehicle_id, journey_id, bucket, storage_path, mime_type, size_bytes)
     values ('aaaaaaaa-0000-0000-0000-000000000001', 'a1000000-0000-0000-0000-000000000003', 'a2000000-0000-0000-0000-000000000001',
-            'vehicle-photos', 'p/1.jpg', 'image/jpeg', 10)$$,
+            'vehicle-photos', 'aaaaaaaa-0000-0000-0000-000000000001/p1.jpg', 'image/jpeg', 10)$$,
   '23514', 'a photo has exactly one parent');
 select pg_temp.expect_error($$insert into photos (owner_id, vehicle_id, bucket, storage_path, mime_type, size_bytes)
-    values ('aaaaaaaa-0000-0000-0000-000000000001', 'a1000000-0000-0000-0000-000000000003', 'journey-photos', 'p/2.jpg', 'image/jpeg', 10)$$,
+    values ('aaaaaaaa-0000-0000-0000-000000000001', 'a1000000-0000-0000-0000-000000000003', 'journey-photos', 'aaaaaaaa-0000-0000-0000-000000000001/p2.jpg', 'image/jpeg', 10)$$,
   '23514', 'a photo''s bucket must match its parent');
 select pg_temp.expect_error($$insert into photos (owner_id, vehicle_id, bucket, storage_path, mime_type, size_bytes)
-    values ('aaaaaaaa-0000-0000-0000-000000000001', 'b1000000-0000-0000-0000-000000000001', 'vehicle-photos', 'p/3.jpg', 'image/jpeg', 10)$$,
+    values ('aaaaaaaa-0000-0000-0000-000000000001', 'b1000000-0000-0000-0000-000000000001', 'vehicle-photos', 'aaaaaaaa-0000-0000-0000-000000000001/p3.jpg', 'image/jpeg', 10)$$,
   '23503', 'a photo cannot be attached to another user''s vehicle');
 select pg_temp.expect_error($$insert into photos (owner_id, vehicle_id, bucket, storage_path, mime_type, size_bytes)
-    values ('aaaaaaaa-0000-0000-0000-000000000001', 'a1000000-0000-0000-0000-000000000003', 'vehicle-photos', 'p/4.jpg', 'image/jpeg', 6000000)$$,
+    values ('aaaaaaaa-0000-0000-0000-000000000001', 'a1000000-0000-0000-0000-000000000003', 'vehicle-photos', 'aaaaaaaa-0000-0000-0000-000000000001/p4.jpg', 'image/jpeg', 6000000)$$,
   '23514', 'photo size limit enforced');
+
+select pg_temp.expect_error($$insert into photos (owner_id, vehicle_id, bucket, storage_path, mime_type, size_bytes)
+    values ('aaaaaaaa-0000-0000-0000-000000000001', 'a1000000-0000-0000-0000-000000000003', 'vehicle-photos',
+            'bbbbbbbb-0000-0000-0000-000000000002/stolen.jpg', 'image/jpeg', 10)$$,
+  '23514', 'a photo row cannot point at a file in another user''s folder');
+select pg_temp.expect_error($$insert into vehicle_documents (vehicle_id, owner_id, doc_type, storage_path, mime_type, size_bytes)
+    values ('a1000000-0000-0000-0000-000000000003', 'aaaaaaaa-0000-0000-0000-000000000001', 'v5c',
+            'bbbbbbbb-0000-0000-0000-000000000002/v5c.pdf', 'application/pdf', 10)$$,
+  '23514', 'a document row cannot point at a file in another user''s folder');
 
 insert into photos (id, owner_id, vehicle_id, bucket, storage_path, thumb_path, mime_type, size_bytes, status) values
   ('a4000000-0000-0000-0000-000000000001', 'aaaaaaaa-0000-0000-0000-000000000001', 'a1000000-0000-0000-0000-000000000003',
@@ -298,9 +313,6 @@ select pg_temp.expect_error($$insert into friendships (user_id, friend_id)
 
 -- ─── 9. Community ────────────────────────────────────────────────────────────
 \echo '--- community'
-select pg_temp.expect_error($$insert into groups (owner_id, name, membership_method)
-    values ('aaaaaaaa-0000-0000-0000-000000000001', 'Code club', 'code')$$,
-  '23514', 'a code-joined group needs a join code');
 insert into groups (id, owner_id, name) values ('a5000000-0000-0000-0000-000000000001', 'aaaaaaaa-0000-0000-0000-000000000001', 'Minis');
 insert into group_members (group_id, user_id, role) values ('a5000000-0000-0000-0000-000000000001', 'aaaaaaaa-0000-0000-0000-000000000001', 'owner');
 select pg_temp.expect_error($$insert into group_members (group_id, user_id, role)
@@ -328,6 +340,12 @@ delete from convoys where id = 'a6000000-0000-0000-0000-000000000001';
 select pg_temp.ok((select convoy_id is null from journeys where id = 'a2000000-0000-0000-0000-000000000001'),
   'deleting a convoy clears journeys.convoy_id');
 
+select pg_temp.expect_error($$insert into private.join_codes (code, group_id, convoy_id)
+    values ('ABC123', 'a5000000-0000-0000-0000-000000000001', null), ('ABC123', 'a5000000-0000-0000-0000-000000000001', null)$$,
+  '23505', 'join codes are unique');
+select pg_temp.expect_error($$insert into private.join_codes (code) values ('XYZ789')$$,
+  '23514', 'a join code belongs to exactly one group or convoy');
+
 -- ─── 10. Notifications ───────────────────────────────────────────────────────
 \echo '--- notifications'
 select pg_temp.expect_error($$insert into notifications (user_id, type, title)
@@ -347,6 +365,7 @@ select pg_temp.ok(
   and not exists (select 1 from vehicles    where owner_id = 'aaaaaaaa-0000-0000-0000-000000000001')
   and not exists (select 1 from journeys    where owner_id = 'aaaaaaaa-0000-0000-0000-000000000001')
   and not exists (select 1 from journey_route_points)
+  and not exists (select 1 from journey_routes)
   and not exists (select 1 from saved_locations where owner_id = 'aaaaaaaa-0000-0000-0000-000000000001')
   and not exists (select 1 from friend_requests)
   and not exists (select 1 from groups      where owner_id = 'aaaaaaaa-0000-0000-0000-000000000001'),

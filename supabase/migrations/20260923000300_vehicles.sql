@@ -107,6 +107,9 @@ create table public.vehicle_documents (
   constraint vehicle_documents_vehicle_fk
     foreign key (vehicle_id, owner_id) references public.vehicles (id, owner_id) on delete cascade,
   constraint vehicle_documents_storage_path_key unique (storage_path),
+  -- A row may only reference a file inside its owner's own folder, so it can
+  -- never be used to gain read access to somebody else's file.
+  constraint vehicle_documents_path_in_owner_folder check (storage_path like owner_id::text || '/%'),
   constraint vehicle_documents_doc_type   check (doc_type in ('v5c', 'insurance', 'mot', 'service_receipt', 'warranty', 'other')),
   constraint vehicle_documents_title      check (char_length(title) <= 120),
   constraint vehicle_documents_mime_type  check (mime_type in ('application/pdf', 'image/jpeg', 'image/png', 'image/webp', 'image/heic')),

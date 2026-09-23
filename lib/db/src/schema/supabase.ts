@@ -11,6 +11,9 @@
  *
  * Not yet wired into the API: the running Express code still uses the legacy
  * schema in `./index.ts` until the Phase 4 integration.
+ *
+ * Tables in the `private` schema (join codes, Storage deletion queue) are
+ * not mirrored here; the API reaches them with explicit SQL.
  */
 import { sql } from 'drizzle-orm';
 import {
@@ -150,7 +153,6 @@ export const groups = pgTable('groups', {
   logoPath:         text('logo_path'),
   isPublic:         boolean('is_public').notNull().default(true),
   membershipMethod: text('membership_method').notNull().default('open'),
-  joinCode:         text('join_code'),
   primaryLocation:  text('primary_location').notNull().default(''),
   vehicleInterests: text('vehicle_interests').notNull().default(''),
   createdAt:        timestamptz('created_at').notNull().defaultNow(),
@@ -177,7 +179,6 @@ export const convoys = pgTable('convoys', {
   destinationLat:  doublePrecision('destination_lat'),
   destinationLng:  doublePrecision('destination_lng'),
   visibility:      text('visibility').notNull().default('public'),
-  joinCode:        text('join_code'),
   startsAt:        timestamptz('starts_at').notNull(),
   status:          text('status').notNull().default('forming'),
   startedAt:       timestamptz('started_at'),
@@ -260,19 +261,28 @@ export const journeys = pgTable('journeys', {
   topSpeedKmh:         doublePrecision('top_speed_kmh').notNull().default(0),
   xpEarned:            integer('xp_earned').notNull().default(0),
   vehicleSnapshot:     jsonb('vehicle_snapshot').$type<Record<string, unknown>>(),
-  routePolyline:       text('route_polyline'),
+  // Start/end-trimmed route, safe to show to anyone the journey is shared with.
   publicRoutePolyline: text('public_route_polyline'),
-  routePointCount:     integer('route_point_count').notNull().default(0),
-  startLat:            doublePrecision('start_lat'),
-  startLng:            doublePrecision('start_lng'),
-  endLat:              doublePrecision('end_lat'),
-  endLng:              doublePrecision('end_lng'),
-  bboxMinLat:          doublePrecision('bbox_min_lat'),
-  bboxMinLng:          doublePrecision('bbox_min_lng'),
-  bboxMaxLat:          doublePrecision('bbox_max_lat'),
-  bboxMaxLng:          doublePrecision('bbox_max_lng'),
   createdAt:           timestamptz('created_at').notNull().defaultNow(),
   updatedAt:           timestamptz('updated_at').notNull().defaultNow(),
+});
+
+/** Owner-only full route summary (reveals where the owner starts and ends). */
+export const journeyRoutes = pgTable('journey_routes', {
+  journeyId:     uuid('journey_id').primaryKey(),
+  ownerId:       uuid('owner_id').notNull(),
+  routePolyline: text('route_polyline'),
+  pointCount:    integer('point_count').notNull().default(0),
+  startLat:      doublePrecision('start_lat'),
+  startLng:      doublePrecision('start_lng'),
+  endLat:        doublePrecision('end_lat'),
+  endLng:        doublePrecision('end_lng'),
+  bboxMinLat:    doublePrecision('bbox_min_lat'),
+  bboxMinLng:    doublePrecision('bbox_min_lng'),
+  bboxMaxLat:    doublePrecision('bbox_max_lat'),
+  bboxMaxLng:    doublePrecision('bbox_max_lng'),
+  createdAt:     timestamptz('created_at').notNull().defaultNow(),
+  updatedAt:     timestamptz('updated_at').notNull().defaultNow(),
 });
 
 export const journeyRoutePoints = pgTable('journey_route_points', {

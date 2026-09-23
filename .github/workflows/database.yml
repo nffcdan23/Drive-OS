@@ -1,0 +1,61 @@
+name: Database
+
+# Verifies the Supabase migrations on every pull request that touches the
+# database, entirely inside the CI runner: a throwaway PostgreSQL + PostGIS
+# instance, schema smoke tests, the Drizzle drift check and the RLS/security
+# test suite. It never connects to Supabase, Railway or any other database,
+# and uses no secrets.
+
+on:
+  pull_request:
+    paths:
+      - 'supabase/**'
+      - 'lib/db/**'
+      - '.github/workflows/database.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'supabase/**'
+      - 'lib/db/**'
+      - '.github/workflows/database.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: database-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Migrations, RLS and security tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      PG_BIN: /usr/lib/postgresql/16/bin
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install PostgreSQL 16 and PostGIS
+        run: |
+          sudo apt-get update -q
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q postgresql-16 postgresql-16-postgis-3
+          # Only the binaries are needed; the tests start their own throwaway cluster.
+          sudo systemctl stop postgresql || true
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck the database package
+        run: pnpm exec tsc --build lib/db
+
+      - name: Verify migrations, RLS and security
+        run: pnpm run db:verify-local

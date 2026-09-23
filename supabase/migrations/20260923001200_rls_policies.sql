@@ -84,10 +84,24 @@ create policy vehicle_service_records_all_own on public.vehicle_service_records
   with check (owner_id = (select auth.uid()));
 
 -- ─── vehicle_documents (owner only, always) ──────────────────────────────────
-create policy vehicle_documents_all_own on public.vehicle_documents
-  for all to authenticated
+create policy vehicle_documents_select_own on public.vehicle_documents
+  for select to authenticated
+  using (owner_id = (select auth.uid()));
+
+-- New rows start 'pending'; the API marks them 'ready' after checking the
+-- uploaded file.
+create policy vehicle_documents_insert_own on public.vehicle_documents
+  for insert to authenticated
+  with check (owner_id = (select auth.uid()) and status = 'pending');
+
+create policy vehicle_documents_update_own on public.vehicle_documents
+  for update to authenticated
   using (owner_id = (select auth.uid()))
   with check (owner_id = (select auth.uid()));
+
+create policy vehicle_documents_delete_own on public.vehicle_documents
+  for delete to authenticated
+  using (owner_id = (select auth.uid()));
 
 -- ─── vehicle_modifications (visibility follows the vehicle) ──────────────────
 create policy vehicle_modifications_select on public.vehicle_modifications
@@ -125,10 +139,12 @@ create policy photos_select on public.photos
 
 -- Location photos: the location must also belong to the uploader (vehicle
 -- and journey ownership is already guaranteed by the composite foreign keys).
+-- New rows start 'pending'; the API marks them 'ready' after checking the file.
 create policy photos_insert_own on public.photos
   for insert to authenticated
   with check (
     owner_id = (select auth.uid())
+    and status = 'pending'
     and (location_id is null or private.owns_location(location_id))
   );
 
@@ -184,6 +200,11 @@ create policy journeys_delete_own on public.journeys
 create policy journey_route_points_select_own on public.journey_route_points
   for select to authenticated
   using (private.owns_journey(journey_id));
+
+-- ─── journey_routes (owner only, read only) ──────────────────────────────────
+create policy journey_routes_select_own on public.journey_routes
+  for select to authenticated
+  using (owner_id = (select auth.uid()));
 
 -- ─── saved_locations ─────────────────────────────────────────────────────────
 create policy saved_locations_select on public.saved_locations
@@ -268,7 +289,10 @@ create policy group_members_update_admin on public.group_members
   )
   with check (
     role <> 'owner'
-    and (private.group_role(group_id) = 'owner' or role = 'member')
+    and (
+      private.group_role(group_id) = 'owner'
+      or (private.group_role(group_id) = 'admin' and role = 'member')
+    )
   );
 
 -- Members may leave (the owner must transfer ownership first); owners and
@@ -372,7 +396,7 @@ create policy content_reports_select_own on public.content_reports
 
 create policy content_reports_insert_own on public.content_reports
   for insert to authenticated
-  with check (reporter_id = (select auth.uid()) and status = 'open');
+  with check (reporter_id = (select auth.uid()) and status = 'open' and resolved_at is null);
 
 -- ─── achievements ────────────────────────────────────────────────────────────
 create policy achievements_select on public.achievements

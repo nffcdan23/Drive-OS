@@ -10,7 +10,8 @@
 # 4. Runs the schema smoke tests.
 # 5. Checks the Drizzle mirror (lib/db/src/schema/supabase.ts) against the
 #    migrated database (skipped with a warning if node_modules is missing).
-# 6. Stops the cluster and deletes it.
+# 6. Runs the RLS and security tests in a second, clean database.
+# 7. Stops the cluster and deletes it.
 #
 # Requirements: PostgreSQL server binaries (initdb, pg_ctl) and PostGIS 3 for
 # the same major version; Node 22+ with `pnpm install` done for the drift check.
@@ -20,7 +21,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-MIGRATIONS="$ROOT/supabase/migrations"
+MIGRATIONS="${MIGRATIONS_DIR:-$ROOT/supabase/migrations}"
 TESTS="$ROOT/supabase/tests/local"
 PORT="${PORT_OVERRIDE:-55433}"
 
@@ -53,26 +54,35 @@ echo "==> Starting throwaway PostgreSQL ($("$PG_BIN/postgres" --version))"
 as_pg "'$PG_BIN/initdb' -D '$WORK/data' -A trust -U postgres --no-sync" >/dev/null
 as_pg "'$PG_BIN/pg_ctl' -D '$WORK/data' -o \"-p $PORT -k $WORK -c listen_addresses='' -c fsync=off\" -l '$WORK/pg.log' -w start" >/dev/null
 
-PSQL=(psql -h "$WORK" -p "$PORT" -U postgres -X -q -v ON_ERROR_STOP=1)
-"${PSQL[@]}" -d postgres -c "create database driveos_verify"
-PSQL+=(-d driveos_verify)
+PSQL_BASE=(psql -h "$WORK" -p "$PORT" -U postgres -X -q -v ON_ERROR_STOP=1)
 
-echo "==> Loading Supabase stub (auth, storage, roles)"
-"${PSQL[@]}" -f "$TESTS/00_supabase_stub.sql"
+# Creates a database with the Supabase stub and every migration applied.
+build_db() {
+  local db="$1" verbose="${2:-}"
+  "${PSQL_BASE[@]}" -d postgres -c "create database $db"
+  "${PSQL_BASE[@]}" -d "$db" -f "$TESTS/00_supabase_stub.sql"
+  local count=0
+  for f in "$MIGRATIONS"/*.sql; do
+    [[ -n "$verbose" ]] && echo "    $(basename "$f")"
+    "${PSQL_BASE[@]}" -d "$db" -f "$f"
+    count=$((count + 1))
+  done
+  [[ -n "$verbose" ]] && echo "    $count migrations applied"
+  return 0
+}
 
-echo "==> Applying migrations"
-count=0
-for f in "$MIGRATIONS"/*.sql; do
-  echo "    $(basename "$f")"
-  "${PSQL[@]}" -f "$f"
-  count=$((count + 1))
-done
-echo "    $count migrations applied"
+# Runs a test file, printing its NOTICE lines as the report.
+run_tests() {
+  local db="$1" file="$2"
+  "${PSQL_BASE[@]}" -d "$db" -f "$file" 2>&1 | sed -e 's/^psql:[^ ]* NOTICE:  /    /' -e 's/^NOTICE:  /    /'
+  return "${PIPESTATUS[0]}"
+}
+
+echo "==> Applying the Supabase stub and migrations"
+build_db driveos_verify verbose
 
 echo "==> Schema smoke tests"
-"${PSQL[@]}" -f "$TESTS/10_schema_smoke.sql" 2>&1 | sed -e 's/^psql:[^ ]* NOTICE:  /    /' -e 's/^NOTICE:  /    /'
-status=${PIPESTATUS[0]}
-[[ $status -eq 0 ]] || { echo "Schema smoke tests FAILED" >&2; exit 1; }
+run_tests driveos_verify "$TESTS/10_schema_smoke.sql" || { echo "Schema smoke tests FAILED" >&2; exit 1; }
 
 echo "==> Drizzle mirror drift check"
 if [[ -d "$ROOT/lib/db/node_modules/drizzle-orm" ]]; then
@@ -82,5 +92,9 @@ if [[ -d "$ROOT/lib/db/node_modules/drizzle-orm" ]]; then
 else
   echo "    SKIPPED: run 'pnpm install' first (lib/db/node_modules missing)"
 fi
+
+echo "==> RLS and security tests (clean database)"
+build_db driveos_rls
+run_tests driveos_rls "$TESTS/20_rls_security.sql" || { echo "RLS and security tests FAILED" >&2; exit 1; }
 
 echo "==> All local verification checks passed"

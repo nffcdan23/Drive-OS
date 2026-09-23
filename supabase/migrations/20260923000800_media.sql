@@ -32,6 +32,11 @@ create table public.photos (
     foreign key (journey_id, owner_id) references public.journeys (id, owner_id) on delete cascade,
   constraint photos_storage_path_key unique (storage_path),
   constraint photos_thumb_path_key   unique (thumb_path),
+  -- A row may only reference files inside its owner's own folder, so it can
+  -- never be used to gain read access to somebody else's file.
+  constraint photos_paths_in_owner_folder check (
+    storage_path like owner_id::text || '/%' and
+    (thumb_path is null or thumb_path like owner_id::text || '/%')),
   constraint photos_one_parent       check (num_nonnulls(vehicle_id, journey_id, location_id) = 1),
   constraint photos_bucket_matches_parent check (
     (vehicle_id  is not null and bucket = 'vehicle-photos') or

@@ -1,8 +1,8 @@
 -- ============================================================================
 -- 0004 · Groups, convoys, events
 -- Visibility and membership rules live here as constraints; the rules that
--- need row locks (capacity, max participants) are enforced by the API inside
--- a transaction.
+-- need row locks (capacity, max participants) and join codes are enforced by
+-- the API inside a transaction.
 -- ============================================================================
 
 -- ─── groups ──────────────────────────────────────────────────────────────────
@@ -16,17 +16,14 @@ create table public.groups (
   -- false: visible only to members (active, pending or invited).
   is_public         boolean     not null default true,
   membership_method text        not null default 'open',
-  join_code         text,
   primary_location  text        not null default '',
   vehicle_interests text        not null default '',
   created_at        timestamptz not null default now(),
   updated_at        timestamptz not null default now(),
 
-  constraint groups_join_code_key       unique (join_code),
   constraint groups_name_length         check (char_length(name) between 1 and 80),
   constraint groups_description_length  check (char_length(description) <= 2000),
-  constraint groups_membership_method   check (membership_method in ('open', 'request', 'invite', 'code')),
-  constraint groups_code_requires_code  check (membership_method <> 'code' or join_code is not null)
+  constraint groups_membership_method   check (membership_method in ('open', 'request', 'invite', 'code'))
 );
 
 create index groups_owner_idx on public.groups (owner_id);
@@ -73,7 +70,6 @@ create table public.convoys (
   destination_lat  double precision,
   destination_lng  double precision,
   visibility       text             not null default 'public',
-  join_code        text,
   starts_at        timestamptz      not null,
   status           text             not null default 'forming',
   started_at       timestamptz,
@@ -82,7 +78,6 @@ create table public.convoys (
   created_at       timestamptz      not null default now(),
   updated_at       timestamptz      not null default now(),
 
-  constraint convoys_join_code_key       unique (join_code),
   constraint convoys_name_length         check (char_length(name) between 1 and 80),
   constraint convoys_description_length  check (char_length(description) <= 2000),
   constraint convoys_visibility          check (visibility in ('public', 'friends', 'private')),
@@ -119,6 +114,20 @@ create unique index convoy_participants_one_leader on public.convoy_participants
 create index convoy_participants_user_idx on public.convoy_participants (user_id);
 
 alter table public.convoy_participants enable row level security;
+
+-- ─── join codes (private schema: never readable by clients) ──────────────────
+-- Kept out of the groups/convoys rows because those rows are visible to people
+-- who must not learn the code (e.g. a listed group that is joined by code).
+-- Issued and checked by the API only.
+create table private.join_codes (
+  code       text        primary key,
+  group_id   uuid        unique references public.groups (id) on delete cascade,
+  convoy_id  uuid        unique references public.convoys (id) on delete cascade,
+  created_at timestamptz not null default now(),
+
+  constraint join_codes_format     check (code ~ '^[A-Z0-9]{6,12}$'),
+  constraint join_codes_one_target check (num_nonnulls(group_id, convoy_id) = 1)
+);
 
 -- ─── events ──────────────────────────────────────────────────────────────────
 create table public.events (

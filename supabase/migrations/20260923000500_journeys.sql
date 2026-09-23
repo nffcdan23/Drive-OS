@@ -1,8 +1,9 @@
 -- ============================================================================
 -- 0005 · Journeys, categories, route points
 -- Raw GPS points are owner-only and keyed (journey_id, recorded_at) so that a
--- re-sent batch cannot create duplicates. Completed journeys carry an encoded
--- polyline (and a start/end-trimmed public one) for display.
+-- re-sent batch cannot create duplicates. The full route summary is kept in
+-- the owner-only journey_routes table; the shareable journeys row only carries
+-- a start/end-trimmed polyline.
 -- ============================================================================
 
 -- ─── journey_categories ──────────────────────────────────────────────────────
@@ -61,18 +62,10 @@ create table public.journeys (
   top_speed_kmh         double precision not null default 0,
   xp_earned             integer          not null default 0,
   vehicle_snapshot      jsonb,
-  -- Route summary, written by the server when the journey is completed.
-  route_polyline        text,
+  -- Start/end-trimmed route for anyone the journey is shared with. The full
+  -- route (which reveals where the owner starts and ends) is owner-only, in
+  -- journey_routes.
   public_route_polyline text,
-  route_point_count     integer          not null default 0,
-  start_lat             double precision,
-  start_lng             double precision,
-  end_lat               double precision,
-  end_lng               double precision,
-  bbox_min_lat          double precision,
-  bbox_min_lng          double precision,
-  bbox_max_lat          double precision,
-  bbox_max_lng          double precision,
   created_at            timestamptz      not null default now(),
   updated_at            timestamptz      not null default now(),
 
@@ -90,7 +83,7 @@ create table public.journeys (
   constraint journeys_times             check (ended_at is null or ended_at >= started_at),
   constraint journeys_stats_nonnegative check (
     duration_seconds >= 0 and distance_km >= 0 and avg_speed_kmh >= 0 and top_speed_kmh >= 0 and
-    xp_earned >= 0 and route_point_count >= 0),
+    xp_earned >= 0),
   constraint journeys_vehicle_snapshot  check (vehicle_snapshot is null or jsonb_typeof(vehicle_snapshot) = 'object')
 );
 
@@ -127,3 +120,36 @@ create table public.journey_route_points (
 );
 
 alter table public.journey_route_points enable row level security;
+
+-- ─── journey_routes (owner only) ─────────────────────────────────────────────
+-- Full route summary, written by the server when a journey is completed.
+-- Separate from journeys because the journeys row can be shared with friends
+-- or the public, and these values reveal where the owner starts and ends.
+create table public.journey_routes (
+  journey_id     uuid             primary key,
+  owner_id       uuid             not null,
+  route_polyline text,
+  point_count    integer          not null default 0,
+  start_lat      double precision,
+  start_lng      double precision,
+  end_lat        double precision,
+  end_lng        double precision,
+  bbox_min_lat   double precision,
+  bbox_min_lng   double precision,
+  bbox_max_lat   double precision,
+  bbox_max_lng   double precision,
+  created_at     timestamptz      not null default now(),
+  updated_at     timestamptz      not null default now(),
+
+  constraint journey_routes_journey_fk
+    foreign key (journey_id, owner_id) references public.journeys (id, owner_id) on delete cascade,
+  constraint journey_routes_point_count check (point_count >= 0)
+);
+
+create index journey_routes_owner_idx on public.journey_routes (owner_id);
+
+create trigger journey_routes_set_updated_at
+  before update on public.journey_routes
+  for each row execute function private.set_updated_at();
+
+alter table public.journey_routes enable row level security;

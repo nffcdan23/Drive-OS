@@ -8,11 +8,18 @@
 -- real Supabase objects; behaviour is simplified.
 -- ============================================================================
 
+set client_min_messages = warning;
+
 -- Roles (Supabase: service_role bypasses RLS; anon/authenticated do not).
-create role anon          nologin noinherit;
-create role authenticated nologin noinherit;
-create role service_role  nologin noinherit bypassrls;
-create role authenticator login noinherit;
+-- Roles are cluster-wide, so this stub may run in several databases.
+do $$
+begin
+  if not exists (select 1 from pg_roles where rolname = 'anon')          then create role anon          nologin noinherit; end if;
+  if not exists (select 1 from pg_roles where rolname = 'authenticated') then create role authenticated nologin noinherit; end if;
+  if not exists (select 1 from pg_roles where rolname = 'service_role')  then create role service_role  nologin noinherit bypassrls; end if;
+  if not exists (select 1 from pg_roles where rolname = 'authenticator') then create role authenticator login noinherit; end if;
+end
+$$;
 grant anon, authenticated, service_role to authenticator;
 
 -- Supabase grants client roles usage of `public` and, by default, full
@@ -94,7 +101,7 @@ create table storage.objects (
   unique (bucket_id, name)
 );
 alter table storage.objects enable row level security;
-grant select, insert, update, delete on storage.objects to authenticated, service_role;
+grant select, insert, update, delete on storage.objects to anon, authenticated, service_role;
 grant select on storage.buckets to anon, authenticated, service_role;
 
 -- Folder segments of an object name (all but the last path segment).
