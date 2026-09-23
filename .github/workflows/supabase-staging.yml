@@ -6,7 +6,8 @@ name: Supabase staging deploy
 # Runs only when deliberately triggered:
 #   * a commit on the working branch whose message contains
 #     "[deploy supabase-staging]" (deploy) or "[probe supabase-staging]"
-#     (read-only probe only — cannot apply anything), or
+#     (read-only probe plus the rollback-only Storage policy proof — cannot
+#     apply migrations or leave anything behind), or
 #   * "Run workflow" in the Actions tab once this file is on the default
 #     branch (type deploy-staging to confirm).
 # Every other push to the branch shows this workflow as skipped.
@@ -37,7 +38,7 @@ concurrency:
 
 jobs:
   probe:
-    name: Read-only staging probe
+    name: Staging probe (read-only + rollback-only policy proof)
     if: github.event_name == 'push' && contains(github.event.head_commit.message, '[probe supabase-staging]')
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -54,12 +55,17 @@ jobs:
           echo "Database secret is set."
 
       - name: Pre-flight (read-only transaction)
-        # Diagnostic here: a failing pre-flight is expected until 0013 is fixed.
-        continue-on-error: true
         run: psql "$STAGING_DB_URL" -X -q -f supabase/tests/staging/preflight.sql
 
       - name: Storage ownership probe (read-only transaction)
         run: psql "$STAGING_DB_URL" -X -q -f supabase/tests/staging/storage_probe.sql
+
+      - name: Storage policy proof (rollback only)
+        run: psql "$STAGING_DB_URL" -X -q -f supabase/tests/staging/storage_policy_proof.sql
+
+      - name: Verify the proof left nothing behind (read-only)
+        if: always()
+        run: psql "$STAGING_DB_URL" -X -q -f supabase/tests/staging/storage_policy_proof_verify.sql
 
   deploy:
     name: Deploy and verify staging
@@ -110,6 +116,12 @@ jobs:
 
       - name: Pre-flight (read-only transaction)
         run: psql "$STAGING_DB_URL" -X -q -f supabase/tests/staging/preflight.sql
+
+      - name: Storage policy proof (rollback only)
+        run: psql "$STAGING_DB_URL" -X -q -f supabase/tests/staging/storage_policy_proof.sql
+
+      - name: Verify the proof left nothing behind (read-only)
+        run: psql "$STAGING_DB_URL" -X -q -f supabase/tests/staging/storage_policy_proof_verify.sql
 
       - name: Show the migrations that will be applied (dry run)
         run: supabase db push --db-url "$STAGING_DB_URL" --dry-run

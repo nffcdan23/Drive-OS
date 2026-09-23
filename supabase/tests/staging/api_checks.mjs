@@ -141,6 +141,22 @@ async function run() {
   r = await upload(users.a.token, 'avatars', `${a.id}/not-an-image-${RUN}.pdf`, 'application/pdf', PDF);
   check('Storage: bucket file-type limits are enforced', !is2xx(r), `HTTP ${r.status}`);
 
+  // Deleting through the Storage API (direct SQL deletes are blocked by
+  // Supabase, so this is where the delete policies are exercised).
+  const removeAs = (token, bucket, paths) =>
+    http('DELETE', `/storage/v1/object/${bucket}`, { headers: userHeaders(token), body: { prefixes: paths } });
+  r = await removeAs(users.b.token, 'avatars', [avatar]);
+  const removedByB = Array.isArray(r.json) ? r.json.length : null;
+  check('Storage: a user cannot delete someone else\'s file', !is2xx(r) || removedByB === 0, `HTTP ${r.status}, removed ${removedByB}`);
+  r = await http('GET', `/storage/v1/object/public/avatars/${avatar}`);
+  check('Storage: the file is still there after that attempt', is2xx(r), `HTTP ${r.status}`);
+  r = await removeAs(users.a.token, 'avatars', [avatar]);
+  const removedByA = Array.isArray(r.json) ? r.json.length : null;
+  check('Storage: a user can delete their own file', is2xx(r) && removedByA === 1, `HTTP ${r.status}, removed ${removedByA}`);
+  if (is2xx(r) && removedByA === 1) createdFiles.splice(createdFiles.findIndex(([b, p]) => b === 'avatars' && p === avatar), 1);
+  r = await http('GET', `/storage/v1/object/public/avatars/${avatar}`);
+  check('Storage: a deleted file is no longer served', !is2xx(r), `HTTP ${r.status}`);
+
   const vehicleId = sql(`insert into public.vehicles (owner_id, nickname, visibility)
                          values ('${a.id}', 'Staging probe', 'public') returning id`);
   const photo = `${a.id}/${vehicleId}/probe-${RUN}.jpg`;

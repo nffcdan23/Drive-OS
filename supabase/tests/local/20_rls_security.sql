@@ -170,6 +170,22 @@ begin
 end;
 $$;
 
+-- Direct SQL deletes from storage.objects are blocked on hosted Supabase by
+-- its protect_objects_delete trigger (files must be deleted through the
+-- Storage API). There, these checks are skipped here and covered instead by
+-- the Storage API delete checks in tests/staging/api_checks.mjs.
+create function pg_temp.check_storage_delete(p_who text, p_sql text, p_expected bigint, p_label text)
+returns void language plpgsql as $$
+begin
+  if exists (select 1 from pg_trigger
+             where tgrelid = 'storage.objects'::regclass and tgname = 'protect_objects_delete') then
+    raise notice 'skip % (Supabase blocks direct deletes; covered by the Storage API live checks)', p_label;
+    return;
+  end if;
+  perform pg_temp.check_affects(p_who, p_sql, p_expected, p_label);
+end;
+$$;
+
 -- ─── Fixture (as the database owner) ─────────────────────────────────────────
 insert into auth.users (id, email, raw_user_meta_data) values
   ('a0000000-0000-0000-0000-000000000000', 'alice@example.test', '{"display_name":"Alice"}'),
@@ -603,11 +619,11 @@ select pg_temp.check_affects('alice', $q$insert into storage.objects (bucket_id,
   'an organiser can upload the event cover');
 select pg_temp.check_denied('carol', $q$insert into storage.objects (bucket_id, name) values ('community-media', 'events/e7000000-0000-0000-0000-000000000001/x.jpg')$q$,
   '42501', '%row-level security%', 'a guest cannot upload event images');
-select pg_temp.check_affects('carol', $q$delete from storage.objects where name like 'a0000000-0000-0000-0000-000000000000/%'$q$, 0,
+select pg_temp.check_storage_delete('carol', $q$delete from storage.objects where name like 'a0000000-0000-0000-0000-000000000000/%'$q$, 0,
   'a user cannot delete someone else''s files');
 select pg_temp.check_affects('bob', $q$update storage.objects set name = 'b0000000-0000-0000-0000-000000000000/stolen.jpg' where name like '%/p2.jpg'$q$, 0,
   'a user cannot rename or move someone else''s files');
-select pg_temp.check_affects('alice', $q$delete from storage.objects where bucket_id = 'vehicle-documents'$q$, 1,
+select pg_temp.check_storage_delete('alice', $q$delete from storage.objects where bucket_id = 'vehicle-documents'$q$, 1,
   'an owner can delete their own document file');
 
 \echo '=== ALL RLS AND SECURITY TESTS PASSED ==='

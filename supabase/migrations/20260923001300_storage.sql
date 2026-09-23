@@ -11,6 +11,14 @@
 -- and visibility; the folder prefix only controls where uploads may go.
 -- During Phase 1 uploads use signed upload URLs created by the API, so the
 -- INSERT policies below are for future direct uploads.
+--
+-- Permissions on hosted Supabase: storage.objects is owned by
+-- supabase_storage_admin, not by `postgres` (the role migrations run as),
+-- and `postgres` cannot SET ROLE to it. Supabase instead lists
+-- storage.objects for `postgres` in its `supautils.policy_grants` setting,
+-- which is the supported way for `postgres` to create, alter and drop
+-- policies on that table. The policies below rely on that grant; the staging
+-- pre-flight checks it before any migration is applied.
 -- ============================================================================
 
 insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types) values

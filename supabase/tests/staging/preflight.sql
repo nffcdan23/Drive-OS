@@ -41,7 +41,9 @@ select (select count(*) from pg_tables where schemaname = 'public')             
 select has_table_privilege('auth.users', 'TRIGGER')                                   as can_create_auth_user_trigger,
        has_table_privilege('auth.users', 'REFERENCES')                                as can_reference_auth_users,
        (select pg_has_role(current_user, c.relowner, 'USAGE')
-          from pg_class c where c.oid = 'storage.objects'::regclass)                  as can_create_storage_policies,
+          from pg_class c where c.oid = 'storage.objects'::regclass)                  as owns_storage_objects,
+       coalesce(nullif(current_setting('supautils.policy_grants', true), '')::jsonb
+                  -> current_user ? 'storage.objects', false)                         as storage_policy_grant,
        has_table_privilege('storage.buckets', 'INSERT')                               as can_create_buckets,
        has_schema_privilege('extensions', 'CREATE')                                   as can_use_extensions_schema,
        has_database_privilege(current_database(), 'CREATE')                           as can_create_schemas,
@@ -93,8 +95,14 @@ begin
   if not has_table_privilege('auth.users', 'REFERENCES') then
     problems := array_append(problems, 'cannot reference auth.users from profiles');
   end if;
-  if not (select pg_has_role(current_user, c.relowner, 'USAGE') from pg_class c where c.oid = 'storage.objects'::regclass) then
-    problems := array_append(problems, 'cannot create policies on storage.objects (not its owner)');
+  -- Creating policies needs ownership (plain Postgres, e.g. local tests) or,
+  -- on hosted Supabase, storage.objects listed for this role in
+  -- supautils.policy_grants (how Supabase lets `postgres` manage them).
+  if not (select pg_has_role(current_user, c.relowner, 'USAGE') from pg_class c where c.oid = 'storage.objects'::regclass)
+     and not coalesce(nullif(current_setting('supautils.policy_grants', true), '')::jsonb
+                        -> current_user ? 'storage.objects', false) then
+    problems := array_append(problems,
+      'cannot create policies on storage.objects (not its owner, and not granted in supautils.policy_grants)');
   end if;
   if not has_table_privilege('storage.buckets', 'INSERT') then
     problems := array_append(problems, 'cannot create Storage buckets');
