@@ -234,6 +234,16 @@ test("vehicles: ownership, activation, idempotency", async () => {
 
 // ─── Journeys ───────────────────────────────────────────────────────────────
 
+// A time zone where `iso` is not between 03:00 and 07:00 local time, so the
+// Early Bird achievement never depends on when the tests run.
+function zoneAvoidingEarlyBird(iso) {
+  for (const tz of ["Europe/London", "Asia/Tokyo", "America/New_York"]) {
+    const h = Number(new Intl.DateTimeFormat("en-GB", { timeZone: tz, hour: "2-digit", hourCycle: "h23" }).format(new Date(iso)));
+    if (h < 3 || h >= 7) return tz;
+  }
+  throw new Error("no suitable time zone");
+}
+
 function track(start, count, stepDeg = 0.009) {
   const t0 = new Date(start).getTime();
   return Array.from({ length: count }, (_, i) => ({
@@ -246,7 +256,7 @@ test("journeys: server-side distance, XP, privacy of the route", async () => {
   const u = await newUser();
   const other = await newUser();
   const startedAt = new Date(Date.now() - 30 * 60_000).toISOString();
-  const j = await post(u, "/journeys", { startedAt, timezone: "Europe/London", clientRef: "j1" });
+  const j = await post(u, "/journeys", { startedAt, timezone: zoneAvoidingEarlyBird(startedAt), clientRef: "j1" });
   expect(j, 201, "start");
   const id = j.body.id;
 
@@ -412,7 +422,8 @@ test("events: capacity under concurrency, private invitations", async () => {
   const rs = await Promise.all(people.map((p) => call(p, "PUT", `/events/${e.body.id}/rsvp`, { status: "going" })));
   assert.equal(rs.filter((r) => r.status === 200).length, 2, "capacity respected");
   assert.equal(rs.filter((r) => r.status === 409).length, 3);
-  expect(await call(people[4], "PUT", `/events/${e.body.id}/rsvp`, { status: "interested" }), 200, "interested is unlimited");
+  const turnedAway = people[rs.findIndex((r) => r.status === 409)];
+  expect(await call(turnedAway, "PUT", `/events/${e.body.id}/rsvp`, { status: "interested" }), 200, "interested is unlimited");
   expect(await patch(org, `/events/${e.body.id}`, { capacity: 1 }), 409, "capacity below attendance");
 
   const p = await post(org, "/events", { name: "Private", visibility: "private", startsAt: future(60) });

@@ -223,6 +223,7 @@ jobs:
 
       - name: Typecheck and build the API
         run: |
+          pnpm run typecheck:libs
           pnpm --filter @workspace/api-server run typecheck
           pnpm --filter @workspace/api-server run build
 

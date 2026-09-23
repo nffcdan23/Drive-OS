@@ -145,7 +145,12 @@ async function run() {
   check("another user cannot edit it", (await api(b, 'PATCH', `/vehicles/${v.json?.id}`, { nickname: 'x' })).status === 404);
 
   const startedAt = new Date(Date.now() - 20 * 60_000);
-  const j = await api(a, 'POST', '/journeys', { startedAt: startedAt.toISOString(), vehicleId: v.json?.id });
+  // A time zone where the start isn't 03:00–07:00 local, so Early Bird can't add XP.
+  const timezone = ['Europe/London', 'Asia/Tokyo', 'America/New_York'].find((tz) => {
+    const h = Number(new Intl.DateTimeFormat('en-GB', { timeZone: tz, hour: '2-digit', hourCycle: 'h23' }).format(startedAt));
+    return h < 3 || h >= 7;
+  });
+  const j = await api(a, 'POST', '/journeys', { startedAt: startedAt.toISOString(), vehicleId: v.json?.id, timezone });
   const points = Array.from({ length: 11 }, (_, i) => ({
     recordedAt: new Date(startedAt.getTime() + (i + 1) * 60_000).toISOString(),
     latitude: 51.5 + i * 0.009, longitude: -0.1, speedKmh: 55, accuracyM: 5, altitudeM: 40,

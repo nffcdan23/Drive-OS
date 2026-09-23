@@ -59,7 +59,7 @@ jobs:
 
       - name: Typecheck the database package and API
         run: |
-          pnpm exec tsc --build lib/db
+          pnpm run typecheck:libs
           pnpm --filter @workspace/api-server run typecheck
 
       - name: Verify migrations, RLS, security and the API
