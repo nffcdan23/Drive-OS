@@ -9,9 +9,6 @@
  * `supabase/tests/local/run.sh` checks this file against a database built
  * from the migrations (tables, columns, types, nullability, defaults).
  *
- * Not yet wired into the API: the running Express code still uses the legacy
- * schema in `./index.ts` until the Phase 4 integration.
- *
  * Tables in the `private` schema (join codes, Storage deletion queue) are
  * not mirrored here; the API reaches them with explicit SQL.
  */

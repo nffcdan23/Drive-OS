@@ -2,8 +2,9 @@ name: Database
 
 # Verifies the Supabase migrations on every pull request that touches the
 # database, entirely inside the CI runner: a throwaway PostgreSQL + PostGIS
-# instance, schema smoke tests, the Drizzle drift check and the RLS/security
-# test suite. It never connects to Supabase, Railway or any other database,
+# instance, schema smoke tests, the Drizzle drift check, the RLS/security
+# test suite and the API integration tests (against a fake Storage/Auth
+# server with test-only tokens). It never connects to Supabase, Railway or any other database,
 # and uses no secrets.
 
 on:
@@ -11,12 +12,14 @@ on:
     paths:
       - 'supabase/**'
       - 'lib/db/**'
+      - 'artifacts/api-server/**'
       - '.github/workflows/database.yml'
   push:
-    branches: [main]
+    branches: [main, 'claude/**']
     paths:
       - 'supabase/**'
       - 'lib/db/**'
+      - 'artifacts/api-server/**'
       - '.github/workflows/database.yml'
   workflow_dispatch:
 
@@ -29,7 +32,7 @@ concurrency:
 
 jobs:
   verify:
-    name: Migrations, RLS and security tests
+    name: Migrations, RLS, security and API tests
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
@@ -54,8 +57,10 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Typecheck the database package
-        run: pnpm exec tsc --build lib/db
+      - name: Typecheck the database package and API
+        run: |
+          pnpm exec tsc --build lib/db
+          pnpm --filter @workspace/api-server run typecheck
 
-      - name: Verify migrations, RLS and security
+      - name: Verify migrations, RLS, security and the API
         run: pnpm run db:verify-local

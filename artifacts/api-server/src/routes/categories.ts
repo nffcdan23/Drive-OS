@@ -1,117 +1,55 @@
-import { Router } from 'express';
-import { param } from '../utils/param';
-import { db, journeyCategories } from '@workspace/db';
-import { eq, and, or, isNull } from 'drizzle-orm';
-import { requireUser } from '../middleware/userId';
+import { Router } from "express";
+import { and, asc, eq, isNull, or } from "drizzle-orm";
+import { db, journeyCategories } from "@workspace/db";
+import { requireUser } from "../middleware/auth";
+import { handler, notFound, uuidParam } from "../lib/http";
+import { Body } from "../lib/validate";
 
 const router = Router();
+const COLOUR = /^#[0-9A-Fa-f]{6}$/;
 
-const DEFAULT_CATEGORIES = [
-  { name: 'Daily Commute',   icon: 'car',          colour: '#4B9EFF' },
-  { name: 'Road Trip',       icon: 'map',          colour: '#FF6B6B' },
-  { name: 'Track Day',       icon: 'flag',         colour: '#FFD700' },
-  { name: 'Weekend Drive',   icon: 'sun',          colour: '#4ECDC4' },
-  { name: 'Night Cruise',    icon: 'moon',         colour: '#9B59B6' },
-  { name: 'Mountain Run',    icon: 'triangle',     colour: '#E67E22' },
-  { name: 'Coastal Drive',   icon: 'anchor',       colour: '#3498DB' },
-  { name: 'Cross Country',   icon: 'compass',      colour: '#2ECC71' },
-];
-
-// GET /api/categories – list user's categories (including defaults)
-router.get('/categories', requireUser, async (req, res, next) => {
-  try {
-    const rows = await db
-      .select()
-      .from(journeyCategories)
-      .where(
-        or(
-          eq(journeyCategories.userId, req.userId),
-          and(isNull(journeyCategories.userId), eq(journeyCategories.isDefault, true)),
-        ),
-      );
-
-    // Seed defaults if user has none yet
-    if (rows.filter((r) => r.isDefault).length === 0) {
-      const seeded = await db
-        .insert(journeyCategories)
-        .values(
-          DEFAULT_CATEGORIES.map((c, i) => ({
-            userId:    null, // shared defaults have no owner
-            name:      c.name,
-            icon:      c.icon,
-            colour:    c.colour,
-            isDefault: true,
-            sortOrder: i,
-          })),
-        )
-        .onConflictDoNothing()
-        .returning();
-      rows.push(...seeded);
-    }
-
-    res.json(rows.sort((a, b) => a.sortOrder - b.sortOrder));
-  } catch (err) {
-    next(err);
-  }
-});
+// GET /api/categories — shared defaults plus the user's own
+router.get("/categories", requireUser, handler(async (req, res) => {
+  const rows = await db.select().from(journeyCategories)
+    .where(or(isNull(journeyCategories.ownerId), eq(journeyCategories.ownerId, req.userId)))
+    .orderBy(asc(journeyCategories.sortOrder), asc(journeyCategories.createdAt));
+  res.json(rows);
+}));
 
 // POST /api/categories
-router.post('/categories', requireUser, async (req, res, next) => {
-  try {
-    const { name, icon, colour } = req.body as { name: string; icon: string; colour: string };
-    const [row] = await db
-      .insert(journeyCategories)
-      .values({ userId: req.userId, name, icon, colour, isDefault: false })
-      .returning();
-    res.status(201).json(row);
-  } catch (err) {
-    next(err);
-  }
-});
+router.post("/categories", requireUser, handler(async (req, res) => {
+  const b = Body.of(req);
+  const [row] = await db.insert(journeyCategories).values({
+    ownerId: req.userId,
+    name: b.str("name", { min: 1, max: 40 })!,
+    icon: b.str("icon", { min: 1, max: 40 })!,
+    colour: b.str("colour", { pattern: COLOUR })!,
+    sortOrder: b.int("sortOrder", { optional: true, min: 0, max: 10_000 }) ?? 100,
+  }).returning();
+  res.status(201).json(row);
+}));
 
-// PUT /api/categories/:id
-router.put('/categories/:id', requireUser, async (req, res, next) => {
-  try {
-    const { name, icon, colour } = req.body as { name?: string; icon?: string; colour?: string };
-    const updates: Partial<typeof journeyCategories.$inferInsert> = {};
-    if (name !== undefined) updates.name = name;
-    if (icon !== undefined) updates.icon = icon;
-    if (colour !== undefined) updates.colour = colour;
+// PATCH /api/categories/:id — own categories only (defaults are read-only)
+router.patch("/categories/:id", requireUser, handler(async (req, res) => {
+  const b = Body.of(req);
+  const u: Partial<typeof journeyCategories.$inferInsert> = {};
+  if (b.has("name")) u.name = b.str("name", { min: 1, max: 40 })!;
+  if (b.has("icon")) u.icon = b.str("icon", { min: 1, max: 40 })!;
+  if (b.has("colour")) u.colour = b.str("colour", { pattern: COLOUR })!;
+  if (b.has("sortOrder")) u.sortOrder = b.int("sortOrder", { min: 0, max: 10_000 })!;
+  const [row] = await db.update(journeyCategories).set(u)
+    .where(and(eq(journeyCategories.id, uuidParam(req, "id")), eq(journeyCategories.ownerId, req.userId))).returning();
+  if (!row) throw notFound();
+  res.json(row);
+}));
 
-    const [row] = await db
-      .update(journeyCategories)
-      .set(updates)
-      .where(
-        and(
-          eq(journeyCategories.id, param(req.params.id)),
-          eq(journeyCategories.userId, req.userId),
-        ),
-      )
-      .returning();
-
-    if (!row) { res.status(404).json({ error: 'Not found or not yours' }); return; }
-    res.json(row);
-  } catch (err) {
-    next(err);
-  }
-});
-
-// DELETE /api/categories/:id
-router.delete('/categories/:id', requireUser, async (req, res, next) => {
-  try {
-    await db
-      .delete(journeyCategories)
-      .where(
-        and(
-          eq(journeyCategories.id, param(req.params.id)),
-          eq(journeyCategories.userId, req.userId),
-          eq(journeyCategories.isDefault, false),
-        ),
-      );
-    res.status(204).send();
-  } catch (err) {
-    next(err);
-  }
-});
+// DELETE /api/categories/:id — journeys using it become uncategorised
+router.delete("/categories/:id", requireUser, handler(async (req, res) => {
+  const [row] = await db.delete(journeyCategories)
+    .where(and(eq(journeyCategories.id, uuidParam(req, "id")), eq(journeyCategories.ownerId, req.userId)))
+    .returning({ id: journeyCategories.id });
+  if (!row) throw notFound();
+  res.status(204).send();
+}));
 
 export default router;

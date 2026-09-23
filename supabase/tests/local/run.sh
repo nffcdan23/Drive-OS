@@ -11,7 +11,9 @@
 # 5. Checks the Drizzle mirror (lib/db/src/schema/supabase.ts) against the
 #    migrated database (skipped with a warning if node_modules is missing).
 # 6. Runs the RLS and security tests in a second, clean database.
-# 7. Stops the cluster and deletes it.
+# 7. Runs the API integration tests (built server, fake Storage/Auth) in a
+#    third database.
+# 8. Stops the cluster and deletes it.
 #
 # Requirements: PostgreSQL server binaries (initdb, pg_ctl) and PostGIS 3 for
 # the same major version; Node 22+ with `pnpm install` done for the drift check.
@@ -96,5 +98,18 @@ fi
 echo "==> RLS and security tests (clean database)"
 build_db driveos_rls
 run_tests driveos_rls "$TESTS/20_rls_security.sql" || { echo "RLS and security tests FAILED" >&2; exit 1; }
+
+echo "==> API integration tests (clean database, fake Storage/Auth)"
+if [[ "${SKIP_API_TESTS:-0}" == "1" ]]; then
+  echo "    SKIPPED: SKIP_API_TESTS=1"
+elif [[ -d "$ROOT/artifacts/api-server/node_modules/express" ]]; then
+  build_db driveos_api
+  (cd "$ROOT/artifacts/api-server" && node ./build.mjs >/dev/null)
+  TEST_DATABASE_URL="postgresql://postgres@/driveos_api?host=$WORK&port=$PORT" \
+    node --test --test-reporter=spec "$ROOT/artifacts/api-server/test/api.test.mjs" \
+    || { echo "API integration tests FAILED" >&2; exit 1; }
+else
+  echo "    SKIPPED: run 'pnpm install' first (api-server node_modules missing)"
+fi
 
 echo "==> All local verification checks passed"
