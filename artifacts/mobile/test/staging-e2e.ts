@@ -416,7 +416,15 @@ async function run() {
   p1.network = 'offline';
   await app5.startDrive(null);
   let olat = 54.3;
-  for (let s2 = 0; s2 < 240; s2++) { offClock.t += 1000; app5.addFix({ latitude: olat, longitude: -2.9, speedMs: 14, accuracyM: 5, timestamp: offClock.t }); olat += 14 / 111_320; }
+  let olng = -2.9, offKept = 0;
+  // A winding road (a straight one would rightly simplify to its two ends).
+  for (let s2 = 0; s2 < 240; s2++) {
+    offClock.t += 1000;
+    if (app5.addFix({ latitude: olat, longitude: olng, speedMs: 14, accuracyM: 5, timestamp: offClock.t })) offKept++;
+    const heading = Math.sin(s2 / 20) * 1.2; // radians east of north, swinging left and right
+    olat += (14 * Math.cos(heading)) / 111_320;
+    olng += (14 * Math.sin(heading)) / (111_320 * Math.cos((olat * Math.PI) / 180));
+  }
   offClock.t = Date.now();
   const offDrive = await app5.endDrive();
   check('a drive recorded offline is kept on the phone', offDrive?.syncState === 'pending' && app5.status.pendingJourneys === 1);
@@ -429,6 +437,8 @@ async function run() {
   check('the offline drive uploads once back online, exactly once', after.length === before + 1 && app5.status.pendingJourneys === 0, `${before} → ${after.length}`);
   const uploaded = after.find((j) => !beforeIds.has(j.id));
   const serverRoute = uploaded ? toJourney(await p1.ep.getJourney(uploaded.id)).routeCoordinates.length : 0;
+  const rawPoints = uploaded ? (await p1.api.get<unknown[]>(`/journeys/${uploaded.id}/points`)).length : 0;
+  check('every GPS point kept offline reached the server', rawPoints === offKept, `${rawPoints} of ${offKept}`);
   const shown = app5.data.journeys.find((j) => j.id === uploaded?.id);
   check('its route is available from the server and shown on the phone', serverRoute > 5 && shown?.syncState === 'synced' && shown.routeCoordinates.length > 5,
     `server ${serverRoute} points, phone ${shown?.routeCoordinates.length ?? 0} points`);
