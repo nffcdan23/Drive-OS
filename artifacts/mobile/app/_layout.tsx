@@ -1,3 +1,5 @@
+import "@/lib/polyfills";
+import { APP_NAME } from "@/constants/brand";
 import { MaterialProvider } from "@/components/Glass";
 import React, { useEffect } from "react";
 import { StatusBar } from "expo-status-bar";
@@ -90,7 +92,7 @@ function ConfigErrorScreen({ message }: { message: string }) {
   useEffect(() => { SplashScreen.hideAsync(); }, []);
   return (
     <View style={styles.configError}>
-      <Text style={styles.configTitle}>DriveOS is not configured</Text>
+      <Text style={styles.configTitle}>{APP_NAME} is not configured</Text>
       <Text style={styles.configText}>{message}</Text>
     </View>
   );

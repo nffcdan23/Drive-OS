@@ -4,6 +4,7 @@
  * waiting on this phone, so failures are never silent.
  */
 import React from 'react';
+import { APP_NAME } from '@/constants/brand';
 import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -38,7 +39,7 @@ export function ConnectionBanner() {
     action = { label: 'Retry', onPress: () => void retrySync() };
   } else if (sync.connection === 'server_error') {
     tone = 'error'; icon = 'warning-outline';
-    text = `DriveOS server problem${waiting ? ` — ${waiting} saved on this phone` : ''}. ${sync.lastError ?? ''}`.trim();
+    text = `${APP_NAME} server problem${waiting ? ` — ${waiting} saved on this phone` : ''}. ${sync.lastError ?? ''}`.trim();
     action = { label: 'Retry', onPress: () => void retrySync() };
   } else if (sync.rejected.length) {
     tone = 'error'; icon = 'alert-circle-outline';

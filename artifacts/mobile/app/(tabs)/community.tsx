@@ -1,4 +1,5 @@
 import { GlassSurface, GlassButton } from "@/components/Glass";
+import { APP_NAME } from "@/constants/brand";
 import { describeError } from "@/lib/backend/http";
 import { KeyboardAwareScrollViewCompat } from "@/components/KeyboardAwareScrollViewCompat";
 import { ScreenTitle, Disclosure } from "@/components/Cockpit";
@@ -1606,7 +1607,7 @@ export default function CommunityScreen() {
                     result === "accepted" ? "You're now friends" : "Request sent",
                     result === "accepted"
                       ? "They had already sent you a request, so you're now connected."
-                      : "They'll see your request next time they open DriveOS.",
+                      : `They'll see your request next time they open ${APP_NAME}.`,
                   );
                 } catch (err) {
                   Alert.alert("Request not sent", describeError(err));

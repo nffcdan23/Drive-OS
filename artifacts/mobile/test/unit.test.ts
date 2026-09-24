@@ -319,3 +319,35 @@ test('each user has separate cached data on the same phone', async () => {
   await a.wipeLocal();
   assert.equal([...store.data.keys()].filter((k) => k.includes('/u1/')).length, 0, 'sign-out removes the user\'s cache');
 });
+
+// ─── Sign-in links, photo bytes, app identity ───────────────────────────────
+
+import { parseAuthCallback } from '@/lib/backend/auth';
+import { base64ToBytes } from '@/lib/backend/bytes';
+import { createRequire } from 'node:module';
+
+test('sign-in return links are parsed from the query and the fragment', () => {
+  assert.deepEqual(parseAuthCallback('driveos-staging://auth/callback?type=recovery&code=abc-123'),
+    { code: 'abc-123', error: null, type: 'recovery' });
+  assert.deepEqual(parseAuthCallback('exp://192.168.1.2:8081/--/auth/callback#error=access_denied&error_description=Email+link+is+invalid+or+has+expired'),
+    { code: null, error: 'Email link is invalid or has expired', type: null });
+  // Values containing "=" and malformed escapes don't break parsing.
+  assert.equal(parseAuthCallback('driveos://auth/callback?code=a%3Db==&x=%E0%A4%A').code, 'a=b==');
+});
+
+test('photo bytes decode from base64', () => {
+  const bytes = base64ToBytes(Buffer.from([0xff, 0xd8, 0xff, 0x00, 0x10]).toString('base64'));
+  assert.deepEqual([...bytes], [0xff, 0xd8, 0xff, 0x00, 0x10]);
+  assert.equal(base64ToBytes('data:image/jpeg;base64,/9g=').length, 2);
+});
+
+test('the app identity is a placeholder and never sets a bundle id by itself', () => {
+  const { identity } = createRequire(import.meta.url)('../app.identity.js');
+  const staging = identity('staging', {});
+  assert.equal(staging.bundleId, null, 'no bundle id without APP_BUNDLE_ID');
+  assert.equal(staging.usingPlaceholders, true);
+  assert.equal(staging.scheme, 'driveos-staging');
+  const chosen = identity('production', { APP_DISPLAY_NAME: 'Name', APP_SCHEME: 'name', APP_BUNDLE_ID: 'com.example.name' });
+  assert.deepEqual([chosen.appName, chosen.scheme, chosen.bundleId, chosen.usingPlaceholders], ['Name', 'name', 'com.example.name', false]);
+  assert.equal(identity('staging', { APP_BUNDLE_ID: 'com.example.name' }).bundleId, 'com.example.name.staging');
+});

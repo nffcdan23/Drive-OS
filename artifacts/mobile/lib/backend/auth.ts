@@ -102,17 +102,40 @@ export async function oauthUrl(client: SupabaseClient, provider: 'google' | 'app
   return data.url;
 }
 
+/** Reads the parameters Supabase puts on a return link (query and fragment). */
+export function parseAuthCallback(url: string): { code: string | null; error: string | null; type: string | null } {
+  const params: Record<string, string> = {};
+  const decode = (s: string) => {
+    try { return decodeURIComponent(s.replace(/\+/g, ' ')); } catch { return s; }
+  };
+  const q = url.indexOf('?');
+  const h = url.indexOf('#');
+  const parts = [
+    q >= 0 ? url.slice(q + 1, h > q ? h : undefined) : '',
+    h >= 0 ? url.slice(h + 1) : '',
+  ];
+  for (const part of parts) {
+    for (const pair of part.split('&')) {
+      if (!pair) continue;
+      const eq = pair.indexOf('=');
+      const key = decode(eq >= 0 ? pair.slice(0, eq) : pair);
+      params[key] = decode(eq >= 0 ? pair.slice(eq + 1) : '');
+    }
+  }
+  return {
+    code: params.code || null,
+    error: params.error_description || params.error || null,
+    type: params.type || null,
+  };
+}
+
 /**
  * Completes a sign-in returned to the app by URL (Google, email
  * confirmation, password reset). Errors in the URL are reported.
  */
 export async function completeFromUrl(client: SupabaseClient, url: string): Promise<Session | null> {
-  const parsed = new URL(url);
-  const params = new URLSearchParams(parsed.search);
-  new URLSearchParams(parsed.hash.replace(/^#/, '')).forEach((v, k) => params.set(k, v));
-  const error = params.get('error_description') ?? params.get('error');
-  if (error) throw new AuthFlowError(error.replace(/\+/g, ' '));
-  const code = params.get('code');
+  const { code, error } = parseAuthCallback(url);
+  if (error) throw new AuthFlowError(error);
   if (!code) return null;
   const { data, error: exchangeError } = await client.auth.exchangeCodeForSession(code);
   if (exchangeError) throw exchangeError;

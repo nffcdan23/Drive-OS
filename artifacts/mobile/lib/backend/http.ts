@@ -13,7 +13,7 @@
 export type ConnectionState = 'online' | 'offline' | 'server_error' | 'signed_out';
 
 export class NetworkError extends Error {
-  constructor(message = 'Could not reach the DriveOS server.') { super(message); }
+  constructor(message = 'Could not reach the server.') { super(message); }
 }
 
 export class ApiError extends Error {
@@ -64,7 +64,7 @@ export class ApiClient {
     let json: unknown = null;
     try { json = text ? JSON.parse(text) : null; } catch { json = null; }
     if (res.status >= 500) {
-      const err = errorFrom(res.status, json, 'The DriveOS server had a problem. Try again shortly.');
+      const err = errorFrom(res.status, json, 'The server had a problem. Try again shortly.');
       this.opts.onStatus?.('server_error', err.message);
       throw err;
     }

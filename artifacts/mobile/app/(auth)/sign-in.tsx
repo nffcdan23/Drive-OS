@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { APP_NAME } from '@/constants/brand';
 import {
   ActivityIndicator, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View,
 } from 'react-native';
@@ -56,7 +57,7 @@ export default function SignInScreen() {
   });
 
   const s = styles(colors, insets.top, insets.bottom);
-  const title = mode === 'signup' ? 'Create your account' : mode === 'forgot' ? 'Reset your password' : 'Sign in to DriveOS';
+  const title = mode === 'signup' ? 'Create your account' : mode === 'forgot' ? 'Reset your password' : `Sign in to ${APP_NAME}`;
 
   if (mode === 'check-email' || mode === 'reset-sent') {
     return (
@@ -77,7 +78,7 @@ export default function SignInScreen() {
 
   return (
     <ScrollView style={s.container} contentContainerStyle={s.content} keyboardShouldPersistTaps="handled">
-      <Text style={s.brand}>DriveOS</Text>
+      <Text style={s.brand}>{APP_NAME}</Text>
       <Text style={s.title}>{title}</Text>
       {backendEnv && backendEnv.appEnv !== 'production' ? (
         <Text style={s.envBadge}>{backendEnv.appEnv.toUpperCase()} SERVER</Text>
@@ -142,7 +143,7 @@ export default function SignInScreen() {
             <Text style={s.link}>Forgot password?</Text>
           </TouchableOpacity>
           <TouchableOpacity style={s.linkBtn} onPress={() => { setMode('signup'); setError(null); }}>
-            <Text style={s.body}>New to DriveOS? <Text style={s.link}>Create an account</Text></Text>
+            <Text style={s.body}>New to {APP_NAME}? <Text style={s.link}>Create an account</Text></Text>
           </TouchableOpacity>
         </>
       ) : (

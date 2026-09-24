@@ -31,24 +31,18 @@ The app contains only public values. **Never add the Supabase secret or service-
 - **EAS builds:** set the values as EAS environment variables. Use `preview` for staging builds and `production` for store builds, for example:
   - `eas env:create --environment preview --name EXPO_PUBLIC_SUPABASE_URL --value https://… --visibility plaintext`
 
-### Build variants (`app.config.js`, `eas.json`)
+### Build variants and app identity
 
-| Profile | App name | Bundle id / package | Link scheme |
-|---|---|---|---|
-| `staging` | DriveOS Staging | `com.driveos.app.staging` | `driveos-staging` |
-| `production` | DriveOS | `com.driveos.app` | `driveos` |
+The `staging` and `production` EAS profiles build separately named variants that can be installed side by side:
+- staging has the `-staging` scheme and `.staging` id suffix;
+- production uses the plain values.
 
-Set `DRIVEOS_BUNDLE_ID` to use a different base id. It must match the App ID registered with Apple.
+The app's name, scheme and bundle id come from `app.identity.js`, and are **placeholders until the final name is chosen**. No bundle id is applied unless `APP_BUNDLE_ID` is set, so a build can't register one by accident. See `docs/NAMING.md`.
 
-### Supabase Auth settings
-
-- **URL configuration → Redirect URLs:** add
-  - `driveos://auth/callback`
-  - `driveos-staging://auth/callback`
-  - the Expo Go / dev-client URL you use locally
-- **Email:** keep "Confirm email" on for production, with custom SMTP. The built-in mailer only sends to project members.
-- **Apple:** enable the provider and list both bundle ids under *Client IDs*. Native iOS sign-in needs no secret. Apple sign-in on Android or the web would additionally need a Services ID and key.
-- **Google:** enable the provider with a Google Cloud **Web** OAuth client (ID + secret). Its authorised redirect URI is `https://<project-ref>.supabase.co/auth/v1/callback`.
+### More detail
+- `docs/ENVIRONMENT.md`: every variable and dashboard setting (app, API, CI, Supabase Auth).
+- `docs/STAGING_DEVICE_CHECKLIST.md`: the first real-device test.
+- `docs/NAMING.md`: what depends on the final name and bundle id.
 
 ## Tests
 

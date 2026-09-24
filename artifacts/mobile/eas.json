@@ -7,7 +7,6 @@
     "staging": {
       "distribution": "internal",
       "environment": "preview",
-      "channel": "staging",
       "env": {
         "EXPO_PUBLIC_APP_ENV": "staging"
       }
@@ -20,7 +19,6 @@
     },
     "production": {
       "environment": "production",
-      "channel": "production",
       "autoIncrement": true,
       "env": {
         "EXPO_PUBLIC_APP_ENV": "production"

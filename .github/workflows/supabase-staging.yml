@@ -303,4 +303,7 @@ jobs:
           [ "$expected" = "$applied" ]
 
       - name: Run the app's data layer against staging
+        env:
+          # Optional repository variable (not a secret): domain for sign-up test addresses.
+          SIGNUP_TEST_EMAIL_DOMAIN: ${{ vars.STAGING_SIGNUP_EMAIL_DOMAIN }}
         run: pnpm --filter @workspace/mobile run test:staging

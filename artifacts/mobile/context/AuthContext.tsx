@@ -11,7 +11,7 @@ import * as WebBrowser from 'expo-web-browser';
 import * as Crypto from 'expo-crypto';
 import * as AppleAuthentication from 'expo-apple-authentication';
 import {
-  AuthFlowError, completeFromUrl, oauthUrl, sendPasswordReset, signInWithAppleToken, signInWithEmail,
+  AuthFlowError, completeFromUrl, parseAuthCallback, oauthUrl, sendPasswordReset, signInWithAppleToken, signInWithEmail,
   signUpWithEmail, updatePassword, type Session,
 } from '@/lib/backend/auth';
 import { ep, supabase } from '@/lib/backendClient';
@@ -69,7 +69,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   const handleAuthUrl = useCallback(async (url: string) => {
-    const isRecovery = url.includes('type=recovery');
+    const isRecovery = parseAuthCallback(url).type === 'recovery';
     const s = await completeFromUrl(client(), url);
     if (s && isRecovery) setRecoveringPassword(true);
   }, []);

@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { APP_NAME } from '@/constants/brand';
 import {
   View, Text, StyleSheet, TouchableOpacity, ScrollView,
   Platform, Alert, Modal, ActivityIndicator, TextInput,
@@ -286,7 +287,7 @@ export default function SettingsScreen() {
         <View style={[styles.futureNote, { marginTop: 10 }]}>
           <Text style={styles.futureNoteTitle}>DVLA Vehicle Lookup</Text>
           <Text style={styles.futureNoteText}>
-            Automatic vehicle details from the registration plate, looked up by the DriveOS server
+            Automatic vehicle details from the registration plate, looked up by the {APP_NAME} server
             (the DVLA key never ships in the app). Available when the server has it configured.
           </Text>
         </View>
@@ -299,7 +300,7 @@ export default function SettingsScreen() {
             <Text style={{ color: colors.foreground, fontSize: 18, fontFamily: 'Inter_700Bold' }}>Delete your account?</Text>
             <Text style={{ color: colors.mutedForeground, fontSize: 14, fontFamily: 'Inter_400Regular', lineHeight: 20 }}>
               This permanently deletes your profile, vehicles, photos, documents, journeys, saved places, Beauty Spots,
-              friends and memberships from DriveOS on every device. It can't be undone.
+              friends and memberships from {APP_NAME} on every device. It can't be undone.
             </Text>
             <Text style={{ color: colors.foreground, fontSize: 14, fontFamily: 'Inter_600SemiBold' }}>Type DELETE to confirm</Text>
             <TextInput

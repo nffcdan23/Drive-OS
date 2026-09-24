@@ -33,6 +33,10 @@ const BASE = need('SUPABASE_URL').replace(/\/+$/, '');
 const PUB_KEY = need('SUPABASE_PUBLISHABLE_KEY');
 const SEC_KEY = need('SUPABASE_SECRET_KEY');
 const RUN = process.env.GITHUB_RUN_ID ?? String(Date.now());
+// Domain for sign-up test addresses. Only used when staging auto-confirms
+// sign-ups, so no email is ever sent to it. Override with the repository
+// variable STAGING_SIGNUP_EMAIL_DOMAIN if Supabase rejects the default.
+const SIGNUP_DOMAIN = process.env.SIGNUP_TEST_EMAIL_DOMAIN || 'example.com';
 const PORT = 18090;
 const API_URL = `http://127.0.0.1:${PORT}`;
 
@@ -135,30 +139,40 @@ async function run() {
     `email confirmation: ${settings.mailer_autoconfirm ? 'off (auto-confirm)' : 'required'} · sign-ups: ${settings.disable_signup ? 'disabled' : 'allowed'}`);
   check('email + password sign-in is enabled on staging', ext.email === true);
 
-  const email = `driveos-mobile-${RUN}-a@example.com`;
+  let email = `driveos-mobile-${RUN}-a@${SIGNUP_DOMAIN}`;
   const password = randomBytes(18).toString('base64url');
   console.log(`::add-mask::${password}`);
 
   // ─── 1. Create an email + password account ───────────────────────────────
   section('1. Create an email/password account');
   const phone1 = device('phone 1');
-  let userA: string;
-  try {
-    const r = await signUpWithEmail(phone1.auth, email, password, 'driveos-staging://auth/callback', 'Mobile Tester');
-    userA = r.userId!;
-    createdUsers.add(userA);
-    check('sign-up request accepted by Supabase Auth', !!userA, r.needsConfirmation ? 'confirmation email required' : 'signed in immediately');
-    if (r.needsConfirmation) {
-      // Stand-in for the user opening the confirmation link.
-      const c = await fetch(`${BASE}/auth/v1/admin/users/${userA}`, {
-        method: 'PUT', headers: { ...adminHeaders, 'Content-Type': 'application/json' }, body: JSON.stringify({ email_confirm: true }),
-      });
-      check('account confirmed (simulating the emailed link)', c.ok, `HTTP ${c.status}`);
-      await signInWithEmail(phone1.auth, email, password);
+  let userA: string | null = null;
+  if (!settings.mailer_autoconfirm) {
+    // With confirmation on and Supabase's built-in mailer, a sign-up needs a
+    // deliverable address the mailer is allowed to send to, so a throwaway
+    // test account can't be created without emailing someone. Not attempted.
+    check('sign-up through the app (staging config)', false,
+      'staging requires email confirmation — turn off "Confirm email" for the staging project (Auth → Providers → Email), or add custom SMTP');
+  } else if (settings.disable_signup) {
+    check('sign-up through the app (staging config)', false, 'sign-ups are disabled on staging (Auth → Providers → Email → Allow new users)');
+  } else {
+    try {
+      const r = await signUpWithEmail(phone1.auth, email, password, 'driveos-staging://auth/callback', 'Mobile Tester');
+      userA = r.userId;
+      if (userA) createdUsers.add(userA);
+      check('sign-up through the app creates a signed-in account', !!userA && !r.needsConfirmation && !!r.session,
+        r.needsConfirmation ? 'unexpected: confirmation still required' : 'signed in immediately');
+      const again = await signUpWithEmail(device('same address').auth, email, password, 'driveos-staging://auth/callback').catch((e) => e);
+      check('signing up twice with the same email is refused', again instanceof Error, again instanceof Error ? again.message : 'accepted');
+    } catch (err) {
+      const msg = (err as Error).message;
+      check('sign-up through the app creates a signed-in account', false,
+        /invalid/i.test(msg) ? `${msg} — set the repository variable STAGING_SIGNUP_EMAIL_DOMAIN to a domain you control` : msg);
     }
-  } catch (err) {
-    const msg = (err as Error).message;
-    check('sign-up request accepted by Supabase Auth', false, `${msg} — staging email settings block sign-up; see report`);
+  }
+  if (!userA) {
+    // Carry on with the other scenarios using an account made by the admin API.
+    email = `driveos-mobile-${RUN}-a@example.com`;
     userA = await adminCreate(email, password, 'Mobile Tester');
     await signInWithEmail(phone1.auth, email, password);
   }

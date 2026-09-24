@@ -10,11 +10,7 @@
     "newArchEnabled": true,
     "ios": {
       "supportsTablet": false,
-      "infoPlist": {
-        "NSLocationWhenInUseUsageDescription": "DriveOS uses your location to show your position on the map and record your drives while the app is open.",
-        "NSPhotoLibraryUsageDescription": "DriveOS needs access to your photos to set your vehicle image.",
-        "NSPhotoLibraryAddUsageDescription": "DriveOS needs to save journey photos to your library."
-      }
+      "infoPlist": {}
     },
     "android": {
       "permissions": [

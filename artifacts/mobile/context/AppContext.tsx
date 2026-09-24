@@ -21,6 +21,7 @@ import type {
   JourneyCategory, Message, NearbySpot, Notification, ProfileStats, SavedPlace, UserProfile, Vehicle,
 } from '@/lib/backend/model';
 import type { PreparedFile } from '@/lib/backend/uploads';
+import { base64ToBytes } from '@/lib/backend/bytes';
 import { UnitSystem, ResolvedUnitSystem, resolveUnitSystem } from '@/lib/units';
 import { api, backendEnv, ep, newId, onConnectionStatus } from '@/lib/backendClient';
 import { deviceStorage } from '@/lib/secureStorage';
@@ -140,23 +141,21 @@ const AppContext = createContext<AppContextValue | null>(null);
 const NO_CONVERSATIONS: Conversation[] = [];
 const NO_MESSAGES: Message[] = [];
 
-/** Resizes a picked photo to at most 1600 px (JPEG) so it fits the upload limits. */
-async function prepareImage(uri: string): Promise<PreparedFile> {
-  const result = await ImageManipulator.manipulateAsync(uri, [{ resize: { width: 1600 } }], {
-    compress: 0.8, format: ImageManipulator.SaveFormat.JPEG,
+/**
+ * Resizes a picked photo (JPEG) so it fits the upload limits, and returns its
+ * bytes. The bytes come straight from the image manipulator as base64: Expo's
+ * native fetch can't be relied on to read local file:// URIs on Android.
+ */
+async function prepareUpload(uri: string, width: number): Promise<PreparedFile> {
+  const result = await ImageManipulator.manipulateAsync(uri, [{ resize: { width } }], {
+    compress: 0.8, format: ImageManipulator.SaveFormat.JPEG, base64: true,
   });
-  const res = await fetch(result.uri);
-  const blob = await res.blob();
-  return { body: blob, size: blob.size, mimeType: 'image/jpeg' };
+  if (!result.base64) throw new Error('The photo could not be read.');
+  const bytes = base64ToBytes(result.base64);
+  return { body: bytes, size: bytes.length, mimeType: 'image/jpeg' };
 }
-
-async function prepareAvatar(uri: string): Promise<PreparedFile> {
-  const result = await ImageManipulator.manipulateAsync(uri, [{ resize: { width: 512 } }], {
-    compress: 0.8, format: ImageManipulator.SaveFormat.JPEG,
-  });
-  const blob = await (await fetch(result.uri)).blob();
-  return { body: blob, size: blob.size, mimeType: 'image/jpeg' };
-}
+const prepareImage = (uri: string) => prepareUpload(uri, 1600);
+const prepareAvatar = (uri: string) => prepareUpload(uri, 512);
 
 const timezone = () => Intl.DateTimeFormat().resolvedOptions().timeZone || 'Europe/London';
 

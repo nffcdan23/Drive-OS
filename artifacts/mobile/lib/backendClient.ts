@@ -4,6 +4,7 @@
  * public by design (they ship inside the app) — see eas.json and
  * docs in artifacts/mobile/README.md. Server secrets are refused.
  */
+import '@/lib/polyfills'; // before the Supabase client is created
 import { AppState } from 'react-native';
 import * as Crypto from 'expo-crypto';
 import { checkEnv, ConfigError, type BackendEnv } from '@/lib/backend/env';
