@@ -41,6 +41,7 @@ The app's name, scheme and bundle id come from `app.identity.js`, and are **plac
 
 ### More detail
 - `docs/ENVIRONMENT.md`: every variable and dashboard setting (app, API, CI, Supabase Auth).
+- `docs/STAGING_API.md`: the hosted staging API and the staging iPhone build.
 - `docs/STAGING_DEVICE_CHECKLIST.md`: the first real-device test.
 - `docs/NAMING.md`: what depends on the final name and bundle id.
 

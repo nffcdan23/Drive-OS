@@ -1,0 +1,155 @@
+# Deploys the Express API to the hosted STAGING service (its own Railway
+# project, separate from production) and tests the mobile data layer against it.
+#
+# Runs only when asked:
+#   - a push whose commit message contains  [deploy api-staging]
+#   - or "Run workflow" with confirm = deploy-api-staging
+#
+# Production is out of reach by construction:
+#   - RAILWAY_STAGING_TOKEN is a Railway *project token*, which Railway scopes to
+#     one project and one environment. Create it in the staging project only.
+#   - The job refuses to deploy unless that project's name contains "staging".
+#   - Every Supabase value comes from the SUPABASE_STAGING_* secrets and is
+#     checked to belong to the same staging project before anything changes.
+#   - The Railway build settings are added to the uploaded copy only; there is
+#     no railway.json at the repository root, so production's builds are unaffected.
+name: API staging deploy
+
+on:
+  push:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "deploy-api-staging" to deploy the API to the hosted staging service'
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: api-staging-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy the API to hosted staging
+    if: >-
+      (github.event_name == 'push' && contains(github.event.head_commit.message, '[deploy api-staging]')) ||
+      (github.event_name == 'workflow_dispatch' && inputs.confirm == 'deploy-api-staging')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_STAGING_TOKEN }}
+      RAILWAY_SERVICE: ${{ vars.RAILWAY_STAGING_SERVICE || 'api' }}
+      STAGING_API_URL: ${{ vars.STAGING_API_URL }}
+      STAGING_DB_URL: ${{ secrets.SUPABASE_STAGING_DB_URL }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_STAGING_URL }}
+      SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_STAGING_PUBLISHABLE_KEY }}
+      SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_STAGING_SECRET_KEY }}
+      SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_STAGING_PROJECT_REF }}
+      # Pinned and more than a week old, like the workspace's minimumReleaseAge rule.
+      RAILWAY_CLI_VERSION: 5.57.6
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the Railway CLI
+        run: |
+          npm install --global --no-audit --no-fund "@railway/cli@$RAILWAY_CLI_VERSION"
+          railway --version
+          echo "::group::railway up --help"; railway up --help || true; echo "::endgroup::"
+          echo "::group::railway variables --help"; railway variables --help || true; echo "::endgroup::"
+
+      - name: Check the secrets and that they all point at staging
+        run: |
+          missing=0
+          for name in RAILWAY_TOKEN STAGING_API_URL STAGING_DB_URL SUPABASE_URL SUPABASE_PUBLISHABLE_KEY SUPABASE_SECRET_KEY SUPABASE_PROJECT_REF; do
+            if [ -z "${!name}" ]; then echo "::error::$name is not set (see artifacts/mobile/docs/STAGING_API.md)"; missing=1; fi
+          done
+          [ "$missing" = 0 ] || exit 1
+          password=$(python3 -c "import os,urllib.parse as u; print(u.unquote(u.urlsplit(os.environ['STAGING_DB_URL']).password or ''))")
+          [ -n "$password" ] && echo "::add-mask::$password"
+          case "$SUPABASE_URL" in
+            "https://$SUPABASE_PROJECT_REF.supabase.co"|"https://$SUPABASE_PROJECT_REF.supabase.co/") ;;
+            *) echo "::error::SUPABASE_STAGING_URL does not match SUPABASE_STAGING_PROJECT_REF"; exit 1 ;;
+          esac
+          case "$STAGING_DB_URL" in
+            *"$SUPABASE_PROJECT_REF"*) ;;
+            *) echo "::error::SUPABASE_STAGING_DB_URL is not for SUPABASE_STAGING_PROJECT_REF"; exit 1 ;;
+          esac
+          case "$STAGING_API_URL" in
+            https://*) ;;
+            *) echo "::error::STAGING_API_URL must be an https:// URL"; exit 1 ;;
+          esac
+          echo "Secrets are set and refer to the same Supabase staging project."
+
+      - name: Confirm the Railway token belongs to a staging project
+        run: |
+          status=$(railway status --json)
+          project=$(printf '%s' "$status" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("name") or (d.get("project") or {}).get("name") or "")')
+          echo "Railway project: $project"
+          case "$(printf '%s' "$project" | tr '[:upper:]' '[:lower:]')" in
+            *staging*) ;;
+            *) echo "::error::The Railway token is for project \"$project\". Its name must contain \"staging\"; refusing to deploy."; exit 1 ;;
+          esac
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck and build the API before deploying
+        run: |
+          pnpm run typecheck:libs
+          pnpm --filter @workspace/api-server run typecheck
+          pnpm --filter @workspace/api-server run build
+
+      - name: Set the staging service's variables (staging values only)
+        run: |
+          railway variables --service "$RAILWAY_SERVICE" --skip-deploys \
+            --set "NODE_ENV=production" \
+            --set "LOG_LEVEL=info" \
+            --set "DATABASE_URL=$STAGING_DB_URL" \
+            --set "SUPABASE_URL=${SUPABASE_URL%/}" \
+            --set "SUPABASE_SECRET_KEY=$SUPABASE_SECRET_KEY" \
+            --set "STORAGE_WORKER_INTERVAL_MS=5000" \
+            --set "APP_RELEASE=$GITHUB_SHA" > /dev/null
+          echo "Variables set (values not shown)."
+
+      - name: Deploy this commit
+        run: |
+          # Upload a clean copy of the commit with the staging build settings added.
+          dir="$RUNNER_TEMP/deploy"
+          mkdir -p "$dir"
+          git archive HEAD | tar -x -C "$dir"
+          cp deploy/railway.staging.json "$dir/railway.json"
+          cd "$dir"
+          railway up --service "$RAILWAY_SERVICE" --ci
+
+      - name: Wait until this commit is serving
+        run: |
+          url="${STAGING_API_URL%/}"
+          for i in $(seq 1 60); do
+            release=$(curl -s -D - -o /dev/null "$url/api/healthz" | tr -d '\r' | awk -F': ' 'tolower($1)=="x-app-release"{print $2}')
+            if [ "$release" = "$GITHUB_SHA" ]; then echo "Serving $release"; break; fi
+            echo "Waiting (serving: ${release:-nothing yet})"; sleep 10
+          done
+          [ "$release" = "$GITHUB_SHA" ] || { echo "::error::The hosted API is not serving this commit"; exit 1; }
+          ready=$(curl -s "$url/api/readyz")
+          echo "readyz: $ready"
+          [ "$ready" = '{"status":"ok","database":"ok"}' ]
+
+      - name: Install PostgreSQL client
+        run: |
+          sudo apt-get update -q
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q postgresql-client-16
+
+      - name: Test the app's data layer against the hosted staging API
+        env:
+          EXPECTED_RELEASE: ${{ github.sha }}
+          SIGNUP_TEST_EMAIL_DOMAIN: ${{ vars.STAGING_SIGNUP_EMAIL_DOMAIN }}
+        run: pnpm --filter @workspace/mobile run test:staging

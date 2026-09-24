@@ -12,6 +12,16 @@ module.exports = ({ config }) => {
   const id = identity(appEnv);
   const name = id.displayName;
 
+  // A staging or production build without its backend settings would install
+  // but never connect; fail the build instead. (The values are public.)
+  if (appEnv === 'staging' || appEnv === 'production') {
+    const missing = ['EXPO_PUBLIC_SUPABASE_URL', 'EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY', 'EXPO_PUBLIC_API_URL']
+      .filter((k) => !process.env[k]);
+    if (missing.length) {
+      throw new Error(`${appEnv} build is missing ${missing.join(', ')} (set them in the EAS "${appEnv === 'staging' ? 'preview' : 'production'}" environment)`);
+    }
+  }
+
   return {
     ...config,
     name: id.appName,
@@ -41,6 +51,9 @@ module.exports = ({ config }) => {
     ],
     extra: {
       ...(config.extra || {}),
+      // Set after `eas init` (EAS_PROJECT_ID), so no EAS project is tied to the
+      // placeholder name in the repository.
+      ...(process.env.EAS_PROJECT_ID ? { eas: { projectId: process.env.EAS_PROJECT_ID } } : {}),
       appEnv,
       displayName: name,
       identityIsPlaceholder: id.usingPlaceholders,

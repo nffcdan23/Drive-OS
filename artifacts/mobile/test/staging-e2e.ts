@@ -39,7 +39,9 @@ const RUN = process.env.GITHUB_RUN_ID ?? String(Date.now());
 // variable STAGING_SIGNUP_EMAIL_DOMAIN if Supabase rejects the default.
 const SIGNUP_DOMAIN = process.env.SIGNUP_TEST_EMAIL_DOMAIN || 'example.com';
 const PORT = 18090;
-const API_URL = `http://127.0.0.1:${PORT}`;
+// Set STAGING_API_URL to test the hosted staging API instead of a local one.
+const HOSTED_API = process.env.STAGING_API_URL?.replace(/\/+$/, '') || null;
+const API_URL = HOSTED_API ?? `http://127.0.0.1:${PORT}`;
 
 const adminHeaders: Record<string, string> = SEC_KEY.startsWith('sb_') ? { apikey: SEC_KEY } : { apikey: SEC_KEY, Authorization: `Bearer ${SEC_KEY}` };
 const sql = (q: string) => execFileSync('psql', [DB_URL, '-X', '-A', '-t', '-q', '-v', 'ON_ERROR_STOP=1', '-c', q], { encoding: 'utf8' }).trim();
@@ -137,9 +139,9 @@ function startApi(): ChildProcess {
   });
 }
 
-async function waitForApi(child: ChildProcess) {
+async function waitForApi(child: ChildProcess | null) {
   for (let i = 0; i < 100; i++) {
-    if (child.exitCode !== null) throw new Error(`API exited with code ${child.exitCode}`);
+    if (child && child.exitCode !== null) throw new Error(`API exited with code ${child.exitCode}`);
     try { if ((await fetch(`${API_URL}/api/healthz`)).ok) return; } catch { /* starting */ }
     await sleep(200);
   }
@@ -530,17 +532,26 @@ async function cleanup() {
   }
 }
 
-const api = startApi();
+const api = HOSTED_API ? null : startApi();
 let failed = false;
 try {
   await waitForApi(api);
+  if (HOSTED_API) {
+    section(`Hosted staging API (${HOSTED_API})`);
+    const health = await fetch(`${HOSTED_API}/api/healthz`);
+    const release = health.headers.get('x-app-release');
+    check('served over HTTPS', HOSTED_API.startsWith('https://') && health.ok);
+    if (process.env.EXPECTED_RELEASE) check('the deployed build is this commit', release === process.env.EXPECTED_RELEASE, release ?? 'no header');
+    const ready = await fetch(`${HOSTED_API}/api/readyz`).then((r) => r.json()).catch(() => null) as { database?: string } | null;
+    check('the hosted API reaches the staging database', ready?.database === 'ok');
+  }
   await run();
 } catch (err) {
   failed = true;
   console.error(`ERROR: ${(err as Error).stack ?? err}`);
 } finally {
   try { await cleanup(); } catch (err) { failed = true; console.error(`Cleanup error: ${(err as Error).message}`); }
-  api.kill('SIGTERM');
+  api?.kill('SIGTERM');
 }
 
 const leftovers = sql(`

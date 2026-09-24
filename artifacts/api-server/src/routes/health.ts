@@ -7,6 +7,9 @@ const router: IRouter = Router();
 
 // Liveness: the process is up (used by the host's startup check; no DB).
 router.get("/healthz", (_req, res) => {
+  // Which build is serving (a commit id set at deploy time), so a deploy can
+  // confirm the new version is live. Not secret.
+  res.set("X-App-Release", process.env.APP_RELEASE || "unknown");
   const data = HealthCheckResponse.parse({ status: "ok" });
   res.json(data);
 });

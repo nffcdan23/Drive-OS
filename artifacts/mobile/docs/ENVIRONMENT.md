@@ -9,7 +9,7 @@ This file lists every value the app, the API and CI need, and where each is set.
 | `EXPO_PUBLIC_APP_ENV` | public | `staging` (set by the `staging` EAS profile) | `production` (set by the `production` profile) |
 | `EXPO_PUBLIC_SUPABASE_URL` | public | `https://<staging-ref>.supabase.co` | production project URL (Phase 6) |
 | `EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | public | staging publishable key (`sb_publishable_…`) | production publishable key |
-| `EXPO_PUBLIC_API_URL` | public | HTTPS URL of the **staging API** (not hosted yet) | production API URL (Phase 6) |
+| `EXPO_PUBLIC_API_URL` | public | HTTPS URL of the **hosted staging API** (the `STAGING_API_URL` domain; see `STAGING_API.md`) | production API URL (Phase 6) |
 
 - **Where they go:**
   - locally: `artifacts/mobile/.env` (copy `.env.example`);
@@ -30,11 +30,14 @@ These are read by `app.identity.js`. None has a final value yet.
 | `APP_DISPLAY_NAME` | Home-screen name and all in-app wording | `DriveOS` |
 | `APP_SLUG` | Expo/EAS project slug | `driveos` |
 | `APP_SCHEME` | Deep-link scheme for sign-in links (`<scheme>://auth/callback`; staging adds `-staging`) | `driveos` |
-| `APP_BUNDLE_ID` | iOS bundle id and Android package (staging adds `.staging`) | **none**: without it, EAS stops and asks, so nothing is registered by accident |
+| `APP_BUNDLE_ID` | iOS bundle id and Android package (staging adds `.staging`) | **none**: without it, EAS stops and asks, so nothing is registered by accident. For device testing before the name is chosen, use a throwaway id (`STAGING_API.md` §4). |
+| `EAS_PROJECT_ID` | EAS project, printed by `eas init`; set in your shell, not committed | none |
+
+Staging and production builds stop with an error if any `EXPO_PUBLIC_SUPABASE_*` or `EXPO_PUBLIC_API_URL` value is missing.
 
 Set these as EAS environment variables when the name is final. See `NAMING.md` for everything that follows from them.
 
-## 3. API server (the host that will run `artifacts/api-server` for staging)
+## 3. API server (hosted staging: its own Railway project, set by CI; see `STAGING_API.md`)
 
 | Variable | Kind | Value |
 |---|---|---|
@@ -52,6 +55,7 @@ Set these as EAS environment variables when the name is final. See `NAMING.md` f
 | `STORAGE_WORKER` | config | optional; `off` disables the file clean-up worker |
 | `STORAGE_WORKER_INTERVAL_MS` | config | optional, default `60000` |
 | `LOG_LEVEL` | config | optional, default `info` |
+| `APP_RELEASE` | config | optional: commit id reported in the `X-App-Release` header of `/api/healthz` |
 
 **Health checks:** `GET /api/healthz` (the process is up) and `GET /api/readyz` (the database is reachable).
 
@@ -64,6 +68,9 @@ Set these as EAS environment variables when the name is final. See `NAMING.md` f
 | `SUPABASE_STAGING_PROJECT_REF` | secret | staging jobs (guards against the wrong project) |
 | `SUPABASE_STAGING_PUBLISHABLE_KEY` | secret | staging jobs |
 | `SUPABASE_STAGING_SECRET_KEY` | secret | staging jobs |
+| `RAILWAY_STAGING_TOKEN` | secret | hosted staging API deploys. It's a Railway **project token** for the separate staging project. |
+| `STAGING_API_URL` | **variable** | hosted staging API deploys and tests: `https://…` domain of the staging service |
+| `RAILWAY_STAGING_SERVICE` | **variable**, optional | the staging service's name if it isn't `api` |
 | `STAGING_SIGNUP_EMAIL_DOMAIN` | **variable**, optional | domain for sign-up test addresses. Only needed if Supabase rejects the default `example.com` once "Confirm email" is off. Use a domain you control; no email is sent to it. |
 
 ## 5. Supabase Auth settings (dashboard), per project

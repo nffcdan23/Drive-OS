@@ -13,7 +13,7 @@ Use this for the first test on a physical iPhone (and optionally an Android phon
 This checklist is for what only a phone can show: Keychain, the camera roll, GPS, deep links, native sign-in sheets and layout. Items marked **★** are the minimum for a first TestFlight build.
 
 ## Before you start
-- [ ] **Staging API is hosted** on HTTPS with the variables in `ENVIRONMENT.md` §3. `https://<api>/api/readyz` returns `{"status":"ok","database":"ok"}`.
+- [ ] **Staging API is hosted** on HTTPS (`STAGING_API.md`: the "API staging deploy" workflow passed). `https://<api>/api/readyz` returns `{"status":"ok","database":"ok"}`.
 - [ ] **Supabase staging settings:** "Confirm email" is off, and the redirect URLs are added (`ENVIRONMENT.md` §5).
 - [ ] **Choose how to install. Both routes avoid registering a final bundle id:**
   - **Option A: Expo Go** (no build, no bundle id).
