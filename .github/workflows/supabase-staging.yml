@@ -13,8 +13,9 @@ name: Supabase staging deploy
 #     everything it creates), "[mobile-test supabase-staging]" (runs the
 #     app's data layer end to end against staging: accounts, sign-in,
 #     vehicles, photos, places, journeys, offline handling, deletion), or
-#   * "Run workflow" in the Actions tab once this file is on the default
-#     branch (type deploy-staging to confirm).
+#   * "Run workflow" (type deploy-staging to deploy, or mobile-test to run
+#     only the app tests; the Actions tab shows the button once this file is
+#     on the default branch, the API can dispatch it on this branch).
 # Every other push to the branch shows this workflow as skipped.
 #
 # Stops at the first step that fails: nothing is applied unless the read-only
@@ -31,7 +32,7 @@ on:
   workflow_dispatch:
     inputs:
       confirm:
-        description: 'Type deploy-staging to apply the migrations to the STAGING project'
+        description: 'Type deploy-staging to apply the migrations to the STAGING project, or mobile-test to only run the app tests against staging'
         required: true
 
 permissions:
@@ -241,7 +242,9 @@ jobs:
 
   mobile-test:
     name: Mobile app data layer against staging
-    if: github.event_name == 'push' && contains(github.event.head_commit.message, '[mobile-test supabase-staging]')
+    if: >-
+      (github.event_name == 'push' && contains(github.event.head_commit.message, '[mobile-test supabase-staging]')) ||
+      (github.event_name == 'workflow_dispatch' && inputs.confirm == 'mobile-test')
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
