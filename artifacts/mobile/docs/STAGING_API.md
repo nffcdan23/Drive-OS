@@ -51,8 +51,10 @@ The API's own settings are **not** entered in Railway by hand. Each deploy copie
 
 ## 3. Deploy
 
-- **GitHub → Actions → "API staging deploy" → Run workflow**, and type `deploy-api-staging`.
-- Or push a commit whose message contains `[deploy api-staging]`.
+- Push a commit whose message contains `[deploy api-staging]`.
+- Or dispatch the "API staging deploy" workflow on this branch with `confirm = deploy-api-staging`.
+  - The Actions tab only shows the **Run workflow** button once the file is on the default branch.
+  - Until then, dispatch it through the API or ask Claude to.
 
 The job then:
 1. checks the secrets, that the token belongs to `RAILWAY_STAGING_PROJECT_ID`, and that the project's name contains "staging". Every Railway command names the project, environment and service explicitly;
