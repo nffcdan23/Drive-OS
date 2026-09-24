@@ -23,6 +23,7 @@ export type OutboxOp =
   | { kind: 'vehicle.delete'; id: string }
   | { kind: 'vehicle.activate'; id: string }
   | { kind: 'vehicle.photo'; id: string; uri: string }
+  | { kind: 'vehicle.photoRemove'; id: string }
   | { kind: 'location.create'; id: string; fields: Record<string, unknown> }
   | { kind: 'location.update'; id: string; fields: Record<string, unknown> }
   | { kind: 'location.delete'; id: string }
@@ -54,6 +55,8 @@ interface Persisted { seq: number; entries: OutboxEntry[]; idMap: Record<string,
 export class Outbox {
   private data: Persisted = { seq: 0, entries: [], idMap: {}, rejected: [] };
   private flushing: Promise<void> | null = null;
+  /** Entry currently being sent; it is never merged into or cancelled. */
+  private inFlight: number | null = null;
   private lastError: string | null = null;
   private listeners = new Set<(s: OutboxState) => void>();
 
@@ -100,34 +103,44 @@ export class Outbox {
   }
 
   async enqueue(op: OutboxOp): Promise<void> {
-    const entries = this.data.entries;
+    // The entry being sent right now has already been serialised: merging into
+    // it or cancelling it would silently lose the change.
+    const idle = this.data.entries.filter((e) => e.seq !== this.inFlight);
     const id = 'id' in op ? op.id : null;
     const kind = entity(op.kind);
     const action = op.kind.split('.')[1];
+    const sameRecord = (e: OutboxEntry) => entity(e.op.kind) === kind && 'id' in e.op && e.op.id === id;
+    const drop = async (pred: (e: OutboxEntry) => boolean) => {
+      this.data.entries = this.data.entries.filter((e) => e.seq === this.inFlight || !pred(e));
+    };
 
     // Coalesce with what's already queued for the same record.
     if (id && action === 'delete') {
-      const created = entries.find((e) => e.op.kind === `${kind}.create` && 'id' in e.op && e.op.id === id);
-      // Remove queued edits of this record; if it never reached the server, nothing to delete.
-      this.data.entries = entries.filter((e) => !(entity(e.op.kind) === kind && 'id' in e.op && e.op.id === id));
-      if (created) { await this.persist(); return; }
+      const unsentCreate = idle.some((e) => e.op.kind === `${kind}.create` && sameRecord(e));
+      // Queued edits of this record are moot; if it never reached the server, nothing to delete.
+      await drop(sameRecord);
+      if (unsentCreate) { await this.persist(); return; }
     } else if (id && action === 'update' && 'fields' in op) {
-      const target = entries.find((e) =>
-        (e.op.kind === `${kind}.create` || e.op.kind === `${kind}.update`) && 'id' in e.op && e.op.id === id);
+      const target = idle.find((e) => (e.op.kind === `${kind}.create` || e.op.kind === `${kind}.update`) && sameRecord(e));
       if (target && 'fields' in target.op) {
         target.op.fields = { ...target.op.fields, ...op.fields };
         await this.persist();
         return;
       }
+    } else if (op.kind === 'vehicle.photo' || op.kind === 'vehicle.photoRemove') {
+      // Only the latest photo choice for a vehicle matters.
+      await drop((e) => (e.op.kind === 'vehicle.photo' || e.op.kind === 'vehicle.photoRemove') && sameRecord(e));
     } else if (op.kind === 'profile.update' || op.kind === 'settings.update') {
-      const target = entries.find((e) => e.op.kind === op.kind);
+      const target = idle.find((e) => e.op.kind === op.kind);
       if (target && 'fields' in target.op) {
         target.op.fields = { ...target.op.fields, ...op.fields };
         await this.persist();
         return;
       }
+    } else if (op.kind === 'profile.avatar') {
+      await drop((e) => e.op.kind === 'profile.avatar');
     } else if (op.kind === 'vehicle.activate') {
-      this.data.entries = entries.filter((e) => e.op.kind !== 'vehicle.activate');
+      await drop((e) => e.op.kind === 'vehicle.activate');
     }
 
     this.data.entries.push({ seq: ++this.data.seq, op, attempts: 0, lastError: null, queuedAt: new Date().toISOString() });
@@ -146,17 +159,19 @@ export class Outbox {
   private async run(): Promise<void> {
     while (this.data.entries.length) {
       const entry = this.data.entries[0]!;
+      const remove = () => { this.data.entries = this.data.entries.filter((e) => e.seq !== entry.seq); };
       const op = this.rewrite(entry.op);
       if ('id' in op && isLocalId(op.id) && !op.kind.endsWith('.create')) {
         // Its create was rejected, so this can never apply.
-        this.data.entries.shift();
+        remove();
         await this.persist();
         continue;
       }
+      this.inFlight = entry.seq;
       try {
         const serverId = await this.execute(op);
         if (serverId && 'id' in entry.op && isLocalId(entry.op.id)) this.data.idMap[entry.op.id] = serverId;
-        this.data.entries.shift();
+        remove();
         this.lastError = null;
         await this.persist();
       } catch (err) {
@@ -167,9 +182,11 @@ export class Outbox {
           await this.persist();
           return;
         }
-        this.data.entries.shift();
+        remove();
         this.data.rejected = [{ kind: entry.op.kind, message: describeError(err), at: new Date().toISOString() }, ...this.data.rejected].slice(0, 20);
         await this.persist();
+      } finally {
+        this.inFlight = null;
       }
     }
   }

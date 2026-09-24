@@ -22,6 +22,7 @@ import type {
 } from '@/lib/backend/model';
 import type { PreparedFile } from '@/lib/backend/uploads';
 import { base64ToBytes } from '@/lib/backend/bytes';
+import { initials } from '@/lib/backend/mappers';
 import { UnitSystem, ResolvedUnitSystem, resolveUnitSystem } from '@/lib/units';
 import { api, backendEnv, ep, newId, onConnectionStatus } from '@/lib/backendClient';
 import { deviceStorage } from '@/lib/secureStorage';
@@ -130,6 +131,12 @@ interface AppContextValue {
   profileStats: ProfileStats;
   refreshProfileStats: () => Promise<void>;
 
+  /** Members of a group (admins also see pending requests). Online only. */
+  loadGroupMembers: (groupId: string) => Promise<Array<{ id: string; name: string; initials: string; role: string; status: string }>>;
+  /** People in a convoy. Online only. */
+  loadConvoyParticipants: (convoyId: string) => Promise<Array<{ id: string; name: string; initials: string; role: string }>>;
+  /** Maps a temporary local id (record created offline, drive still uploading) to its server id. */
+  resolveId: (id: string) => string;
   /** True when there are changes or drives that haven't reached the server. */
   hasUnsyncedWork: () => boolean;
   /** Removes this user's cached data from the device (on sign-out). */
@@ -192,6 +199,7 @@ export function AppProvider({ userId, children }: { userId: string; children: Re
 
   // Start: cached data first, then the server.
   useEffect(() => {
+    cloud.resume();
     const unsubscribe = onConnectionStatus((state, detail) => cloud.reportConnection(state, detail));
     let cancelled = false;
     (async () => {
@@ -282,7 +290,11 @@ export function AppProvider({ userId, children }: { userId: string; children: Re
   const actions = useMemo(() => {
     const online = <A extends unknown[]>(label: string, fn: (...a: A) => Promise<unknown>, after?: () => Promise<unknown>) =>
       (...args: A) => {
-        fn(...args).catch((err) => reportFailure(label, err)).finally(() => { if (after) after().catch(() => {}); });
+        // Promise.resolve().then(): a synchronous throw (e.g. an invalid date typed
+        // into a form) is reported like any other failure instead of crashing.
+        Promise.resolve().then(() => fn(...args))
+          .catch((err) => reportFailure(label, err))
+          .finally(() => { if (after) after().catch(() => {}); });
       };
     return {
       retryJourneySync: () => cloud.syncJourneys().then(() => cloud.refresh()),
@@ -367,6 +379,13 @@ export function AppProvider({ userId, children }: { userId: string; children: Re
       setUnitSystem: (st: UnitSystem) => void cloud.setUnitSystem(st),
       refreshProfileStats: () => cloud.refreshFriends().catch(() => {}),
 
+      loadGroupMembers: async (groupId: string) => (await ep!.getGroup(groupId)).members.map((m) => ({
+        id: m.id, name: m.displayName, initials: initials(m.displayName), role: m.role, status: m.status,
+      })),
+      loadConvoyParticipants: async (convoyId: string) => (await ep!.getConvoy(convoyId)).participants.map((p) => ({
+        id: p.id, name: p.displayName, initials: initials(p.displayName), role: p.role,
+      })),
+      resolveId: (id: string) => cloud.resolveJourneyId(cloud.outbox.resolve(id)),
       hasUnsyncedWork: () => cloud.hasUnsyncedWork,
       clearLocalData: () => cloud.wipeLocal(),
       deleteAccount: async () => {

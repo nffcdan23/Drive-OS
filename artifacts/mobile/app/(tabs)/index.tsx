@@ -32,7 +32,6 @@ import ActiveDriveOverlay, {
 } from "@/components/ActiveDriveOverlay";
 import * as Location from "expo-location";
 
-const MINI_IMAGE = require("@/assets/images/mini-cooper.png");
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const NAV_ZOOM = 17;
@@ -2183,9 +2182,9 @@ export default function MapScreen() {
               >
                 {activeVehicle ? (
                   <>
-                    {activeVehicle.id === "mock-vehicle-1" ? (
+                    {activeVehicle.imageUri ? (
                       <Image
-                        source={MINI_IMAGE}
+                        source={{ uri: activeVehicle.imageUri }}
                         style={styles.vehicleThumb}
                         resizeMode="contain"
                       />

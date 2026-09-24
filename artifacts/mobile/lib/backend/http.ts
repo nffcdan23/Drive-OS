@@ -42,7 +42,14 @@ export class ApiClient {
   get baseUrl() { return this.opts.baseUrl; }
 
   async request<T>(method: string, path: string, body?: unknown): Promise<T> {
-    const token = await this.opts.getAccessToken();
+    let token: string | null;
+    try {
+      token = await this.opts.getAccessToken();
+    } catch (err) {
+      // The session couldn't be refreshed because the auth server is unreachable.
+      if (err instanceof NetworkError) this.opts.onStatus?.('offline');
+      throw err;
+    }
     if (!token) {
       this.opts.onStatus?.('signed_out');
       throw new AuthRequiredError();

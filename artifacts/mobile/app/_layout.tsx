@@ -4,7 +4,6 @@ import { MaterialProvider } from "@/components/Glass";
 import React, { useEffect } from "react";
 import { StatusBar } from "expo-status-bar";
 import { StyleSheet, Text, View } from "react-native";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { KeyboardProvider } from "react-native-keyboard-controller";
 import { SafeAreaProvider } from "react-native-safe-area-context";
@@ -28,8 +27,6 @@ import { AuthProvider, useAuth } from "@/context/AuthContext";
 import { configError } from "@/lib/backendClient";
 
 SplashScreen.preventAutoHideAsync();
-
-const queryClient = new QueryClient();
 
 function AppStack({ signedIn, recovering }: { signedIn: boolean; recovering: boolean }) {
   return (
@@ -66,7 +63,7 @@ function AppStack({ signedIn, recovering }: { signedIn: boolean; recovering: boo
 }
 
 function RootLayoutNav() {
-  const { session, initialising, recoveringPassword } = useAuth();
+  const { userId, initialising, recoveringPassword } = useAuth();
 
   useEffect(() => {
     if (!initialising) SplashScreen.hideAsync();
@@ -74,14 +71,14 @@ function RootLayoutNav() {
 
   if (initialising) return null;
 
-  if (!session) return <AppStack signedIn={false} recovering={false} />;
+  if (!userId) return <AppStack signedIn={false} recovering={false} />;
 
   // One provider per account: signing in as someone else starts from a clean slate.
   return (
-    <AppProvider key={session.user.id} userId={session.user.id}>
+    <AppProvider key={userId} userId={userId}>
       <View style={{ flex: 1 }}>
-        <AppStack signedIn recovering={recoveringPassword} />
         <ConnectionBanner />
+        <AppStack signedIn recovering={recoveringPassword} />
       </View>
     </AppProvider>
   );
@@ -119,7 +116,6 @@ export default function RootLayout() {
       <KeyboardProvider>
         <SafeAreaProvider>
           <ErrorBoundary>
-            <QueryClientProvider client={queryClient}>
               <AuthProvider>
                 <MaterialProvider>
                   <View style={{ flex: 1 }}>
@@ -128,7 +124,6 @@ export default function RootLayout() {
                   </View>
                 </MaterialProvider>
               </AuthProvider>
-            </QueryClientProvider>
           </ErrorBoundary>
         </SafeAreaProvider>
       </KeyboardProvider>

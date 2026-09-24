@@ -1,7 +1,8 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
-  View, Text, ScrollView, StyleSheet, TouchableOpacity, Platform, Alert,
+  View, Text, ScrollView, StyleSheet, TouchableOpacity, Platform, Alert, ActivityIndicator,
 } from 'react-native';
+import { describeError } from '@/lib/backend/http';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -16,8 +17,18 @@ export default function GroupDetailScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
   const router = useRouter();
-  const { groups, leaveGroup, events } = useApp();
+  const { groups, leaveGroup, events, loadGroupMembers } = useApp();
   const [activeTab, setActiveTab] = useState<GroupTab>('feed');
+  const [members, setMembers] = useState<Awaited<ReturnType<typeof loadGroupMembers>> | null>(null);
+  const [membersError, setMembersError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (activeTab !== 'members' || !id) return;
+    let cancelled = false;
+    setMembersError(null);
+    loadGroupMembers(id).then((m) => { if (!cancelled) setMembers(m); }, (err) => { if (!cancelled) setMembersError(describeError(err)); });
+    return () => { cancelled = true; };
+  }, [activeTab, id, loadGroupMembers]);
 
   const group = groups.find((g) => g.id === id);
   const groupEvents = events.filter((e) => e.groupId === id);
@@ -105,20 +116,6 @@ export default function GroupDetailScreen() {
     );
   }
 
-  // Mock posts for demo
-  const MOCK_POSTS = [
-    { id: 'p1', author: 'Sarah T.', initials: 'ST', time: '2h ago', body: 'Great turnout at last Sunday\'s meet — see you all at the Grasmere run next weekend 🚗' },
-    { id: 'p2', author: 'Mike R.', initials: 'MR', time: '1d ago', body: 'Reminder: track day spaces are filling up. Get your name in before Thursday.' },
-  ];
-
-  // Mock members for demo
-  const MOCK_MEMBERS = [
-    { id: 'm1', name: 'Sarah T.', initials: 'ST', role: 'Administrator' },
-    { id: 'm2', name: 'Mike R.', initials: 'MR', role: 'Verified Member' },
-    { id: 'm3', name: 'James H.', initials: 'JH', role: 'Member' },
-    { id: 'm4', name: 'Emma K.', initials: 'EK', role: 'Member' },
-  ];
-
   const canEdit = group.myRole === 'owner' || group.myRole === 'admin';
 
   return (
@@ -170,34 +167,23 @@ export default function GroupDetailScreen() {
                 </Text>
               </View>
             )}
-            {MOCK_POSTS.map((post) => (
-              <View key={post.id} style={styles.postCard}>
-                <View style={styles.postHeader}>
-                  <View style={styles.postAvatar}><Text style={{ fontSize: 12, fontWeight: '600', color: colors.foreground, fontFamily: 'Inter_600SemiBold' }}>{post.initials}</Text></View>
-                  <View>
-                    <Text style={styles.postAuthor}>{post.author}</Text>
-                    <Text style={styles.postTime}>{post.time}</Text>
-                  </View>
-                </View>
-                <Text style={styles.postBody}>{post.body}</Text>
-              </View>
-            ))}
+            <View style={styles.emptyBox}>
+              <Ionicons name="chatbubbles-outline" size={40} color={colors.mutedForeground} />
+              <Text style={styles.emptyText}>Group posts are coming soon.</Text>
+            </View>
           </>
         )}
 
         {activeTab === 'members' && (
           <>
-            <View style={styles.privacyNote}>
-              <Text style={styles.privacyNoteText}>
-                Member directory is opt-in. Only members who have chosen to appear are shown here.
-              </Text>
-            </View>
-            {MOCK_MEMBERS.map((m) => (
+            {membersError ? <Text style={styles.emptyText}>{membersError}</Text> : null}
+            {!members && !membersError ? <ActivityIndicator color={colors.primary} style={{ marginTop: 24 }} /> : null}
+            {members?.map((m) => (
               <View key={m.id} style={styles.memberCard}>
                 <View style={styles.memberAvatar}><Text style={{ fontSize: 14, fontWeight: '600', color: colors.foreground, fontFamily: 'Inter_600SemiBold' }}>{m.initials}</Text></View>
                 <View>
                   <Text style={styles.memberName}>{m.name}</Text>
-                  <Text style={styles.memberRole}>{m.role}</Text>
+                  <Text style={styles.memberRole}>{m.status === 'active' ? m.role.charAt(0).toUpperCase() + m.role.slice(1) : m.status === 'pending' ? 'Requested to join' : 'Invited'}</Text>
                 </View>
               </View>
             ))}

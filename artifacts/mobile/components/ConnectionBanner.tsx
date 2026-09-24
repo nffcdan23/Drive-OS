@@ -60,7 +60,8 @@ export function ConnectionBanner() {
   const fg = tone === 'error' ? '#F7B4B4' : tone === 'warn' ? '#F3D29B' : '#B9D7F5';
 
   return (
-    <View style={[styles.wrap, { top: insets.top + 4 }]} pointerEvents="box-none">
+    // In the layout flow (not floating), so it never covers a screen's header or back button.
+    <View style={[styles.wrap, { paddingTop: insets.top + 4 }]}>
       <View style={[styles.pill, { backgroundColor: bg }]} accessibilityRole="alert" accessibilityLiveRegion="polite">
         <Ionicons name={icon} size={16} color={fg} />
         <Text style={[styles.text, { color: fg }]} numberOfLines={2}>{text}</Text>
@@ -75,7 +76,7 @@ export function ConnectionBanner() {
 }
 
 const styles = StyleSheet.create({
-  wrap: { position: 'absolute', left: 12, right: 12, zIndex: 1000, alignItems: 'center' },
+  wrap: { paddingHorizontal: 12, paddingBottom: 4, alignItems: 'center', backgroundColor: '#0A0D10' },
   pill: {
     flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 8, paddingHorizontal: 12,
     borderRadius: cockpit.radius.control, maxWidth: 560, width: '100%',

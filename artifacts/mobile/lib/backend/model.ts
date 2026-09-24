@@ -24,6 +24,8 @@ export interface Vehicle {
   fuelPercentage: number;
   /** Signed cover photo URL (expires after an hour), or a local file awaiting upload. */
   imageUri: string | null;
+  /** Server photo used as the cover (null when none). */
+  coverPhotoId?: string | null;
   isActive: boolean;
   syncState?: SyncState;
 }

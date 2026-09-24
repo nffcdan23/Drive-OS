@@ -202,6 +202,7 @@ export const endpoints = (api: ApiClient) => ({
 
   // Vehicles
   listVehicles: () => api.get<ServerVehicle[]>('/vehicles'),
+  getVehicle: (id: string) => api.get<ServerVehicle>(`/vehicles/${id}`),
   createVehicle: (fields: VehicleFields & { nickname: string; clientRef: string; isActive?: boolean }) =>
     api.post<ServerVehicle>('/vehicles', fields),
   updateVehicle: (id: string, fields: VehicleFields) => api.patch<ServerVehicle>(`/vehicles/${id}`, fields),
@@ -271,6 +272,7 @@ export const endpoints = (api: ApiClient) => ({
 
   // Convoys
   listConvoys: () => api.get<ServerConvoy[]>('/convoys'),
+  getConvoy: (id: string) => api.get<ServerConvoy & { participants: Array<UserCard & { role: string }> }>(`/convoys/${id}`),
   createConvoy: (c: { name: string; description?: string; destinationName?: string; visibility: 'public' | 'friends' | 'private'; startsAt: string; maxParticipants?: number | null }) =>
     api.post<ServerConvoy>('/convoys', c),
   updateConvoy: (id: string, c: Record<string, unknown>) => api.patch<ServerConvoy>(`/convoys/${id}`, c),
@@ -281,6 +283,7 @@ export const endpoints = (api: ApiClient) => ({
 
   // Groups
   listGroups: () => api.get<ServerGroup[]>('/groups'),
+  getGroup: (id: string) => api.get<ServerGroup & { members: Array<UserCard & { role: string; status: string }> }>(`/groups/${id}`),
   createGroup: (g: { name: string; description?: string; isPublic?: boolean; membershipMethod?: string; primaryLocation?: string; vehicleInterests?: string }) =>
     api.post<ServerGroup>('/groups', g),
   joinGroup: (id: string) => api.post<ServerGroup>(`/groups/${id}/join`),

@@ -11,10 +11,11 @@ import * as WebBrowser from 'expo-web-browser';
 import * as Crypto from 'expo-crypto';
 import * as AppleAuthentication from 'expo-apple-authentication';
 import {
-  AuthFlowError, completeFromUrl, parseAuthCallback, oauthUrl, sendPasswordReset, signInWithAppleToken, signInWithEmail,
+  AuthFlowError, completeFromUrl, describeAuthError, isOfflineAuthError, parseAuthCallback, storedSessionUser, oauthUrl, sendPasswordReset, signInWithAppleToken, signInWithEmail,
   signUpWithEmail, updatePassword, type Session,
 } from '@/lib/backend/auth';
 import { ep, supabase } from '@/lib/backendClient';
+import { authStorage } from '@/lib/secureStorage';
 
 WebBrowser.maybeCompleteAuthSession();
 
@@ -23,7 +24,12 @@ export const authRedirectUrl = () => Linking.createURL('auth/callback');
 
 interface AuthContextValue {
   session: Session | null;
+  /** Signed-in user; also set when offline with a saved session that can't be refreshed yet. */
   userId: string | null;
+  /** True when signed in from the saved session without having reached the auth server. */
+  offline: boolean;
+  /** Error from the last sign-in link (expired, opened on another device, …). */
+  linkError: string | null;
   email: string | null;
   /** True until the stored session has been read. */
   initialising: boolean;
@@ -47,17 +53,25 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [initialising, setInitialising] = useState(true);
   const [recoveringPassword, setRecoveringPassword] = useState(false);
   const [appleAvailable, setAppleAvailable] = useState(false);
+  const [offlineUser, setOfflineUser] = useState<{ id: string; email: string | null } | null>(null);
+  const [linkError, setLinkError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!supabase) { setInitialising(false); return; }
     let mounted = true;
-    supabase.auth.getSession().then(({ data }) => {
-      if (mounted) { setSession(data.session); setInitialising(false); }
+    const client = supabase;
+    client.auth.getSession().then(async ({ data, error }) => {
+      // Offline with an expired access token: supabase-js can't refresh and
+      // reports no session, but the user never signed out. Stay signed in from
+      // the saved session; the token refreshes once the network is back.
+      const saved = !data.session && isOfflineAuthError(error) ? await storedSessionUser(client, authStorage) : null;
+      if (mounted) { setSession(data.session); setOfflineUser(saved); setInitialising(false); }
     }).catch(() => { if (mounted) setInitialising(false); });
-    const { data: sub } = supabase.auth.onAuthStateChange((event, next) => {
+    const { data: sub } = client.auth.onAuthStateChange((event, next) => {
       setSession(next);
+      if (next) setOfflineUser(null);
       if (event === 'PASSWORD_RECOVERY') setRecoveringPassword(true);
-      if (event === 'SIGNED_OUT') setRecoveringPassword(false);
+      if (event === 'SIGNED_OUT') { setRecoveringPassword(false); setOfflineUser(null); }
     });
     if (Platform.OS === 'ios') AppleAuthentication.isAvailableAsync().then(setAppleAvailable).catch(() => {});
     return () => { mounted = false; sub.subscription.unsubscribe(); };
@@ -69,9 +83,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   const handleAuthUrl = useCallback(async (url: string) => {
-    const isRecovery = parseAuthCallback(url).type === 'recovery';
-    const s = await completeFromUrl(client(), url);
-    if (s && isRecovery) setRecoveringPassword(true);
+    setLinkError(null);
+    try {
+      const isRecovery = parseAuthCallback(url).type === 'recovery';
+      const s = await completeFromUrl(client(), url);
+      if (s && isRecovery) setRecoveringPassword(true);
+    } catch (err) {
+      // Shown on the return screen rather than leaving the user waiting.
+      setLinkError(describeAuthError(err));
+      throw err;
+    }
   }, []);
 
   // Links opened while the app is running (email confirmation, password reset).
@@ -134,13 +155,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const signOut = useCallback(async () => {
     // Local scope: signs out this device only; other devices stay signed in.
     await client().auth.signOut({ scope: 'local' });
+    setOfflineUser(null);
+    setRecoveringPassword(false);
   }, []);
 
   const value = useMemo<AuthContextValue>(() => ({
-    session, userId: session?.user.id ?? null, email: session?.user.email ?? null, initialising, recoveringPassword,
+    session, userId: session?.user.id ?? offlineUser?.id ?? null, offline: !session && !!offlineUser, linkError,
+    email: session?.user.email ?? offlineUser?.email ?? null, initialising, recoveringPassword,
     appleAvailable, signIn, signUp, signInWithApple, signInWithGoogle, requestPasswordReset, setNewPassword,
     handleAuthUrl, signOut,
-  }), [session, initialising, recoveringPassword, appleAvailable, signIn, signUp, signInWithApple, signInWithGoogle,
+  }), [session, offlineUser, linkError, initialising, recoveringPassword, appleAvailable, signIn, signUp, signInWithApple, signInWithGoogle,
     requestPasswordReset, setNewPassword, handleAuthUrl, signOut]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

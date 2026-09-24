@@ -8,7 +8,7 @@ import { cockpit } from '@/constants/colors';
 
 export default function ResetPasswordScreen() {
   const colors = useColors();
-  const { setNewPassword } = useAuth();
+  const { setNewPassword, signOut } = useAuth();
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -36,6 +36,9 @@ export default function ResetPasswordScreen() {
       {error ? <Text style={{ color: colors.destructive, fontFamily: cockpit.type.body }}>{error}</Text> : null}
       <TouchableOpacity style={[styles.btn, { backgroundColor: colors.primary }]} onPress={save} disabled={busy}>
         {busy ? <ActivityIndicator color={colors.primaryForeground} /> : <Text style={[styles.btnText, { color: colors.primaryForeground }]}>Save password</Text>}
+      </TouchableOpacity>
+      <TouchableOpacity onPress={() => { void signOut(); }} style={{ alignItems: 'center', padding: 8 }}>
+        <Text style={{ color: colors.primary, fontFamily: cockpit.type.label }}>Cancel and sign out</Text>
       </TouchableOpacity>
     </View>
   );

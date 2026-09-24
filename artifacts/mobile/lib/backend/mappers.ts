@@ -35,6 +35,7 @@ export function toVehicle(v: ServerVehicle): Vehicle {
     mileage: v.mileage,
     fuelPercentage: 0,
     imageUri: v.coverPhotoUrl,
+    coverPhotoId: v.coverPhotoId,
     isActive: v.isActive,
     syncState: 'synced',
   };

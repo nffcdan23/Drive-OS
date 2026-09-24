@@ -6,6 +6,7 @@
  */
 import { createClient, type AuthError, type Session, type SupabaseClient } from '@supabase/supabase-js';
 import type { KeyValueStore } from './storage';
+import { NetworkError } from './http';
 
 export type { Session, SupabaseClient };
 
@@ -27,6 +28,40 @@ export function createAuthClient(opts: { url: string; publishableKey: string; st
 }
 
 export class AuthFlowError extends Error {}
+
+/** True when Supabase Auth couldn't be reached (offline), as opposed to a rejected session. */
+export const isOfflineAuthError = (err: unknown): boolean =>
+  !!err && (err as { name?: string }).name === 'AuthRetryableFetchError';
+
+/**
+ * The access token for API requests (refreshed by supabase-js when expired).
+ * Returns null when signed out; throws NetworkError when the token needs a
+ * refresh but the auth server can't be reached (offline, still signed in).
+ */
+export async function currentAccessToken(client: SupabaseClient): Promise<string | null> {
+  const { data, error } = await client.auth.getSession();
+  if (data.session) return data.session.access_token;
+  if (isOfflineAuthError(error)) throw new NetworkError();
+  return null;
+}
+
+/**
+ * The user saved on this device, read without contacting the server. Used
+ * when the app starts offline with an expired access token: supabase-js then
+ * reports no session (it can't refresh), but the user hasn't signed out.
+ */
+export async function storedSessionUser(client: SupabaseClient, storage: KeyValueStore): Promise<{ id: string; email: string | null } | null> {
+  const key = (client.auth as unknown as { storageKey?: string }).storageKey;
+  if (!key) return null;
+  try {
+    const raw = await storage.getItem(key);
+    const parsed = raw ? (JSON.parse(raw) as { user?: { id?: string; email?: string }; refresh_token?: string }) : null;
+    if (!parsed?.user?.id || !parsed.refresh_token) return null;
+    return { id: parsed.user.id, email: parsed.user.email ?? null };
+  } catch {
+    return null;
+  }
+}
 
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 

@@ -87,6 +87,9 @@ export class CloudSync {
   private listeners = new Set<() => void>();
   private cacheTimer: ReturnType<typeof setTimeout> | null = null;
   private disposed = false;
+  private wiped = false;
+  /** Bumped whenever a change reaches the server (to detect refresh races). */
+  private completedChanges = 0;
 
   constructor(private readonly deps: CloudSyncDeps) {
     this.outbox = new Outbox(deps.store, deps.userId, (op) => this.execute(op));
@@ -171,6 +174,16 @@ export class CloudSync {
   /** Reloads all data from the API. Sections that fail keep their cached value. */
   async refresh(): Promise<void> {
     if (this.status.refreshing) return;
+    // If a queued change reaches the server while the lists are being fetched,
+    // the fetched data may predate it; fetch again so it can't briefly vanish.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const before = this.completedChanges;
+      await this.refreshOnce();
+      if (this.completedChanges === before) return;
+    }
+  }
+
+  private async refreshOnce(): Promise<void> {
     this.setStatus({ refreshing: true });
     const ep = this.ep;
     const [
@@ -234,6 +247,9 @@ export class CloudSync {
           break;
         case 'vehicle.photo':
           out.vehicles = out.vehicles.map((v) => (v.id === op.id || v.id === local(op.id) ? { ...v, imageUri: op.uri, syncState: 'pending' } : v));
+          break;
+        case 'vehicle.photoRemove':
+          out.vehicles = out.vehicles.map((v) => (v.id === op.id || v.id === local(op.id) ? { ...v, imageUri: null, syncState: 'pending' } : v));
           break;
         case 'vehicle.update':
           out.vehicles = out.vehicles.map((v) => (v.id === op.id || v.id === local(op.id) ? { ...v, ...vehicleFromFields(op.fields), syncState: 'pending' } : v));
@@ -306,6 +322,12 @@ export class CloudSync {
   // ─── Outbox execution ─────────────────────────────────────────────────────
 
   private async execute(op: OutboxOp): Promise<string | void> {
+    const result = await this.executeOp(op);
+    this.completedChanges++;
+    return result;
+  }
+
+  private async executeOp(op: OutboxOp): Promise<string | void> {
     const ep = this.ep;
     switch (op.kind) {
       case 'profile.update': {
@@ -339,8 +361,19 @@ export class CloudSync {
         await ep.activateVehicle(op.id);
         return;
       case 'vehicle.photo': {
+        // The vehicle shows one photo: the previous cover is deleted once the
+        // new one is in place (its file is then removed from Storage).
+        const previous = (await ep.getVehicle(op.id)).coverPhotoId;
         const vehicle = await uploadVehiclePhoto(this.uploadDeps, op.id, await this.deps.prepareFile(op.uri, 'photo'));
         this.update((d) => ({ ...d, vehicles: d.vehicles.map((x) => (x.id === vehicle.id ? toVehicle(vehicle) : x)) }));
+        if (previous && previous !== vehicle.coverPhotoId) await ignoreNotFound(ep.deletePhoto(previous));
+        return;
+      }
+      case 'vehicle.photoRemove': {
+        const current = (await ep.getVehicle(op.id)).coverPhotoId;
+        // Deleting the photo clears the cover and queues its file for removal.
+        if (current) await ignoreNotFound(ep.deletePhoto(current));
+        this.update((d) => ({ ...d, vehicles: d.vehicles.map((x) => (x.id === op.id ? { ...x, imageUri: null, coverPhotoId: null, syncState: 'synced' } : x)) }));
         return;
       }
       case 'location.create': {
@@ -363,7 +396,11 @@ export class CloudSync {
         await ignoreNotFound(ep.deleteJourney(op.id));
         return;
       case 'category.create': {
-        const c = await ep.createCategory(op.fields as { name: string; icon: string; colour: string });
+        // Categories have no idempotency key, so a retry after a lost response
+        // adopts the category created by the first attempt instead of duplicating it.
+        const fields = op.fields as { name: string; icon: string; colour: string };
+        const c = (await ep.listCategories()).find((x) => x.ownerId !== null && x.name === fields.name && x.icon === fields.icon && x.colour === fields.colour)
+          ?? await ep.createCategory(fields);
         this.update((d) => ({ ...d, categories: d.categories.map((x) => (x.id === op.id ? toCategory(c) : x)) }));
         return c.id;
       }
@@ -431,6 +468,7 @@ export class CloudSync {
     const fields = vehicleFields(updates);
     if (Object.keys(fields).length) await this.outbox.enqueue({ kind: 'vehicle.update', id, fields });
     if (updates.imageUri && isLocalFile(updates.imageUri)) await this.outbox.enqueue({ kind: 'vehicle.photo', id, uri: updates.imageUri });
+    else if ('imageUri' in updates && updates.imageUri === null) await this.outbox.enqueue({ kind: 'vehicle.photoRemove', id });
     void this.outbox.flush();
   }
 
@@ -537,7 +575,11 @@ export class CloudSync {
     const fields: Record<string, unknown> = {};
     if (updates.name !== undefined) fields.name = updates.name;
     if (updates.notes !== undefined) fields.notes = updates.notes;
-    if (updates.categoryId !== undefined) fields.categoryId = updates.categoryId && !isLocalId(updates.categoryId) ? updates.categoryId : null;
+    // `categoryId: undefined` means "remove the category", so check the key, not the value.
+    if ('categoryId' in updates) {
+      const category = updates.categoryId ? this.outbox.resolve(updates.categoryId) : null;
+      fields.categoryId = category && !isLocalId(category) ? category : null;
+    }
     if (updates.privacy !== undefined) fields.visibility = updates.privacy;
     if (Object.keys(fields).length) await this.queue({ kind: 'journey.update', id: serverId, fields });
   }
@@ -647,6 +689,7 @@ export class CloudSync {
         });
         if (!journey) continue;
         this.journeyIds.set(rec.clientRef, journey.id);
+        this.completedChanges++;
         this.pending = this.pending.filter((r) => r !== rec);
         await this.journeys.savePending(this.pending);
         this.update((d) => {
@@ -731,6 +774,7 @@ export class CloudSync {
 
   /** Removes everything this user has cached on the device. */
   async wipeLocal() {
+    this.wiped = true;
     this.disposed = true;
     if (this.cacheTimer) clearTimeout(this.cacheTimer);
     await this.outbox.clear();
@@ -738,10 +782,18 @@ export class CloudSync {
     await this.deps.store.removeItem(this.cacheKey);
   }
 
+  /**
+   * Stops cache writes and notifications. Subscribers remove themselves;
+   * React may re-run the provider's effect on the same instance (development
+   * double-mount, Fast Refresh), which calls resume().
+   */
   dispose() {
     this.disposed = true;
     if (this.cacheTimer) clearTimeout(this.cacheTimer);
-    this.listeners.clear();
+  }
+
+  resume() {
+    if (!this.wiped) this.disposed = false;
   }
 }
 

@@ -232,10 +232,10 @@ class FakeServer {
         return j;
       },
       addRoutePoints: async (id: string, pts: unknown[]) => { self.guard(); self.points.set(id, (self.points.get(id) ?? 0) + pts.length); return { saved: pts.length, status: 'active' }; },
-      completeJourney: async (id: string, i: { endedAt: string; distanceKm: number }) => {
+      completeJourney: async (id: string, i: { endedAt: string; distanceKm: number; name?: string }) => {
         self.guard();
         const j = self.journeys.find((x) => x.id === id)!;
-        Object.assign(j, { status: 'completed', endedAt: i.endedAt, distanceKm: i.distanceKm, durationSeconds: 60, avgSpeedKmh: 0, topSpeedKmh: 0, xpEarned: 50, timezone: 'UTC', notes: '', visibility: 'private', journeyType: 'personal', vehicleId: null, categoryId: null, convoyId: null, vehicleSnapshot: null, publicRoutePolyline: null });
+        Object.assign(j, { name: i.name ?? j.name, status: 'completed', endedAt: i.endedAt, distanceKm: i.distanceKm, durationSeconds: 60, avgSpeedKmh: 0, topSpeedKmh: 0, xpEarned: 50, timezone: 'UTC', notes: '', visibility: 'private', journeyType: 'personal', vehicleId: null, categoryId: null, convoyId: null, vehicleSnapshot: null, publicRoutePolyline: null });
         return j;
       },
     };
@@ -350,4 +350,230 @@ test('the app identity is a placeholder and never sets a bundle id by itself', (
   const chosen = identity('production', { APP_DISPLAY_NAME: 'Name', APP_SCHEME: 'name', APP_BUNDLE_ID: 'com.example.name' });
   assert.deepEqual([chosen.appName, chosen.scheme, chosen.bundleId, chosen.usingPlaceholders], ['Name', 'name', 'com.example.name', false]);
   assert.equal(identity('staging', { APP_BUNDLE_ID: 'com.example.name' }).bundleId, 'com.example.name.staging');
+});
+
+// ─── Outbox / sync edge cases (review fixes) ────────────────────────────────
+
+import { storedSessionUser } from '@/lib/backend/auth';
+
+function deferred<T = void>() {
+  let resolve!: (v: T) => void, reject!: (e: unknown) => void;
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+
+test('an edit made while its create is being sent is not lost', async () => {
+  const gate = deferred<void>();
+  const sent: Array<{ kind: string; id?: string; fields?: Record<string, unknown> }> = [];
+  const box = new Outbox(new MemoryStore(), 'u', async (op) => {
+    sent.push(JSON.parse(JSON.stringify(op)));
+    if (op.kind === 'vehicle.create') { await gate.promise; return 'srv-1'; }
+  });
+  await box.enqueue({ kind: 'vehicle.create', id: 'local:a', fields: { nickname: 'A' } });
+  const flushing = box.flush();
+  await new Promise((r) => setTimeout(r, 5)); // create is now in flight
+  await box.enqueue({ kind: 'vehicle.update', id: 'local:a', fields: { nickname: 'B' } });
+  gate.resolve();
+  await flushing;
+  await box.flush();
+  assert.deepEqual(sent.map((o) => o.kind), ['vehicle.create', 'vehicle.update']);
+  assert.equal(sent[1]!.id, 'srv-1', 'the update targets the server id');
+  assert.equal(sent[1]!.fields!.nickname, 'B');
+  assert.equal(box.state.pending, 0);
+});
+
+test('a delete made while its create is being sent still deletes on the server', async () => {
+  const gate = deferred<void>();
+  const sent: string[] = [];
+  const box = new Outbox(new MemoryStore(), 'u', async (op) => {
+    sent.push(`${op.kind}:${'id' in op ? op.id : ''}`);
+    if (op.kind === 'location.create') { await gate.promise; return 'srv-9'; }
+  });
+  await box.enqueue({ kind: 'location.create', id: 'local:p', fields: { name: 'X' } });
+  const flushing = box.flush();
+  await new Promise((r) => setTimeout(r, 5));
+  await box.enqueue({ kind: 'location.delete', id: 'local:p' });
+  gate.resolve();
+  await flushing;
+  await box.flush();
+  assert.deepEqual(sent, ['location.create:local:p', 'location.delete:srv-9']);
+});
+
+test('only the latest photo choice for a vehicle is uploaded', async () => {
+  const box = new Outbox(new MemoryStore(), 'u', async () => { throw new NetworkError(); });
+  await box.enqueue({ kind: 'vehicle.photo', id: 'v1', uri: 'file:///a.jpg' });
+  await box.enqueue({ kind: 'vehicle.photo', id: 'v1', uri: 'file:///b.jpg' });
+  assert.deepEqual(box.queued, [{ kind: 'vehicle.photo', id: 'v1', uri: 'file:///b.jpg' }]);
+  await box.enqueue({ kind: 'vehicle.photoRemove', id: 'v1' });
+  assert.deepEqual(box.queued, [{ kind: 'vehicle.photoRemove', id: 'v1' }]);
+});
+
+/** A small in-memory API with photos, categories and journeys for CloudSync tests. */
+class PhotoServer extends FakeServer {
+  photos = new Map<string, { vehicleId: string }>();
+  deletedPhotos: string[] = [];
+  categories: Array<{ id: string; ownerId: string | null; name: string; icon: string; colour: string; sortOrder: number }> = [];
+  categoryCreates = 0;
+  journeyUpdates: Array<{ id: string; fields: Record<string, unknown> }> = [];
+  private k = 0;
+  ep(): Endpoints {
+    const base = super.ep() as unknown as Record<string, unknown>;
+    const self = this;
+    return {
+      ...base,
+      getVehicle: async (id: string) => { const v = self.vehicles.find((x) => x.id === id); if (!v) throw new ApiError(404, 'not_found', 'Not found.'); return v; },
+      requestUpload: async (i: { parentId: string }) => ({ kind: 'vehicle-photo', id: `ph${++self.k}`, bucket: 'vehicle-photos', path: `u/${i.parentId}/x.jpg`, uploadUrl: 'https://storage.test/upload', token: 't' }),
+      confirmUpload: async (id: string) => ({ id, status: 'ready' }),
+      updateVehicle: async (id: string, f: Record<string, unknown>) => {
+        const v = self.vehicles.find((x) => x.id === id)!;
+        if ('coverPhotoId' in f) { self.photos.set(f.coverPhotoId as string, { vehicleId: id }); v.coverPhotoUrl = `https://signed/${f.coverPhotoId}`; }
+        Object.assign(v, f);
+        return v;
+      },
+      deletePhoto: async (id: string) => {
+        self.deletedPhotos.push(id);
+        self.photos.delete(id);
+        for (const v of self.vehicles) if (v.coverPhotoId === id) { v.coverPhotoId = null; v.coverPhotoUrl = null; }
+      },
+      listCategories: async () => self.categories,
+      createCategory: async (c: { name: string; icon: string; colour: string }) => {
+        self.categoryCreates++;
+        const row = { id: `c${++self.k}`, ownerId: 'u1', sortOrder: 100, ...c };
+        self.categories.push(row);
+        return row;
+      },
+      updateJourney: async (id: string, fields: Record<string, unknown>) => { self.journeyUpdates.push({ id, fields }); return {}; },
+    } as unknown as Endpoints;
+  }
+}
+
+function photoSync(server: PhotoServer, store = new MemoryStore(), clock = { t: Date.now() }) {
+  let n = 0;
+  return new CloudSync({
+    ep: server.ep(), store, userId: 'u1', publishableKey: 'k', newId: () => `id${++n}-${Math.random()}`, timezone: () => 'UTC',
+    now: () => clock.t,
+    fetchImpl: (async () => new Response('{}', { status: 200 })) as unknown as typeof fetch,
+    prepareFile: async () => ({ body: new Uint8Array([1, 2, 3]), size: 3, mimeType: 'image/jpeg' }),
+  });
+}
+
+const car = { nickname: 'Car', registration: '', make: 'Mazda', model: 'MX-5', year: 2020, colour: '', fuelType: 'petrol' as const, engine: '', power: '', torque: '', zeroToSixty: '', topSpeed: '', mileage: 0, fuelPercentage: 0, imageUri: null, isActive: false };
+
+test('replacing a vehicle photo deletes the old one; removing it deletes the cover', async () => {
+  const server = new PhotoServer();
+  const app = photoSync(server);
+  await app.start();
+  await app.addVehicle({ ...car, imageUri: 'file:///first.jpg' });
+  await app.outbox.flush();
+  const v = server.vehicles[0]!;
+  const first = v.coverPhotoId;
+  assert.ok(first, 'first photo is the cover');
+  await app.updateVehicle(app.data.vehicles[0]!.id, { imageUri: 'file:///second.jpg' });
+  await app.outbox.flush();
+  assert.notEqual(v.coverPhotoId, first);
+  assert.deepEqual(server.deletedPhotos, [first], 'the replaced photo is deleted (its file is then removed from Storage)');
+  const second = v.coverPhotoId;
+  await app.updateVehicle(app.data.vehicles[0]!.id, { imageUri: null });
+  await app.outbox.flush();
+  assert.deepEqual(server.deletedPhotos, [first, second]);
+  assert.equal(v.coverPhotoId, null);
+  assert.equal(app.data.vehicles[0]!.imageUri, null);
+  assert.equal(app.status.rejected.length, 0);
+});
+
+test('retrying a category create after a lost response does not duplicate it', async () => {
+  const server = new PhotoServer();
+  const app = photoSync(server);
+  await app.start();
+  // The first attempt reached the server but the response was lost.
+  server.categories.push({ id: 'c-existing', ownerId: 'u1', name: 'Track', icon: 'flag', colour: '#FF0000', sortOrder: 100 });
+  await app.addCategory({ name: 'Track', icon: 'flag', colour: '#FF0000' });
+  await app.outbox.flush();
+  assert.equal(server.categoryCreates, 0);
+  assert.ok(app.data.categories.some((c) => c.id === 'c-existing'));
+});
+
+test('a record created while a refresh is in progress does not vanish', async () => {
+  const server = new PhotoServer();
+  const app = photoSync(server);
+  await app.start();
+  const listGate = deferred<void>();
+  const ep = app['deps'].ep as unknown as { listVehicles: () => Promise<unknown> };
+  const realList = ep.listVehicles;
+  let firstCall = true;
+  ep.listVehicles = async () => {
+    const snapshot = [...server.vehicles]; // read before the create lands
+    if (firstCall) { firstCall = false; await listGate.promise; }
+    return snapshot;
+  };
+  const refreshing = app.refresh();
+  await new Promise((r) => setTimeout(r, 5));
+  await app.addVehicle(car);
+  await app.outbox.flush();
+  listGate.resolve();
+  await refreshing;
+  ep.listVehicles = realList;
+  assert.equal(app.data.vehicles.length, 1, 'still shown after the refresh');
+  assert.equal(app.data.vehicles[0]!.id, server.vehicles[0]!.id);
+});
+
+test('a drive cut short by a crash is finished and uploaded on the next start', async () => {
+  const server = new PhotoServer();
+  const store = new MemoryStore();
+  const clock = { t: Date.now() - 20 * 60_000 };
+  const app = photoSync(server, store, clock);
+  server.offline = true;
+  await app.start();
+  await app.startDrive(null);
+  for (let s = 0; s < 90; s++) { clock.t += 1000; app.addFix({ latitude: 52 + s * 0.0002, longitude: 0, speedMs: 20, accuracyM: 5, timestamp: clock.t }); }
+  await new Promise((r) => setTimeout(r, 10));
+  // The app is killed here (no endDrive). Points were persisted every 5 s.
+  const saved = JSON.parse((await store.getItem('@driveos/u/u1/journey/active'))!);
+  assert.ok(saved.points.length > 5, 'drive saved on the device while recording');
+  server.offline = false;
+  const again = photoSync(server, store, clock);
+  await again.start();
+  assert.equal(again.status.pendingJourneys, 1, 'the interrupted drive is waiting to upload');
+  await again.sync();
+  assert.equal(again.status.pendingJourneys, 0);
+  assert.equal(server.journeys[0]!.status, 'completed');
+});
+
+test('renaming a drive while it uploads keeps the name; clearing a category is sent', async () => {
+  const server = new PhotoServer();
+  const clock = { t: Date.now() - 10 * 60_000 };
+  const app = photoSync(server, new MemoryStore(), clock);
+  server.offline = true;
+  await app.start();
+  await app.startDrive(null);
+  for (let s = 0; s < 30; s++) { clock.t += 2000; app.addFix({ latitude: 51 + s * 0.0005, longitude: 0, speedMs: 25, accuracyM: 5, timestamp: clock.t }); }
+  const j = await app.endDrive();
+  await app.updateJourney(j!.id, { name: 'Sunday run' });
+  server.offline = false;
+  await app.sync();
+  assert.equal(server.journeys[0]!.name, 'Sunday run');
+  const serverId = server.journeys[0]!.id;
+  await app.updateJourney(serverId, { categoryId: undefined });
+  await app.outbox.flush();
+  assert.deepEqual(server.journeyUpdates.at(-1), { id: serverId, fields: { categoryId: null } });
+});
+
+test('offline token refresh is reported as offline, not signed out', async () => {
+  const states: string[] = [];
+  const client = new ApiClient({
+    baseUrl: 'http://x', getAccessToken: async () => { throw new NetworkError(); }, refreshAccessToken: async () => null,
+    onStatus: (s) => states.push(s),
+  });
+  await assert.rejects(client.get('/me'), NetworkError);
+  assert.deepEqual(states, ['offline']);
+});
+
+test('the saved session user can be read without contacting the server', async () => {
+  const store = new MemoryStore();
+  const fakeClient = { auth: { storageKey: 'sb-ref-auth-token' } } as never;
+  assert.equal(await storedSessionUser(fakeClient, store), null);
+  await store.setItem('sb-ref-auth-token', JSON.stringify({ refresh_token: 'r', user: { id: 'user-1', email: 'a@b.c' } }));
+  assert.deepEqual(await storedSessionUser(fakeClient, store), { id: 'user-1', email: 'a@b.c' });
+  await store.setItem('sb-ref-auth-token', 'not json');
+  assert.equal(await storedSessionUser(fakeClient, store), null);
 });

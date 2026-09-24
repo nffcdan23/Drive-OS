@@ -41,9 +41,9 @@ export default function VehicleDetailScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
   const router = useRouter();
-  const { vehicles, addVehicle, updateVehicle, deleteVehicle, lookupVehicle } = useApp();
+  const { vehicles, addVehicle, updateVehicle, deleteVehicle, lookupVehicle, resolveId } = useApp();
 
-  const existing = isNew ? null : vehicles.find((v) => v.id === id);
+  const existing = isNew ? null : vehicles.find((v) => v.id === id || v.id === resolveId(id ?? ''));
 
   const [form, setForm] = useState<VehicleForm>(() => {
     if (existing) {
@@ -69,7 +69,7 @@ export default function VehicleDetailScreen() {
     if (isNew) {
       addVehicle({ ...form, fuelPercentage: 0, isActive: vehicles.length === 0 });
     } else {
-      updateVehicle(id!, form);
+      updateVehicle(existing?.id ?? id!, form);
     }
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     router.back();
@@ -84,7 +84,7 @@ export default function VehicleDetailScreen() {
         { text: 'Cancel', style: 'cancel' },
         {
           text: 'Remove Vehicle', style: 'destructive', onPress: () => {
-            deleteVehicle(id!);
+            deleteVehicle(existing?.id ?? id!);
             Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
             router.back();
           },

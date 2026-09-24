@@ -8,7 +8,7 @@ import '@/lib/polyfills'; // before the Supabase client is created
 import { AppState } from 'react-native';
 import * as Crypto from 'expo-crypto';
 import { checkEnv, ConfigError, type BackendEnv } from '@/lib/backend/env';
-import { createAuthClient, type SupabaseClient } from '@/lib/backend/auth';
+import { createAuthClient, currentAccessToken, type SupabaseClient } from '@/lib/backend/auth';
 import { ApiClient, type ConnectionState } from '@/lib/backend/http';
 import { endpoints, type Endpoints } from '@/lib/backend/endpoints';
 import { authStorage } from '@/lib/secureStorage';
@@ -41,6 +41,7 @@ export const supabase: SupabaseClient | null = backendEnv
 
 // Refresh tokens only while the app is in the foreground (Supabase guidance for React Native).
 if (supabase) {
+  if (AppState.currentState === 'active') supabase.auth.startAutoRefresh();
   AppState.addEventListener('change', (state) => {
     if (state === 'active') supabase.auth.startAutoRefresh();
     else supabase.auth.stopAutoRefresh();
@@ -57,7 +58,8 @@ export function onConnectionStatus(fn: StatusListener): () => void {
 export const api: ApiClient | null = backendEnv && supabase
   ? new ApiClient({
       baseUrl: backendEnv.apiUrl,
-      getAccessToken: async () => (await supabase.auth.getSession()).data.session?.access_token ?? null,
+      // Offline with an expired token: throws NetworkError (still signed in, can't refresh yet).
+      getAccessToken: () => currentAccessToken(supabase),
       refreshAccessToken: async () => (await supabase.auth.refreshSession()).data.session?.access_token ?? null,
       onStatus: (state, detail) => statusListeners.forEach((fn) => fn(state, detail)),
     })

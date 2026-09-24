@@ -16,8 +16,8 @@
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { createAuthClient, signInWithEmail, signUpWithEmail, type SupabaseClient } from '@/lib/backend/auth';
-import { ApiClient, ApiError, AuthRequiredError, type ConnectionState } from '@/lib/backend/http';
+import { createAuthClient, currentAccessToken, signInWithEmail, signUpWithEmail, storedSessionUser, type SupabaseClient } from '@/lib/backend/auth';
+import { ApiClient, ApiError, AuthRequiredError, NetworkError, type ConnectionState } from '@/lib/backend/http';
 import { endpoints, type Endpoints } from '@/lib/backend/endpoints';
 import { CloudSync } from '@/lib/backend/cloudSync';
 import { MemoryStore, LEGACY_KEYS } from '@/lib/backend/storage';
@@ -63,23 +63,28 @@ interface Device {
   ep: Endpoints;
   connection: ConnectionState | 'unknown';
   /** Simulated network failures for this phone. */
-  network: 'up' | 'offline' | 'server-error';
+  network: 'up' | 'offline' | 'server-error' | 'lose-response';
   sync?: CloudSync;
 }
 
 function device(name: string, store = new MemoryStore()): Device {
   const d = { name, store, connection: 'unknown', network: 'up' } as Device;
-  d.auth = createAuthClient({ url: BASE, publishableKey: PUB_KEY, storage: store });
+  // Every request from this "phone" (auth and API) goes through its simulated network.
+  const net = (async (url: string, init?: RequestInit) => {
+    if (d.network === 'offline') throw new TypeError('Network request failed');
+    if (d.network === 'server-error' && url.startsWith(API_URL)) return new Response('{"error":"internal_error","message":"Something went wrong."}', { status: 503 });
+    const res = await fetch(url, init);
+    // The server handled the request but the reply never reached the phone.
+    if (d.network === 'lose-response' && url.startsWith(API_URL)) { await res.text(); throw new TypeError('Network request failed'); }
+    return res;
+  }) as typeof fetch;
+  d.auth = createAuthClient({ url: BASE, publishableKey: PUB_KEY, storage: store, fetchImpl: net });
   d.api = new ApiClient({
     baseUrl: API_URL,
-    getAccessToken: async () => (await d.auth.auth.getSession()).data.session?.access_token ?? null,
+    getAccessToken: () => currentAccessToken(d.auth), // the app's own logic
     refreshAccessToken: async () => (await d.auth.auth.refreshSession()).data.session?.access_token ?? null,
     onStatus: (s, detail) => { d.connection = s; d.sync?.reportConnection(s, detail); },
-    fetchImpl: (async (url: string, init?: RequestInit) => {
-      if (d.network === 'offline') throw new TypeError('Network request failed');
-      if (d.network === 'server-error') return new Response('{"error":"internal_error","message":"Something went wrong."}', { status: 503 });
-      return fetch(url, init);
-    }) as typeof fetch,
+    fetchImpl: net,
   });
   d.ep = endpoints(d.api);
   return d;
@@ -91,11 +96,23 @@ function cloud(d: Device, userId: string, clock?: { t: number }): CloudSync {
     ep: d.ep, store: d.store, userId, publishableKey: PUB_KEY, newId: () => randomUUID(), timezone: () => 'Europe/London',
     ...(clock ? { now: () => clock.t } : {}),
     prepareFile: async () => ({ body: JPEG, size: JPEG.length, mimeType: 'image/jpeg' }),
+    fetchImpl: ((url: string, init?: RequestInit) => (d.network === 'offline'
+      ? Promise.reject(new TypeError('Network request failed')) : fetch(url, init))) as typeof fetch,
   });
   return d.sync;
 }
 
 const createdUsers = new Set<string>();
+
+/** Waits until a Storage object is gone (the API's worker removes queued files). */
+async function objectRemoved(bucket: string, path: string): Promise<boolean> {
+  for (let i = 0; i < 30; i++) {
+    if (sql(`select count(*) from storage.objects where bucket_id = '${bucket}' and name = '${path}'`) === '0') return true;
+    await sleep(1000);
+  }
+  return false;
+}
+const photoPath = (id: string) => sql(`select storage_path from public.photos where id = '${id}'`);
 
 async function adminCreate(email: string, password: string, name: string): Promise<string> {
   const r = await fetch(`${BASE}/auth/v1/admin/users`, {
@@ -248,6 +265,33 @@ async function run() {
   const img = withPhoto?.imageUri ? await fetch(withPhoto.imageUri) : null;
   check('the cover photo URL downloads the image', img?.status === 200, `HTTP ${img?.status}`);
 
+  section('8b. Replacing and removing photos cleans up Storage');
+  const firstPhoto = withPhoto!.coverPhotoId!;
+  const firstPath = photoPath(firstPhoto);
+  await app.updateVehicle(vehicleId, { imageUri: 'file:///data/photo-2.jpg' });
+  await app.outbox.flush();
+  const replaced = app.data.vehicles.find((v) => v.id === vehicleId);
+  check('replacement photo becomes the cover', !!replaced?.coverPhotoId && replaced.coverPhotoId !== firstPhoto && !!replaced.imageUri);
+  check('the replaced photo\'s file is removed from Storage', await objectRemoved('vehicle-photos', firstPath));
+  const secondPath = photoPath(replaced!.coverPhotoId!);
+  await app.updateVehicle(vehicleId, { imageUri: null });
+  await app.outbox.flush();
+  check('removing the photo clears the cover on the server', !(await p1.ep.getVehicle(vehicleId)).coverPhotoId);
+  check('the removed photo\'s file is removed from Storage', await objectRemoved('vehicle-photos', secondPath));
+  await app.updateVehicle(vehicleId, { imageUri: 'file:///data/photo-3.jpg' });
+  await app.outbox.flush();
+  check('a new photo can be added again', !!app.data.vehicles.find((v) => v.id === vehicleId)?.imageUri);
+
+  await app.setAvatar('file:///data/avatar.jpg');
+  await app.outbox.flush();
+  const avatarUrl = app.data.profile.avatarUrl ?? '';
+  const avatarRes = avatarUrl.startsWith('http') ? await fetch(avatarUrl) : null;
+  check('avatar uploaded and publicly viewable', avatarRes?.status === 200, `HTTP ${avatarRes?.status}`);
+  const firstAvatar = sql(`select avatar_path from public.profiles where id = '${userA}'`);
+  await app.setAvatar('file:///data/avatar-2.jpg');
+  await app.outbox.flush();
+  check('replacing the avatar removes the old file', await objectRemoved('avatars', firstAvatar));
+
   // ─── 9–10. Saved places & Beauty Spots ───────────────────────────────────
   section('9. Save a location');
   const homeLocal = await app.addPlace({ kind: 'home', name: 'Home', coordinate: { latitude: 51.5007, longitude: -0.1246 }, visibility: 'public' });
@@ -324,6 +368,13 @@ async function run() {
   const bNearby = await phoneB.ep.nearbySpots(54.46, -3.09, 5000);
   check('B can see A\'s public Beauty Spot', bNearby.some((s) => s.id === spot!.id));
   check('B does not see A\'s Home among nearby spots', !bNearby.some((s) => s.id === home!.id));
+  const aPhoto = app.data.vehicles.find((v) => v.id === vehicleId)?.coverPhotoId ?? '';
+  check('B cannot open A\'s photo', (await status(phoneB.api.get(`/photos/${aPhoto}`))) === 404);
+  check('B cannot upload a photo to A\'s vehicle',
+    (await status(phoneB.ep.requestUpload({ kind: 'vehicle-photo', parentId: vehicleId, sizeBytes: 100, mimeType: 'image/jpeg' }))) === 404);
+  check('B cannot delete A\'s Home', (await status(phoneB.ep.deleteLocation(home!.id))) === 404
+    && (await p1.ep.listLocations()).some((l) => l.id === home!.id));
+  check('B cannot change A\'s journey', (await status(phoneB.ep.updateJourney(journeyId, { name: 'Mine' }))) === 404);
 
   // ─── 14. Offline / server failures are visible ───────────────────────────
   section('14. Offline and server failures are visible');
@@ -345,6 +396,37 @@ async function run() {
   check('back online: the waiting change uploads', app3.status.pendingChanges === 0 && app3.status.connection === 'online'
     && (await p1.ep.listVehicles()).some((v) => v.nickname === 'Offline Golf'));
 
+  section('14b. Lost responses and offline drives never duplicate');
+  p1.network = 'lose-response';
+  await app3.addVehicle({ ...vehicleInput, nickname: 'Idempotent Civic', registration: '', isActive: false });
+  await app3.addPlace({ kind: 'favourite_road', name: 'Idempotent Road', coordinate: { latitude: 54.5, longitude: -3.1 } });
+  await app3.outbox.flush();
+  check('a lost reply leaves the change waiting', app3.status.pendingChanges >= 1);
+  p1.network = 'up';
+  await app3.sync();
+  const civics = (await p1.ep.listVehicles()).filter((v) => v.nickname === 'Idempotent Civic').length;
+  const roads = (await p1.ep.listLocations()).filter((l) => l.name === 'Idempotent Road').length;
+  check('the retried vehicle exists exactly once', civics === 1, `${civics} copies`);
+  check('the retried place exists exactly once', roads === 1, `${roads} copies`);
+
+  const offClock = { t: Date.now() - 8 * 60_000 };
+  const app5 = cloud(p1, userA, offClock);
+  await app5.start();
+  p1.network = 'offline';
+  await app5.startDrive(null);
+  let olat = 54.3;
+  for (let s2 = 0; s2 < 240; s2++) { offClock.t += 1000; app5.addFix({ latitude: olat, longitude: -2.9, speedMs: 14, accuracyM: 5, timestamp: offClock.t }); olat += 14 / 111_320; }
+  offClock.t = Date.now();
+  const offDrive = await app5.endDrive();
+  check('a drive recorded offline is kept on the phone', offDrive?.syncState === 'pending' && app5.status.pendingJourneys === 1);
+  const before = (await (async () => { p1.network = 'up'; return p1.ep.listJourneys(); })()).length;
+  await app5.sync();
+  await app5.sync(); // retrying must not create a second copy
+  const after = await p1.ep.listJourneys();
+  check('the offline drive uploads once back online, exactly once', after.length === before + 1 && app5.status.pendingJourneys === 0, `${before} → ${after.length}`);
+  check('its route is available from the server', (app5.data.journeys.find((j) => j.syncState === 'synced' && j.id === after[0]!.id)?.routeCoordinates.length ?? 0) > 5);
+  app5.dispose();
+
   // ─── 16. Same account on a second phone ──────────────────────────────────
   section('16. Same account on a second phone sees the same cloud data');
   const phone2 = device('second phone');
@@ -361,6 +443,29 @@ async function run() {
   check('same profile', app4.data.profile.name === 'Alex Driver' && app4.data.profile.xp === app3.data.profile.xp);
   check('vehicle photo visible on the second phone', !!app4.data.vehicles.find((v) => v.id === vehicleId)?.imageUri);
   check('legacy device data keys untouched', LEGACY_KEYS.every((k) => !phone2.store.data.has(k)));
+
+  section('17. Sessions across devices and offline start');
+  await phone2.auth.auth.signOut({ scope: 'local' });
+  check('signing out one phone leaves the other signed in', (await p1.ep.getMe()).id === userA && !(await phone2.auth.auth.getSession()).data.session);
+  // Offline cold start more than an hour later: copy phone 1's saved session and expire its access token.
+  const coldStore = new MemoryStore();
+  for (const [k, v] of phone1.store.data) coldStore.data.set(k, v);
+  const key = [...coldStore.data.keys()].find((k) => k.endsWith('-auth-token'))!;
+  const saved = JSON.parse(coldStore.data.get(key)!);
+  saved.expires_at = Math.floor(Date.now() / 1000) - 60;
+  coldStore.data.set(key, JSON.stringify(saved));
+  const cold = device('phone restarted offline', coldStore);
+  cold.network = 'offline';
+  const offlineToken = await currentAccessToken(cold.auth).catch((e) => e);
+  check('offline with an expired token: treated as offline, not signed out', offlineToken instanceof NetworkError);
+  check('the saved account is still known offline', (await storedSessionUser(cold.auth, coldStore))?.id === userA);
+  const coldApp = cloud(cold, userA);
+  await coldApp.start();
+  check('cached data is available offline after the restart', coldApp.data.vehicles.some((v) => v.id === vehicleId));
+  cold.network = 'up';
+  const fresh2 = await currentAccessToken(cold.auth);
+  check('back online: the session refreshes and the API works', !!fresh2 && (await cold.ep.getMe()).id === userA);
+  coldApp.dispose();
   app3.dispose();
   app4.dispose();
 

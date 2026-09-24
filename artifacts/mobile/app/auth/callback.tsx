@@ -14,19 +14,19 @@ export default function AuthCallback() {
   const colors = useColors();
   const router = useRouter();
   const params = useGlobalSearchParams<{ error_description?: string }>();
-  const { session } = useAuth();
+  const { userId, linkError } = useAuth();
   const [timedOut, setTimedOut] = useState(false);
 
   useEffect(() => {
-    if (session) router.replace('/');
-  }, [session, router]);
+    if (userId) router.replace('/');
+  }, [userId, router]);
 
   useEffect(() => {
     const t = setTimeout(() => setTimedOut(true), 10_000);
     return () => clearTimeout(t);
   }, []);
 
-  const error = params.error_description ? String(params.error_description).replace(/\+/g, ' ') : null;
+  const error = linkError ?? (params.error_description ? String(params.error_description).replace(/\+/g, ' ') : null);
   return (
     <View style={[styles.container, { backgroundColor: colors.background }]}>
       {error || timedOut ? (

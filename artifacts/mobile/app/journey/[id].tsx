@@ -1,4 +1,5 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
+import { describeError } from '@/lib/backend/http';
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity, Platform, Alert,
   TextInput, Modal,
@@ -106,23 +107,29 @@ const PRIVACY_OPTIONS: { value: string; label: string; icon: string }[] = [
   { value: 'public', label: 'Public', icon: 'earth-outline' },
 ];
 
-// Mock convoy participants for the convoy journey type
-const MOCK_PARTICIPANTS = [
-  { id: 'p1', name: 'Sarah T.', initials: 'ST', vehicle: 'Cooper S JCW', distance: 63.8, xp: 128 },
-  { id: 'p2', name: 'Mike R.', initials: 'MR', vehicle: 'BMW M340i', distance: 63.8, xp: 128 },
-  { id: 'p3', name: 'James H.', initials: 'JH', vehicle: 'Abarth 595', distance: 51.2, xp: 102, joinedLate: true },
-];
-
 export default function JourneyDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const colors = useColors();
   const insets = useSafeAreaInsets();
   const router = useRouter();
-  const { journeys, vehicles, deleteJourney, updateJourney, categories, resolvedUnitSystem } = useApp();
+  const { journeys, vehicles, deleteJourney, updateJourney, categories, resolvedUnitSystem, resolveId, loadConvoyParticipants } = useApp();
 
-  const journey = journeys.find((j) => j.id === id);
+  // A drive opened while still uploading keeps working once it gets its server id.
+  const journey = journeys.find((j) => j.id === id) ?? journeys.find((j) => j.id === resolveId(id ?? ''));
+  const [participants, setParticipants] = useState<Awaited<ReturnType<typeof loadConvoyParticipants>> | null>(null);
+  const [participantsError, setParticipantsError] = useState<string | null>(null);
+  const convoyId = journey?.journeyType === 'convoy' ? journey.convoyId : undefined;
+  useEffect(() => {
+    if (!convoyId) return;
+    let cancelled = false;
+    loadConvoyParticipants(convoyId).then(
+      (p) => { if (!cancelled) setParticipants(p); },
+      (err) => { if (!cancelled) setParticipantsError(describeError(err)); },
+    );
+    return () => { cancelled = true; };
+  }, [convoyId, loadConvoyParticipants]);
   const vehicle = journey
-    ? (vehicles.find((v) => v.id === journey.vehicleId) ?? null)
+    ? (vehicles.find((v) => v.id === journey.vehicleId || v.id === resolveId(journey.vehicleId)) ?? null)
     : null;
   const vehicleDisplay = journey?.vehicleSnapshot ?? (vehicle ? {
     nickname: vehicle.nickname, make: vehicle.make, model: vehicle.model,
@@ -393,31 +400,19 @@ export default function JourneyDetailScreen() {
         {/* Convoy participants */}
         {isConvoy && (
           <>
-            <Text style={styles.sectionTitle}>Convoy Participants · {MOCK_PARTICIPANTS.length}</Text>
-            {MOCK_PARTICIPANTS.map((p) => (
+            <Text style={styles.sectionTitle}>Convoy Participants{participants ? ` · ${participants.length}` : ''}</Text>
+            {participantsError ? <Text style={{ fontSize: 13, color: colors.mutedForeground, fontFamily: 'Inter_400Regular', marginBottom: 12 }}>{participantsError}</Text> : null}
+            {participants?.map((p) => (
               <View key={p.id} style={styles.participantCard}>
                 <View style={styles.participantAvatar}>
                   <Text style={styles.participantInitials}>{p.initials}</Text>
                 </View>
                 <View style={{ flex: 1 }}>
                   <Text style={styles.participantName}>{p.name}</Text>
-                  <Text style={styles.participantVehicle}>{p.vehicle}</Text>
-                  {p.joinedLate && (
-                    <View style={styles.lateTag}><Text style={styles.lateTagText}>Joined late</Text></View>
-                  )}
-                </View>
-                <View style={styles.participantStats}>
-                  <Text style={{ fontSize: 13, fontWeight: '600', color: colors.foreground, fontFamily: 'Inter_600SemiBold' }}>{formatDistance(p.distance, resolvedUnitSystem)}</Text>
-                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3, marginTop: 2 }}>
-                    <Ionicons name="star" size={10} color={colors.primary} />
-                    <Text style={{ fontSize: 11, color: colors.primary, fontFamily: 'Inter_500Medium' }}>+{p.xp} XP</Text>
-                  </View>
+                  <Text style={styles.participantVehicle}>{p.role === 'leader' ? 'Leader' : 'Driver'}</Text>
                 </View>
               </View>
             ))}
-            <Text style={{ fontSize: 12, color: colors.mutedForeground, fontFamily: 'Inter_400Regular', marginBottom: 16, textAlign: 'center' }}>
-              Performance stats are private to convoy participants.
-            </Text>
           </>
         )}
 
