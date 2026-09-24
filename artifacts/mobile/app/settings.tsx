@@ -1,13 +1,15 @@
 import React, { useState } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, ScrollView,
-  Platform, Alert, Modal,
+  Platform, Alert, Modal, ActivityIndicator, TextInput,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useColors } from '@/hooks/useColors';
 import { useApp } from '@/context/AppContext';
+import { useAuth } from '@/context/AuthContext';
+import { describeError } from '@/lib/backend/http';
 import { UnitSystem, UNIT_SYSTEM_OPTIONS } from '@/lib/units';
 import * as Haptics from 'expo-haptics';
 
@@ -15,7 +17,48 @@ export default function SettingsScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
   const router = useRouter();
-  const { isPassengerMode, togglePassengerMode, unitSystem, setUnitSystem } = useApp();
+  const { isPassengerMode, togglePassengerMode, unitSystem, setUnitSystem, hasUnsyncedWork, clearLocalData, deleteAccount, retrySync, sync } = useApp();
+  const { email, signOut } = useAuth();
+  const [showDelete, setShowDelete] = useState(false);
+  const [deleteText, setDeleteText] = useState('');
+  const [deleting, setDeleting] = useState(false);
+
+  async function doSignOut() {
+    await clearLocalData();
+    await signOut();
+  }
+
+  function handleSignOut() {
+    if (hasUnsyncedWork()) {
+      Alert.alert(
+        'Changes not uploaded yet',
+        'Some changes or drives are still on this phone and haven\'t reached your account. Signing out now will lose them.',
+        [
+          { text: 'Try to upload', onPress: () => { void retrySync(); } },
+          { text: 'Sign out anyway', style: 'destructive', onPress: () => { void doSignOut(); } },
+          { text: 'Cancel', style: 'cancel' },
+        ],
+      );
+      return;
+    }
+    Alert.alert('Sign out?', 'Your data stays in your account. Sign in again on any phone to get it back.', [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Sign out', onPress: () => { void doSignOut(); } },
+    ]);
+  }
+
+  async function handleDeleteAccount() {
+    setDeleting(true);
+    try {
+      await deleteAccount();
+      setShowDelete(false);
+      await signOut().catch(() => {});
+    } catch (err) {
+      Alert.alert('Account not deleted', describeError(err));
+    } finally {
+      setDeleting(false);
+    }
+  }
 
   const [showUnitsPicker, setShowUnitsPicker] = useState(false);
 
@@ -203,6 +246,34 @@ export default function SettingsScreen() {
           ))}
         </View>
 
+        <Text style={styles.sectionTitle}>Account</Text>
+        <View style={styles.card}>
+          <View style={styles.row}>
+            <View style={[styles.rowIcon, { backgroundColor: colors.primary + '20' }]}>
+              <Ionicons name="person-circle-outline" size={18} color={colors.primary} />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.rowLabel}>Signed in</Text>
+              <Text style={styles.rowSub}>{email ?? 'Apple ID / Google account'}</Text>
+              <Text style={styles.rowSub}>
+                {sync.lastSyncedAt ? `Last synced ${new Date(sync.lastSyncedAt).toLocaleString('en-GB')}` : 'Not synced yet'}
+              </Text>
+            </View>
+          </View>
+          <TouchableOpacity style={styles.row} onPress={handleSignOut} accessibilityRole="button">
+            <View style={[styles.rowIcon, { backgroundColor: colors.mutedForeground + '20' }]}>
+              <Ionicons name="log-out-outline" size={18} color={colors.foreground} />
+            </View>
+            <Text style={styles.rowLabel}>Sign out</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={[styles.row, styles.rowLast]} onPress={() => { setDeleteText(''); setShowDelete(true); }} accessibilityRole="button">
+            <View style={[styles.rowIcon, { backgroundColor: colors.destructive + '20' }]}>
+              <Ionicons name="trash-outline" size={18} color={colors.destructive} />
+            </View>
+            <Text style={[styles.rowLabel, { color: colors.destructive }]}>Delete account</Text>
+          </TouchableOpacity>
+        </View>
+
         <Text style={styles.sectionTitle}>Future Features</Text>
         <View style={styles.futureNote}>
           <Text style={styles.futureNoteTitle}>OBD2 &amp; HUD Integration</Text>
@@ -215,11 +286,41 @@ export default function SettingsScreen() {
         <View style={[styles.futureNote, { marginTop: 10 }]}>
           <Text style={styles.futureNoteTitle}>DVLA Vehicle Lookup</Text>
           <Text style={styles.futureNoteText}>
-            Automatic vehicle details from registration plate. Requires backend API key
-            (DVLA_API_KEY — never stored in the frontend). Set EXPO_PUBLIC_DVLA_PROXY_URL to connect.
+            Automatic vehicle details from the registration plate, looked up by the DriveOS server
+            (the DVLA key never ships in the app). Available when the server has it configured.
           </Text>
         </View>
       </ScrollView>
+
+      {/* Delete account confirmation */}
+      <Modal visible={showDelete} transparent animationType="fade" onRequestClose={() => setShowDelete(false)}>
+        <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center', padding: 24 }}>
+          <View style={{ backgroundColor: colors.card, borderRadius: 20, padding: 20, gap: 12 }}>
+            <Text style={{ color: colors.foreground, fontSize: 18, fontFamily: 'Inter_700Bold' }}>Delete your account?</Text>
+            <Text style={{ color: colors.mutedForeground, fontSize: 14, fontFamily: 'Inter_400Regular', lineHeight: 20 }}>
+              This permanently deletes your profile, vehicles, photos, documents, journeys, saved places, Beauty Spots,
+              friends and memberships from DriveOS on every device. It can't be undone.
+            </Text>
+            <Text style={{ color: colors.foreground, fontSize: 14, fontFamily: 'Inter_600SemiBold' }}>Type DELETE to confirm</Text>
+            <TextInput
+              value={deleteText} onChangeText={setDeleteText} autoCapitalize="characters" autoCorrect={false}
+              style={{ height: 46, borderRadius: 12, borderWidth: 1, borderColor: colors.input, color: colors.foreground, paddingHorizontal: 14, fontSize: 16 }}
+            />
+            <TouchableOpacity
+              disabled={deleteText !== 'DELETE' || deleting}
+              onPress={handleDeleteAccount}
+              style={{ height: 48, borderRadius: 12, alignItems: 'center', justifyContent: 'center', backgroundColor: deleteText === 'DELETE' ? colors.destructive : colors.muted }}
+            >
+              {deleting ? <ActivityIndicator color={colors.destructiveForeground} /> : (
+                <Text style={{ color: deleteText === 'DELETE' ? colors.destructiveForeground : colors.mutedForeground, fontFamily: 'Inter_600SemiBold', fontSize: 16 }}>Delete permanently</Text>
+              )}
+            </TouchableOpacity>
+            <TouchableOpacity onPress={() => setShowDelete(false)} style={{ alignItems: 'center', padding: 8 }}>
+              <Text style={{ color: colors.primary, fontFamily: 'Inter_600SemiBold', fontSize: 15 }}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
 
       {/* Units of measurement picker */}
       <Modal

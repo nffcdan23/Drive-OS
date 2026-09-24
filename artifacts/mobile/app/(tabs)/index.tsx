@@ -544,6 +544,8 @@ export default function MapScreen() {
       speedMs: number | null,
       gpsHeading: number | null,
       accuracy: number | null,
+      altitude: number | null = null,
+      fixTime: number | null = null,
     ) => {
       const now = Date.now();
 
@@ -613,6 +615,10 @@ export default function MapScreen() {
           latitude: lat,
           longitude: lon,
           speed: speedMs ?? 0,
+          heading: gpsHeading,
+          accuracy,
+          altitude,
+          timestamp: fixTime ?? now,
         });
       }
 
@@ -674,6 +680,8 @@ export default function MapScreen() {
               pos.coords.speed,
               pos.coords.heading,
               pos.coords.accuracy,
+              pos.coords.altitude,
+              pos.timestamp,
             );
           },
           () => {
@@ -709,6 +717,8 @@ export default function MapScreen() {
               loc.coords.speed,
               loc.coords.heading,
               loc.coords.accuracy,
+              loc.coords.altitude,
+              loc.timestamp,
             );
           },
         );
@@ -1847,7 +1857,9 @@ export default function MapScreen() {
                     isScenic && styles.quickBtnScenic,
                     btn.isActive && styles.quickBtnActive,
                   ]}
-                  onPress={() => router.push("/search")}
+                  onPress={() =>
+                    router.push(isScenic ? { pathname: "/search", params: { section: "spots" } } : "/search")
+                  }
                   activeOpacity={0.8}
                 >
                   <Ionicons

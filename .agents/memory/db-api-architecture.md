@@ -30,16 +30,19 @@ All mounted in `artifacts/api-server/src/routes/index.ts` under `/api`:
 - Tests: `artifacts/api-server/test/api.test.mjs` (run by `db:verify-local`); staging: `supabase/tests/staging/api_staging.mjs`.
 - NO orval codegen — handwritten types in `artifacts/mobile/lib/apiClient.ts` (to be updated in Phase 5).
 
-## Mobile client
-- `artifacts/mobile/lib/apiClient.ts` — imports customFetch from @workspace/api-client-react, calls setBaseUrl + setAuthTokenGetter at module init
-- `artifacts/mobile/lib/deviceId.ts` — uses expo-crypto (~15.0.9) for Crypto.randomUUID()
-- `artifacts/mobile/lib/journeyDraft.ts` — platform-unified draft: IndexedDB on web, AsyncStorage on native
+## Mobile client (Phase 5)
+- Supabase Auth (email+password, native Apple on iOS, Google via browser OAuth/PKCE); session in expo-secure-store
+  (`lib/secureStorage.ts`, chunked). Config from EXPO_PUBLIC_* (`lib/backendClient.ts`); secret keys are refused.
+- `lib/backend/` (no RN imports, unit-tested in Node): `http.ts` (ApiClient, error classes), `endpoints.ts`,
+  `cloudSync.ts` (engine), `outbox.ts` (offline queue), `journeyRecorder.ts` (thinning + idempotent upload),
+  `uploads.ts` (signed Storage URLs), `mappers.ts`, `model.ts`.
+- Device storage is per user: `@driveos/u/<userId>/…`; legacy `@driveos/*` keys are preserved, never read.
+- No device-ID auth anywhere; `lib/apiClient.ts`, `deviceId.ts`, `journeyDraft.ts` and mock data were removed.
 
 ## AppContext
-- On mount: AsyncStorage first (fast) → then API (authoritative)
-- `endDrive()` is now async — returns `Promise<Journey | null>`, clears state immediately, saves to API in background
-- `startDrive()` is fire-and-forget async internally (external interface stays `() => void`)
-- SyncBanner shows when `syncStatus !== 'idle'`
+- Mounted per signed-in user (keyed by user id); a thin layer over CloudSync. Cache first, then API.
+- Mutations: update state immediately, queue in the outbox, replay when online; failures are shown
+  (ConnectionBanner / Alert), never swallowed. Community actions are online-only and report errors.
 
-**Why:** Offline-first pattern — never block UI on network, always persist locally first.
-**How to apply:** Any new mutation should update local state first, fire API call in background.
+**How to apply:** new persistent data goes through the API and CloudSync (with an outbox op if it
+must work offline); never make the device the source of truth.

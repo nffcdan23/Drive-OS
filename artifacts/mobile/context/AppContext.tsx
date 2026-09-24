@@ -1,257 +1,40 @@
-import React, {
-  createContext, useContext, useEffect, useState, useCallback, useRef,
-} from 'react';
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import {
-  MOCK_VEHICLES, MOCK_JOURNEYS, MOCK_ACHIEVEMENTS,
-  MOCK_FRIENDS, MOCK_CONVOYS, DEFAULT_CATEGORIES,
-  MOCK_GROUPS, MOCK_EVENTS, MOCK_CONVERSATIONS, MOCK_MESSAGES, MOCK_NOTIFICATIONS,
-} from '@/constants/mockData';
-import {
-  apiGetMe, apiGetVehicles, apiGetJourneys, apiGetCategories,
-  apiGetNotifications, apiStartJourney, apiAddRoutePoints,
-  apiCompleteJourney, apiUpdateJourney, apiDeleteJourney, apiCreateVehicle,
-  apiUpdateVehicle, apiDeleteVehicle, apiActivateVehicle, apiUpdateMe,
-  apiGetMyStats, apiGetFriends, apiRemoveFriend,
-  apiAcceptFriendRequest, apiDeclineFriendRequest,
-  apiGetConvoys, apiCreateConvoy, apiUpdateConvoy, apiDeleteConvoy,
-  apiJoinConvoy, apiLeaveConvoy,
-  apiGetGroups, apiCreateGroup, apiUpdateGroup, apiJoinGroup, apiLeaveGroup,
-  apiGetEvents, apiCreateEvent, apiRsvpEvent,
-  ApiVehicle, ApiJourney, ApiProfileStats, ApiFriend,
-  ApiConvoy, ApiGroup, ApiEvent,
-} from '@/lib/apiClient';
-import {
-  loadDraft, saveDraft, clearDraft, clearPendingPoints,
-  JourneyDraft, DraftRoutePoint,
-} from '@/lib/journeyDraft';
-import {
-  UnitSystem, ResolvedUnitSystem, resolveUnitSystem,
-} from '@/lib/units';
+/**
+ * The signed-in user's data for every screen.
+ *
+ * Supabase (through the DriveOS API) is the source of truth; this provider
+ * is a thin React layer over CloudSync, which caches data on the device per
+ * user, queues edits made offline and uploads recorded drives. Failures are
+ * surfaced (connection banner, alerts), never silently ignored.
+ *
+ * The provider is mounted per user (keyed by user id), so switching
+ * accounts can never show the previous account's data.
+ */
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { Alert, AppState } from 'react-native';
+import * as ImageManipulator from 'expo-image-manipulator';
+import { CloudSync, type SyncStatus } from '@/lib/backend/cloudSync';
+import { describeError } from '@/lib/backend/http';
+import type { GpsFix } from '@/lib/backend/journeyRecorder';
+import type { LocationKind, SpotCategory, Visibility } from '@/lib/backend/endpoints';
+import type {
+  ActiveDrive, BlockedUser, Conversation, Convoy, Coordinate, DriveOSEvent, Friend, FriendRequest, Group, Journey,
+  JourneyCategory, Message, NearbySpot, Notification, ProfileStats, SavedPlace, UserProfile, Vehicle,
+} from '@/lib/backend/model';
+import type { PreparedFile } from '@/lib/backend/uploads';
+import { UnitSystem, ResolvedUnitSystem, resolveUnitSystem } from '@/lib/units';
+import { api, backendEnv, ep, newId, onConnectionStatus } from '@/lib/backendClient';
+import { deviceStorage } from '@/lib/secureStorage';
 
-// ─── Types ────────────────────────────────────────────────────────────────────
+export type {
+  Vehicle, VehicleSnapshot, Coordinate, JourneyCategory, Journey, Achievement, UserProfile, Friend, FriendRequest,
+  BlockedUser, Convoy, Group, EventType, DriveOSEvent, Conversation, Message, Notification, Destination, ActiveDrive,
+  SavedPlace, NearbySpot,
+} from '@/lib/backend/model';
+export type { SyncStatus as CloudSyncStatus } from '@/lib/backend/cloudSync';
 
-export interface Vehicle {
-  id: string;
-  nickname: string;
-  registration: string;
-  make: string;
-  model: string;
-  year: number;
-  colour: string;
-  fuelType: 'petrol' | 'diesel' | 'electric' | 'hybrid';
-  engine: string;
-  power: string;
-  torque: string;
-  zeroToSixty: string;
-  topSpeed: string;
-  mileage: number;
-  fuelPercentage: number;
-  imageUri: string | null;
-  isActive: boolean;
-}
-
-export interface VehicleSnapshot {
-  vehicleId: string;
-  make: string;
-  model: string;
-  nickname: string;
-  year: number;
-  registration: string;
-  imageUri: string | null;
-  power: string;
-  engine: string;
-}
-
-export interface Coordinate {
-  latitude: number;
-  longitude: number;
-}
-
-export interface JourneyCategory {
-  id: string;
-  name: string;
-  icon: string;
-  colour: string;
-}
-
-export interface Journey {
-  id: string;
-  name: string;
-  date: string;
-  startTime: string;
-  endTime: string;
-  duration: number;   // seconds
-  distance: number;   // km
-  averageSpeed: number; // km/h
-  topSpeed: number;     // km/h
-  vehicleId: string;
-  notes: string;
-  routeCoordinates: Coordinate[];
-  photos: string[];
-  categoryId?: string;
-  journeyType?: 'personal' | 'convoy';
-  xpEarned?: number;
-  vehicleSnapshot?: VehicleSnapshot;
-  privacy?: 'private' | 'friends' | 'public';
-  convoyId?: string;
-}
-
-export interface Achievement {
-  id: string;
-  title: string;
-  description: string;
-  icon: string;
-  unlockedAt: string | null;
-}
-
-export interface UserProfile {
-  name: string;
-  level: number;
-  xp: number;
-  xpToNextLevel: number;
-  totalDistance: number;
-  totalJourneys: number;
-  achievements: Achievement[];
-  username?: string;
-  bio?: string;
-  friendCode?: string;
-}
-
-export interface Friend {
-  id: string;
-  name: string;
-  initials: string;
-  status: 'online' | 'offline' | 'driving';
-  location: string;
-}
-
-export interface FriendRequest {
-  id: string;
-  fromId: string;
-  fromName: string;
-  fromInitials: string;
-  status: 'pending' | 'accepted' | 'declined';
-  createdAt: string;
-  isIncoming: boolean;
-}
-
-export interface BlockedUser {
-  id: string;
-  blockedName: string;
-}
-
-export interface Convoy {
-  id: string;
-  name: string;
-  leaderId: string;
-  leaderName: string;
-  destination: string;
-  driverCount: number;
-  isPrivate: boolean;
-  startTime: string;
-  status: 'forming' | 'active' | 'completed' | 'cancelled';
-  description: string;
-  maxParticipants?: number;
-  privacyMethod?: 'invite_only' | 'passcode' | 'group_members';
-  isOwn?: boolean;
-  isJoined?: boolean;
-}
-
-export interface Group {
-  id: string;
-  name: string;
-  description: string;
-  logoUri: string | null;
-  isPublic: boolean;
-  memberCount: number;
-  membershipMethod: 'open' | 'request' | 'invite' | 'code';
-  myRole: 'owner' | 'admin' | 'moderator' | 'verified_member' | 'member' | null;
-  isMember: boolean;
-  primaryLocation: string;
-  vehicleInterests: string;
-  createdAt: string;
-}
-
-export type EventType =
-  | 'static_car_meet' | 'scenic_drive' | 'convoy' | 'road_trip'
-  | 'show' | 'track_day' | 'closed_course' | 'charity' | 'photography'
-  | 'owner_club' | 'other';
-
-export interface DriveOSEvent {
-  id: string;
-  name: string;
-  description: string;
-  coverUri: string | null;
-  location: string;
-  date: string;
-  startTime: string;
-  endTime: string;
-  eventType: EventType;
-  isPublic: boolean;
-  groupId: string | null;
-  capacity: number;
-  attendeeCount: number;
-  organiser: string;
-  vehicleCategory: string;
-  rsvpStatus: 'going' | 'interested' | 'declined' | null;
-  entryCost: string;
-}
-
-export interface Conversation {
-  id: string;
-  participantId: string;
-  participantName: string;
-  participantInitials: string;
-  lastMessage: string;
-  lastMessageAt: string;
-  unreadCount: number;
-}
-
-export interface Message {
-  id: string;
-  conversationId: string;
-  senderId: string;
-  senderName: string;
-  content: string;
-  createdAt: string;
-  isOwn: boolean;
-}
-
-export interface Notification {
-  id: string;
-  type: 'friend_request' | 'friend_accepted' | 'message' | 'convoy_invite'
-    | 'convoy_updated' | 'convoy_cancelled' | 'group_invite'
-    | 'group_request_result' | 'group_news' | 'event_invite' | 'event_reminder';
-  title: string;
-  body: string;
-  createdAt: string;
-  read: boolean;
-}
-
-export interface Destination {
-  id: string;
-  name: string;
-  address: string;
-  type: 'home' | 'work' | 'favourite' | 'recent' | 'scenic' | 'search';
-  coordinate: Coordinate;
-}
-
-export interface ActiveDrive {
-  startTime: number;
-  coordinates: Coordinate[];
-  speedSamples: number[];
-  topSpeed: number;
-  estimatedDistance: number;
-  currentSpeed: number;
-}
-
-// ─── Context ──────────────────────────────────────────────────────────────────
-
-export type SyncStatus = 'idle' | 'syncing' | 'error';
+export type SyncStatusSummary = 'idle' | 'syncing' | 'error';
 
 interface AppContextValue {
-  // Core
   vehicles: Vehicle[];
   journeys: Journey[];
   userProfile: UserProfile;
@@ -260,42 +43,50 @@ interface AppContextValue {
   currentDrive: ActiveDrive | null;
   activeVehicle: Vehicle | null;
 
-  // Loading & sync state
+  // Loading & sync
   isLoading: boolean;
-  syncStatus: SyncStatus;
+  syncStatus: SyncStatusSummary;
+  sync: SyncStatus;
   unsyncedJourneyId: string | null;
   retryJourneySync: () => Promise<void>;
+  retrySync: () => Promise<void>;
+  dismissRejections: () => Promise<void>;
+  discardPendingJourney: (id: string) => Promise<void>;
 
-  // Journey categories
   categories: JourneyCategory[];
   addCategory: (c: Omit<JourneyCategory, 'id'>) => void;
   updateCategory: (id: string, updates: Partial<JourneyCategory>) => void;
   deleteCategory: (id: string) => void;
 
-  // Vehicles
   setActiveVehicle: (id: string) => void;
   addVehicle: (v: Omit<Vehicle, 'id'>) => void;
   updateVehicle: (id: string, updates: Partial<Vehicle>) => void;
   deleteVehicle: (id: string) => void;
+  lookupVehicle: (registration: string) => ReturnType<CloudSync['lookupVehicle']>;
 
-  // Journeys
   addJourney: (j: Omit<Journey, 'id'>) => void;
   updateJourney: (id: string, updates: Partial<Journey>) => void;
   deleteJourney: (id: string) => void;
 
-  // Driving
   startDrive: () => void;
-  updateDriveCoordinate: (coord: Coordinate & { speed: number }) => void;
+  updateDriveCoordinate: (coord: Coordinate & { speed: number; accuracy?: number | null; heading?: number | null; altitude?: number | null; timestamp?: number }) => void;
   endDrive: () => Promise<Journey | null>;
   togglePassengerMode: () => void;
 
-  // Profile
   updateProfile: (updates: Partial<UserProfile>) => void;
+  setAvatar: (uri: string) => Promise<void>;
+
+  // Saved places & Beauty Spots
+  places: SavedPlace[];
+  addPlace: (p: { kind: LocationKind; name: string; coordinate: Coordinate; description?: string; category?: SpotCategory | null; visibility?: Visibility }) => Promise<string>;
+  updatePlace: (id: string, updates: Partial<Pick<SavedPlace, 'name' | 'description' | 'visibility' | 'category'>>) => void;
+  deletePlace: (id: string) => void;
+  findNearbySpots: (lat: number, lng: number, radiusM?: number) => Promise<NearbySpot[]>;
 
   // Friends
   friends: Friend[];
   friendRequests: FriendRequest[];
-  sendFriendRequest: (name: string, initials: string) => void;
+  sendFriendRequest: (friendCode: string) => Promise<'pending' | 'accepted'>;
   acceptFriendRequest: (id: string) => void;
   declineFriendRequest: (id: string) => void;
   removeFriend: (id: string) => void;
@@ -303,7 +94,6 @@ interface AppContextValue {
   blockUser: (id: string, name: string) => void;
   unblockUser: (id: string) => void;
 
-  // Convoys
   convoys: Convoy[];
   addConvoy: (c: Omit<Convoy, 'id'>) => void;
   updateConvoy: (id: string, updates: Partial<Convoy>) => void;
@@ -311,1107 +101,318 @@ interface AppContextValue {
   joinConvoy: (id: string) => void;
   leaveConvoy: (id: string) => void;
 
-  // Groups
   groups: Group[];
   addGroup: (g: Omit<Group, 'id' | 'createdAt' | 'memberCount' | 'myRole' | 'isMember'>) => void;
   joinGroup: (id: string) => void;
   leaveGroup: (id: string) => void;
 
-  // Events
   events: DriveOSEvent[];
   addEvent: (e: Omit<DriveOSEvent, 'id' | 'attendeeCount' | 'rsvpStatus'>) => void;
   rsvpEvent: (id: string, status: DriveOSEvent['rsvpStatus']) => void;
 
-  // Messaging
+  // Messaging has no server yet, so it stays empty rather than faking delivery.
   conversations: Conversation[];
   messages: Message[];
   sendMessage: (conversationId: string, content: string) => void;
   startConversation: (participantId: string, participantName: string, participantInitials: string) => string;
   markConversationRead: (id: string) => void;
 
-  // Notifications
   notifications: Notification[];
   markNotificationRead: (id: string) => void;
   markAllNotificationsRead: () => void;
   unreadNotificationCount: number;
 
-  // Units of measurement
   unitSystem: UnitSystem;
   resolvedUnitSystem: ResolvedUnitSystem;
   setUnitSystem: (s: UnitSystem) => void;
 
-  // Profile statistics (live from server)
-  profileStats: ApiProfileStats;
+  profileStats: ProfileStats;
   refreshProfileStats: () => Promise<void>;
+
+  /** True when there are changes or drives that haven't reached the server. */
+  hasUnsyncedWork: () => boolean;
+  /** Removes this user's cached data from the device (on sign-out). */
+  clearLocalData: () => Promise<void>;
+  deleteAccount: () => Promise<void>;
 }
 
 const AppContext = createContext<AppContextValue | null>(null);
+const NO_CONVERSATIONS: Conversation[] = [];
+const NO_MESSAGES: Message[] = [];
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-function apiFriendToLocal(f: ApiFriend): Friend {
-  const parts = f.name.trim().split(/\s+/);
-  const initials = parts.length >= 2
-    ? (parts[0][0] + parts[parts.length - 1][0]).toUpperCase()
-    : (parts[0]?.[0] ?? '?').toUpperCase();
-  return { id: f.id, name: f.name, initials, status: 'offline', location: '' };
+/** Resizes a picked photo to at most 1600 px (JPEG) so it fits the upload limits. */
+async function prepareImage(uri: string): Promise<PreparedFile> {
+  const result = await ImageManipulator.manipulateAsync(uri, [{ resize: { width: 1600 } }], {
+    compress: 0.8, format: ImageManipulator.SaveFormat.JPEG,
+  });
+  const res = await fetch(result.uri);
+  const blob = await res.blob();
+  return { body: blob, size: blob.size, mimeType: 'image/jpeg' };
 }
 
-function apiConvoyToLocal(c: ApiConvoy): Convoy {
-  return {
-    id:              c.id,
-    name:            c.name,
-    leaderId:        c.ownerId,
-    leaderName:      c.leaderName,
-    destination:     c.destination,
-    driverCount:     c.driverCount,
-    isPrivate:       c.isPrivate,
-    startTime:       c.startTime,
-    status:          (c.status as Convoy['status']) ?? 'forming',
-    description:     c.description,
-    maxParticipants: c.maxParticipants ?? undefined,
-    isOwn:           c.isOwn,
-    isJoined:        c.isJoined,
-  };
+async function prepareAvatar(uri: string): Promise<PreparedFile> {
+  const result = await ImageManipulator.manipulateAsync(uri, [{ resize: { width: 512 } }], {
+    compress: 0.8, format: ImageManipulator.SaveFormat.JPEG,
+  });
+  const blob = await (await fetch(result.uri)).blob();
+  return { body: blob, size: blob.size, mimeType: 'image/jpeg' };
 }
 
-function apiGroupToLocal(g: ApiGroup): Group {
-  return {
-    id:                g.id,
-    name:              g.name,
-    description:       g.description,
-    logoUri:           g.logoUrl,
-    isPublic:          g.isPublic,
-    memberCount:       g.memberCount,
-    membershipMethod:  (g.membershipMethod as Group['membershipMethod']) ?? 'open',
-    myRole:            (g.myRole as Group['myRole']) ?? null,
-    isMember:          g.isMember,
-    primaryLocation:   g.primaryLocation,
-    vehicleInterests:  g.vehicleInterests,
-    createdAt:         g.createdAt,
-  };
+const timezone = () => Intl.DateTimeFormat().resolvedOptions().timeZone || 'Europe/London';
+
+/** Shows an error the user needs to know about (the action didn't happen). */
+function reportFailure(action: string, err: unknown) {
+  Alert.alert(action, describeError(err));
 }
 
-function apiEventToLocal(e: ApiEvent): DriveOSEvent {
-  return {
-    id:              e.id,
-    name:            e.name,
-    description:     e.description,
-    coverUri:        e.coverUrl,
-    location:        e.location,
-    date:            e.date,
-    startTime:       e.startTime,
-    endTime:         e.endTime,
-    eventType:       e.eventType as EventType,
-    isPublic:        e.isPublic,
-    groupId:         e.groupId,
-    capacity:        e.capacity,
-    attendeeCount:   e.attendeeCount,
-    organiser:       e.organiserName,
-    vehicleCategory: e.vehicleCategory,
-    rsvpStatus:      e.rsvpStatus,
-    entryCost:       e.entryCost,
-  };
-}
+export function AppProvider({ userId, children }: { userId: string; children: React.ReactNode }) {
+  const cloud = useMemo(() => {
+    if (!ep || !backendEnv) throw new Error('Backend is not configured');
+    const c = new CloudSync({
+      ep, store: deviceStorage, userId, publishableKey: backendEnv.supabasePublishableKey, newId, timezone,
+      prepareFile: (uri, purpose) => (purpose === 'avatar' ? prepareAvatar(uri) : prepareImage(uri)),
+    });
+    return c;
+  }, [userId]);
 
-// ─── Storage keys ─────────────────────────────────────────────────────────────
+  // Re-render on every change inside CloudSync.
+  const version = useSyncExternalStore(
+    useCallback((fn: () => void) => cloud.subscribe(fn), [cloud]),
+    () => cloud.data,
+  );
+  const status = useSyncExternalStore(
+    useCallback((fn: () => void) => cloud.subscribe(fn), [cloud]),
+    () => cloud.status,
+  );
+  const data = version;
 
-const STORAGE_KEYS = {
-  VEHICLES:       '@driveos/vehicles',
-  JOURNEYS:       '@driveos/journeys',
-  PROFILE:        '@driveos/profile',
-  PASSENGER_MODE: '@driveos/passengerMode',
-  CATEGORIES:     '@driveos/categories',
-  CONVOYS:        '@driveos/convoys',
-  FRIENDS:        '@driveos/friends',
-  FRIEND_REQUESTS:'@driveos/friendRequests',
-  BLOCKED:        '@driveos/blocked',
-  GROUPS:         '@driveos/groups',
-  EVENTS:         '@driveos/events',
-  CONVERSATIONS:  '@driveos/conversations',
-  MESSAGES:       '@driveos/messages',
-  NOTIFICATIONS:  '@driveos/notifications',
-  UNIT_SYSTEM:    '@driveos/unitSystem',
-};
+  const [isLoading, setIsLoading] = useState(true);
+  const [isPassengerMode, setIsPassengerMode] = useState(false);
+  const [currentDrive, setCurrentDrive] = useState<ActiveDrive | null>(null);
+  const isDriving = currentDrive !== null;
 
-// ─── Default profile ──────────────────────────────────────────────────────────
-
-const DEFAULT_PROFILE: UserProfile = {
-  name: 'Driver',
-  username: undefined,
-  bio: undefined,
-  friendCode: undefined,
-  level: 1,
-  xp: 0,
-  xpToNextLevel: 1000,
-  totalDistance: 0,
-  totalJourneys: 0,
-  achievements: MOCK_ACHIEVEMENTS,
-};
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-function generateId(): string {
-  return Date.now().toString() + Math.random().toString(36).substring(2, 9);
-}
-
-function snapshotVehicle(v: Vehicle): VehicleSnapshot {
-  return {
-    vehicleId: v.id, make: v.make, model: v.model, nickname: v.nickname,
-    year: v.year, registration: v.registration, imageUri: v.imageUri,
-    power: v.power, engine: v.engine,
-  };
-}
-
-/** Map an API vehicle to the local Vehicle shape. */
-function apiVehicleToLocal(v: ApiVehicle): Vehicle {
-  return {
-    id:             v.id,
-    nickname:       v.nickname,
-    registration:   v.registration,
-    make:           v.make,
-    model:          v.model,
-    year:           v.year,
-    colour:         v.colour,
-    fuelType:       (v.fuelType as Vehicle['fuelType']) ?? 'petrol',
-    engine:         v.engine,
-    power:          v.power,
-    torque:         v.torque,
-    zeroToSixty:    v.zeroToSixty,
-    topSpeed:       v.topSpeedSpec,
-    mileage:        v.mileage,
-    fuelPercentage: 75, // not in DB, use default
-    imageUri:       v.imageUrl ?? null,
-    isActive:       v.isActive,
-  };
-}
-
-/** Map an API journey to the local Journey shape. */
-function apiJourneyToLocal(j: ApiJourney): Journey {
-  const toTime = (iso: string | null) => {
-    if (!iso) return '';
-    return new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
-  };
-  return {
-    id:              j.id,
-    name:            j.name,
-    date:            j.date,
-    startTime:       toTime(j.startTimeIso),
-    endTime:         toTime(j.endTimeIso),
-    duration:        j.durationSeconds,
-    distance:        j.distanceKm,
-    averageSpeed:    j.avgSpeedKmh,
-    topSpeed:        j.topSpeedKmh,
-    vehicleId:       j.vehicleId ?? '',
-    notes:           j.notes,
-    routeCoordinates: [],
-    photos:          (j.photos as string[]) ?? [],
-    categoryId:      j.categoryId ?? undefined,
-    journeyType:     (j.journeyType as Journey['journeyType']) ?? 'personal',
-    xpEarned:        j.xpEarned,
-    privacy:         (j.privacy as Journey['privacy']) ?? 'private',
-    convoyId:        j.convoyId ?? undefined,
-    vehicleSnapshot: j.vehicleSnapshot ? (j.vehicleSnapshot as VehicleSnapshot) : undefined,
-  };
-}
-
-// ─── Provider ─────────────────────────────────────────────────────────────────
-
-export function AppProvider({ children }: { children: React.ReactNode }) {
-  const [vehicles,       setVehicles]       = useState<Vehicle[]>(MOCK_VEHICLES);
-  const [journeys,       setJourneys]       = useState<Journey[]>(MOCK_JOURNEYS);
-  const [userProfile,    setUserProfile]    = useState<UserProfile>(DEFAULT_PROFILE);
-  const [isPassengerMode,setIsPassengerMode]= useState(false);
-  const [isDriving,      setIsDriving]      = useState(false);
-  const [currentDrive,   setCurrentDrive]   = useState<ActiveDrive | null>(null);
-  const [categories,     setCategories]     = useState<JourneyCategory[]>(DEFAULT_CATEGORIES);
-  const [convoys,        setConvoys]        = useState<Convoy[]>(MOCK_CONVOYS);
-  const [friends,        setFriends]        = useState<Friend[]>(MOCK_FRIENDS);
-  const [friendRequests, setFriendRequests] = useState<FriendRequest[]>([]);
-  const [blockedUsers,   setBlockedUsers]   = useState<BlockedUser[]>([]);
-  const [groups,         setGroups]         = useState<Group[]>(MOCK_GROUPS);
-  const [events,         setEvents]         = useState<DriveOSEvent[]>(MOCK_EVENTS);
-  const [conversations,  setConversations]  = useState<Conversation[]>(MOCK_CONVERSATIONS);
-  const [messages,       setMessages]       = useState<Message[]>(MOCK_MESSAGES);
-  const [notifications,  setNotifications]  = useState<Notification[]>(MOCK_NOTIFICATIONS);
-  const [unitSystem,     setUnitSystemState] = useState<UnitSystem>('auto');
-  const [profileStats,   setProfileStats]   = useState<ApiProfileStats>({ friends: 0, vehicles: 0, journeys: 0, totalDistance: 0 });
-  const [loaded,         setLoaded]         = useState(false);
-  const [isLoading,      setIsLoading]      = useState(true);
-  const [syncStatus,     setSyncStatus]     = useState<SyncStatus>('idle');
-  const [unsyncedJourneyId, setUnsyncedJourneyId] = useState<string | null>(null);
-
-  // Refs for drive lifecycle (not reactive — just for internal coordination)
-  const serverJourneyIdRef = useRef<string | null>(null);
-  const journeyDraftRef    = useRef<JourneyDraft | null>(null);
-  const flushIntervalRef   = useRef<ReturnType<typeof setInterval> | null>(null);
-  const activeVehicleRef   = useRef<Vehicle | null>(null);
-
-  // Keep activeVehicleRef in sync so callbacks close over the latest value
-  const activeVehicle = vehicles.find((v) => v.isActive) ?? vehicles[0] ?? null;
-  activeVehicleRef.current = activeVehicle;
-  const resolvedUnitSystem = resolveUnitSystem(unitSystem);
-
-  // ── Step 1: Load from AsyncStorage (fast, offline-capable) ──────────────────
+  // Start: cached data first, then the server.
   useEffect(() => {
-    const load = async () => {
-      try {
-        const results = await Promise.all(
-          Object.values(STORAGE_KEYS).map((k) => AsyncStorage.getItem(k))
-        );
-        const keys = Object.keys(STORAGE_KEYS) as (keyof typeof STORAGE_KEYS)[];
-        const map: Record<string, string | null> = {};
-        keys.forEach((k, i) => { map[STORAGE_KEYS[k]] = results[i]; });
-
-        const parse = (k: string, fallback: unknown) => {
-          const v = map[k];
-          return v ? JSON.parse(v) : fallback;
-        };
-
-        setVehicles(parse(STORAGE_KEYS.VEHICLES, MOCK_VEHICLES));
-        setJourneys(parse(STORAGE_KEYS.JOURNEYS, MOCK_JOURNEYS));
-        setUserProfile(parse(STORAGE_KEYS.PROFILE, DEFAULT_PROFILE));
-        setIsPassengerMode(parse(STORAGE_KEYS.PASSENGER_MODE, false));
-        setCategories(parse(STORAGE_KEYS.CATEGORIES, DEFAULT_CATEGORIES));
-        setConvoys(parse(STORAGE_KEYS.CONVOYS, MOCK_CONVOYS));
-        setFriends(parse(STORAGE_KEYS.FRIENDS, MOCK_FRIENDS));
-        setFriendRequests(parse(STORAGE_KEYS.FRIEND_REQUESTS, []));
-        setBlockedUsers(parse(STORAGE_KEYS.BLOCKED, []));
-        setGroups(parse(STORAGE_KEYS.GROUPS, MOCK_GROUPS));
-        setEvents(parse(STORAGE_KEYS.EVENTS, MOCK_EVENTS));
-        setConversations(parse(STORAGE_KEYS.CONVERSATIONS, MOCK_CONVERSATIONS));
-        setMessages(parse(STORAGE_KEYS.MESSAGES, MOCK_MESSAGES));
-        setNotifications(parse(STORAGE_KEYS.NOTIFICATIONS, MOCK_NOTIFICATIONS));
-        setUnitSystemState(parse(STORAGE_KEYS.UNIT_SYSTEM, 'auto') as UnitSystem);
-      } catch {
-        // Use defaults on failure
-      } finally {
-        setLoaded(true);
-      }
-    };
-    load();
-  }, []);
-
-  // ── Step 2: Load from API (authoritative, replaces local data) ──────────────
-  useEffect(() => {
-    if (!loaded) return; // wait for AsyncStorage to load first
-
-    const loadFromApi = async () => {
-      try {
-        // Parallel fetch everything
-        const [
-          me, apiVehicles, apiJourneys, apiCats, apiNotifs, apiFriendsList, stats,
-          apiConvoys, apiGroups, apiEvents,
-        ] = await Promise.all([
-          apiGetMe().catch(() => null),
-          apiGetVehicles().catch(() => null),
-          apiGetJourneys().catch(() => null),
-          apiGetCategories().catch(() => null),
-          apiGetNotifications().catch(() => null),
-          apiGetFriends().catch(() => null),
-          apiGetMyStats().catch(() => null),
-          apiGetConvoys().catch(() => null),
-          apiGetGroups().catch(() => null),
-          apiGetEvents().catch(() => null),
-        ]);
-
-        // Always apply API responses — even empty arrays are authoritative.
-        // Mock / seed data is only the offline fallback; once the API responds
-        // (even with []) the server is the source of truth.
-        if (me) {
-          setUserProfile((prev) => ({
-            ...prev,
-            name:          me.name,
-            username:      me.username ?? prev.username,
-            bio:           me.bio ?? prev.bio,
-            friendCode:    me.friendCode ?? prev.friendCode,
-            level:         me.level,
-            xp:            me.xp,
-            xpToNextLevel: me.xpToNextLevel,
-            totalDistance: me.totalDistance,
-            totalJourneys: me.totalJourneys,
-          }));
-          // Restore unit preference saved on the server (cross-device sync)
-          if (me.unitSystem) {
-            setUnitSystemState(me.unitSystem as UnitSystem);
-          }
-        }
-
-        if (apiVehicles !== null) {
-          setVehicles(apiVehicles.map(apiVehicleToLocal));
-        }
-
-        if (apiJourneys !== null) {
-          setJourneys(apiJourneys.map(apiJourneyToLocal));
-        }
-
-        if (apiCats !== null) {
-          setCategories(apiCats.map((c) => ({
-            id:     c.id,
-            name:   c.name,
-            icon:   c.icon,
-            colour: c.colour,
-          })));
-        }
-
-        if (apiNotifs !== null) {
-          setNotifications(
-            apiNotifs.map((n) => ({
-              id:        n.id,
-              type:      n.type as Notification['type'],
-              title:     n.title,
-              body:      n.body,
-              read:      n.read,
-              createdAt: n.createdAt,
-            }))
-          );
-        }
-
-        if (apiFriendsList !== null) {
-          setFriends(apiFriendsList.map(apiFriendToLocal));
-        }
-
-        if (apiConvoys !== null) {
-          setConvoys(apiConvoys.map(apiConvoyToLocal));
-        }
-
-        if (apiGroups !== null) {
-          setGroups(apiGroups.map(apiGroupToLocal));
-        }
-
-        if (apiEvents !== null) {
-          setEvents(apiEvents.map(apiEventToLocal));
-        }
-
-        if (stats !== null) {
-          setProfileStats(stats);
-        }
-
-        // Check for an unfinished draft (from a previous session that crashed)
-        const draft = await loadDraft();
-        if (draft && draft.journeyId) {
-          journeyDraftRef.current = draft;
-          serverJourneyIdRef.current = draft.journeyId;
-          // Note: We don't restore isDriving=true because the GPS session is gone.
-          // Instead, we show the sync banner so the user can complete the save.
-          setSyncStatus('error');
-          setUnsyncedJourneyId(`draft:${draft.journeyId}`);
-        }
-      } catch {
-        // API unavailable — continue with local data
-      } finally {
-        setIsLoading(false);
-      }
-    };
-
-    loadFromApi();
-  }, [loaded]);
-
-  // ── Persist state to AsyncStorage whenever it changes ────────────────────────
-  useEffect(() => { if (!loaded) return; AsyncStorage.setItem(STORAGE_KEYS.VEHICLES, JSON.stringify(vehicles)); }, [vehicles, loaded]);
-  useEffect(() => { if (!loaded) return; AsyncStorage.setItem(STORAGE_KEYS.JOURNEYS, JSON.stringify(journeys)); }, [journeys, loaded]);
-  useEffect(() => { if (!loaded) return; AsyncStorage.setItem(STORAGE_KEYS.PROFILE, JSON.stringify(userProfile)); }, [userProfile, loaded]);
-  useEffect(() => { if (!loaded) return; AsyncStorage.setItem(STORAGE_KEYS.PASSENGER_MODE, JSON.stringify(isPassengerMode)); }, [isPassengerMode, loaded]);
-  useEffect(() => { if (!loaded) return; AsyncStorage.setItem(STORAGE_KEYS.CATEGORIES, JSON.stringify(categories)); }, [categories, loaded]);
-  useEffect(() => { if (!loaded) return; AsyncStorage.setItem(STORAGE_KEYS.CONVOYS, JSON.stringify(convoys)); }, [convoys, loaded]);
-  useEffect(() => { if (!loaded) return; AsyncStorage.setItem(STORAGE_KEYS.FRIENDS, JSON.stringify(friends)); }, [friends, loaded]);
-  useEffect(() => { if (!loaded) return; AsyncStorage.setItem(STORAGE_KEYS.FRIEND_REQUESTS, JSON.stringify(friendRequests)); }, [friendRequests, loaded]);
-  useEffect(() => { if (!loaded) return; AsyncStorage.setItem(STORAGE_KEYS.BLOCKED, JSON.stringify(blockedUsers)); }, [blockedUsers, loaded]);
-  useEffect(() => { if (!loaded) return; AsyncStorage.setItem(STORAGE_KEYS.GROUPS, JSON.stringify(groups)); }, [groups, loaded]);
-  useEffect(() => { if (!loaded) return; AsyncStorage.setItem(STORAGE_KEYS.EVENTS, JSON.stringify(events)); }, [events, loaded]);
-  useEffect(() => { if (!loaded) return; AsyncStorage.setItem(STORAGE_KEYS.CONVERSATIONS, JSON.stringify(conversations)); }, [conversations, loaded]);
-  useEffect(() => { if (!loaded) return; AsyncStorage.setItem(STORAGE_KEYS.MESSAGES, JSON.stringify(messages)); }, [messages, loaded]);
-  useEffect(() => { if (!loaded) return; AsyncStorage.setItem(STORAGE_KEYS.NOTIFICATIONS, JSON.stringify(notifications)); }, [notifications, loaded]);
-  useEffect(() => { if (!loaded) return; AsyncStorage.setItem(STORAGE_KEYS.UNIT_SYSTEM, JSON.stringify(unitSystem)); }, [unitSystem, loaded]);
-
-  // ── Flush pending route points every 30 s during a drive ─────────────────────
-  const flushPendingPoints = useCallback(async () => {
-    const draft   = journeyDraftRef.current;
-    const serverId = serverJourneyIdRef.current;
-    if (!draft || !serverId || draft.pendingPoints.length === 0) return;
-
-    try {
-      await apiAddRoutePoints(
-        serverId,
-        draft.pendingPoints.map((p) => ({
-          latitude:   p.latitude,
-          longitude:  p.longitude,
-          speedKmh:   p.speedKmh,
-          accuracyM:  p.accuracyM,
-          recordedAt: p.recordedAt,
-        })),
-      );
-      const updated = await clearPendingPoints(draft);
-      journeyDraftRef.current = updated;
-    } catch {
-      // Keep pending points — will retry on next flush
-    }
-  }, []);
-
-  // ── Vehicle methods ──────────────────────────────────────────────────────────
-
-  const setActiveVehicle = useCallback((id: string) => {
-    setVehicles((prev) => prev.map((v) => ({ ...v, isActive: v.id === id })));
-    // Fire-and-forget API call
-    apiActivateVehicle(id).catch(() => {});
-  }, []);
-
-  const addVehicle = useCallback((v: Omit<Vehicle, 'id'>) => {
-    const localId = generateId();
-    const newV: Vehicle = { ...v, id: localId };
-    setVehicles((prev) => [...prev, newV]);
-
-    // Sync to API in background
-    apiCreateVehicle({
-      nickname:     v.nickname,
-      registration: v.registration,
-      make:         v.make,
-      model:        v.model,
-      year:         v.year,
-      colour:       v.colour,
-      fuelType:     v.fuelType,
-      engine:       v.engine,
-      power:        v.power,
-      torque:       v.torque,
-      zeroToSixty:  v.zeroToSixty,
-      topSpeedSpec: v.topSpeed,
-      mileage:      v.mileage,
-      imageUrl:     v.imageUri,
-      isActive:     v.isActive,
-    }).then((serverV) => {
-      // Replace local ID with server ID
-      setVehicles((prev) =>
-        prev.map((existing) => existing.id === localId ? apiVehicleToLocal(serverV) : existing)
-      );
-    }).catch(() => {
-      // Vehicle stays in local state — will sync on next load from API
-    });
-  }, []);
-
-  const updateVehicle = useCallback((id: string, updates: Partial<Vehicle>) => {
-    setVehicles((prev) => prev.map((v) => (v.id === id ? { ...v, ...updates } : v)));
-    // API update (best-effort)
-    apiUpdateVehicle(id, {
-      nickname:     updates.nickname,
-      registration: updates.registration,
-      make:         updates.make,
-      model:        updates.model,
-      year:         updates.year,
-      colour:       updates.colour,
-      fuelType:     updates.fuelType,
-      engine:       updates.engine,
-      power:        updates.power,
-      torque:       updates.torque,
-      zeroToSixty:  updates.zeroToSixty,
-      topSpeedSpec: updates.topSpeed,
-      mileage:      updates.mileage,
-      imageUrl:     updates.imageUri,
-      isActive:     updates.isActive,
-    }).catch(() => {});
-  }, []);
-
-  const deleteVehicle = useCallback((id: string) => {
-    setVehicles((prev) => {
-      const filtered = prev.filter((v) => v.id !== id);
-      if (filtered.length > 0 && !filtered.some((v) => v.isActive)) {
-        return filtered.map((v, i) => ({ ...v, isActive: i === 0 }));
-      }
-      return filtered;
-    });
-    apiDeleteVehicle(id).catch(() => {});
-  }, []);
-
-  // ── Category methods ─────────────────────────────────────────────────────────
-
-  const addCategory = useCallback((c: Omit<JourneyCategory, 'id'>) => {
-    setCategories((prev) => [...prev, { ...c, id: generateId() }]);
-  }, []);
-
-  const updateCategory = useCallback((id: string, updates: Partial<JourneyCategory>) => {
-    setCategories((prev) => prev.map((c) => (c.id === id ? { ...c, ...updates } : c)));
-  }, []);
-
-  const deleteCategory = useCallback((id: string) => {
-    setCategories((prev) => prev.filter((c) => c.id !== id));
-    setJourneys((prev) => prev.map((j) => j.categoryId === id ? { ...j, categoryId: undefined } : j));
-  }, []);
-
-  // ── Journey methods ──────────────────────────────────────────────────────────
-
-  const addJourney = useCallback((j: Omit<Journey, 'id'>) => {
-    const newJ: Journey = { ...j, id: generateId() };
-    setJourneys((prev) => [newJ, ...prev]);
-    setUserProfile((prev) => ({
-      ...prev,
-      totalJourneys: prev.totalJourneys + 1,
-      totalDistance: Math.round((prev.totalDistance + j.distance) * 10) / 10,
-      xp:            prev.xp + (j.xpEarned ?? Math.round(j.distance * 2)),
-    }));
-  }, []);
-
-  const updateJourney = useCallback((id: string, updates: Partial<Journey>) => {
-    setJourneys((prev) => prev.map((j) => (j.id === id ? { ...j, ...updates } : j)));
-    // Also update on server (best-effort)
-    apiUpdateJourney(id, {
-      name:       updates.name,
-      notes:      updates.notes,
-      categoryId: updates.categoryId,
-      privacy:    updates.privacy,
-      photos:     updates.photos,
-    }).catch(() => {});
-  }, []);
-
-  const deleteJourney = useCallback((id: string) => {
-    // Optimistic delete — revert if server rejects
-    setJourneys((prev) => {
-      const snapshot = prev;
-      apiDeleteJourney(id).catch(() => {
-        setJourneys(snapshot);
-      });
-      return prev.filter((j) => j.id !== id);
-    });
-  }, []);
-
-  // ── Drive methods ────────────────────────────────────────────────────────────
-
-  const startDrive = useCallback(() => {
-    if (isDriving) return;
-    const av = activeVehicleRef.current;
-    const startTime = Date.now();
-    const now = new Date();
-
-    setCurrentDrive({
-      startTime,
-      coordinates: [], speedSamples: [], topSpeed: 0, estimatedDistance: 0, currentSpeed: 0,
-    });
-    setIsDriving(true);
-
-    // Fire-and-forget: create journey on server + draft
+    const unsubscribe = onConnectionStatus((state, detail) => cloud.reportConnection(state, detail));
+    let cancelled = false;
     (async () => {
-      try {
-        const serverJourney = await apiStartJourney({
-          vehicleId:       av?.id ?? undefined,
-          vehicleSnapshot: av ? snapshotVehicle(av) : undefined,
-          name:            'Active Journey',
-          date:            now.toISOString().split('T')[0],
-          startTimeIso:    now.toISOString(),
-        });
-
-        serverJourneyIdRef.current = serverJourney.id;
-
-        const draft: JourneyDraft = {
-          draftId:         generateId(),
-          journeyId:       serverJourney.id,
-          vehicleId:       av?.id ?? null,
-          vehicleSnapshot: av ? snapshotVehicle(av) : null,
-          startTime,
-          routePoints:     [],
-          pendingPoints:   [],
-          stats:           { distanceKm: 0, topSpeedKmh: 0, speedSamples: [] },
-        };
-        await saveDraft(draft);
-        journeyDraftRef.current = draft;
-
-        // Start periodic flush every 30 s
-        if (flushIntervalRef.current) clearInterval(flushIntervalRef.current);
-        flushIntervalRef.current = setInterval(() => {
-          flushPendingPoints();
-        }, 30_000);
-      } catch {
-        // API unavailable — drive continues in local-only mode
-        serverJourneyIdRef.current = null;
-      }
+      await cloud.start();
+      if (!cancelled) setIsLoading(false);
+      await cloud.sync().catch(() => {});
     })();
-  }, [isDriving, flushPendingPoints]);
+    return () => { cancelled = true; unsubscribe(); cloud.dispose(); };
+  }, [cloud]);
 
-  const updateDriveCoordinate = useCallback((data: Coordinate & { speed: number }) => {
-    if (!isDriving || isPassengerMode) return;
-    const speedKmh = data.speed * 3.6;
-
-    const point: DraftRoutePoint = {
-      latitude:   data.latitude,
-      longitude:  data.longitude,
-      speedKmh,
-      accuracyM:  undefined,
-      recordedAt: new Date().toISOString(),
-    };
-
-    // Update draft synchronously on the ref so retry always has accurate stats.
-    // Build the full updated draft in one shot (stats + new route point) and
-    // persist it asynchronously via saveDraft — avoids stale-snapshot races
-    // that would arise from using the appendRoutePoints return value.
-    if (journeyDraftRef.current) {
-      const draft = journeyDraftRef.current;
-      const lastPt = draft.routePoints[draft.routePoints.length - 1];
-      let draftAddedKm = 0;
-      if (lastPt) {
-        const dLat = (data.latitude - lastPt.latitude) * 111;
-        const dLon = (data.longitude - lastPt.longitude)
-          * 111 * Math.cos(data.latitude * (Math.PI / 180));
-        draftAddedKm = Math.sqrt(dLat * dLat + dLon * dLon);
+  // Keep retrying while something is waiting or the server was unreachable,
+  // and whenever the app comes back to the foreground.
+  const statusRef = useRef(status);
+  statusRef.current = status;
+  useEffect(() => {
+    const tick = () => {
+      const s = statusRef.current;
+      if (s.pendingChanges || s.pendingJourneys || s.connection !== 'online') {
+        void (async () => {
+          if (s.connection !== 'online' && api) await api.ping();
+          await cloud.sync().catch(() => {});
+        })();
       }
+    };
+    const timer = setInterval(tick, 30_000);
+    const sub = AppState.addEventListener('change', (state) => { if (state === 'active') void cloud.sync().catch(() => {}); });
+    return () => { clearInterval(timer); sub.remove(); };
+  }, [cloud]);
 
-      const updatedDraft: JourneyDraft = {
-        ...draft,
-        routePoints:   [...draft.routePoints, point],
-        pendingPoints: [...draft.pendingPoints, point],
-        stats: {
-          distanceKm:   draft.stats.distanceKm + draftAddedKm,
-          topSpeedKmh:  Math.max(draft.stats.topSpeedKmh, speedKmh),
-          speedSamples: [...draft.stats.speedSamples, speedKmh],
-        },
-      };
+  const activeVehicle = data.vehicles.find((v) => v.isActive) ?? data.vehicles[0] ?? null;
+  const activeVehicleRef = useRef(activeVehicle);
+  activeVehicleRef.current = activeVehicle;
 
-      journeyDraftRef.current = updatedDraft;
-      // Best-effort persistence — in-memory ref is the source of truth
-      saveDraft(updatedDraft).catch(() => {});
-    }
+  // ── Drives ──
+  const startDrive = useCallback(() => {
+    if (cloud.isDriving) return;
+    setCurrentDrive({ startTime: Date.now(), coordinates: [], speedSamples: [], topSpeed: 0, estimatedDistance: 0, currentSpeed: 0 });
+    cloud.startDrive(activeVehicleRef.current).catch((err) => reportFailure('Could not start recording', err));
+  }, [cloud]);
 
-    // Update React state for UI
+  const passengerRef = useRef(isPassengerMode);
+  passengerRef.current = isPassengerMode;
+  const updateDriveCoordinate = useCallback((p: Coordinate & { speed: number; accuracy?: number | null; heading?: number | null; altitude?: number | null; timestamp?: number }) => {
+    if (!cloud.isDriving || passengerRef.current) return;
+    const fix: GpsFix = {
+      latitude: p.latitude, longitude: p.longitude, speedMs: p.speed, headingDeg: p.heading ?? null,
+      accuracyM: p.accuracy ?? null, altitudeM: p.altitude ?? null, timestamp: p.timestamp ?? Date.now(),
+    };
+    cloud.addFix(fix);
+    const speedKmh = Math.max(0, p.speed) * 3.6;
     setCurrentDrive((prev) => {
       if (!prev) return prev;
-      const newCoords = [...prev.coordinates, { latitude: data.latitude, longitude: data.longitude }];
-      let addedDistance = 0;
-      if (prev.coordinates.length > 0) {
-        const last = prev.coordinates[prev.coordinates.length - 1];
-        const dLat = (data.latitude - last.latitude) * 111;
-        const dLon = (data.longitude - last.longitude) * 111 * Math.cos(data.latitude * (Math.PI / 180));
-        addedDistance = Math.sqrt(dLat * dLat + dLon * dLon);
+      const last = prev.coordinates[prev.coordinates.length - 1];
+      let added = 0;
+      if (last) {
+        const dLat = (p.latitude - last.latitude) * 111;
+        const dLon = (p.longitude - last.longitude) * 111 * Math.cos(p.latitude * (Math.PI / 180));
+        added = Math.sqrt(dLat * dLat + dLon * dLon);
       }
       return {
         ...prev,
-        coordinates:       newCoords,
-        speedSamples:      [...prev.speedSamples, speedKmh],
-        topSpeed:          Math.max(prev.topSpeed, speedKmh),
-        estimatedDistance: prev.estimatedDistance + addedDistance,
-        currentSpeed:      speedKmh,
+        coordinates: [...prev.coordinates, { latitude: p.latitude, longitude: p.longitude }],
+        speedSamples: [...prev.speedSamples, speedKmh],
+        topSpeed: Math.max(prev.topSpeed, speedKmh),
+        estimatedDistance: prev.estimatedDistance + added,
+        currentSpeed: speedKmh,
       };
     });
-  }, [isDriving, isPassengerMode]);
+  }, [cloud]);
 
-  const endDrive = useCallback(async (): Promise<Journey | null> => {
-    if (!isDriving || !currentDrive) return null;
-
-    // Stop batch flush
-    if (flushIntervalRef.current) {
-      clearInterval(flushIntervalRef.current);
-      flushIntervalRef.current = null;
-    }
-
-    const endTime    = Date.now();
-    const av         = activeVehicleRef.current;
-    const durationSec = Math.round((endTime - currentDrive.startTime) / 1000);
-    const avgSpeed   = currentDrive.speedSamples.length > 0
-      ? Math.round(currentDrive.speedSamples.reduce((a, b) => a + b, 0) / currentDrive.speedSamples.length)
-      : 0;
-    const xpEarned   = Math.min(500, Math.max(50, Math.round(currentDrive.estimatedDistance * 10)));
-    const now        = new Date();
-    const localId    = generateId();
-    const distance   = Math.round(currentDrive.estimatedDistance * 10) / 10;
-
-    const journeyData: Journey = {
-      id:              localId,
-      name:            'Unnamed Journey',
-      date:            now.toISOString().split('T')[0],
-      startTime:       new Date(currentDrive.startTime).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }),
-      endTime:         now.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }),
-      duration:        durationSec,
-      distance,
-      averageSpeed:    avgSpeed,
-      topSpeed:        Math.round(currentDrive.topSpeed),
-      vehicleId:       av?.id ?? '',
-      vehicleSnapshot: av ? snapshotVehicle(av) : undefined,
-      notes:           '',
-      routeCoordinates: currentDrive.coordinates,
-      photos:          [],
-      journeyType:     'personal',
-      xpEarned,
-      privacy:         'private',
-    };
-
-    // Update local state immediately
-    setJourneys((prev) => [journeyData, ...prev]);
-    setUserProfile((prev) => ({
-      ...prev,
-      totalJourneys: prev.totalJourneys + 1,
-      totalDistance: Math.round((prev.totalDistance + distance) * 10) / 10,
-      xp:            prev.xp + xpEarned,
-    }));
-    setIsDriving(false);
+  const endDrive = useCallback(async () => {
     setCurrentDrive(null);
-
-    // Save to server
-    const draft    = journeyDraftRef.current;
-    const serverId = serverJourneyIdRef.current;
-
-    if (serverId) {
-      setSyncStatus('syncing');
-      try {
-        const completed = await apiCompleteJourney(serverId, {
-          endTimeIso:      now.toISOString(),
-          durationSeconds: durationSec,
-          distanceKm:      distance,
-          avgSpeedKmh:     avgSpeed,
-          topSpeedKmh:     Math.round(currentDrive.topSpeed),
-          notes:           '',
-          privacy:         'private',
-          xpEarned,
-          remainingPoints: (draft?.pendingPoints ?? []).map((p) => ({
-            latitude:   p.latitude,
-            longitude:  p.longitude,
-            speedKmh:   p.speedKmh,
-            accuracyM:  p.accuracyM,
-            recordedAt: p.recordedAt,
-          })),
-        });
-
-        // Replace temp local ID with server-assigned ID
-        setJourneys((prev) =>
-          prev.map((j) => j.id === localId ? { ...j, id: completed.id } : j)
-        );
-
-        // Cleanup
-        await clearDraft();
-        journeyDraftRef.current  = null;
-        serverJourneyIdRef.current = null;
-        setSyncStatus('idle');
-        setUnsyncedJourneyId(null);
-
-        return { ...journeyData, id: completed.id };
-      } catch {
-        // Save failed — show sync banner, keep draft
-        setSyncStatus('error');
-        setUnsyncedJourneyId(localId);
-      }
-    }
-
-    return journeyData;
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isDriving, currentDrive]);
-
-  /** Retry saving a failed journey from the IndexedDB draft. */
-  const retryJourneySync = useCallback(async () => {
-    const draft    = journeyDraftRef.current;
-    const serverId = serverJourneyIdRef.current;
-    if (!draft || !serverId) return;
-
-    setSyncStatus('syncing');
     try {
-      const now = new Date();
-      const completed = await apiCompleteJourney(serverId, {
-        endTimeIso:      now.toISOString(),
-        durationSeconds: draft.stats.speedSamples.length > 0
-          ? Math.round((Date.now() - draft.startTime) / 1000)
-          : 0,
-        distanceKm:      draft.stats.distanceKm,
-        avgSpeedKmh:     draft.stats.speedSamples.length > 0
-          ? Math.round(draft.stats.speedSamples.reduce((a, b) => a + b, 0) / draft.stats.speedSamples.length)
-          : 0,
-        topSpeedKmh:     draft.stats.topSpeedKmh,
-        remainingPoints: (draft.pendingPoints ?? []).map((p) => ({
-          latitude:   p.latitude,
-          longitude:  p.longitude,
-          speedKmh:   p.speedKmh,
-          accuracyM:  p.accuracyM,
-          recordedAt: p.recordedAt,
-        })),
-      });
-
-      // Update the journey in state with server ID
-      if (unsyncedJourneyId) {
-        setJourneys((prev) =>
-          prev.map((j) => j.id === unsyncedJourneyId ? { ...j, id: completed.id } : j)
-        );
-      }
-
-      await clearDraft();
-      journeyDraftRef.current    = null;
-      serverJourneyIdRef.current = null;
-      setSyncStatus('idle');
-      setUnsyncedJourneyId(null);
-    } catch {
-      setSyncStatus('error');
+      return await cloud.endDrive();
+    } catch (err) {
+      reportFailure('Could not save the drive', err);
+      return null;
     }
-  }, [unsyncedJourneyId]);
+  }, [cloud]);
 
-  const setUnitSystem = useCallback((s: UnitSystem) => {
-    setUnitSystemState(s);
-    apiUpdateMe({ unitSystem: s }).catch(() => {});
-  }, []);
+  const pendingJourney = data.journeys.find((j) => j.syncState && j.syncState !== 'synced') ?? null;
+  const syncSummary: SyncStatusSummary =
+    status.refreshing || (status.pendingJourneys > 0 && status.connection === 'online') ? 'syncing'
+      : status.connection === 'offline' || status.connection === 'server_error' || status.pendingJourneys > 0 || status.pendingChanges > 0 ? 'error'
+        : 'idle';
 
-  const refreshProfileStats = useCallback(async () => {
-    try {
-      const [freshStats, freshFriends] = await Promise.all([
-        apiGetMyStats(),
-        apiGetFriends(),
-      ]);
-      setProfileStats(freshStats);
-      setFriends(freshFriends.map(apiFriendToLocal));
-    } catch {
-      // Silently fail — stale data is better than a crash
-    }
-  }, []);
+  // Actions are created once per user so screens can use them in effect deps.
+  const actions = useMemo(() => {
+    const online = <A extends unknown[]>(label: string, fn: (...a: A) => Promise<unknown>, after?: () => Promise<unknown>) =>
+      (...args: A) => {
+        fn(...args).catch((err) => reportFailure(label, err)).finally(() => { if (after) after().catch(() => {}); });
+      };
+    return {
+      retryJourneySync: () => cloud.syncJourneys().then(() => cloud.refresh()),
+      retrySync: async () => { if (api) await api.ping(); await cloud.sync(); },
+      dismissRejections: () => cloud.outbox.dismissRejections(),
+      discardPendingJourney: (id: string) => cloud.discardPendingJourney(id),
 
-  const togglePassengerMode = useCallback(() => setIsPassengerMode((p) => !p), []);
-  const updateProfile       = useCallback((updates: Partial<UserProfile>) => setUserProfile((p) => ({ ...p, ...updates })), []);
+      addCategory: (c: Omit<JourneyCategory, 'id'>) => void cloud.addCategory(c),
+      updateCategory: (id: string, u: Partial<JourneyCategory>) => void cloud.updateCategory(id, u),
+      deleteCategory: (id: string) => void cloud.deleteCategory(id),
 
-  // ── Friend methods ───────────────────────────────────────────────────────────
+      setActiveVehicle: (id: string) => void cloud.setActiveVehicle(id),
+      addVehicle: (v: Omit<Vehicle, 'id'>) => void cloud.addVehicle(v),
+      updateVehicle: (id: string, u: Partial<Vehicle>) => void cloud.updateVehicle(id, u),
+      deleteVehicle: (id: string) => void cloud.deleteVehicle(id),
+      lookupVehicle: (reg: string) => cloud.lookupVehicle(reg),
 
-  const sendFriendRequest = useCallback((name: string, _initials: string) => {
-    const req: FriendRequest = {
-      id: generateId(), fromId: 'me', fromName: 'Me', fromInitials: 'M',
-      status: 'pending', createdAt: new Date().toISOString(), isIncoming: false,
+      // Journeys are only created by recording a drive.
+      addJourney: () => Alert.alert('Not available', 'Journeys are created by recording a drive.'),
+      updateJourney: (id: string, u: Partial<Journey>) => void cloud.updateJourney(id, u),
+      deleteJourney: (id: string) => void cloud.deleteJourney(id),
+
+      togglePassengerMode: () => setIsPassengerMode((p) => !p),
+
+      updateProfile: (u: Partial<UserProfile>) => void cloud.updateProfile(u),
+      setAvatar: (uri: string) => cloud.setAvatar(uri),
+
+      addPlace: (p: Parameters<CloudSync['addPlace']>[0]) => cloud.addPlace(p),
+      updatePlace: (id: string, u: Partial<Pick<SavedPlace, 'name' | 'description' | 'visibility' | 'category'>>) => void cloud.updatePlace(id, u),
+      deletePlace: (id: string) => void cloud.deletePlace(id),
+      findNearbySpots: (lat: number, lng: number, r?: number) => cloud.nearbySpots(lat, lng, r),
+
+      sendFriendRequest: (code: string) => cloud.sendFriendRequest(code),
+      acceptFriendRequest: online('Could not accept the request', (id: string) => cloud.acceptFriendRequest(id)),
+      declineFriendRequest: online('Could not decline the request', (id: string) => cloud.declineFriendRequest(id)),
+      removeFriend: online('Could not remove the friend', (id: string) => cloud.removeFriend(id)),
+      blockUser: online('Could not block this driver', (id: string, _name: string) => cloud.blockUser(id)),
+      unblockUser: online('Could not unblock this driver', (id: string) => cloud.unblockUser(id)),
+
+      addConvoy: online('Could not create the convoy', (c: Omit<Convoy, 'id'>) => ep!.createConvoy({
+        name: c.name, description: c.description, destinationName: c.destination,
+        visibility: c.isPrivate ? 'private' : 'public', startsAt: toIso(c.startTime), maxParticipants: c.maxParticipants ?? null,
+      }), () => cloud.refreshConvoys()),
+      updateConvoy: online('Could not update the convoy', (id: string, u: Partial<Convoy>) => ep!.updateConvoy(id, {
+        ...(u.name !== undefined ? { name: u.name } : {}),
+        ...(u.description !== undefined ? { description: u.description } : {}),
+        ...(u.destination !== undefined ? { destinationName: u.destination } : {}),
+        ...(u.isPrivate !== undefined ? { visibility: u.isPrivate ? 'private' : 'public' } : {}),
+        ...(u.startTime !== undefined ? { startsAt: toIso(u.startTime) } : {}),
+        ...(u.maxParticipants !== undefined ? { maxParticipants: u.maxParticipants } : {}),
+        ...(u.status && u.status !== 'forming' ? { status: u.status } : {}),
+      }), () => cloud.refreshConvoys()),
+      deleteConvoy: online('Could not delete the convoy', (id: string) => ep!.deleteConvoy(id), () => cloud.refreshConvoys()),
+      joinConvoy: online('Could not join the convoy', (id: string) => ep!.joinConvoy(id), () => cloud.refreshConvoys()),
+      leaveConvoy: online('Could not leave the convoy', (id: string) => ep!.leaveConvoy(id), () => cloud.refreshConvoys()),
+
+      addGroup: online('Could not create the group', (g: Omit<Group, 'id' | 'createdAt' | 'memberCount' | 'myRole' | 'isMember'>) => ep!.createGroup({
+        name: g.name, description: g.description, isPublic: g.isPublic, membershipMethod: g.membershipMethod,
+        primaryLocation: g.primaryLocation, vehicleInterests: g.vehicleInterests,
+      }), () => cloud.refreshGroups()),
+      joinGroup: online('Could not join the group', (id: string) => ep!.joinGroup(id), () => cloud.refreshGroups()),
+      leaveGroup: online('Could not leave the group', (id: string) => ep!.leaveGroup(id), () => cloud.refreshGroups()),
+
+      addEvent: online('Could not create the event', (e: Omit<DriveOSEvent, 'id' | 'attendeeCount' | 'rsvpStatus'>) => ep!.createEvent({
+        name: e.name, description: e.description, locationName: e.location,
+        startsAt: toIso(`${e.date}T${e.startTime || '09:00'}`), timezone: timezone(),
+        eventType: e.eventType, visibility: e.groupId && !e.isPublic ? 'group' : e.isPublic ? 'public' : 'private',
+        ...(e.groupId ? { groupId: e.groupId } : {}),
+        ...(e.capacity > 0 ? { capacity: e.capacity } : {}),
+        entryCost: e.entryCost || 'Free', vehicleCategory: e.vehicleCategory || 'All',
+      }).then((created) => ep!.rsvpEvent(created.id, 'going')), () => cloud.refreshEvents()),
+      rsvpEvent: online('Could not update your RSVP', (id: string, st: DriveOSEvent['rsvpStatus']) =>
+        (st ? ep!.rsvpEvent(id, st) : ep!.withdrawRsvp(id)), () => cloud.refreshEvents()),
+
+      sendMessage: () => Alert.alert('Messaging is coming soon', 'Messages are not delivered yet, so nothing was sent.'),
+      startConversation: () => { Alert.alert('Messaging is coming soon', 'Direct messages are not available yet.'); return ''; },
+      markConversationRead: () => {},
+
+      markNotificationRead: online('Could not update the notification', (id: string) => cloud.markNotificationRead(id)),
+      markAllNotificationsRead: online('Could not update notifications', () => cloud.markAllNotificationsRead()),
+
+      setUnitSystem: (st: UnitSystem) => void cloud.setUnitSystem(st),
+      refreshProfileStats: () => cloud.refreshFriends().catch(() => {}),
+
+      hasUnsyncedWork: () => cloud.hasUnsyncedWork,
+      clearLocalData: () => cloud.wipeLocal(),
+      deleteAccount: async () => {
+        await ep!.deleteAccount();
+        await cloud.wipeLocal();
+      },
     };
-    setFriendRequests((p) => [req, ...p]);
-    const notif: Notification = {
-      id: generateId(), type: 'friend_accepted',
-      title: 'Friend request sent', body: `Request sent to ${name}.`,
-      createdAt: new Date().toISOString(), read: false,
-    };
-    setNotifications((p) => [notif, ...p]);
-  }, []);
-
-  const acceptFriendRequest = useCallback((id: string) => {
-    // Optimistic update
-    setFriendRequests((prev) => prev.map((r) => r.id === id ? { ...r, status: 'accepted' } : r));
-    const req = friendRequests.find((r) => r.id === id);
-    if (req) {
-      setFriends((p) => [...p, { id: req.fromId, name: req.fromName, initials: req.fromInitials, status: 'online', location: '' }]);
-    }
-    // Persist to server, then reconcile with authoritative data
-    apiAcceptFriendRequest(id).then(() =>
-      Promise.all([apiGetFriends(), apiGetMyStats()])
-    ).then(([freshFriends, freshStats]) => {
-      setFriends(freshFriends.map(apiFriendToLocal));
-      setProfileStats(freshStats);
-    }).catch(() => {});
-  }, [friendRequests]);
-
-  const declineFriendRequest = useCallback((id: string) => {
-    setFriendRequests((prev) => prev.map((r) => r.id === id ? { ...r, status: 'declined' } : r));
-    apiDeclineFriendRequest(id).catch(() => {});
-  }, []);
-
-  const removeFriend = useCallback((id: string) => {
-    // Optimistic removal
-    setFriends((prev) => prev.filter((f) => f.id !== id));
-    setProfileStats((prev) => ({ ...prev, friends: Math.max(0, prev.friends - 1) }));
-    // Persist and reconcile
-    apiRemoveFriend(id).then(() => apiGetMyStats()).then(setProfileStats).catch(() => {});
-  }, []);
-
-  const blockUser = useCallback((id: string, name: string) => {
-    setBlockedUsers((p) => [...p, { id, blockedName: name }]);
-    setFriends((p) => p.filter((f) => f.id !== id));
-  }, []);
-
-  const unblockUser = useCallback((id: string) => {
-    setBlockedUsers((p) => p.filter((b) => b.id !== id));
-  }, []);
-
-  // ── Convoy methods ───────────────────────────────────────────────────────────
-
-  const addConvoy = useCallback((c: Omit<Convoy, 'id'>) => {
-    const localId = generateId();
-    setConvoys((p) => [{ ...c, id: localId }, ...p]);
-
-    apiCreateConvoy({
-      name:            c.name,
-      destination:     c.destination,
-      isPrivate:       c.isPrivate,
-      startTime:       c.startTime,
-      description:     c.description,
-      maxParticipants: c.maxParticipants ?? null,
-    }).then((serverC) => {
-      // Re-fetch so leaderName/driverCount/isOwn/isJoined are correctly populated
-      apiGetConvoys().then((fresh) => setConvoys(fresh.map(apiConvoyToLocal))).catch(() => {
-        setConvoys((prev) => prev.map((existing) =>
-          existing.id === localId
-            ? { ...existing, id: serverC.id, isOwn: true, isJoined: true, driverCount: 1 }
-            : existing
-        ));
-      });
-    }).catch(() => {
-      // Convoy stays local-only — will sync on next load from API
-    });
-  }, []);
-
-  const updateConvoy = useCallback((id: string, updates: Partial<Convoy>) => {
-    setConvoys((p) => p.map((c) => c.id === id ? { ...c, ...updates } : c));
-    apiUpdateConvoy(id, {
-      name:            updates.name,
-      destination:     updates.destination,
-      isPrivate:       updates.isPrivate,
-      startTime:       updates.startTime,
-      description:     updates.description,
-      status:          updates.status,
-      maxParticipants: updates.maxParticipants,
-    }).catch(() => {});
-  }, []);
-
-  const deleteConvoy = useCallback((id: string) => {
-    setConvoys((p) => p.filter((c) => c.id !== id));
-    apiDeleteConvoy(id).catch(() => {});
-  }, []);
-
-  const joinConvoy = useCallback((id: string) => {
-    setConvoys((p) => p.map((c) => c.id === id ? { ...c, isJoined: true, driverCount: c.driverCount + 1 } : c));
-    apiJoinConvoy(id).catch(() => {
-      setConvoys((p) => p.map((c) => c.id === id ? { ...c, isJoined: false, driverCount: Math.max(0, c.driverCount - 1) } : c));
-    });
-  }, []);
-
-  const leaveConvoy = useCallback((id: string) => {
-    setConvoys((p) => p.map((c) => c.id === id ? { ...c, isJoined: false, driverCount: Math.max(0, c.driverCount - 1) } : c));
-    apiLeaveConvoy(id).catch(() => {
-      setConvoys((p) => p.map((c) => c.id === id ? { ...c, isJoined: true, driverCount: c.driverCount + 1 } : c));
-    });
-  }, []);
-
-  // ── Group methods ────────────────────────────────────────────────────────────
-
-  const addGroup = useCallback((g: Omit<Group, 'id' | 'createdAt' | 'memberCount' | 'myRole' | 'isMember'>) => {
-    const localId = generateId();
-    setGroups((p) => [{ ...g, id: localId, createdAt: new Date().toISOString(), memberCount: 1, myRole: 'owner', isMember: true }, ...p]);
-
-    apiCreateGroup({
-      name:              g.name,
-      description:       g.description,
-      logoUrl:           g.logoUri,
-      isPublic:          g.isPublic,
-      membershipMethod:  g.membershipMethod,
-      primaryLocation:   g.primaryLocation,
-      vehicleInterests:  g.vehicleInterests,
-    }).then((serverG) => {
-      setGroups((prev) => prev.map((existing) =>
-        existing.id === localId ? { ...existing, id: serverG.id, createdAt: serverG.createdAt } : existing
-      ));
-    }).catch(() => {
-      // Group stays local-only — will sync on next load from API
-    });
-  }, []);
-
-  const joinGroup = useCallback((id: string) => {
-    setGroups((p) => p.map((g) => g.id === id ? { ...g, isMember: true, myRole: 'member', memberCount: g.memberCount + 1 } : g));
-    apiJoinGroup(id).catch(() => {
-      setGroups((p) => p.map((g) => g.id === id ? { ...g, isMember: false, myRole: null, memberCount: Math.max(0, g.memberCount - 1) } : g));
-    });
-  }, []);
-
-  const leaveGroup = useCallback((id: string) => {
-    setGroups((p) => p.map((g) => g.id === id ? { ...g, isMember: false, myRole: null, memberCount: Math.max(0, g.memberCount - 1) } : g));
-    apiLeaveGroup(id).catch(() => {
-      setGroups((p) => p.map((g) => g.id === id ? { ...g, isMember: true, myRole: 'member', memberCount: g.memberCount + 1 } : g));
-    });
-  }, []);
-
-  // ── Event methods ────────────────────────────────────────────────────────────
-
-  const addEvent = useCallback((e: Omit<DriveOSEvent, 'id' | 'attendeeCount' | 'rsvpStatus'>) => {
-    const localId = generateId();
-    setEvents((p) => [{ ...e, id: localId, attendeeCount: 1, rsvpStatus: 'going' }, ...p]);
-
-    apiCreateEvent({
-      groupId:         e.groupId,
-      name:            e.name,
-      description:     e.description,
-      coverUrl:        e.coverUri,
-      location:        e.location,
-      date:            e.date,
-      startTime:       e.startTime,
-      endTime:         e.endTime,
-      eventType:       e.eventType,
-      isPublic:        e.isPublic,
-      capacity:        e.capacity,
-      entryCost:       e.entryCost,
-      vehicleCategory: e.vehicleCategory,
-    }).then((serverE) => {
-      setEvents((prev) => prev.map((existing) =>
-        existing.id === localId ? { ...existing, id: serverE.id } : existing
-      ));
-      // Organiser auto-RSVPs 'going' locally, but the server doesn't create
-      // that RSVP row automatically — send it explicitly so it persists.
-      apiRsvpEvent(serverE.id, 'going').catch(() => {});
-    }).catch(() => {
-      // Event stays local-only — will sync on next load from API
-    });
-  }, []);
-
-  const rsvpEvent = useCallback((id: string, status: DriveOSEvent['rsvpStatus']) => {
-    const previous = events.find((e) => e.id === id)?.rsvpStatus ?? null;
-    setEvents((p) => p.map((e) => e.id === id ? {
-      ...e, rsvpStatus: status,
-      attendeeCount: status === 'going'
-        ? e.attendeeCount + (e.rsvpStatus !== 'going' ? 1 : 0)
-        : e.attendeeCount - (e.rsvpStatus === 'going' ? 1 : 0),
-    } : e));
-
-    if (status === null) return; // nothing to sync — server has no "clear RSVP" endpoint
-    apiRsvpEvent(id, status).catch(() => {
-      setEvents((p) => p.map((e) => e.id === id ? { ...e, rsvpStatus: previous } : e));
-    });
-  }, [events]);
-
-  // ── Messaging ────────────────────────────────────────────────────────────────
-
-  const startConversation = useCallback((participantId: string, participantName: string, participantInitials: string): string => {
-    const existing = conversations.find((c) => c.participantId === participantId);
-    if (existing) return existing.id;
-    const newConv: Conversation = {
-      id: generateId(), participantId, participantName, participantInitials,
-      lastMessage: '', lastMessageAt: new Date().toISOString(), unreadCount: 0,
-    };
-    setConversations((p) => [newConv, ...p]);
-    return newConv.id;
-  }, [conversations]);
-
-  const sendMessage = useCallback((conversationId: string, content: string) => {
-    const msg: Message = {
-      id: generateId(), conversationId, senderId: 'me', senderName: userProfile.name,
-      content, createdAt: new Date().toISOString(), isOwn: true,
-    };
-    setMessages((p) => [...p, msg]);
-    setConversations((p) => p.map((c) => c.id === conversationId
-      ? { ...c, lastMessage: content, lastMessageAt: msg.createdAt } : c));
-  }, [userProfile.name]);
-
-  const markConversationRead = useCallback((id: string) => {
-    setConversations((p) => p.map((c) => c.id === id ? { ...c, unreadCount: 0 } : c));
-  }, []);
-
-  // ── Notifications ────────────────────────────────────────────────────────────
-
-  const markNotificationRead = useCallback((id: string) => {
-    setNotifications((p) => p.map((n) => n.id === id ? { ...n, read: true } : n));
-  }, []);
-
-  const markAllNotificationsRead = useCallback(() => {
-    setNotifications((p) => p.map((n) => ({ ...n, read: true })));
-  }, []);
-
-  const unreadNotificationCount = notifications.filter((n) => !n.read).length;
-
-  // ── Context value ────────────────────────────────────────────────────────────
+  }, [cloud]);
 
   const value: AppContextValue = {
-    vehicles, journeys, userProfile, isPassengerMode, isDriving, currentDrive, activeVehicle,
-    isLoading, syncStatus, unsyncedJourneyId, retryJourneySync,
-    categories, addCategory, updateCategory, deleteCategory,
-    setActiveVehicle, addVehicle, updateVehicle, deleteVehicle,
-    addJourney, updateJourney, deleteJourney,
-    startDrive, updateDriveCoordinate, endDrive, togglePassengerMode, updateProfile,
-    friends, friendRequests, sendFriendRequest, acceptFriendRequest, declineFriendRequest, removeFriend,
-    blockedUsers, blockUser, unblockUser,
-    convoys, addConvoy, updateConvoy, deleteConvoy, joinConvoy, leaveConvoy,
-    groups, addGroup, joinGroup, leaveGroup,
-    events, addEvent, rsvpEvent,
-    conversations, messages, sendMessage, startConversation, markConversationRead,
-    notifications, markNotificationRead, markAllNotificationsRead, unreadNotificationCount,
-    unitSystem, resolvedUnitSystem, setUnitSystem,
-    profileStats, refreshProfileStats,
+    ...actions,
+    vehicles: data.vehicles,
+    journeys: data.journeys,
+    userProfile: data.profile,
+    isPassengerMode, isDriving, currentDrive, activeVehicle,
+    isLoading,
+    syncStatus: syncSummary,
+    sync: status,
+    unsyncedJourneyId: pendingJourney?.id ?? null,
+    categories: data.categories,
+    startDrive, updateDriveCoordinate, endDrive,
+    places: data.places,
+    friends: data.friends,
+    friendRequests: data.friendRequests,
+    blockedUsers: data.blockedUsers,
+    convoys: data.convoys,
+    groups: data.groups,
+    events: data.events,
+    conversations: NO_CONVERSATIONS,
+    messages: NO_MESSAGES,
+    notifications: data.notifications,
+    unreadNotificationCount: data.notifications.filter((n) => !n.read).length,
+    unitSystem: data.unitSystem,
+    resolvedUnitSystem: resolveUnitSystem(data.unitSystem),
+    profileStats: data.profileStats,
   };
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
+}
+
+/** Accepts ISO strings or "YYYY-MM-DDTHH:MM" local times from the forms. */
+function toIso(value: string): string {
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) throw new Error('Enter a valid date and time.');
+  return d.toISOString();
 }
 
 export function useApp(): AppContextValue {

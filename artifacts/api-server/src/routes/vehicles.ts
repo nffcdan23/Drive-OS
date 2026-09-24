@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { and, asc, eq, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import { db, vehicles, photos } from "@workspace/db";
 import { requireUser } from "../middleware/auth";
 import { badRequest, handler, notFound, uuidParam } from "../lib/http";
@@ -7,10 +7,36 @@ import { Body } from "../lib/validate";
 import { rateLimit } from "../lib/rateLimit";
 import { config } from "../config";
 import { logger } from "../lib/logger";
+import { createSignedDownloadUrl } from "../lib/supabaseAdmin";
 
 const router = Router();
 const FUEL = ["petrol", "diesel", "electric", "hybrid", "other"] as const;
 const VISIBILITY = ["private", "friends", "public"] as const;
+const COVER_URL_TTL = 3600;
+
+type VehicleRow = typeof vehicles.$inferSelect;
+
+/**
+ * Adds `coverPhotoUrl`, a 1-hour signed link to the vehicle's cover photo
+ * (photo buckets are private). A Storage outage only blanks the image.
+ */
+async function withCoverUrls(rows: VehicleRow[]): Promise<Array<VehicleRow & { coverPhotoUrl: string | null }>> {
+  const ids = rows.map((r) => r.coverPhotoId).filter((id): id is string => !!id);
+  const urls = new Map<string, string>();
+  if (ids.length) {
+    const found = await db.select({ id: photos.id, bucket: photos.bucket, path: photos.storagePath })
+      .from(photos).where(and(inArray(photos.id, ids), eq(photos.status, "ready")));
+    await Promise.all(found.map(async (p) => {
+      try {
+        urls.set(p.id, await createSignedDownloadUrl(p.bucket, p.path, COVER_URL_TTL));
+      } catch (err) {
+        logger.warn({ err }, "Could not sign a vehicle cover photo URL");
+      }
+    }));
+  }
+  return rows.map((r) => ({ ...r, coverPhotoUrl: r.coverPhotoId ? urls.get(r.coverPhotoId) ?? null : null }));
+}
+const withCoverUrl = async (row: VehicleRow) => (await withCoverUrls([row]))[0]!;
 
 /** Reads the editable vehicle fields present in the body. */
 function readVehicleFields(b: Body, creating: boolean): Partial<typeof vehicles.$inferInsert> {
@@ -39,7 +65,7 @@ function readVehicleFields(b: Body, creating: boolean): Partial<typeof vehicles.
 // GET /api/vehicles — own vehicles
 router.get("/vehicles", requireUser, handler(async (req, res) => {
   const rows = await db.select().from(vehicles).where(eq(vehicles.ownerId, req.userId)).orderBy(asc(vehicles.createdAt));
-  res.json(rows);
+  res.json(await withCoverUrls(rows));
 }));
 
 // POST /api/vehicles — idempotent when clientRef is supplied
@@ -52,7 +78,7 @@ router.post("/vehicles", requireUser, handler(async (req, res) => {
   if (clientRef) {
     const [existing] = await db.select().from(vehicles)
       .where(and(eq(vehicles.ownerId, req.userId), eq(vehicles.clientRef, clientRef))).limit(1);
-    if (existing) { res.status(200).json(existing); return; }
+    if (existing) { res.status(200).json(await withCoverUrl(existing)); return; }
   }
 
   const row = await db.transaction(async (tx) => {
@@ -64,7 +90,7 @@ router.post("/vehicles", requireUser, handler(async (req, res) => {
       .returning();
     return created!;
   });
-  res.status(201).json(row);
+  res.status(201).json(await withCoverUrl(row));
 }));
 
 // GET /api/vehicles/:id — own vehicle
@@ -72,7 +98,7 @@ router.get("/vehicles/:id", requireUser, handler(async (req, res) => {
   const [row] = await db.select().from(vehicles)
     .where(and(eq(vehicles.id, uuidParam(req, "id")), eq(vehicles.ownerId, req.userId))).limit(1);
   if (!row) throw notFound();
-  res.json(row);
+  res.json(await withCoverUrl(row));
 }));
 
 // PATCH /api/vehicles/:id
@@ -80,6 +106,9 @@ router.patch("/vehicles/:id", requireUser, handler(async (req, res) => {
   const id = uuidParam(req, "id");
   const b = Body.of(req);
   const fields = readVehicleFields(b, false);
+  const [owned] = await db.select({ id: vehicles.id }).from(vehicles)
+    .where(and(eq(vehicles.id, id), eq(vehicles.ownerId, req.userId))).limit(1);
+  if (!owned) throw notFound();
   if (b.has("coverPhotoId")) {
     const cover = b.uuid("coverPhotoId", { nullable: true });
     if (cover) {
@@ -92,7 +121,7 @@ router.patch("/vehicles/:id", requireUser, handler(async (req, res) => {
   const [row] = await db.update(vehicles).set(fields)
     .where(and(eq(vehicles.id, id), eq(vehicles.ownerId, req.userId))).returning();
   if (!row) throw notFound();
-  res.json(row);
+  res.json(await withCoverUrl(row));
 }));
 
 // DELETE /api/vehicles/:id — photos, documents and records go with it;
@@ -115,7 +144,7 @@ router.post("/vehicles/:id/activate", requireUser, handler(async (req, res) => {
     const [updated] = await tx.update(vehicles).set({ isActive: true }).where(eq(vehicles.id, id)).returning();
     return updated!;
   });
-  res.json(row);
+  res.json(await withCoverUrl(row));
 }));
 
 // ─── DVLA Vehicle Enquiry Service lookup ─────────────────────────────────────

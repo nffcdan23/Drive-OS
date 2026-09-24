@@ -19,5 +19,8 @@
     {
       "path": "../../lib/api-client-react"
     }
+  ],
+  "exclude": [
+    "test/**"
   ]
 }

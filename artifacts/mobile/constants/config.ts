@@ -11,10 +11,6 @@ export const CONFIG = {
   // Weather API — set in .env as EXPO_PUBLIC_WEATHER_API_KEY
   WEATHER_API_KEY: process.env.EXPO_PUBLIC_WEATHER_API_KEY ?? null,
 
-  // DVLA Vehicle Enquiry Service — NEVER expose in frontend; use backend proxy
-  // Backend env: DVLA_API_KEY
-  DVLA_LOOKUP_URL: process.env.EXPO_PUBLIC_DVLA_PROXY_URL ?? null,
-
   // Default demo location — Lake District, England
   DEMO_REGION: {
     latitude: 54.4609,

@@ -1,4 +1,5 @@
 import { GlassSurface, GlassButton } from "@/components/Glass";
+import { describeError } from "@/lib/backend/http";
 import { KeyboardAwareScrollViewCompat } from "@/components/KeyboardAwareScrollViewCompat";
 import { ScreenTitle, Disclosure } from "@/components/Cockpit";
 import React, { useState } from "react";
@@ -1532,15 +1533,16 @@ export default function CommunityScreen() {
             <View style={styles.modalHandle} />
             <Text style={styles.modalTitle}>Add Friend</Text>
             <Text style={styles.inputLabel}>
-              Search by username or friend code
+              Their friend code
             </Text>
             <TextInput
               style={styles.input}
-              placeholder="e.g. sarah_drives or DRIVE-1234"
+              placeholder="e.g. K7M2QX9P"
               placeholderTextColor={colors.mutedForeground}
               value={friendSearch}
               onChangeText={setFriendSearch}
-              autoCapitalize="none"
+              autoCapitalize="characters"
+              maxLength={12}
               autoCorrect={false}
             />
             <Text style={[styles.inputLabel, { marginTop: 16 }]}>
@@ -1568,13 +1570,13 @@ export default function CommunityScreen() {
                   letterSpacing: 2,
                 }}
               >
-                {userProfile.friendCode ?? "DRIVE-0000"}
+                {userProfile.friendCode ?? "…"}
               </Text>
               <TouchableOpacity
                 onPress={() =>
                   Alert.alert(
                     "Share link",
-                    `https://driveos.app/invite/friend/${userProfile.friendCode}`,
+                    `Share this code with a friend: ${userProfile.friendCode ?? ""}`,
                   )
                 }
               >
@@ -1590,21 +1592,25 @@ export default function CommunityScreen() {
             </Text>
             <TouchableOpacity
               style={styles.submitBtn}
-              onPress={() => {
-                if (!friendSearch.trim()) {
-                  Alert.alert("Enter a username or code");
+              onPress={async () => {
+                const code = friendSearch.replace(/\s+/g, "").toUpperCase();
+                if (!/^[A-Z0-9]{8}$/.test(code)) {
+                  Alert.alert("Enter a friend code", "Friend codes are 8 letters and numbers.");
                   return;
                 }
-                sendFriendRequest(
-                  friendSearch,
-                  friendSearch.slice(0, 2).toUpperCase(),
-                );
-                setFriendSearch("");
-                setShowAddFriend(false);
-                Alert.alert(
-                  "Request sent",
-                  `Friend request sent to "${friendSearch}".`,
-                );
+                try {
+                  const result = await sendFriendRequest(code);
+                  setFriendSearch("");
+                  setShowAddFriend(false);
+                  Alert.alert(
+                    result === "accepted" ? "You're now friends" : "Request sent",
+                    result === "accepted"
+                      ? "They had already sent you a request, so you're now connected."
+                      : "They'll see your request next time they open DriveOS.",
+                  );
+                } catch (err) {
+                  Alert.alert("Request not sent", describeError(err));
+                }
               }}
             >
               <Text style={styles.submitBtnText}>Send Request</Text>

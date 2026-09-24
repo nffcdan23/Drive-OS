@@ -1,248 +1,280 @@
+/**
+ * Places: the user's saved locations (Home, Work, favourite roads, meeting
+ * points) and Beauty Spots — their own and ones shared nearby. Everything is
+ * stored in the user's account; places saved offline upload later.
+ */
 import { GlassSurface } from '@/components/Glass';
-import React, { useState, useMemo } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  View, Text, StyleSheet, TouchableOpacity, FlatList, TextInput,
-  Platform, KeyboardAvoidingView,
+  ActivityIndicator, Alert, FlatList, KeyboardAvoidingView, Modal, Platform, ScrollView, StyleSheet, Text,
+  TextInput, TouchableOpacity, View,
 } from 'react-native';
-import { useRouter } from 'expo-router';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useColors } from '@/hooks/useColors';
-import { DEMO_DESTINATIONS, SCENIC_ROUTES } from '@/constants/mockData';
-import type { Destination } from '@/context/AppContext';
+import * as Location from 'expo-location';
 import * as Haptics from 'expo-haptics';
+import { useColors } from '@/hooks/useColors';
+import { useApp, type NearbySpot, type SavedPlace } from '@/context/AppContext';
+import type { LocationKind, SpotCategory, Visibility } from '@/lib/backend/endpoints';
+import { describeError } from '@/lib/backend/http';
 
-type SearchSection = 'recent' | 'saved' | 'scenic' | 'results';
+type Section = 'saved' | 'spots';
 
-const ICON_MAP: Record<Destination['type'], string> = {
-  home: 'home-outline',
-  work: 'briefcase-outline',
-  favourite: 'star-outline',
-  recent: 'time-outline',
-  scenic: 'triangle-outline',
-  search: 'location-outline',
+const KIND_LABEL: Record<LocationKind, string> = {
+  home: 'Home', work: 'Work', favourite_road: 'Favourite road', meeting_point: 'Meeting point',
+  car_park: 'Car park', poi: 'Place', beauty_spot: 'Beauty Spot',
 };
+const KIND_ICON: Record<LocationKind, keyof typeof Ionicons.glyphMap> = {
+  home: 'home-outline', work: 'briefcase-outline', favourite_road: 'star-outline', meeting_point: 'people-outline',
+  car_park: 'car-outline', poi: 'location-outline', beauty_spot: 'triangle-outline',
+};
+const SAVE_KINDS: LocationKind[] = ['home', 'work', 'favourite_road', 'meeting_point', 'beauty_spot'];
+const SPOT_CATEGORIES: Array<{ id: SpotCategory; label: string }> = [
+  { id: 'viewpoint', label: 'Viewpoint' }, { id: 'scenic_road', label: 'Scenic road' }, { id: 'mountain_pass', label: 'Mountain pass' },
+  { id: 'coastal', label: 'Coastal' }, { id: 'lake', label: 'Lake' }, { id: 'forest', label: 'Forest' },
+  { id: 'landmark', label: 'Landmark' }, { id: 'photo_spot', label: 'Photo spot' }, { id: 'other', label: 'Other' },
+];
+const VISIBILITY_LABEL: Record<Visibility, string> = { private: 'Only me', friends: 'Friends', public: 'Everyone' };
 
-export default function SearchScreen() {
+async function currentPosition(): Promise<{ latitude: number; longitude: number }> {
+  const { status } = await Location.requestForegroundPermissionsAsync();
+  if (status !== 'granted') throw new Error('Allow location access to save or find places.');
+  const last = await Location.getLastKnownPositionAsync({ maxAge: 60_000 });
+  const pos = last ?? await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+  return { latitude: pos.coords.latitude, longitude: pos.coords.longitude };
+}
+
+export default function PlacesScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
   const router = useRouter();
+  const { places, addPlace, deletePlace, findNearbySpots } = useApp();
   const [query, setQuery] = useState('');
-  const [searchFocused, setSearchFocused] = useState(false);
-  const [activeSection, setActiveSection] = useState<SearchSection>('recent');
+  const params = useLocalSearchParams<{ section?: string }>();
+  const [section, setSection] = useState<Section>(params.section === 'spots' ? 'spots' : 'saved');
+  const [showSave, setShowSave] = useState(false);
+  const [nearby, setNearby] = useState<NearbySpot[] | null>(null);
+  const [nearbyError, setNearbyError] = useState<string | null>(null);
+  const [nearbyLoading, setNearbyLoading] = useState(false);
 
-  const recentDests = DEMO_DESTINATIONS.filter((d) => d.type === 'recent' || d.type === 'home' || d.type === 'work').slice(0, 5);
-  const savedDests = DEMO_DESTINATIONS.filter((d) => d.type === 'favourite');
+  const saved = useMemo(() => places.filter((p) => p.kind !== 'beauty_spot'), [places]);
+  const mySpots = useMemo(() => places.filter((p) => p.kind === 'beauty_spot'), [places]);
+  const matches = (name: string) => !query.trim() || name.toLowerCase().includes(query.trim().toLowerCase());
 
-  const searchResults = useMemo(() => {
-    if (!query.trim()) return [];
-    const q = query.toLowerCase();
-    return DEMO_DESTINATIONS.filter(
-      (d) => d.name.toLowerCase().includes(q) || d.address.toLowerCase().includes(q)
-    );
-  }, [query]);
+  const loadNearby = useCallback(async () => {
+    setNearbyLoading(true);
+    setNearbyError(null);
+    try {
+      const pos = await currentPosition();
+      setNearby(await findNearbySpots(pos.latitude, pos.longitude, 50_000));
+    } catch (err) {
+      setNearbyError(describeError(err));
+    } finally {
+      setNearbyLoading(false);
+    }
+  }, [findNearbySpots]);
 
-  const displaySection: SearchSection = query.trim() ? 'results' : activeSection;
+  useEffect(() => { if (section === 'spots' && nearby === null && !nearbyLoading) void loadNearby(); }, [section, nearby, nearbyLoading, loadNearby]);
 
-  function handleSelectDestination(dest: Destination) {
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    router.back();
-    // In a real app: set destination and start route planning
-  }
+  const confirmDelete = (p: SavedPlace) => Alert.alert(`Delete "${p.name}"?`, 'It will be removed from your account on all devices.', [
+    { text: 'Cancel', style: 'cancel' },
+    { text: 'Delete', style: 'destructive', onPress: () => deletePlace(p.id) },
+  ]);
 
-  const styles = StyleSheet.create({
-    container: { flex: 1, backgroundColor: colors.background },
-    searchHeader: {
-      paddingTop: insets.top + 16,
-      paddingHorizontal: 16, paddingBottom: 12,
-      backgroundColor: colors.background,
-      borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border,
-      flexDirection: 'row', alignItems: 'center', gap: 10,
-    },
-    searchInputWrap: {
-      flex: 1, flexDirection: 'row', alignItems: 'center', gap: 8,
-      backgroundColor: colors.card, borderRadius: 14, paddingHorizontal: 12,
-      borderWidth: StyleSheet.hairlineWidth, borderColor: colors.border, height: 46,
-    },
-    searchInput: {
-      outlineWidth: 0,
-      flex: 1, fontSize: 16, color: colors.foreground, fontFamily: 'Inter_400Regular',
-    },
-    cancelBtn: { paddingVertical: 8 },
-    cancelBtnText: { fontSize: 15, color: colors.primary, fontFamily: 'Inter_500Medium' },
-    sectionTabs: {
-      flexDirection: 'row', paddingHorizontal: 16, paddingVertical: 10, gap: 8,
-    },
-    sectionTab: {
-      paddingHorizontal: 14, paddingVertical: 7, borderRadius: 20,
-      borderWidth: 1, borderColor: colors.border,
-    },
-    sectionTabActive: { borderColor: colors.primary, backgroundColor: colors.primary + '15' },
-    sectionTabText: { fontSize: 13, color: colors.mutedForeground, fontFamily: 'Inter_500Medium' },
-    sectionTabTextActive: { color: colors.primary },
-    sectionHeader: {
-      paddingHorizontal: 20, paddingVertical: 10,
-      fontSize: 13, fontWeight: '600', color: colors.mutedForeground,
-      fontFamily: 'Inter_600SemiBold', textTransform: 'uppercase', letterSpacing: 0.5,
-    },
-    destItem: {
-      flexDirection: 'row', alignItems: 'center', gap: 12,
-      paddingHorizontal: 20, paddingVertical: 13,
-      borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border,
-    },
-    destIconWrap: {
-      width: 38, height: 38, borderRadius: 19,
-      backgroundColor: colors.muted, alignItems: 'center', justifyContent: 'center',
-    },
-    destName: { fontSize: 15, fontWeight: '500', color: colors.foreground, fontFamily: 'Inter_500Medium' },
-    destAddress: { fontSize: 12, color: colors.mutedForeground, fontFamily: 'Inter_400Regular', marginTop: 1 },
-    scenicCard: {
-      marginHorizontal: 20, marginBottom: 10, backgroundColor: colors.card,
-      borderRadius: 14, padding: 14, flexDirection: 'row', alignItems: 'center', gap: 12,
-      borderWidth: StyleSheet.hairlineWidth, borderColor: colors.border,
-    },
-    scenicIconWrap: {
-      width: 42, height: 42, borderRadius: 21,
-      backgroundColor: colors.primary + '15', alignItems: 'center', justifyContent: 'center',
-    },
-    scenicName: { fontSize: 15, fontWeight: '600', color: colors.foreground, fontFamily: 'Inter_600SemiBold' },
-    scenicMeta: { fontSize: 12, color: colors.mutedForeground, fontFamily: 'Inter_400Regular', marginTop: 2 },
-    emptyText: { textAlign: 'center', color: colors.mutedForeground, marginTop: 40, fontFamily: 'Inter_400Regular' },
-    listContent: { paddingBottom: (Platform.OS === 'web' ? 34 : insets.bottom) + 20 },
-    demoNote: {
-      marginHorizontal: 20, marginTop: 8, padding: 10, backgroundColor: colors.muted,
-      borderRadius: 10,
-    },
-    demoNoteText: { fontSize: 11, color: colors.mutedForeground, fontFamily: 'Inter_400Regular', textAlign: 'center' },
-  });
+  const s = styles(colors, insets.top, insets.bottom);
 
-  function DestRow({ item }: { item: Destination }) {
-    return (
-      <TouchableOpacity style={styles.destItem} onPress={() => handleSelectDestination(item)}>
-        <View style={styles.destIconWrap}>
-          <Ionicons name={ICON_MAP[item.type] as any} size={18} color={colors.primary} />
-        </View>
-        <View style={{ flex: 1 }}>
-          <Text style={styles.destName}>{item.name}</Text>
-          <Text style={styles.destAddress}>{item.address}</Text>
-        </View>
-        <Ionicons name="chevron-forward" size={16} color={colors.mutedForeground} />
+  const PlaceRow = ({ p }: { p: SavedPlace }) => (
+    <TouchableOpacity style={s.row} onPress={() => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); router.back(); }}
+      onLongPress={() => confirmDelete(p)} accessibilityHint="Long-press to delete">
+      <View style={s.iconWrap}><Ionicons name={KIND_ICON[p.kind]} size={18} color={colors.primary} /></View>
+      <View style={{ flex: 1 }}>
+        <Text style={s.name}>{p.name}</Text>
+        <Text style={s.meta}>
+          {KIND_LABEL[p.kind]}{p.kind === 'beauty_spot' ? ` · ${VISIBILITY_LABEL[p.visibility]}` : ''}
+          {p.syncState === 'pending' ? ' · Waiting to upload' : ''}
+        </Text>
+      </View>
+      <TouchableOpacity onPress={() => confirmDelete(p)} hitSlop={10} accessibilityLabel={`Delete ${p.name}`}>
+        <Ionicons name="trash-outline" size={18} color={colors.mutedForeground} />
       </TouchableOpacity>
-    );
-  }
+    </TouchableOpacity>
+  );
 
-  function renderContent() {
-    if (displaySection === 'results') {
+  function content() {
+    if (section === 'saved') {
+      const list = saved.filter((p) => matches(p.name));
       return (
         <>
-          <Text style={styles.sectionHeader}>Results ({searchResults.length})</Text>
-          {searchResults.length === 0
-            ? <Text style={styles.emptyText}>No results for "{query}"</Text>
-            : searchResults.map((d) => <DestRow key={d.id} item={d} />)
-          }
-          <View style={styles.demoNote}>
-            <Text style={styles.demoNoteText}>Demo search — connect a Places API for live results</Text>
+          <Text style={s.header}>Saved places</Text>
+          {list.length ? list.map((p) => <PlaceRow key={p.id} p={p} />) : <Text style={s.empty}>No saved places yet. Save where you are with the button below.</Text>}
+        </>
+      );
+    }
+    const others = (nearby ?? []).filter((n) => !n.isOwn && matches(n.name));
+    return (
+      <>
+        <Text style={s.header}>My Beauty Spots</Text>
+        {mySpots.filter((p) => matches(p.name)).map((p) => <PlaceRow key={p.id} p={p} />)}
+        {!mySpots.length ? <Text style={s.empty}>You haven't saved any Beauty Spots yet.</Text> : null}
+        <View style={s.nearbyHeader}>
+          <Text style={s.header}>Shared nearby</Text>
+          <TouchableOpacity onPress={loadNearby} hitSlop={10}><Ionicons name="refresh" size={18} color={colors.primary} /></TouchableOpacity>
+        </View>
+        {nearbyLoading ? <ActivityIndicator color={colors.primary} style={{ marginTop: 16 }} /> : null}
+        {nearbyError ? <Text style={[s.empty, { color: colors.destructive }]}>{nearbyError}</Text> : null}
+        {!nearbyLoading && !nearbyError && nearby && !others.length ? <Text style={s.empty}>No shared Beauty Spots within 50 km.</Text> : null}
+        {others.map((n) => (
+          <View key={n.id} style={s.row}>
+            <View style={s.iconWrap}><Ionicons name="triangle-outline" size={18} color={colors.primary} /></View>
+            <View style={{ flex: 1 }}>
+              <Text style={s.name}>{n.name}</Text>
+              <Text style={s.meta}>{n.distanceM != null ? `${(n.distanceM / 1000).toFixed(1)} km away` : ''}{n.visibility === 'friends' ? ' · Friend' : ''}</Text>
+            </View>
           </View>
-        </>
-      );
-    }
-    if (displaySection === 'recent') {
-      return (
-        <>
-          <Text style={styles.sectionHeader}>Recent & Saved</Text>
-          {recentDests.map((d) => <DestRow key={d.id} item={d} />)}
-        </>
-      );
-    }
-    if (displaySection === 'saved') {
-      return (
-        <>
-          <Text style={styles.sectionHeader}>Favourites</Text>
-          {savedDests.length === 0
-            ? <Text style={styles.emptyText}>No saved places yet</Text>
-            : savedDests.map((d) => <DestRow key={d.id} item={d} />)
-          }
-        </>
-      );
-    }
-    if (displaySection === 'scenic') {
-      return (
-        <>
-          <Text style={styles.sectionHeader}>Scenic Routes</Text>
-          {SCENIC_ROUTES.map((route) => (
-            <TouchableOpacity key={route.id} style={styles.scenicCard} onPress={() => {
-              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-              router.back();
-            }}>
-              <View style={styles.scenicIconWrap}>
-                <Ionicons name="triangle-outline" size={20} color={colors.primary} />
-              </View>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.scenicName}>{route.name}</Text>
-                <Text style={styles.scenicMeta}>{route.distance} · {route.description}</Text>
-              </View>
-              <Ionicons name="chevron-forward" size={16} color={colors.mutedForeground} />
-            </TouchableOpacity>
-          ))}
-        </>
-      );
-    }
-    return null;
+        ))}
+      </>
+    );
   }
 
   return (
-    <KeyboardAvoidingView
-      style={styles.container}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-    >
-      <View style={styles.searchHeader}>
-        <GlassSurface focused={searchFocused} style={styles.searchInputWrap}>
+    <KeyboardAvoidingView style={s.container} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+      <View style={s.searchHeader}>
+        <GlassSurface style={s.searchInputWrap}>
           <Ionicons name="search" size={18} color={colors.mutedForeground} />
-          <TextInput
-            style={styles.searchInput}
-            onFocus={() => setSearchFocused(true)}
-            onBlur={() => setSearchFocused(false)}
-            placeholder="Where are we going?"
-            placeholderTextColor={colors.mutedForeground}
-            value={query}
-            onChangeText={setQuery}
-            autoFocus
-            returnKeyType="search"
-          />
-          {query.length > 0 && (
-            <TouchableOpacity onPress={() => setQuery('')}>
-              <Ionicons name="close-circle" size={18} color={colors.mutedForeground} />
-            </TouchableOpacity>
-          )}
+          <TextInput style={s.searchInput} placeholder="Filter your places" placeholderTextColor={colors.mutedForeground}
+            value={query} onChangeText={setQuery} returnKeyType="search" />
+          {query ? <TouchableOpacity onPress={() => setQuery('')}><Ionicons name="close-circle" size={18} color={colors.mutedForeground} /></TouchableOpacity> : null}
         </GlassSurface>
-        <TouchableOpacity style={styles.cancelBtn} onPress={() => router.back()}>
-          <Text style={styles.cancelBtnText}>Cancel</Text>
-        </TouchableOpacity>
+        <TouchableOpacity style={s.cancelBtn} onPress={() => router.back()}><Text style={s.cancelText}>Close</Text></TouchableOpacity>
       </View>
-
-      {!query.trim() && (
-        <View style={styles.sectionTabs}>
-          {(['recent', 'saved', 'scenic'] as const).map((tab) => (
-            <TouchableOpacity
-              key={tab}
-              style={[styles.sectionTab, activeSection === tab && styles.sectionTabActive]}
-              onPress={() => setActiveSection(tab)}
-            >
-              <Text style={[styles.sectionTabText, activeSection === tab && styles.sectionTabTextActive]}>
-                {tab.charAt(0).toUpperCase() + tab.slice(1)}
-              </Text>
-            </TouchableOpacity>
-          ))}
-        </View>
-      )}
-
-      <FlatList
-        data={[null]}
-        renderItem={() => <View>{renderContent()}</View>}
-        keyExtractor={() => 'content'}
-        keyboardShouldPersistTaps="handled"
-        contentContainerStyle={styles.listContent}
-      />
+      <View style={s.tabs}>
+        {(['saved', 'spots'] as const).map((t) => (
+          <TouchableOpacity key={t} style={[s.tab, section === t && s.tabActive]} onPress={() => setSection(t)}>
+            <Text style={[s.tabText, section === t && s.tabTextActive]}>{t === 'saved' ? 'Saved' : 'Beauty Spots'}</Text>
+          </TouchableOpacity>
+        ))}
+      </View>
+      <FlatList data={[null]} renderItem={() => <View>{content()}</View>} keyExtractor={() => 'c'} contentContainerStyle={s.list} keyboardShouldPersistTaps="handled" />
+      <TouchableOpacity style={s.saveBtn} onPress={() => setShowSave(true)} accessibilityRole="button">
+        <Ionicons name="add-circle-outline" size={20} color={colors.primaryForeground} />
+        <Text style={s.saveText}>Save where I am</Text>
+      </TouchableOpacity>
+      <SavePlaceSheet visible={showSave} defaultKind={section === 'spots' ? 'beauty_spot' : 'favourite_road'} onClose={() => setShowSave(false)} onSave={addPlace} />
     </KeyboardAvoidingView>
   );
 }
+
+function SavePlaceSheet({ visible, defaultKind, onClose, onSave }: {
+  visible: boolean; defaultKind: LocationKind; onClose: () => void;
+  onSave: ReturnType<typeof useApp>['addPlace'];
+}) {
+  const colors = useColors();
+  const [kind, setKind] = useState<LocationKind>(defaultKind);
+  const [name, setName] = useState('');
+  const [description, setDescription] = useState('');
+  const [category, setCategory] = useState<SpotCategory>('viewpoint');
+  const [visibility, setVisibility] = useState<Visibility>('private');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => { if (visible) { setKind(defaultKind); setName(''); setDescription(''); setError(null); setVisibility('private'); } }, [visible, defaultKind]);
+
+  const isSpot = kind === 'beauty_spot';
+  const s = styles(colors, 0, 0);
+
+  async function save() {
+    const finalName = name.trim() || (kind === 'home' || kind === 'work' ? KIND_LABEL[kind] : '');
+    if (!finalName) { setError('Give this place a name.'); return; }
+    setBusy(true);
+    setError(null);
+    try {
+      const coordinate = await currentPosition();
+      await onSave({ kind, name: finalName, coordinate, description: description.trim() || undefined, ...(isSpot ? { category, visibility } : {}) });
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      onClose();
+    } catch (err) {
+      setError(describeError(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const Chip = ({ label, active, onPress }: { label: string; active: boolean; onPress: () => void }) => (
+    <TouchableOpacity onPress={onPress} style={[s.chip, active && s.chipActive]}><Text style={[s.chipText, active && s.chipTextActive]}>{label}</Text></TouchableOpacity>
+  );
+
+  return (
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+      <View style={s.overlay}>
+        <GlassSurface material="dense" style={s.sheet}>
+          <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={{ gap: 12 }}>
+            <Text style={s.sheetTitle}>Save this place</Text>
+            <View style={s.chips}>{SAVE_KINDS.map((k) => <Chip key={k} label={KIND_LABEL[k]} active={kind === k} onPress={() => setKind(k)} />)}</View>
+            <TextInput style={s.input} placeholder={kind === 'home' || kind === 'work' ? KIND_LABEL[kind] : 'Name'}
+              placeholderTextColor={colors.mutedForeground} value={name} onChangeText={setName} maxLength={100} />
+            {isSpot ? (
+              <>
+                <TextInput style={[s.input, { height: 80, textAlignVertical: 'top', paddingTop: 12 }]} placeholder="What makes it special? (optional)"
+                  placeholderTextColor={colors.mutedForeground} value={description} onChangeText={setDescription} multiline maxLength={2000} />
+                <Text style={s.label}>Type</Text>
+                <View style={s.chips}>{SPOT_CATEGORIES.map((c) => <Chip key={c.id} label={c.label} active={category === c.id} onPress={() => setCategory(c.id)} />)}</View>
+                <Text style={s.label}>Who can see it</Text>
+                <View style={s.chips}>{(['private', 'friends', 'public'] as const).map((v) => <Chip key={v} label={VISIBILITY_LABEL[v]} active={visibility === v} onPress={() => setVisibility(v)} />)}</View>
+              </>
+            ) : (
+              <Text style={s.note}>{kind === 'home' || kind === 'work' ? 'Home and Work are always private.' : 'Saved places are private to you.'}</Text>
+            )}
+            {error ? <Text style={{ color: colors.destructive, fontFamily: 'Inter_400Regular' }}>{error}</Text> : null}
+            <TouchableOpacity style={s.primary} onPress={save} disabled={busy}>
+              {busy ? <ActivityIndicator color={colors.primaryForeground} /> : <Text style={s.saveText}>Save current location</Text>}
+            </TouchableOpacity>
+            <TouchableOpacity onPress={onClose} style={{ alignItems: 'center', padding: 8 }}><Text style={s.cancelText}>Cancel</Text></TouchableOpacity>
+          </ScrollView>
+        </GlassSurface>
+      </View>
+    </Modal>
+  );
+}
+
+const styles = (c: ReturnType<typeof useColors>, top: number, bottom: number) => StyleSheet.create({
+  container: { flex: 1, backgroundColor: c.background },
+  searchHeader: {
+    paddingTop: top + 16, paddingHorizontal: 16, paddingBottom: 12, flexDirection: 'row', alignItems: 'center', gap: 10,
+    borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: c.border,
+  },
+  searchInputWrap: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 12, height: 44, borderRadius: 12 },
+  searchInput: { flex: 1, color: c.foreground, fontSize: 16, fontFamily: 'Inter_400Regular' },
+  cancelBtn: { paddingHorizontal: 4 },
+  cancelText: { color: c.primary, fontSize: 15, fontFamily: 'Inter_600SemiBold' },
+  tabs: { flexDirection: 'row', gap: 8, paddingHorizontal: 16, paddingVertical: 10 },
+  tab: { paddingHorizontal: 14, paddingVertical: 7, borderRadius: 16, backgroundColor: c.muted },
+  tabActive: { backgroundColor: c.primary },
+  tabText: { color: c.mutedForeground, fontFamily: 'Inter_600SemiBold', fontSize: 13 },
+  tabTextActive: { color: c.primaryForeground },
+  list: { paddingBottom: bottom + 100 },
+  header: { color: c.mutedForeground, fontSize: 12, fontFamily: 'Inter_600SemiBold', letterSpacing: 0.8, textTransform: 'uppercase', paddingHorizontal: 20, paddingTop: 16, paddingBottom: 6 },
+  nearbyHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingRight: 20 },
+  row: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 20, paddingVertical: 12 },
+  iconWrap: { width: 36, height: 36, borderRadius: 10, backgroundColor: c.muted, alignItems: 'center', justifyContent: 'center' },
+  name: { color: c.foreground, fontSize: 15, fontFamily: 'Inter_600SemiBold' },
+  meta: { color: c.mutedForeground, fontSize: 12, fontFamily: 'Inter_400Regular', marginTop: 2 },
+  empty: { color: c.mutedForeground, fontFamily: 'Inter_400Regular', paddingHorizontal: 20, paddingVertical: 8 },
+  saveBtn: {
+    position: 'absolute', left: 20, right: 20, bottom: bottom + 16, height: 50, borderRadius: 14, backgroundColor: c.primary,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
+  },
+  saveText: { color: c.primaryForeground, fontFamily: 'Inter_600SemiBold', fontSize: 16 },
+  overlay: { flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.5)' },
+  sheet: { padding: 20, paddingBottom: 36, borderTopLeftRadius: 24, borderTopRightRadius: 24, maxHeight: '85%' },
+  sheetTitle: { color: c.foreground, fontFamily: 'Inter_700Bold', fontSize: 18 },
+  label: { color: c.mutedForeground, fontFamily: 'Inter_600SemiBold', fontSize: 13 },
+  note: { color: c.mutedForeground, fontFamily: 'Inter_400Regular', fontSize: 13 },
+  chips: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  chip: { paddingHorizontal: 12, paddingVertical: 7, borderRadius: 14, backgroundColor: c.muted },
+  chipActive: { backgroundColor: c.primary },
+  chipText: { color: c.foreground, fontFamily: 'Inter_500Medium', fontSize: 13 },
+  chipTextActive: { color: c.primaryForeground },
+  input: { height: 46, borderRadius: 12, borderWidth: 1, borderColor: c.input, backgroundColor: c.card, color: c.foreground, paddingHorizontal: 14, fontSize: 16, fontFamily: 'Inter_400Regular' },
+  primary: { height: 50, borderRadius: 14, backgroundColor: c.primary, alignItems: 'center', justifyContent: 'center' },
+});

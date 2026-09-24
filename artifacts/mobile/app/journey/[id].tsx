@@ -288,6 +288,19 @@ export default function JourneyDetailScreen() {
 
       <ScrollView style={styles.scroll} contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
 
+        {journey.syncState && journey.syncState !== 'synced' ? (
+          <View style={{ backgroundColor: journey.syncState === 'failed' ? '#3A1618' : '#16283A', borderRadius: 12, padding: 12, marginBottom: 12 }}>
+            <Text style={{ color: journey.syncState === 'failed' ? '#F7B4B4' : '#B9D7F5', fontFamily: 'Inter_600SemiBold', fontSize: 14 }}>
+              {journey.syncState === 'failed' ? 'This drive could not be uploaded' : 'Saved on this phone — uploading to your account'}
+            </Text>
+            <Text style={{ color: colors.mutedForeground, fontFamily: 'Inter_400Regular', fontSize: 13, marginTop: 4 }}>
+              {journey.syncState === 'failed'
+                ? `${journey.syncError ?? 'The server rejected it.'} Delete it to remove it from this phone.`
+                : `Distance, XP and the final route are worked out by the server once it arrives.${journey.syncError ? ` Last attempt: ${journey.syncError}` : ''}`}
+            </Text>
+          </View>
+        ) : null}
+
         {/* Route map */}
         <RouteMapView coordinates={journey.routeCoordinates} />
 

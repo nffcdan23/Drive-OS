@@ -11,7 +11,6 @@ import { useApp, Vehicle } from '@/context/AppContext';
 import * as ImagePicker from 'expo-image-picker';
 import * as Haptics from 'expo-haptics';
 import { TEST_REGISTRATIONS } from '@/constants/config';
-import { apiLookupVehicle } from '@/lib/apiClient';
 
 type VehicleForm = Omit<Vehicle, 'id' | 'isActive' | 'fuelPercentage'>;
 
@@ -42,7 +41,7 @@ export default function VehicleDetailScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
   const router = useRouter();
-  const { vehicles, addVehicle, updateVehicle, deleteVehicle } = useApp();
+  const { vehicles, addVehicle, updateVehicle, deleteVehicle, lookupVehicle } = useApp();
 
   const existing = isNew ? null : vehicles.find((v) => v.id === id);
 
@@ -134,7 +133,7 @@ export default function VehicleDetailScreen() {
     setLookupResult(null);
 
     try {
-      const found = await apiLookupVehicle(cleaned);
+      const found = await lookupVehicle(cleaned);
       setForm((prev) => ({
         ...prev,
         registration: found.registration,

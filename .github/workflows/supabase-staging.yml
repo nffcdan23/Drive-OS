@@ -10,7 +10,9 @@ name: Supabase staging deploy
 #     apply migrations or leave anything behind) or "[api-test supabase-staging]"
 #     (runs the Express API on the runner against staging and exercises it
 #     with real Auth tokens and Storage; applies no migrations and deletes
-#     everything it creates), or
+#     everything it creates), "[mobile-test supabase-staging]" (runs the
+#     app's data layer end to end against staging: accounts, sign-in,
+#     vehicles, photos, places, journeys, offline handling, deletion), or
 #   * "Run workflow" in the Actions tab once this file is on the default
 #     branch (type deploy-staging to confirm).
 # Every other push to the branch shows this workflow as skipped.
@@ -236,3 +238,69 @@ jobs:
 
       - name: Run the API against staging
         run: node supabase/tests/staging/api_staging.mjs
+
+  mobile-test:
+    name: Mobile app data layer against staging
+    if: github.event_name == 'push' && contains(github.event.head_commit.message, '[mobile-test supabase-staging]')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      STAGING_DB_URL: ${{ secrets.SUPABASE_STAGING_DB_URL }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_STAGING_URL }}
+      SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_STAGING_PUBLISHABLE_KEY }}
+      SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_STAGING_SECRET_KEY }}
+      SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_STAGING_PROJECT_REF }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the required secrets are set
+        run: |
+          missing=0
+          for name in STAGING_DB_URL SUPABASE_URL SUPABASE_PUBLISHABLE_KEY SUPABASE_SECRET_KEY SUPABASE_PROJECT_REF; do
+            if [ -z "${!name}" ]; then echo "::error::Secret for $name is not set"; missing=1; fi
+          done
+          [ "$missing" = 0 ] || exit 1
+          password=$(python3 -c "import os,urllib.parse as u; print(u.unquote(u.urlsplit(os.environ['STAGING_DB_URL']).password or ''))")
+          [ -n "$password" ] && echo "::add-mask::$password"
+          case "$SUPABASE_URL" in
+            "https://$SUPABASE_PROJECT_REF.supabase.co"|"https://$SUPABASE_PROJECT_REF.supabase.co/") ;;
+            *) echo "::error::SUPABASE_STAGING_URL does not match SUPABASE_STAGING_PROJECT_REF"; exit 1 ;;
+          esac
+          case "$STAGING_DB_URL" in
+            *"$SUPABASE_PROJECT_REF"*) ;;
+            *) echo "::error::SUPABASE_STAGING_DB_URL is not for SUPABASE_STAGING_PROJECT_REF"; exit 1 ;;
+          esac
+          echo "All required secrets are set and refer to the same project."
+
+      - name: Install PostgreSQL client
+        run: |
+          sudo apt-get update -q
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q postgresql-client-16
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck and build the API; typecheck and unit-test the app
+        run: |
+          pnpm run typecheck:libs
+          pnpm --filter @workspace/api-server run typecheck
+          pnpm --filter @workspace/api-server run build
+          pnpm --filter @workspace/mobile run typecheck
+          pnpm --filter @workspace/mobile run test
+
+      - name: Confirm staging has every migration (read-only)
+        run: |
+          expected=$(ls supabase/migrations/*.sql | wc -l)
+          applied=$(psql "$STAGING_DB_URL" -X -A -t -c "select count(*) from supabase_migrations.schema_migrations")
+          echo "Migrations in repo: $expected, recorded on staging: $applied"
+          [ "$expected" = "$applied" ]
+
+      - name: Run the app's data layer against staging
+        run: pnpm --filter @workspace/mobile run test:staging

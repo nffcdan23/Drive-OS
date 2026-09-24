@@ -1,0 +1,64 @@
+name: Mobile
+
+# Typechecks the Expo app and runs its data-layer unit tests (auth guard,
+# GPS thinning, polyline decoding, offline outbox, per-user cache). No
+# network access to Supabase or the API, and no secrets.
+
+on:
+  pull_request:
+    paths:
+      - 'artifacts/mobile/**'
+      - 'lib/**'
+      - '.github/workflows/mobile.yml'
+  push:
+    branches: [main, 'claude/**']
+    paths:
+      - 'artifacts/mobile/**'
+      - 'lib/**'
+      - '.github/workflows/mobile.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mobile-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Typecheck and unit tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: |
+          pnpm run typecheck:libs
+          pnpm --filter @workspace/mobile run typecheck
+
+      - name: Unit tests
+        run: pnpm --filter @workspace/mobile run test
+
+      - name: No server secrets in the app
+        run: |
+          # The app may only contain the Supabase URL and publishable key.
+          # Look for secret values: sb_secret_ keys, embedded JWTs (legacy
+          # service_role keys) and database URLs with passwords.
+          if grep -rEn "sb_secret_[A-Za-z0-9_-]{10,}|eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}|postgres(ql)?://[^[:space:]]+:[^[:space:]@]+@" artifacts/mobile \
+               --include=*.ts --include=*.tsx --include=*.js --include=*.json --include=.env* \
+               --exclude-dir=node_modules --exclude-dir=.expo; then
+            echo "::error::A server secret appears to be in the mobile app"; exit 1
+          fi
+          echo "No server secrets found in the app."

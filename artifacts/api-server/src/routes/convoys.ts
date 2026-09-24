@@ -19,7 +19,8 @@ const convoySelect = (userId: string) => sql`
          c.visibility, c.starts_at as "startsAt", c.status, c.started_at as "startedAt", c.ended_at as "endedAt",
          c.max_participants as "maxParticipants", c.created_at as "createdAt", c.updated_at as "updatedAt",
          (select count(*)::int from public.convoy_participants x where x.convoy_id = c.id) as "participantCount",
-         (select x.role from public.convoy_participants x where x.convoy_id = c.id and x.user_id = ${userId}) as "myRole"
+         (select x.role from public.convoy_participants x where x.convoy_id = c.id and x.user_id = ${userId}) as "myRole",
+         (select p.display_name from public.profiles p where p.id = c.owner_id) as "leaderName"
   from public.convoys c`;
 
 async function loadConvoy(tx: Tx, userId: string, id: string) {

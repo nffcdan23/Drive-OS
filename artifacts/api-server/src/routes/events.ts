@@ -23,7 +23,8 @@ const eventSelect = (userId: string) => sql`
          e.created_at as "createdAt", e.updated_at as "updatedAt",
          (select count(*)::int from public.event_rsvps r where r.event_id = e.id and r.status = 'going') as "goingCount",
          (select count(*)::int from public.event_rsvps r where r.event_id = e.id and r.status = 'interested') as "interestedCount",
-         (select r.status from public.event_rsvps r where r.event_id = e.id and r.user_id = ${userId}) as "myRsvp"
+         (select r.status from public.event_rsvps r where r.event_id = e.id and r.user_id = ${userId}) as "myRsvp",
+         (select p.display_name from public.profiles p where p.id = e.organiser_id) as "organiserName"
   from public.events e`;
 
 function present(row: Record<string, unknown>) {

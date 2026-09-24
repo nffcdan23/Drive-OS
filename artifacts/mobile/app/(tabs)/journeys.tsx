@@ -562,6 +562,18 @@ export default function JourneysScreen() {
           />
         </View>
         <View style={styles.cardMeta}>
+          {item.syncState && item.syncState !== "synced" && (
+            <View style={[styles.tag, { borderLeftWidth: 2, borderLeftColor: item.syncState === "failed" ? colors.destructive : colors.primary }]}>
+              <Ionicons
+                name={item.syncState === "failed" ? "alert-circle-outline" : "cloud-upload-outline"}
+                size={10}
+                color={item.syncState === "failed" ? colors.destructive : colors.primary}
+              />
+              <Text style={[styles.tagText, { color: item.syncState === "failed" ? colors.destructive : colors.primary }]}>
+                {item.syncState === "failed" ? "Upload failed" : "Waiting to upload"}
+              </Text>
+            </View>
+          )}
           {isConvoy && (
             <View style={[styles.tag, styles.convoyTag]}>
               <Ionicons

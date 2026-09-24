@@ -344,6 +344,7 @@ test("convoys: private visibility, join codes, capacity under concurrency", asyn
   const c = await post(leader, "/convoys", { name: "Night run", visibility: "private", startsAt: future(60), maxParticipants: 3 });
   expect(c, 201, "create");
   assert.equal(c.body.myRole, "leader");
+  assert.equal(c.body.leaderName, "Leader", "leader's display name included");
   const id = c.body.id;
 
   expect(await get(stranger, `/convoys/${id}`), 404, "private convoy hidden");
@@ -418,6 +419,7 @@ test("events: capacity under concurrency, private invitations", async () => {
   const org = await newUser("Org");
   const e = await post(org, "/events", { name: "Meet", startsAt: future(120), capacity: 2, eventType: "static_car_meet" });
   expect(e, 201, "create");
+  assert.equal(e.body.organiserName, "Org", "organiser's display name included");
   const people = await Promise.all([1, 2, 3, 4, 5].map((i) => newUser(`P${i}`)));
   const rs = await Promise.all(people.map((p) => call(p, "PUT", `/events/${e.body.id}/rsvp`, { status: "going" })));
   assert.equal(rs.filter((r) => r.status === 200).length, 2, "capacity respected");
@@ -481,6 +483,11 @@ test("uploads: signed URLs, size/type checks, private documents", async () => {
   await db.query("update storage.objects set metadata = $1 where name = $2", [{ size: 1000, mimetype: "image/jpeg" }, up.body.path]);
   expect(await post(other, `/uploads/${up.body.id}/confirm`), 404, "other user cannot confirm");
   expect(await post(u, `/uploads/${up.body.id}/confirm`), 200, "confirmed");
+  const cover = await patch(u, `/vehicles/${v.id}`, { coverPhotoId: up.body.id });
+  expect(cover, 200, "set cover photo");
+  assert.ok(cover.body.coverPhotoUrl?.includes("ttl=3600"), "vehicle carries a 1-hour signed cover URL");
+  assert.ok((await get(u, "/vehicles")).body[0].coverPhotoUrl, "listed vehicles carry the cover URL");
+  expect(await patch(other, `/vehicles/${v.id}`, { coverPhotoId: up.body.id }), 404, "other user cannot set cover");
 
   const doc = await post(u, "/uploads", { kind: "vehicle-document", parentId: v.id, sizeBytes: 2000, mimeType: "application/pdf", docType: "insurance" });
   expect(doc, 201, "document upload url");
