@@ -8,7 +8,7 @@ import '@/lib/polyfills'; // before the Supabase client is created
 import { AppState } from 'react-native';
 import * as Crypto from 'expo-crypto';
 import { checkEnv, ConfigError, type BackendEnv } from '@/lib/backend/env';
-import { createAuthClient, currentAccessToken, type SupabaseClient } from '@/lib/backend/auth';
+import { accessTokenGetter, authServerProbe, createAuthClient, type SupabaseClient } from '@/lib/backend/auth';
 import { ApiClient, type ConnectionState } from '@/lib/backend/http';
 import { endpoints, type Endpoints } from '@/lib/backend/endpoints';
 import { authStorage } from '@/lib/secureStorage';
@@ -59,7 +59,7 @@ export const api: ApiClient | null = backendEnv && supabase
   ? new ApiClient({
       baseUrl: backendEnv.apiUrl,
       // Offline with an expired token: throws NetworkError (still signed in, can't refresh yet).
-      getAccessToken: () => currentAccessToken(supabase),
+      getAccessToken: accessTokenGetter(supabase, authServerProbe(backendEnv.supabaseUrl, backendEnv.supabasePublishableKey)),
       refreshAccessToken: async () => (await supabase.auth.refreshSession()).data.session?.access_token ?? null,
       onStatus: (state, detail) => statusListeners.forEach((fn) => fn(state, detail)),
     })

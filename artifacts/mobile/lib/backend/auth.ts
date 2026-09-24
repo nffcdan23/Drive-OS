@@ -46,6 +46,56 @@ export async function currentAccessToken(client: SupabaseClient): Promise<string
 }
 
 /**
+ * supabase-js remembers a failed refresh for a minute and replays it without
+ * contacting the server, so after an offline start the app would stay
+ * "offline" for up to a minute once the network is back. Clearing that
+ * memory lets the next attempt go to the server. The field is internal to
+ * @supabase/auth-js (pinned); the unit tests fail if it stops working.
+ */
+function forgetRefreshFailure(client: SupabaseClient): void {
+  const auth = client.auth as unknown as { lastRefreshFailure?: unknown };
+  if ('lastRefreshFailure' in auth) auth.lastRefreshFailure = null;
+}
+
+/**
+ * `currentAccessToken` for the API client. When the token can't be refreshed
+ * because the phone seemed offline, it checks (at most every few seconds)
+ * whether Supabase Auth answers again and, if so, retries straight away.
+ */
+export function accessTokenGetter(
+  client: SupabaseClient,
+  authReachable: () => Promise<boolean>,
+  opts: { minProbeIntervalMs?: number; now?: () => number } = {},
+): () => Promise<string | null> {
+  const minInterval = opts.minProbeIntervalMs ?? 5_000;
+  const now = opts.now ?? Date.now;
+  let lastProbe = -Infinity;
+  return async () => {
+    try {
+      return await currentAccessToken(client);
+    } catch (err) {
+      if (!(err instanceof NetworkError) || now() - lastProbe < minInterval) throw err;
+      lastProbe = now();
+      if (!(await authReachable().catch(() => false))) throw err;
+      forgetRefreshFailure(client);
+      return currentAccessToken(client);
+    }
+  };
+}
+
+/** True when the Supabase Auth server answers at all (any HTTP status). */
+export function authServerProbe(url: string, publishableKey: string, fetchImpl: typeof fetch = fetch): () => Promise<boolean> {
+  return async () => {
+    try {
+      await fetchImpl(`${url.replace(/\/+$/, '')}/auth/v1/health`, { headers: { apikey: publishableKey } });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+}
+
+/**
  * The user saved on this device, read without contacting the server. Used
  * when the app starts offline with an expired access token: supabase-js then
  * reports no session (it can't refresh), but the user hasn't signed out.

@@ -60,13 +60,24 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     if (!supabase) { setInitialising(false); return; }
     let mounted = true;
     const client = supabase;
+    let settled = false;
+    // Offline with an expired access token, supabase-js retries the refresh
+    // for ~25 s before answering. Don't hold the splash screen that long: if
+    // a session is saved on this phone, open the app from it (cached data,
+    // offline banner) and let getSession's answer correct it afterwards.
+    const early = setTimeout(() => {
+      void storedSessionUser(client, authStorage).then((saved) => {
+        if (mounted && !settled && saved) { setOfflineUser(saved); setInitialising(false); }
+      });
+    }, 1_500);
     client.auth.getSession().then(async ({ data, error }) => {
+      settled = true;
       // Offline with an expired access token: supabase-js can't refresh and
       // reports no session, but the user never signed out. Stay signed in from
       // the saved session; the token refreshes once the network is back.
       const saved = !data.session && isOfflineAuthError(error) ? await storedSessionUser(client, authStorage) : null;
       if (mounted) { setSession(data.session); setOfflineUser(saved); setInitialising(false); }
-    }).catch(() => { if (mounted) setInitialising(false); });
+    }).catch(() => { settled = true; if (mounted) setInitialising(false); });
     const { data: sub } = client.auth.onAuthStateChange((event, next) => {
       setSession(next);
       if (next) setOfflineUser(null);
@@ -74,7 +85,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (event === 'SIGNED_OUT') { setRecoveringPassword(false); setOfflineUser(null); }
     });
     if (Platform.OS === 'ios') AppleAuthentication.isAvailableAsync().then(setAppleAvailable).catch(() => {});
-    return () => { mounted = false; sub.subscription.unsubscribe(); };
+    return () => { mounted = false; clearTimeout(early); sub.subscription.unsubscribe(); };
   }, []);
 
   const client = () => {

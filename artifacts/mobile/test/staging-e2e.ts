@@ -16,12 +16,13 @@
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { createAuthClient, currentAccessToken, signInWithEmail, signUpWithEmail, storedSessionUser, type SupabaseClient } from '@/lib/backend/auth';
+import { accessTokenGetter, authServerProbe, createAuthClient, currentAccessToken, signInWithEmail, signUpWithEmail, storedSessionUser, type SupabaseClient } from '@/lib/backend/auth';
 import { ApiClient, ApiError, AuthRequiredError, NetworkError, type ConnectionState } from '@/lib/backend/http';
 import { endpoints, type Endpoints } from '@/lib/backend/endpoints';
 import { CloudSync } from '@/lib/backend/cloudSync';
 import { MemoryStore, LEGACY_KEYS } from '@/lib/backend/storage';
 import type { Vehicle } from '@/lib/backend/model';
+import { toJourney } from '@/lib/backend/mappers';
 
 const need = (k: string) => {
   const v = process.env[k];
@@ -81,7 +82,7 @@ function device(name: string, store = new MemoryStore()): Device {
   d.auth = createAuthClient({ url: BASE, publishableKey: PUB_KEY, storage: store, fetchImpl: net });
   d.api = new ApiClient({
     baseUrl: API_URL,
-    getAccessToken: () => currentAccessToken(d.auth), // the app's own logic
+    getAccessToken: accessTokenGetter(d.auth, authServerProbe(BASE, PUB_KEY, net)), // the app's own logic
     refreshAccessToken: async () => (await d.auth.auth.refreshSession()).data.session?.access_token ?? null,
     onStatus: (s, detail) => { d.connection = s; d.sync?.reportConnection(s, detail); },
     fetchImpl: net,
@@ -419,12 +420,18 @@ async function run() {
   offClock.t = Date.now();
   const offDrive = await app5.endDrive();
   check('a drive recorded offline is kept on the phone', offDrive?.syncState === 'pending' && app5.status.pendingJourneys === 1);
-  const before = (await (async () => { p1.network = 'up'; return p1.ep.listJourneys(); })()).length;
+  p1.network = 'up';
+  const beforeIds = new Set((await p1.ep.listJourneys()).map((j) => j.id));
+  const before = beforeIds.size;
   await app5.sync();
   await app5.sync(); // retrying must not create a second copy
   const after = await p1.ep.listJourneys();
   check('the offline drive uploads once back online, exactly once', after.length === before + 1 && app5.status.pendingJourneys === 0, `${before} → ${after.length}`);
-  check('its route is available from the server', (app5.data.journeys.find((j) => j.syncState === 'synced' && j.id === after[0]!.id)?.routeCoordinates.length ?? 0) > 5);
+  const uploaded = after.find((j) => !beforeIds.has(j.id));
+  const serverRoute = uploaded ? toJourney(await p1.ep.getJourney(uploaded.id)).routeCoordinates.length : 0;
+  const shown = app5.data.journeys.find((j) => j.id === uploaded?.id);
+  check('its route is available from the server and shown on the phone', serverRoute > 5 && shown?.syncState === 'synced' && shown.routeCoordinates.length > 5,
+    `server ${serverRoute} points, phone ${shown?.routeCoordinates.length ?? 0} points`);
   app5.dispose();
 
   // ─── 16. Same account on a second phone ──────────────────────────────────
@@ -437,9 +444,11 @@ async function run() {
   await app4.refresh();
   const ids = (xs: Array<{ id: string }>) => xs.map((x) => x.id).sort().join(',');
   await app3.refresh();
-  check('same vehicles', ids(app4.data.vehicles) === ids(app3.data.vehicles) && app4.data.vehicles.length === 2);
+  const serverVehicles = (await p1.ep.listVehicles()).length;
+  check('same vehicles', ids(app4.data.vehicles) === ids(app3.data.vehicles) && app4.data.vehicles.length === serverVehicles, `${app4.data.vehicles.length} of ${serverVehicles}`);
   check('same journeys', ids(app4.data.journeys) === ids(app3.data.journeys) && app4.data.journeys.some((j) => j.id === journeyId));
-  check('same saved places and Beauty Spots', ids(app4.data.places) === ids(app3.data.places) && app4.data.places.length === 2);
+  const serverPlaces = (await p1.ep.listLocations()).length;
+  check('same saved places and Beauty Spots', ids(app4.data.places) === ids(app3.data.places) && app4.data.places.length === serverPlaces, `${app4.data.places.length} of ${serverPlaces}`);
   check('same profile', app4.data.profile.name === 'Alex Driver' && app4.data.profile.xp === app3.data.profile.xp);
   check('vehicle photo visible on the second phone', !!app4.data.vehicles.find((v) => v.id === vehicleId)?.imageUri);
   check('legacy device data keys untouched', LEGACY_KEYS.every((k) => !phone2.store.data.has(k)));
@@ -463,8 +472,14 @@ async function run() {
   await coldApp.start();
   check('cached data is available offline after the restart', coldApp.data.vehicles.some((v) => v.id === vehicleId));
   cold.network = 'up';
-  const fresh2 = await currentAccessToken(cold.auth);
-  check('back online: the session refreshes and the API works', !!fresh2 && (await cold.ep.getMe()).id === userA);
+  // The app retries on its own schedule; allow for the probe's few-second throttle.
+  let meId: string | null = null;
+  const backAt = Date.now();
+  for (let i = 0; i < 5 && !meId; i++) {
+    meId = await cold.ep.getMe().then((u) => u.id).catch(() => null);
+    if (!meId) await sleep(2000);
+  }
+  check('back online: the session refreshes and the API works', meId === userA, `after ${Math.round((Date.now() - backAt) / 1000)} s`);
   coldApp.dispose();
   app3.dispose();
   app4.dispose();

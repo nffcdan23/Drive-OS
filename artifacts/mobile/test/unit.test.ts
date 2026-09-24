@@ -577,3 +577,38 @@ test('the saved session user can be read without contacting the server', async (
   await store.setItem('sb-ref-auth-token', 'not json');
   assert.equal(await storedSessionUser(fakeClient, store), null);
 });
+
+import { accessTokenGetter, authServerProbe, createAuthClient, currentAccessToken } from '@/lib/backend/auth';
+
+test('back online after an offline start, the token refreshes at once (not a minute later)', { timeout: 90_000 }, async () => {
+  let online = false;
+  const b64 = (o: object) => Buffer.from(JSON.stringify(o)).toString('base64url');
+  const jwt = (exp: number) => `${b64({ alg: 'HS256' })}.${b64({ sub: 'u1', exp })}.sig`;
+  const user = { id: 'u1', aud: 'authenticated', email: 'a@b.c', app_metadata: {}, user_metadata: {}, created_at: '' };
+  const net = (async (url: string) => {
+    if (!online) throw new TypeError('Network request failed');
+    if (String(url).endsWith('/auth/v1/health')) return new Response('{}', { status: 200 });
+    const exp = Math.floor(Date.now() / 1000) + 3600;
+    return new Response(JSON.stringify({ access_token: jwt(exp), refresh_token: 'r2', expires_in: 3600, expires_at: exp, token_type: 'bearer', user }),
+      { status: 200, headers: { 'content-type': 'application/json' } });
+  }) as typeof fetch;
+  const store = new MemoryStore();
+  const expired = Math.floor(Date.now() / 1000) - 60;
+  await store.setItem('sb-x-auth-token', JSON.stringify({ access_token: jwt(expired), refresh_token: 'r1', expires_in: 3600, expires_at: expired, token_type: 'bearer', user }));
+  const client = createAuthClient({ url: 'https://x.supabase.co', publishableKey: 'sb_publishable_x', storage: store, fetchImpl: net });
+  const clock = { t: 0 };
+  const getToken = accessTokenGetter(client, authServerProbe('https://x.supabase.co', 'sb_publishable_x', net), { now: () => clock.t });
+
+  // Offline: reported as offline, and the saved session is kept.
+  await assert.rejects(getToken(), NetworkError);
+  assert.ok(await store.getItem('sb-x-auth-token'));
+  online = true;
+  clock.t += 6_000; // the app's next retry, after the probe throttle
+  // supabase-js alone keeps replaying the offline failure for a minute…
+  await assert.rejects(currentAccessToken(client), NetworkError);
+  // …the app's getter notices the server is back and refreshes straight away.
+  const t0 = Date.now();
+  const token = await getToken();
+  assert.ok(token && token !== jwt(expired));
+  assert.ok(Date.now() - t0 < 2_000);
+});
