@@ -17,15 +17,20 @@ iPhone (staging build) ──HTTPS──▶ staging API (Railway project "…sta
    - Pick the region closest to the Supabase staging project.
 3. Service → **Settings → Networking → Generate Domain**, with target port left to Railway.
    - Copy the URL, e.g. `https://api-xxxx.up.railway.app`.
-4. **Project Settings → Tokens → Create token** for the project's environment.
+4. **Project Settings → Environments:** rename the project's environment (Railway calls it `production` by default) to **`staging`**.
+   - This keeps "production" out of the staging project entirely.
+5. **Project Settings → Tokens → Create token** for the `staging` environment.
    - This is a *project token*: it only works for this one project and environment.
+6. **Project Settings → General:** copy the **Project ID**.
 
 ## 2. GitHub settings (repository → Settings → Secrets and variables → Actions)
 
 | Name | Type | Value |
 |---|---|---|
-| `RAILWAY_STAGING_TOKEN` | **secret** | the project token from step 4 |
+| `RAILWAY_STAGING_TOKEN` | **secret** | the project token from step 5 |
+| `RAILWAY_STAGING_PROJECT_ID` | variable | the Project ID from step 6 (the token must belong to this project) |
 | `STAGING_API_URL` | variable | the domain from step 3, e.g. `https://api-xxxx.up.railway.app` (no trailing slash) |
+| `RAILWAY_STAGING_ENVIRONMENT` | variable, optional | only if the environment isn't named `staging` |
 | `RAILWAY_STAGING_SERVICE` | variable, optional | only if the service isn't named `api` |
 
 The API's own settings are **not** entered in Railway by hand. Each deploy copies them from the existing `SUPABASE_STAGING_*` secrets, after checking they all belong to the same staging project:
@@ -50,7 +55,7 @@ The API's own settings are **not** entered in Railway by hand. Each deploy copie
 - Or push a commit whose message contains `[deploy api-staging]`.
 
 The job then:
-1. checks the secrets, and that the Railway project is a staging one;
+1. checks the secrets, that the token belongs to `RAILWAY_STAGING_PROJECT_ID`, and that the project's name contains "staging". Every Railway command names the project, environment and service explicitly;
 2. typechecks and builds the API;
 3. sets the variables above;
 4. uploads the commit with `deploy/railway.staging.json` added as its `railway.json`. There is no `railway.json` at the repository root, so production builds are unaffected;

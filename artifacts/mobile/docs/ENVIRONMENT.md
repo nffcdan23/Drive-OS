@@ -69,6 +69,8 @@ Set these as EAS environment variables when the name is final. See `NAMING.md` f
 | `SUPABASE_STAGING_PUBLISHABLE_KEY` | secret | staging jobs |
 | `SUPABASE_STAGING_SECRET_KEY` | secret | staging jobs |
 | `RAILWAY_STAGING_TOKEN` | secret | hosted staging API deploys. It's a Railway **project token** for the separate staging project. |
+| `RAILWAY_STAGING_PROJECT_ID` | **variable** | hosted staging API deploys: the staging Railway project's id. The token must belong to it. |
+| `RAILWAY_STAGING_ENVIRONMENT` | **variable**, optional | the staging project's environment, if it isn't named `staging` |
 | `STAGING_API_URL` | **variable** | hosted staging API deploys and tests: `https://…` domain of the staging service |
 | `RAILWAY_STAGING_SERVICE` | **variable**, optional | the staging service's name if it isn't `api` |
 | `STAGING_SIGNUP_EMAIL_DOMAIN` | **variable**, optional | domain for sign-up test addresses. Only needed if Supabase rejects the default `example.com` once "Confirm email" is off. Use a domain you control; no email is sent to it. |
