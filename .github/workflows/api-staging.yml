@@ -211,6 +211,15 @@ jobs:
           railway up -p "$RAILWAY_PROJECT_ID" -e "$RAILWAY_ENVIRONMENT" -s "$RAILWAY_SERVICE" --ci \
             --message "staging $GITHUB_SHA"
 
+      - name: Show Railway build and deploy logs (on failure)
+        if: failure() && env.MODE == 'deploy'
+        run: |
+          r() { railway "$@" -p "$RAILWAY_PROJECT_ID" -e "$RAILWAY_ENVIRONMENT" -s "$RAILWAY_SERVICE"; }
+          echo "::group::railway logs --help"; railway logs --help || true; echo "::endgroup::"
+          echo "::group::Deployments"; r deployment list || true; echo "::endgroup::"
+          echo "::group::Build log"; r logs --build --lines 300 || true; echo "::endgroup::"
+          echo "::group::Deploy log"; r logs --deployment --lines 200 || true; echo "::endgroup::"
+
       - name: Wait until this commit is serving
         if: env.MODE == 'deploy'
         run: |
