@@ -92,6 +92,9 @@ jobs:
           echo "Secrets are set and refer to the same Supabase staging project."
 
       - name: Confirm the token, project, environment and service (read-only)
+        # Runs even if the step above found a problem, so every issue is reported
+        # at once; deploy steps below still need every check to pass.
+        if: ${{ !cancelled() && env.RAILWAY_TOKEN != '' && env.RAILWAY_PROJECT_ID != '' }}
         run: |
           railway status --json > "$RUNNER_TEMP/railway-status.json"
           python3 - "$RUNNER_TEMP/railway-status.json" <<'PY'
