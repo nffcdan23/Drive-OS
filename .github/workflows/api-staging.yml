@@ -233,6 +233,15 @@ jobs:
               print(json.dumps(scrub(latest), indent=2)[:6000])
           ' || true
           echo "::endgroup::"
+          echo "::group::Deployment events (Railway API)"
+          dep=$(r deployment list --json | python3 -c 'import sys,json; d=json.load(sys.stdin); i=d if isinstance(d,list) else d.get("deployments") or [d]; print(i[0]["id"])' || true)
+          for q in \
+            "{\"query\":\"query { deploymentEvents(id: \\\"$dep\\\", first: 50) { edges { node { step createdAt completedAt payload { error } } } } }\"}" \
+            "{\"query\":\"query { deployment(id: \\\"$dep\\\") { status statusUpdatedAt canRedeploy } }\"}"; do
+            curl -s https://backboard.railway.com/graphql/v2 -H "Project-Access-Token: $RAILWAY_TOKEN" \
+              -H 'Content-Type: application/json' -d "$q" | python3 -m json.tool | head -120 || true
+          done
+          echo "::endgroup::"
           echo "::group::Build log"; r logs --build --lines 300 || true; echo "::endgroup::"
           echo "::group::Deploy log"; r logs --deployment --lines 200 || true; echo "::endgroup::"
 
