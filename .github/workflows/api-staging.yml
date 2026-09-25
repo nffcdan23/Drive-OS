@@ -144,7 +144,20 @@ jobs:
           rm -f "$RUNNER_TEMP/railway-status.json"
           # The token can read the target service's settings (names only are shown).
           railway variables -p "$RAILWAY_PROJECT_ID" -e "$RAILWAY_ENVIRONMENT" -s "$RAILWAY_SERVICE" --json \
-            | python3 -c 'import sys,json; d=json.load(sys.stdin); print("Current variable names on staging/api:", sorted(d) if isinstance(d, dict) else "(unexpected format)")'
+            | python3 -c '
+          import json, os, sys, urllib.parse
+          d = json.load(sys.stdin)
+          if not isinstance(d, dict):
+              print("::error::Unexpected variables format"); sys.exit(1)
+          print("Current variable names on staging/api:", sorted(d))
+          # STAGING_API_URL must be this service'"'"'s own public domain.
+          url = os.environ["STAGING_API_URL"]
+          host = urllib.parse.urlsplit(url if "://" in url else "//" + url).hostname
+          domain = d.get("RAILWAY_PUBLIC_DOMAIN")
+          print(f"STAGING_API_URL host: {host}; staging/api public domain: {domain}")
+          if not domain or host != domain.lower():
+              print("::error::STAGING_API_URL is not the public domain of the staging api service"); sys.exit(1)
+          '
 
       - name: Read-only checks passed; nothing was changed
         if: env.MODE == 'verify'
