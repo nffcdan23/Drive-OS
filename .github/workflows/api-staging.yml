@@ -4,6 +4,8 @@
 # Runs only when asked:
 #   - a push whose commit message contains  [deploy api-staging]
 #   - or "Run workflow" with confirm = deploy-api-staging
+#   - "Run workflow" with confirm = verify-api-staging runs only the read-only
+#     checks below and changes nothing
 #
 # Production is out of reach by construction:
 #   - RAILWAY_STAGING_TOKEN is a Railway *project token*, which Railway scopes to
@@ -23,7 +25,7 @@ on:
   workflow_dispatch:
     inputs:
       confirm:
-        description: 'Type "deploy-api-staging" to deploy the API to the hosted staging service'
+        description: 'Type "deploy-api-staging" to deploy the API to hosted staging, or "verify-api-staging" for the read-only checks only'
         required: true
 
 permissions:
@@ -38,14 +40,16 @@ jobs:
     name: Deploy the API to hosted staging
     if: >-
       (github.event_name == 'push' && contains(github.event.head_commit.message, '[deploy api-staging]')) ||
-      (github.event_name == 'workflow_dispatch' && inputs.confirm == 'deploy-api-staging')
+      (github.event_name == 'workflow_dispatch' && (inputs.confirm == 'deploy-api-staging' || inputs.confirm == 'verify-api-staging'))
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
       RAILWAY_TOKEN: ${{ secrets.RAILWAY_STAGING_TOKEN }}
       RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_STAGING_PROJECT_ID }}
-      RAILWAY_ENVIRONMENT: ${{ vars.RAILWAY_STAGING_ENVIRONMENT || 'staging' }}
-      RAILWAY_SERVICE: ${{ vars.RAILWAY_STAGING_SERVICE || 'api' }}
+      # Fixed on purpose: deploys go only to environment "staging", service "api".
+      RAILWAY_ENVIRONMENT: staging
+      RAILWAY_SERVICE: api
+      MODE: ${{ (github.event_name == 'workflow_dispatch' && inputs.confirm == 'verify-api-staging') && 'verify' || 'deploy' }}
       STAGING_API_URL: ${{ vars.STAGING_API_URL }}
       STAGING_DB_URL: ${{ secrets.SUPABASE_STAGING_DB_URL }}
       SUPABASE_URL: ${{ secrets.SUPABASE_STAGING_URL }}
@@ -87,51 +91,84 @@ jobs:
           esac
           echo "Secrets are set and refer to the same Supabase staging project."
 
-      - name: Confirm the Railway token belongs to the staging project
+      - name: Confirm the token, project, environment and service (read-only)
         run: |
           railway status --json > "$RUNNER_TEMP/railway-status.json"
-          project=$(python3 - "$RUNNER_TEMP/railway-status.json" <<'PY'
+          python3 - "$RUNNER_TEMP/railway-status.json" <<'PY'
           import json, os, sys
           want = os.environ["RAILWAY_PROJECT_ID"]
-          def walk(o):
+          status = json.load(open(sys.argv[1]))
+          def find_project(o):
               if isinstance(o, dict):
                   if o.get("id") == want and isinstance(o.get("name"), str):
-                      yield o["name"]
+                      return o
                   for v in o.values():
-                      yield from walk(v)
+                      r = find_project(v)
+                      if r: return r
               elif isinstance(o, list):
                   for v in o:
-                      yield from walk(v)
-          print(next(walk(json.load(open(sys.argv[1]))), ""))
+                      r = find_project(v)
+                      if r: return r
+              return None
+          def names_under(o, word, inside=False, out=None):
+              out = set() if out is None else out
+              if isinstance(o, dict):
+                  if inside and isinstance(o.get("name"), str):
+                      out.add(o["name"])
+                  for k, v in o.items():
+                      names_under(v, word, inside or word in k.lower(), out)
+              elif isinstance(o, list):
+                  for v in o:
+                      names_under(v, word, inside, out)
+              return out
+          project = find_project(status)
+          fail = lambda msg: (print(f"::error::{msg}; refusing to continue."), sys.exit(1))
+          if not project:
+              fail("The Railway token does not belong to RAILWAY_STAGING_PROJECT_ID")
+          envs = names_under(project, "environment")
+          services = names_under(project, "service")
+          print(f"Railway project: {project['name']}")
+          print(f"Environments: {sorted(envs)}")
+          print(f"Services: {sorted(services)}")
+          if "staging" not in project["name"].lower():
+              fail(f'Project "{project["name"]}" does not have "staging" in its name')
+          if os.environ["RAILWAY_ENVIRONMENT"] not in envs:
+              fail('The project has no environment named "staging"')
+          if os.environ["RAILWAY_SERVICE"] not in services:
+              fail('The project has no service named "api"')
+          print("Token, project, environment and service verified.")
           PY
-          )
           rm -f "$RUNNER_TEMP/railway-status.json"
-          if [ -z "$project" ]; then
-            echo "::error::The Railway token does not belong to project RAILWAY_STAGING_PROJECT_ID; refusing to deploy."; exit 1
-          fi
-          echo "Railway project: $project"
-          case "$(printf '%s' "$project" | tr '[:upper:]' '[:lower:]')" in
-            *staging*) ;;
-            *) echo "::error::Railway project \"$project\" does not have \"staging\" in its name; refusing to deploy."; exit 1 ;;
-          esac
+          # The token can read the target service's settings (names only are shown).
+          railway variables -p "$RAILWAY_PROJECT_ID" -e "$RAILWAY_ENVIRONMENT" -s "$RAILWAY_SERVICE" --json \
+            | python3 -c 'import sys,json; d=json.load(sys.stdin); print("Current variable names on staging/api:", sorted(d) if isinstance(d, dict) else "(unexpected format)")'
+
+      - name: Read-only checks passed; nothing was changed
+        if: env.MODE == 'verify'
+        run: echo "verify-api-staging mode stops here."
 
       - uses: pnpm/action-setup@v4
+        if: env.MODE == 'deploy'
 
       - uses: actions/setup-node@v4
+        if: env.MODE == 'deploy'
         with:
           node-version: '22'
           cache: pnpm
 
       - name: Install dependencies
+        if: env.MODE == 'deploy'
         run: pnpm install --frozen-lockfile
 
       - name: Typecheck and build the API before deploying
+        if: env.MODE == 'deploy'
         run: |
           pnpm run typecheck:libs
           pnpm --filter @workspace/api-server run typecheck
           pnpm --filter @workspace/api-server run build
 
       - name: Set the staging service's variables (staging values only)
+        if: env.MODE == 'deploy'
         run: |
           put() {  # value on stdin, never on the command line or in the log
             railway variables -p "$RAILWAY_PROJECT_ID" -e "$RAILWAY_ENVIRONMENT" -s "$RAILWAY_SERVICE" \
@@ -147,6 +184,7 @@ jobs:
           echo "Variables set (values not shown)."
 
       - name: Deploy this commit
+        if: env.MODE == 'deploy'
         run: |
           # Upload a clean copy of the commit with the staging build settings added.
           dir="$RUNNER_TEMP/deploy"
@@ -158,6 +196,7 @@ jobs:
             --message "staging $GITHUB_SHA"
 
       - name: Wait until this commit is serving
+        if: env.MODE == 'deploy'
         run: |
           url="${STAGING_API_URL%/}"
           for i in $(seq 1 60); do
@@ -171,11 +210,13 @@ jobs:
           [ "$ready" = '{"status":"ok","database":"ok"}' ]
 
       - name: Install PostgreSQL client
+        if: env.MODE == 'deploy'
         run: |
           sudo apt-get update -q
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q postgresql-client-16
 
       - name: Test the app's data layer against the hosted staging API
+        if: env.MODE == 'deploy'
         env:
           EXPECTED_RELEASE: ${{ github.sha }}
           SIGNUP_TEST_EMAIL_DOMAIN: ${{ vars.STAGING_SIGNUP_EMAIL_DOMAIN }}

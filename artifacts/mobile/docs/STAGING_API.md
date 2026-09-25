@@ -30,8 +30,6 @@ iPhone (staging build) ──HTTPS──▶ staging API (Railway project "…sta
 | `RAILWAY_STAGING_TOKEN` | **secret** | the project token from step 5 |
 | `RAILWAY_STAGING_PROJECT_ID` | variable | the Project ID from step 6 (the token must belong to this project) |
 | `STAGING_API_URL` | variable | the domain from step 3, e.g. `https://api-xxxx.up.railway.app` (no trailing slash) |
-| `RAILWAY_STAGING_ENVIRONMENT` | variable, optional | only if the environment isn't named `staging` |
-| `RAILWAY_STAGING_SERVICE` | variable, optional | only if the service isn't named `api` |
 
 The API's own settings are **not** entered in Railway by hand. Each deploy copies them from the existing `SUPABASE_STAGING_*` secrets, after checking they all belong to the same staging project:
 
@@ -50,6 +48,10 @@ The API's own settings are **not** entered in Railway by hand. Each deploy copie
 - `SUPABASE_JWT_SECRET` isn't needed, because staging tokens are checked against Supabase's public keys.
 
 ## 3. Deploy
+
+Deploys go only to environment **`staging`**, service **`api`**; those names are fixed in the workflow.
+
+To run just the read-only checks (token, project, environment, service, URL), dispatch the workflow with `confirm = verify-api-staging`. It changes nothing.
 
 - Push a commit whose message contains `[deploy api-staging]`.
 - Or dispatch the "API staging deploy" workflow on this branch with `confirm = deploy-api-staging`.
