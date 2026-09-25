@@ -197,6 +197,7 @@ jobs:
           printf '%s' "$SUPABASE_SECRET_KEY" | put SUPABASE_SECRET_KEY
           printf '%s' 5000 | put STORAGE_WORKER_INTERVAL_MS
           printf '%s' "$GITHUB_SHA" | put APP_RELEASE
+          printf '%s' Dockerfile | put RAILWAY_DOCKERFILE_PATH
           echo "Variables set (values not shown)."
 
       - name: Deploy this commit
@@ -207,6 +208,9 @@ jobs:
           mkdir -p "$dir"
           git archive HEAD | tar -x -C "$dir"
           cp deploy/railway.staging.json "$dir/railway.json"
+          # Railway picks a root Dockerfile over its automatic builder. This is the
+          # uploaded copy only; the repository root has no Dockerfile.
+          cp deploy/Dockerfile.staging "$dir/Dockerfile"
           cd "$dir"
           railway up -p "$RAILWAY_PROJECT_ID" -e "$RAILWAY_ENVIRONMENT" -s "$RAILWAY_SERVICE" --ci \
             --message "staging $GITHUB_SHA"

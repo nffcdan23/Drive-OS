@@ -1,6 +1,6 @@
 # Staging image for the Express API (artifacts/api-server).
-# Used only by the hosted staging service: deploy/railway.staging.json points
-# at this file, and that config is added to staging uploads only.
+# Used only by the hosted staging service: the staging deploy copies it to the
+# root of the uploaded copy as "Dockerfile" (never to the repository root).
 # Toolchain versions match mise.toml (what production's Railway build uses).
 
 FROM node:22.22.2-bookworm-slim AS build
