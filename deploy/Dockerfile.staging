@@ -1,0 +1,20 @@
+# Staging image for the Express API (artifacts/api-server).
+# Used only by the hosted staging service: deploy/railway.staging.json points
+# at this file, and that config is added to staging uploads only.
+# Toolchain versions match mise.toml (what production's Railway build uses).
+
+FROM node:22.22.2-bookworm-slim AS build
+WORKDIR /app
+RUN corepack enable && corepack prepare pnpm@10.33.0 --activate
+COPY . .
+# Only the API and the workspace libraries it depends on.
+RUN pnpm install --frozen-lockfile --filter "@workspace/api-server..." \
+ && pnpm --filter @workspace/api-server run build
+
+FROM node:22.22.2-bookworm-slim
+WORKDIR /app
+ENV NODE_ENV=production
+# The esbuild bundle is self-contained (dependencies are bundled in).
+COPY --from=build --chown=node:node /app/artifacts/api-server/dist ./dist
+USER node
+CMD ["node", "--enable-source-maps", "dist/index.mjs"]

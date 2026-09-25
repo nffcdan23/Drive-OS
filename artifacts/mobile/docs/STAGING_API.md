@@ -62,7 +62,7 @@ The job then:
 1. checks the secrets, that the token belongs to `RAILWAY_STAGING_PROJECT_ID`, and that the project's name contains "staging". Every Railway command names the project, environment and service explicitly;
 2. typechecks and builds the API;
 3. sets the variables above;
-4. uploads the commit with `deploy/railway.staging.json` added as its `railway.json`. There is no `railway.json` at the repository root, so production builds are unaffected;
+4. uploads the commit with `deploy/railway.staging.json` added as its `railway.json`. That config builds `deploy/Dockerfile.staging`, the same Node 22.22.2 and pnpm 10.33.0 as `mise.toml`, and runs the bundled API as a non-root user. There is no `railway.json` at the repository root, so production builds are unaffected;
 5. waits until `/api/healthz` reports this commit and `/api/readyz` reports the database;
 6. runs the whole mobile staging test suite against the hosted URL.
 
