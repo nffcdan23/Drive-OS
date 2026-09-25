@@ -215,8 +215,24 @@ jobs:
         if: failure() && env.MODE == 'deploy'
         run: |
           r() { railway "$@" -p "$RAILWAY_PROJECT_ID" -e "$RAILWAY_ENVIRONMENT" -s "$RAILWAY_SERVICE"; }
-          echo "::group::railway logs --help"; railway logs --help || true; echo "::endgroup::"
           echo "::group::Deployments"; r deployment list || true; echo "::endgroup::"
+          echo "::group::Latest deployment (JSON, status and reason)"
+          r deployment list --json | python3 -c '
+          import json, sys
+          d = json.load(sys.stdin)
+          items = d if isinstance(d, list) else d.get("deployments") or d.get("items") or [d]
+          if items:
+              latest = items[0]
+              # Show everything except anything that looks like variables.
+              def scrub(o):
+                  if isinstance(o, dict):
+                      return {k: ("<hidden>" if "variable" in k.lower() or k.lower() == "env" else scrub(v)) for k, v in o.items()}
+                  if isinstance(o, list):
+                      return [scrub(v) for v in o]
+                  return o
+              print(json.dumps(scrub(latest), indent=2)[:6000])
+          ' || true
+          echo "::endgroup::"
           echo "::group::Build log"; r logs --build --lines 300 || true; echo "::endgroup::"
           echo "::group::Deploy log"; r logs --deployment --lines 200 || true; echo "::endgroup::"
 
