@@ -504,7 +504,18 @@ async function run() {
   const foreign = await p1.ep.lookupVehicle('B-MW 1234').catch((e) => e);
   check('a non-UK registration is refused without contacting DVLA', foreign instanceof ApiError && foreign.code === 'invalid_registration');
   const testReg = process.env.DVLA_TEST_REGISTRATION?.trim() || '';
-  const probe = await p1.ep.lookupVehicle(testReg || 'AB12 CDE').catch((e) => e);
+  const probeReg = testReg || 'AB12 CDE';
+  const masked = probeReg.replace(/\s+/g, '').toUpperCase().replace(/^(.{4}).*$/, '$1***');
+  const probe = await p1.ep.lookupVehicle(probeReg).catch((e) => e);
+  if (!(probe instanceof ApiError && probe.code === 'lookup_not_configured')) {
+    const outcome = probe instanceof Error ? (probe as ApiError).code ?? 'error' : 'found';
+    console.log(`     live DVLA lookup of ${masked} through the hosted API: ${outcome}`);
+  }
+  const leakKey = process.env.LEAK_CHECK_DVLA_KEY?.trim();
+  if (leakKey) {
+    const bodies = [probe, foreign].map((x) => (x instanceof ApiError ? JSON.stringify({ code: x.code, message: x.message }) : JSON.stringify(x)));
+    check('lookup responses never contain the DVLA key', bodies.every((b) => !b.includes(leakKey)));
+  }
   if (probe instanceof ApiError && probe.code === 'lookup_not_configured') {
     console.log('     DVLA lookup is not configured on this API (no key): live checks skipped');
     check('without a key the API says lookup is not connected', true);

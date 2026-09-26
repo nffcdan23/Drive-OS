@@ -292,4 +292,24 @@ jobs:
           # Optional: a registration DVLA knows (e.g. one of DVLA's UAT test registrations).
           DVLA_TEST_REGISTRATION: ${{ vars.DVLA_STAGING_TEST_REGISTRATION }}
           SIGNUP_TEST_EMAIL_DOMAIN: ${{ vars.STAGING_SIGNUP_EMAIL_DOMAIN }}
+          # Only compared against lookup responses (never printed or sent anywhere).
+          LEAK_CHECK_DVLA_KEY: ${{ secrets.DVLA_STAGING_API_KEY }}
         run: pnpm --filter @workspace/mobile run test:staging
+
+      - name: The DVLA key is not in the staging logs
+        if: env.MODE == 'deploy'
+        run: |
+          if [ -z "$DVLA_STAGING_API_KEY" ]; then echo "No DVLA key configured; nothing to check."; exit 0; fi
+          logs="$RUNNER_TEMP/railway-logs.txt"
+          r() { railway "$@" -p "$RAILWAY_PROJECT_ID" -e "$RAILWAY_ENVIRONMENT" -s "$RAILWAY_SERVICE"; }
+          { r logs --deployment --lines 2000; r logs --build --lines 2000; } > "$logs" 2>&1 || true
+          lines=$(wc -l < "$logs")
+          # Compared literally and quietly: the key is never printed.
+          if grep -qF -- "$DVLA_STAGING_API_KEY" "$logs"; then
+            rm -f "$logs"; echo "::error::The DVLA key appears in the staging logs"; exit 1
+          fi
+          if grep -qiE "x-api-key: *[A-Za-z0-9]" "$logs"; then
+            rm -f "$logs"; echo "::error::An x-api-key header value appears in the staging logs"; exit 1
+          fi
+          rm -f "$logs"
+          echo "Checked $lines lines of staging runtime and build logs: no DVLA key."
