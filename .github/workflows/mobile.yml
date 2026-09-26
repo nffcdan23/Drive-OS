@@ -62,3 +62,55 @@ jobs:
             echo "::error::A server secret appears to be in the mobile app"; exit 1
           fi
           echo "No server secrets found in the app."
+
+      - name: The app never talks to DVLA directly
+        run: |
+          # Registration lookups go through the API, which alone holds the DVLA
+          # key. The app must not contain DVLA's host, the key header or a
+          # public (EXPO_PUBLIC_*) DVLA setting. Tests are excluded: they check
+          # that the build refuses such settings.
+          if grep -rEn "driver-vehicle-licensing|x-api-key|EXPO_PUBLIC_[A-Z0-9_]*(DVLA|VES_)" artifacts/mobile lib/vehicle-registration \
+               --include=*.ts --include=*.tsx --include=*.js --include=*.json --include=.env* \
+               --exclude-dir=node_modules --exclude-dir=.expo --exclude-dir=test; then
+            echo "::error::DVLA access details found in the app"; exit 1
+          fi
+          echo "No DVLA access details in the app."
+
+  dvla-key-scan:
+    name: The DVLA key is not in the app bundle
+    # Needs the repository secret, so it runs on pushes (not fork pull requests).
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      DVLA_KEY: ${{ secrets.DVLA_STAGING_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build a staging iOS bundle and search it (and the source) for the key
+        run: |
+          if [ -z "$DVLA_KEY" ]; then
+            echo "DVLA_STAGING_API_KEY is not set; nothing to compare against."
+            exit 0
+          fi
+          out="$RUNNER_TEMP/bundle"
+          (cd artifacts/mobile && EXPO_PUBLIC_APP_ENV=staging \
+            EXPO_PUBLIC_SUPABASE_URL=https://placeholder.supabase.co \
+            EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY=sb_publishable_placeholder \
+            EXPO_PUBLIC_API_URL=https://api.example.invalid \
+            CI=1 pnpm exec expo export --platform ios --output-dir "$out" > /dev/null)
+          # grep -F: the key is compared literally and never printed (-q).
+          if grep -rqF -- "$DVLA_KEY" "$out" || grep -rqF --exclude-dir=node_modules --exclude-dir=.git -- "$DVLA_KEY" .; then
+            echo "::error::The DVLA key was found in the app bundle or the repository"; exit 1
+          fi
+          echo "The DVLA key is not in the app bundle or the repository."

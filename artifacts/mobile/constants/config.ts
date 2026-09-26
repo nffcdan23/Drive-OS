@@ -27,8 +27,10 @@ export const CONFIG = {
   },
 };
 
-// Test registrations for demo DVLA lookup
-// Real lookup will NOT return data for registrations not on this list
+// Demo Mode (development builds only): when the server has no DVLA key, these
+// test registrations fill the vehicle form with data clearly labelled
+// "Demo Mode — test data, not from DVLA". Any other registration reports that
+// live DVLA lookup isn't connected. Never used in staging or production builds.
 export const TEST_REGISTRATIONS: Record<string, {
   make: string; model: string; year: number; colour: string; fuelType: string; engine: string;
 }> = {

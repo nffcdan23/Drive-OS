@@ -11,10 +11,14 @@
  *   SUPABASE_JWT_SECRET   only for projects that still sign tokens with the
  *                         legacy shared secret (HS256). Projects using signing
  *                         keys are verified against the public JWKS instead.
- *   DVLA_API_KEY          optional; enables registration lookup
+ *   DVLA_API_KEY          optional; enables registration lookup (server only)
+ *   DVLA_VES_URL          optional; must be DVLA's live or UAT host (see lib/dvla)
+ *   DVLA_TIMEOUT_MS       optional; DVLA request timeout (default 8000)
  *   STORAGE_WORKER        "off" disables the Storage clean-up worker
  *   STORAGE_WORKER_INTERVAL_MS  how often it runs (default 60000)
  */
+import { readDvlaConfig, type DvlaConfig } from "./lib/dvla";
+
 export interface Config {
   port: number;
   env: string;
@@ -22,8 +26,7 @@ export interface Config {
   supabaseUrl: string | null;
   supabaseSecretKey: string | null;
   jwtSecret: string | null;
-  dvlaApiKey: string | null;
-  dvlaUrl: string;
+  dvla: DvlaConfig;
   storageWorker: boolean;
   storageWorkerIntervalMs: number;
 }
@@ -44,8 +47,8 @@ function read(env: NodeJS.ProcessEnv): Config {
     supabaseUrl,
     supabaseSecretKey: env.SUPABASE_SECRET_KEY || null,
     jwtSecret: env.SUPABASE_JWT_SECRET || null,
-    dvlaApiKey: env.DVLA_API_KEY || null,
-    dvlaUrl: env.DVLA_VES_URL ?? "https://driver-vehicle-licensing.api.gov.uk/vehicle-enquiry/v1/vehicles",
+    // Throws for a URL that isn't DVLA's, so the key can't be sent elsewhere.
+    dvla: readDvlaConfig(env),
     storageWorker: env.STORAGE_WORKER !== "off",
     storageWorkerIntervalMs: Math.max(200, Number(env.STORAGE_WORKER_INTERVAL_MS) || 60_000),
   };

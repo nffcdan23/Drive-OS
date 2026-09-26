@@ -44,7 +44,12 @@ The API's own settings are **not** entered in Railway by hand. Each deploy copie
 | `APP_RELEASE` | the commit being deployed (lets CI confirm it is live) |
 | `PORT` | provided by Railway |
 
-- `DVLA_API_KEY` is deliberately **not** copied. Registration lookup is off on staging unless you add a separate staging key in Railway yourself.
+- **DVLA lookup (optional).** Add the GitHub secret `DVLA_STAGING_API_KEY` to turn registration lookup on for staging. Each deploy then sets `DVLA_API_KEY` and `DVLA_VES_URL` on the staging service only.
+  - `DVLA_VES_URL` comes from the variable `DVLA_STAGING_VES_URL`, which must be DVLA's live or UAT vehicle-enquiry URL; the default is live.
+  - UAT (`https://uat.driver-vehicle-licensing.api.gov.uk/vehicle-enquiry/v1/vehicles`) with a UAT key is recommended, so staging never uses the live quota.
+  - Without the secret, staging answers lookups with `lookup_not_configured`, and the app says live lookup isn't connected.
+  - Optionally set the variable `DVLA_STAGING_TEST_REGISTRATION` to a registration DVLA knows (for UAT, one of DVLA's test registrations); the hosted test suite then checks a real answer with a single DVLA call.
+  - The key is never copied into the app. CI fails if it appears in the app bundle or the repository.
 - `SUPABASE_JWT_SECRET` isn't needed, because staging tokens are checked against Supabase's public keys.
 
 ## 3. Deploy

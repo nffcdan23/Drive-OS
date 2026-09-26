@@ -7,11 +7,13 @@
     "dev": "export NODE_ENV=development && pnpm run build && pnpm run start",
     "build": "node ./build.mjs",
     "start": "node --enable-source-maps ./dist/index.mjs",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test:unit": "node --experimental-transform-types --no-warnings --test --test-reporter=spec test/dvla.unit.test.ts"
   },
   "dependencies": {
     "@workspace/api-zod": "workspace:*",
     "@workspace/db": "workspace:*",
+    "@workspace/vehicle-registration": "workspace:*",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.6",
     "drizzle-orm": "catalog:",

@@ -36,12 +36,21 @@ export interface ApiClientOptions {
   timeoutMs?: number;
 }
 
+export interface RequestOptions {
+  /**
+   * Don't report a 5xx to the connection indicator. For endpoints whose
+   * failures come from a third party (e.g. DVLA): the API itself is fine, so
+   * the app-wide "server problem" banner would be misleading.
+   */
+  quiet?: boolean;
+}
+
 export class ApiClient {
   constructor(private readonly opts: ApiClientOptions) {}
 
   get baseUrl() { return this.opts.baseUrl; }
 
-  async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  async request<T>(method: string, path: string, body?: unknown, options: RequestOptions = {}): Promise<T> {
     let token: string | null;
     try {
       token = await this.opts.getAccessToken();
@@ -72,7 +81,7 @@ export class ApiClient {
     try { json = text ? JSON.parse(text) : null; } catch { json = null; }
     if (res.status >= 500) {
       const err = errorFrom(res.status, json, 'The server had a problem. Try again shortly.');
-      this.opts.onStatus?.('server_error', err.message);
+      if (!options.quiet) this.opts.onStatus?.('server_error', err.message);
       throw err;
     }
     this.opts.onStatus?.('online');
@@ -81,7 +90,7 @@ export class ApiClient {
   }
 
   get<T>(path: string) { return this.request<T>('GET', path); }
-  post<T>(path: string, body: unknown = {}) { return this.request<T>('POST', path, body); }
+  post<T>(path: string, body: unknown = {}, options?: RequestOptions) { return this.request<T>('POST', path, body, options); }
   put<T>(path: string, body: unknown) { return this.request<T>('PUT', path, body); }
   patch<T>(path: string, body: unknown) { return this.request<T>('PATCH', path, body); }
   delete<T = void>(path: string, body?: unknown) { return this.request<T>('DELETE', path, body); }

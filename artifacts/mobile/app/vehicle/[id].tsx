@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useRef } from 'react';
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity, Platform, Alert,
   TextInput, Image, ActivityIndicator,
@@ -11,12 +11,18 @@ import { useApp, Vehicle } from '@/context/AppContext';
 import * as ImagePicker from 'expo-image-picker';
 import * as Haptics from 'expo-haptics';
 import { TEST_REGISTRATIONS } from '@/constants/config';
+import { displayRegistration, normaliseRegistration } from '@workspace/vehicle-registration';
+import {
+  acceptConflicts, demoSuggestions, FIELD_LABELS, initialSources, lookupErrorMessage, lookupInputProblem,
+  markEdited, mergeLookup, type Conflict, type FieldSources, type LookupField, type Suggestions,
+} from '@/lib/backend/vehicleLookup';
+import { ApiError } from '@/lib/backend/http';
 
 type VehicleForm = Omit<Vehicle, 'id' | 'isActive' | 'fuelPercentage'>;
 
-function generateId(): string {
-  return Date.now().toString() + Math.random().toString(36).substring(2, 9);
-}
+type LookupState =
+  | { kind: 'found' | 'demo'; message: string; conflicts: Conflict[]; suggested: Suggestions }
+  | { kind: 'error'; message: string };
 
 const BLANK_FORM: VehicleForm = {
   nickname: '',
@@ -48,17 +54,27 @@ export default function VehicleDetailScreen() {
   const [form, setForm] = useState<VehicleForm>(() => {
     if (existing) {
       const { id: _id, isActive: _isActive, fuelPercentage: _fuel, ...rest } = existing;
-      return rest;
+      return { ...rest, registration: displayRegistration(rest.registration) };
     }
     return BLANK_FORM;
   });
 
-  const [lookupReg, setLookupReg] = useState('');
+  // Where each lookup-able field's value came from: a lookup never replaces
+  // what the user typed or had saved.
+  const [sources, setSources] = useState<FieldSources>(() => initialSources(existing ?? null));
   const [lookupLoading, setLookupLoading] = useState(false);
-  const [lookupResult, setLookupResult] = useState<string | null>(null);
+  const [lookup, setLookup] = useState<LookupState | null>(null);
+  // Latest values, so a lookup that finishes after the user kept typing
+  // merges into what's on screen now, not what was there when it started.
+  const formRef = useRef(form);
+  formRef.current = form;
+  const sourcesRef = useRef(sources);
+  sourcesRef.current = sources;
 
   const handleChange = useCallback(<K extends keyof VehicleForm>(field: K, value: VehicleForm[K]) => {
     setForm((prev) => ({ ...prev, [field]: value }));
+    setSources((prev) => markEdited(prev, field));
+    if (field === 'registration') setLookup(null);
   }, []);
 
   const handleSave = useCallback(() => {
@@ -114,65 +130,70 @@ export default function VehicleDetailScreen() {
     handleChange('imageUri', null);
   }, [handleChange]);
 
-  /** Turns a failed lookup into something the user can act on. */
-  function lookupErrorMessage(status: number | undefined): string {
-    if (status === 404) return 'No vehicle found with that registration. Enter the details manually.';
-    if (status === 400) return "That doesn't look like a valid UK registration.";
-    if (status === 429) return 'Too many lookups just now — try again shortly.';
-    if (status === 503) return 'Vehicle lookup is not set up on the server yet.';
-    return 'Could not reach the lookup service. Check your connection and try again.';
-  }
+  /** Applies suggestions (from DVLA or Demo Mode) without replacing the user's own values. */
+  const applySuggestions = useCallback((registration: string, suggested: Suggestions, kind: 'found' | 'demo', intro: string) => {
+    const merged = mergeLookup(formRef.current, sourcesRef.current, registration, suggested);
+    formRef.current = merged.form;
+    sourcesRef.current = merged.sources;
+    setForm(merged.form);
+    setSources(merged.sources);
+    const filled = merged.applied.map((f) => FIELD_LABELS[f]);
+    const parts = [intro];
+    if (filled.length) parts.push(`Filled in ${filled.join(', ')}.`);
+    if (merged.conflicts.length) parts.push(`Kept your ${merged.conflicts.map((c) => FIELD_LABELS[c.field]).join(', ')}.`);
+    if (kind === 'found') parts.push("DVLA doesn't publish the model — add it below.");
+    setLookup({ kind, message: parts.join(' '), conflicts: merged.conflicts, suggested });
+  }, []);
+
+  const handleUseSuggested = useCallback(() => {
+    if (!lookup || lookup.kind === 'error') return;
+    const next = acceptConflicts(form, sources, lookup.conflicts, lookup.suggested);
+    setForm(next.form);
+    setSources(next.sources);
+    setLookup({ ...lookup, conflicts: [], message: `${lookup.message} Used the ${lookup.kind === 'demo' ? 'Demo Mode' : "DVLA"} values instead.` });
+  }, [form, sources, lookup]);
 
   const handleLookup = useCallback(async () => {
-    const cleaned = lookupReg.replace(/\s+/g, '').toUpperCase();
-    if (!cleaned) {
-      Alert.alert('Enter registration', 'Type a registration number to look up.');
+    const problem = lookupInputProblem(form.registration);
+    if (problem) {
+      setLookup({ kind: 'error', message: problem });
       return;
     }
+    const cleaned = normaliseRegistration(form.registration);
     setLookupLoading(true);
-    setLookupResult(null);
-
+    setLookup(null);
+    // The registration was changed while the lookup ran: its answer no longer applies.
+    const stale = () => normaliseRegistration(formRef.current.registration) !== cleaned;
     try {
       const found = await lookupVehicle(cleaned);
-      setForm((prev) => ({
-        ...prev,
-        registration: found.registration,
-        // Blank fields are left as they were rather than wiping what was typed
-        make:     found.make   || prev.make,
-        colour:   found.colour || prev.colour,
-        engine:   found.engine || prev.engine,
-        year:     found.year   ?? prev.year,
-        fuelType: found.fuelType ?? prev.fuelType,
-      }));
-      const label = [found.year, found.make, found.colour].filter(Boolean).join(' ');
-      setLookupResult(`Found: ${label || cleaned}. DVLA doesn't publish the model — add it below.`);
+      if (stale()) return;
+      const v = found.suggested;
+      const label = [v.year, v.make, v.colour].filter(Boolean).join(' · ');
+      applySuggestions(found.displayRegistration, v, 'found', `Found ${label || found.displayRegistration} (DVLA).`);
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     } catch (err) {
-      const status = (err as { status?: number }).status;
-      // In development, fall back to the test plates so the form can be
-      // exercised without a configured key or a real API call.
-      const demo = __DEV__ ? TEST_REGISTRATIONS[cleaned] : undefined;
-      if (demo && (status === 503 || status === undefined)) {
-        setForm((prev) => ({
-          ...prev,
-          registration: cleaned,
-          make: demo.make,
-          model: demo.model,
-          year: demo.year,
-          colour: demo.colour,
-          fuelType: demo.fuelType as VehicleForm['fuelType'],
-          engine: demo.engine,
-        }));
-        setLookupResult(`Found (test data): ${demo.year} ${demo.make} ${demo.model}`);
+      if (stale()) return;
+      // Demo Mode (development builds only, and only when the server has no
+      // DVLA key): a few test registrations fill the form, clearly labelled.
+      const notConnected = err instanceof ApiError && err.code === 'lookup_not_configured';
+      const demo = __DEV__ && notConnected ? TEST_REGISTRATIONS[cleaned] : undefined;
+      if (demo) {
+        applySuggestions(displayRegistration(cleaned), demoSuggestions(demo), 'demo', `Demo Mode — test data, not from DVLA: ${demo.year} ${demo.make} ${demo.model}.`);
+        setForm((prev) => (prev.model.trim() ? prev : { ...prev, model: demo.model }));
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       } else {
-        setLookupResult(lookupErrorMessage(status));
+        const suffix = __DEV__ && notConnected ? ' (Demo Mode only knows its test registrations.)' : '';
+        setLookup({ kind: 'error', message: lookupErrorMessage(err) + suffix });
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
       }
     } finally {
       setLookupLoading(false);
     }
-  }, [lookupReg]);
+  }, [form, applySuggestions, lookupVehicle]);
+
+  /** " · from DVLA" after a label whose value came from a lookup. */
+  const fromLookup = (field: LookupField) =>
+    sources[field] === 'dvla' ? (lookup?.kind === 'demo' ? ' · Demo Mode' : ' · from DVLA') : '';
 
   const styles = StyleSheet.create({
     container: { flex: 1, backgroundColor: colors.background },
@@ -228,6 +249,8 @@ export default function VehicleDetailScreen() {
     lookupResult: { marginTop: 8, fontSize: 12, fontFamily: 'Inter_400Regular' },
     lookupSuccess: { color: '#22c55e' },
     lookupFail: { color: colors.mutedForeground },
+    lookupUseBtn: { marginTop: 8, alignSelf: 'flex-start', paddingVertical: 6, paddingHorizontal: 10, borderRadius: 8, borderWidth: 1, borderColor: colors.primary },
+    lookupUseText: { fontSize: 12, color: colors.primary, fontFamily: 'Inter_600SemiBold' },
     inputLabel: { fontSize: 13, color: colors.mutedForeground, fontFamily: 'Inter_500Medium', marginBottom: 5, marginTop: 12 },
     input: {
       backgroundColor: colors.card, borderRadius: 12, padding: 13,
@@ -251,7 +274,7 @@ export default function VehicleDetailScreen() {
     saveBtnText: { fontSize: 16, fontWeight: '700', color: '#fff', fontFamily: 'Inter_700Bold' },
   });
 
-  const fuelTypes: Array<VehicleForm['fuelType']> = ['petrol', 'diesel', 'electric', 'hybrid'];
+  const fuelTypes: Array<VehicleForm['fuelType']> = ['petrol', 'diesel', 'electric', 'hybrid', 'other'];
 
   return (
     <View style={styles.container}>
@@ -293,23 +316,25 @@ export default function VehicleDetailScreen() {
           )}
         </TouchableOpacity>
 
-        {/* Registration lookup */}
-        <Text style={styles.sectionTitle}>Registration Lookup</Text>
+        {/* Registration (with optional DVLA lookup) */}
+        <Text style={styles.sectionTitle}>Registration</Text>
         <View style={styles.lookupCard}>
           <Text style={styles.lookupNote}>
-            Fills in make, colour, fuel and engine size from DVLA. Model and performance
-            figures aren't published by DVLA — add those yourself.
+            Look up a UK registration to fill in make, colour, fuel, year and engine size from DVLA.
+            Nothing you've typed is replaced, and you can always enter the details yourself
+            (including non-UK registrations).
           </Text>
           <View style={styles.lookupRow}>
             <TextInput
               style={styles.lookupInput}
               placeholder="AB12 CDE"
               placeholderTextColor={colors.mutedForeground}
-              value={lookupReg}
-              onChangeText={setLookupReg}
+              value={form.registration}
+              onChangeText={(v) => handleChange('registration', v.toUpperCase())}
+              onBlur={() => setForm((prev) => ({ ...prev, registration: displayRegistration(prev.registration) }))}
               autoCapitalize="characters"
               autoCorrect={false}
-              maxLength={8}
+              maxLength={12}
             />
             <TouchableOpacity style={styles.lookupBtn} onPress={handleLookup} disabled={lookupLoading}>
               {lookupLoading
@@ -317,10 +342,17 @@ export default function VehicleDetailScreen() {
                 : <Text style={styles.lookupBtnText}>Look up</Text>}
             </TouchableOpacity>
           </View>
-          {lookupResult && (
-            <Text style={[styles.lookupResult, lookupResult.startsWith('Found') ? styles.lookupSuccess : styles.lookupFail]}>
-              {lookupResult}
+          {lookup && (
+            <Text style={[styles.lookupResult, lookup.kind === 'error' ? styles.lookupFail : styles.lookupSuccess]}>
+              {lookup.message}
             </Text>
+          )}
+          {lookup && lookup.kind !== 'error' && lookup.conflicts.length > 0 && (
+            <TouchableOpacity style={styles.lookupUseBtn} onPress={handleUseSuggested}>
+              <Text style={styles.lookupUseText}>
+                Use {lookup.kind === 'demo' ? 'Demo Mode' : "DVLA's"} values: {lookup.conflicts.map((c) => `${FIELD_LABELS[c.field]} ${c.suggested}`).join(', ')}
+              </Text>
+            </TouchableOpacity>
           )}
         </View>
 
@@ -331,15 +363,9 @@ export default function VehicleDetailScreen() {
         <TextInput style={styles.input} value={form.nickname} onChangeText={(v) => handleChange('nickname', v)}
           placeholder="e.g. The Green Monster" placeholderTextColor={colors.mutedForeground} />
 
-        <Text style={styles.inputLabel}>Registration</Text>
-        <TextInput style={styles.input} value={form.registration}
-          onChangeText={(v) => handleChange('registration', v.toUpperCase())}
-          placeholder="AB12 CDE" placeholderTextColor={colors.mutedForeground}
-          autoCapitalize="characters" autoCorrect={false} />
-
         <View style={styles.row2}>
           <View style={styles.flex1}>
-            <Text style={styles.inputLabel}>Make</Text>
+            <Text style={styles.inputLabel}>Make{fromLookup('make')}</Text>
             <TextInput style={styles.input} value={form.make} onChangeText={(v) => handleChange('make', v)}
               placeholder="e.g. MINI" placeholderTextColor={colors.mutedForeground} />
           </View>
@@ -352,19 +378,19 @@ export default function VehicleDetailScreen() {
 
         <View style={styles.row2}>
           <View style={styles.flex1}>
-            <Text style={styles.inputLabel}>Year</Text>
+            <Text style={styles.inputLabel}>Year{fromLookup('year')}</Text>
             <TextInput style={styles.input} value={form.year.toString()}
               onChangeText={(v) => handleChange('year', parseInt(v, 10) || 0)}
               placeholder="2003" placeholderTextColor={colors.mutedForeground} keyboardType="numeric" />
           </View>
           <View style={styles.flex1}>
-            <Text style={styles.inputLabel}>Colour</Text>
+            <Text style={styles.inputLabel}>Colour{fromLookup('colour')}</Text>
             <TextInput style={styles.input} value={form.colour} onChangeText={(v) => handleChange('colour', v)}
               placeholder="e.g. Racing Green" placeholderTextColor={colors.mutedForeground} />
           </View>
         </View>
 
-        <Text style={styles.inputLabel}>Fuel Type</Text>
+        <Text style={styles.inputLabel}>Fuel Type{fromLookup('fuelType')}</Text>
         <View style={styles.fuelRow}>
           {fuelTypes.map((ft) => (
             <TouchableOpacity key={ft}
@@ -382,7 +408,7 @@ export default function VehicleDetailScreen() {
 
         <View style={styles.row2}>
           <View style={styles.flex1}>
-            <Text style={styles.inputLabel}>Engine</Text>
+            <Text style={styles.inputLabel}>Engine{fromLookup('engine')}</Text>
             <TextInput style={styles.input} value={form.engine} onChangeText={(v) => handleChange('engine', v)}
               placeholder="1.6L" placeholderTextColor={colors.mutedForeground} />
           </View>

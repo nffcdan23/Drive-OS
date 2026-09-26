@@ -42,6 +42,13 @@ This checklist is for what only a phone can show: Keychain, the camera roll, GPS
 10c. [ ] **Link opened while the app is closed:** force-quit, tap a confirmation or reset link in Mail → the app opens and completes the step. A used or expired link shows a message, not an endless spinner.
 10. [ ] **Apple** (once the Apple setup is done, Option B only) → Face ID sheet → signed in. Your name appears the first time.
 
+## Registration lookup (DVLA)
+- [ ] Add vehicle → type a UK registration → **Look up**. Make, colour, fuel, year and engine fill in, and each is marked "from DVLA". Model stays for you to add.
+- [ ] Type your own colour first, then look up. Your colour is kept, and a "Use DVLA's values" button offers DVLA's instead.
+- [ ] A foreign plate (e.g. `B-MW 1234`) can still be saved; **Look up** explains it isn't a UK format.
+- [ ] Airplane mode → **Look up** says you're offline. You can still save the vehicle, and **no** app-wide server banner appears.
+- [ ] Unknown registration → "DVLA has no vehicle…"; without a DVLA key on the server → "Live DVLA lookup isn't connected".
+
 ## Your data
 11. [ ] **Profile:** edit name and bio → force-quit → the edits remain.
 12. [ ] **Avatar:** tap the avatar → pick a photo → it appears, and it remains after a restart.

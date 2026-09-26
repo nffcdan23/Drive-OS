@@ -612,3 +612,103 @@ test('back online after an offline start, the token refreshes at once (not a min
   assert.ok(token && token !== jwt(expired));
   assert.ok(Date.now() - t0 < 2_000);
 });
+
+// ─── DVLA registration lookup (v1) ──────────────────────────────────────────
+import { endpoints } from '@/lib/backend/endpoints';
+import { toVehicle } from '@/lib/backend/mappers';
+import {
+  acceptConflicts, initialSources, lookupErrorMessage, lookupInputProblem, markEdited, mergeLookup, type Suggestions,
+} from '@/lib/backend/vehicleLookup';
+import { parseUkRegistration } from '@workspace/vehicle-registration';
+
+const SUGGESTED: Suggestions = { make: 'Volkswagen', colour: 'Blue', fuelType: 'diesel', year: 2018, engine: '2.0L' };
+const blankForm = () => ({ registration: '', make: '', colour: '', fuelType: 'petrol' as const, year: new Date().getFullYear(), engine: '' });
+
+test('a DVLA failure does not raise the app-wide server banner; other 5xx still do', async () => {
+  const states: string[] = [];
+  const fetchImpl = (async () => new Response('{"error":"lookup_unavailable","message":"DVLA lookup is unavailable right now."}', { status: 503 })) as typeof fetch;
+  const api = new ApiClient({ baseUrl: 'http://x', getAccessToken: async () => 't', refreshAccessToken: async () => null, fetchImpl, onStatus: (s) => states.push(s) });
+  await assert.rejects(endpoints(api).lookupVehicle('AB12CDE'), (e) => e instanceof ApiError && e.code === 'lookup_unavailable');
+  assert.deepEqual(states, [], 'lookup failures are quiet');
+  await assert.rejects(api.get('/vehicles'), ApiError);
+  assert.deepEqual(states, ['server_error'], 'the rest of the API still reports');
+});
+
+test('a lookup fills a new vehicle form, including its placeholder defaults', () => {
+  const r = mergeLookup(blankForm(), initialSources(null), 'AB12 CDE', SUGGESTED);
+  assert.deepEqual(r.form, { registration: 'AB12 CDE', make: 'Volkswagen', colour: 'Blue', fuelType: 'diesel', year: 2018, engine: '2.0L' });
+  assert.deepEqual(r.applied, ['make', 'colour', 'fuelType', 'year', 'engine']);
+  assert.deepEqual(r.conflicts, []);
+});
+
+test('a lookup never replaces what the user typed; differences are offered instead', () => {
+  let sources = initialSources(null);
+  const form = { ...blankForm(), colour: 'British Racing Green', year: 2019 };
+  sources = markEdited(sources, 'colour');
+  sources = markEdited(sources, 'year');
+  const r = mergeLookup(form, sources, 'AB12 CDE', SUGGESTED);
+  assert.equal(r.form.colour, 'British Racing Green');
+  assert.equal(r.form.year, 2019);
+  assert.equal(r.form.make, 'Volkswagen', 'blank fields are still filled');
+  assert.deepEqual(r.conflicts.map((c) => [c.field, c.yours, c.suggested]), [['colour', 'British Racing Green', 'Blue'], ['year', '2019', '2018']]);
+  // Only when the user asks.
+  const used = acceptConflicts(r.form, r.sources, r.conflicts, SUGGESTED);
+  assert.equal(used.form.colour, 'Blue');
+  assert.equal(used.form.year, 2018);
+});
+
+test("a saved vehicle's values count as the user's; same values in other casing aren't conflicts", () => {
+  const saved = { registration: 'AB12CDE', make: 'VOLKSWAGEN', colour: 'Alpine White', fuelType: 'petrol' as const, year: 2017, engine: '' };
+  const r = mergeLookup(saved, initialSources(saved), 'AB12 CDE', SUGGESTED);
+  assert.equal(r.form.make, 'VOLKSWAGEN');
+  assert.equal(r.form.colour, 'Alpine White');
+  assert.equal(r.form.fuelType, 'petrol');
+  assert.equal(r.form.engine, '2.0L', 'blank saved field filled');
+  assert.deepEqual(r.conflicts.map((c) => c.field), ['colour', 'fuelType', 'year'], 'make differs only in case');
+});
+
+test('a second lookup may replace values the first one filled, but blank suggestions never wipe anything', () => {
+  const first = mergeLookup(blankForm(), initialSources(null), 'AB12 CDE', SUGGESTED);
+  const second = mergeLookup(first.form, first.sources, 'XY34 ZZZ', { make: 'Ford', colour: null, fuelType: null, year: null, engine: null });
+  assert.equal(second.form.make, 'Ford');
+  assert.equal(second.form.colour, 'Blue');
+  assert.equal(second.form.registration, 'XY34 ZZZ');
+  assert.deepEqual(second.conflicts, []);
+});
+
+test('lookup input checks and messages keep manual entry open', () => {
+  assert.equal(lookupInputProblem('ab12 cde'), null);
+  assert.match(lookupInputProblem('')!, /Enter the registration/);
+  assert.match(lookupInputProblem('B-MW 1234')!, /enter the vehicle's details yourself/);
+  assert.match(lookupErrorMessage(new NetworkError()), /offline/);
+  for (const code of ['invalid_registration', 'vehicle_not_found', 'rate_limited', 'lookup_not_configured', 'lookup_busy', 'lookup_unavailable', 'lookup_timeout', 'lookup_bad_response', 'something_new']) {
+    assert.match(lookupErrorMessage(new ApiError(503, code, 'x')), /yourself/, code);
+  }
+  assert.match(lookupErrorMessage(new ApiError(503, 'lookup_not_configured', 'x')), /isn't connected/);
+  assert.equal(parseUkRegistration('ab12 cde')?.registration, 'AB12CDE', 'shared module resolves from the app');
+});
+
+test("'other' fuel survives the server mapping", () => {
+  const v = toVehicle({ id: 'v', clientRef: null, nickname: 'n', registration: '', make: '', model: '', year: null, colour: '', fuelType: 'other', engine: '', power: '', torque: '', zeroToSixty: '', topSpeedSpec: '', mileage: 0, visibility: 'private', isActive: false, coverPhotoId: null, coverPhotoUrl: null, createdAt: '', updatedAt: '' });
+  assert.equal(v.fuelType, 'other');
+});
+
+test('the app build refuses anything that would put DVLA credentials in the bundle', () => {
+  const appConfig = createRequire(import.meta.url)('../app.config.js') as (a: { config: object }) => object;
+  const base = { config: { ios: { infoPlist: {} }, android: {}, plugins: [], extra: {} } };
+  const saved = { ...process.env };
+  try {
+    for (const k of Object.keys(process.env)) if (k.startsWith('EXPO_PUBLIC_') || k === 'DVLA_API_KEY') delete process.env[k];
+    assert.doesNotThrow(() => appConfig(base), 'a normal development build');
+    process.env.EXPO_PUBLIC_DVLA_API_KEY = 'anything';
+    assert.throws(() => appConfig(base), /EXPO_PUBLIC_DVLA_API_KEY .*DVLA credentials/);
+    delete process.env.EXPO_PUBLIC_DVLA_API_KEY;
+    // The key's value hidden under an innocent-looking public name.
+    process.env.DVLA_API_KEY = 'secret-dvla-key-123';
+    process.env.EXPO_PUBLIC_EXTRA = 'prefix-secret-dvla-key-123';
+    assert.throws(() => appConfig(base), /EXPO_PUBLIC_EXTRA/);
+  } finally {
+    for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];
+    Object.assign(process.env, saved);
+  }
+});

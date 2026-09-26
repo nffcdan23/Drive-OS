@@ -6,6 +6,8 @@ import type { LocationKind, SpotCategory, Visibility } from './endpoints';
 
 export type SyncState = 'synced' | 'pending' | 'failed';
 
+export type FuelType = 'petrol' | 'diesel' | 'electric' | 'hybrid' | 'other';
+
 export interface Vehicle {
   id: string;
   nickname: string;
@@ -14,7 +16,7 @@ export interface Vehicle {
   model: string;
   year: number;
   colour: string;
-  fuelType: 'petrol' | 'diesel' | 'electric' | 'hybrid';
+  fuelType: FuelType;
   engine: string;
   power: string;
   torque: string;

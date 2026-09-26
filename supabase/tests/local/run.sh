@@ -99,6 +99,16 @@ echo "==> RLS and security tests (clean database)"
 build_db driveos_rls
 run_tests driveos_rls "$TESTS/20_rls_security.sql" || { echo "RLS and security tests FAILED" >&2; exit 1; }
 
+echo "==> Registration and DVLA unit tests (no database, no network)"
+if [[ -d "$ROOT/artifacts/api-server/node_modules/@workspace/vehicle-registration" ]]; then
+  (cd "$ROOT/lib/vehicle-registration" && node --experimental-transform-types --no-warnings --test test/registration.test.ts) \
+    || { echo "Registration unit tests FAILED" >&2; exit 1; }
+  (cd "$ROOT/artifacts/api-server" && node --experimental-transform-types --no-warnings --test test/dvla.unit.test.ts) \
+    || { echo "DVLA unit tests FAILED" >&2; exit 1; }
+else
+  echo "    SKIPPED: run 'pnpm install' first"
+fi
+
 echo "==> API integration tests (clean database, fake Storage/Auth)"
 if [[ "${SKIP_API_TESTS:-0}" == "1" ]]; then
   echo "    SKIPPED: SKIP_API_TESTS=1"

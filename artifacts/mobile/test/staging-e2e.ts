@@ -496,6 +496,29 @@ async function run() {
   app3.dispose();
   app4.dispose();
 
+  // ─── 18. Registration lookup (DVLA v1) ───────────────────────────────────
+  // At most one DVLA call per run. Without a key on the API the section only
+  // checks that it says so; with DVLA_TEST_REGISTRATION it checks a real answer.
+  section('18. Registration lookup (DVLA)');
+  p1.network = 'up';
+  const foreign = await p1.ep.lookupVehicle('B-MW 1234').catch((e) => e);
+  check('a non-UK registration is refused without contacting DVLA', foreign instanceof ApiError && foreign.code === 'invalid_registration');
+  const testReg = process.env.DVLA_TEST_REGISTRATION?.trim() || '';
+  const probe = await p1.ep.lookupVehicle(testReg || 'AB12 CDE').catch((e) => e);
+  if (probe instanceof ApiError && probe.code === 'lookup_not_configured') {
+    console.log('     DVLA lookup is not configured on this API (no key): live checks skipped');
+    check('without a key the API says lookup is not connected', true);
+  } else if (testReg) {
+    check('a known registration returns DVLA suggestions only',
+      !(probe instanceof Error) && !!probe.suggested?.make && !('tax' in probe) && !('mot' in probe),
+      probe instanceof Error ? (probe as ApiError).code ?? probe.message : `${probe.suggested.year ?? ''} ${probe.suggested.make}`);
+  } else {
+    check('DVLA answers (found or not found)',
+      !(probe instanceof Error) || (probe instanceof ApiError && probe.code === 'vehicle_not_found'),
+      probe instanceof Error ? (probe as ApiError).code ?? probe.message : 'found');
+  }
+  check('a lookup failure never marks the API as down', p1.connection !== 'server_error', String(p1.connection));
+
   // ─── 15. Account deletion ────────────────────────────────────────────────
   section('15. Account deletion');
   await p1.ep.deleteAccount();

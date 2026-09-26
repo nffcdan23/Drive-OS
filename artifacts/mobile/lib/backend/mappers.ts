@@ -15,7 +15,7 @@ export function initials(name: string): string {
   return (parts[0]?.[0] ?? '?').toUpperCase();
 }
 
-const FUELS = ['petrol', 'diesel', 'electric', 'hybrid'] as const;
+const FUELS = ['petrol', 'diesel', 'electric', 'hybrid', 'other'] as const;
 
 export function toVehicle(v: ServerVehicle): Vehicle {
   return {

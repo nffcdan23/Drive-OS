@@ -67,11 +67,27 @@ export type VehicleFields = Partial<Pick<ServerVehicle,
   'nickname' | 'registration' | 'make' | 'model' | 'year' | 'colour' | 'fuelType' | 'engine' | 'power' |
   'torque' | 'zeroToSixty' | 'topSpeedSpec' | 'mileage' | 'visibility' | 'coverPhotoId'>>;
 
+/** POST /vehicles/lookup: DVLA's details for a UK registration, as suggestions for the form. */
 export interface VehicleLookup {
-  registration: string; make: string; colour: string;
-  fuelType: 'petrol' | 'diesel' | 'electric' | 'hybrid' | null;
-  year: number | null; engine: string; motStatus: string | null; taxStatus: string | null;
+  registration: string;
+  displayRegistration: string;
+  source: 'dvla';
+  checkedAt: string;
+  vehicle: {
+    make: string | null; colour: string | null; fuelType: string | null;
+    yearOfManufacture: number | null; engineCapacityCc: number | null;
+  };
+  suggested: {
+    make: string | null; colour: string | null;
+    fuelType: 'petrol' | 'diesel' | 'electric' | 'hybrid' | 'other' | null;
+    year: number | null; engine: string | null;
+  };
 }
+
+/** Error codes the lookup can return (ApiError.code). */
+export type VehicleLookupErrorCode =
+  | 'invalid_registration' | 'vehicle_not_found' | 'rate_limited' | 'lookup_not_configured'
+  | 'lookup_busy' | 'lookup_unavailable' | 'lookup_timeout' | 'lookup_bad_response';
 
 export interface ServerJourneyRoute {
   routePolyline: string | null;
@@ -208,7 +224,8 @@ export const endpoints = (api: ApiClient) => ({
   updateVehicle: (id: string, fields: VehicleFields) => api.patch<ServerVehicle>(`/vehicles/${id}`, fields),
   deleteVehicle: (id: string) => api.delete(`/vehicles/${id}`),
   activateVehicle: (id: string) => api.post<ServerVehicle>(`/vehicles/${id}/activate`),
-  lookupVehicle: (registration: string) => api.post<VehicleLookup>('/vehicles/lookup', { registration }),
+  // Quiet: a DVLA outage mustn't show the app-wide "server problem" banner.
+  lookupVehicle: (registration: string) => api.post<VehicleLookup>('/vehicles/lookup', { registration }, { quiet: true }),
 
   // Journeys
   listJourneys: () => api.get<ServerJourney[]>('/journeys'),

@@ -56,6 +56,10 @@ jobs:
       SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_STAGING_PUBLISHABLE_KEY }}
       SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_STAGING_SECRET_KEY }}
       SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_STAGING_PROJECT_REF }}
+      # Optional: DVLA registration lookup on staging. The key only ever goes to
+      # the Railway staging service; the URL must be DVLA's (UAT recommended).
+      DVLA_STAGING_API_KEY: ${{ secrets.DVLA_STAGING_API_KEY }}
+      DVLA_STAGING_VES_URL: ${{ vars.DVLA_STAGING_VES_URL }}
       # Pinned and more than a week old, like the workspace's minimumReleaseAge rule.
       RAILWAY_CLI_VERSION: 5.57.6
     steps:
@@ -198,6 +202,18 @@ jobs:
           printf '%s' 5000 | put STORAGE_WORKER_INTERVAL_MS
           printf '%s' "$GITHUB_SHA" | put APP_RELEASE
           printf '%s' Dockerfile | put RAILWAY_DOCKERFILE_PATH
+          if [ -n "$DVLA_STAGING_API_KEY" ]; then
+            url="${DVLA_STAGING_VES_URL:-https://driver-vehicle-licensing.api.gov.uk/vehicle-enquiry/v1/vehicles}"
+            case "$url" in
+              https://driver-vehicle-licensing.api.gov.uk/vehicle-enquiry/v1/vehicles|https://uat.driver-vehicle-licensing.api.gov.uk/vehicle-enquiry/v1/vehicles) ;;
+              *) echo "::error::DVLA_STAGING_VES_URL must be DVLA's live or UAT vehicle-enquiry URL"; exit 1 ;;
+            esac
+            printf '%s' "$DVLA_STAGING_API_KEY" | put DVLA_API_KEY
+            printf '%s' "$url" | put DVLA_VES_URL
+            echo "DVLA lookup configured for staging ($url)."
+          else
+            echo "No DVLA_STAGING_API_KEY secret: lookup on staging reports lookup_not_configured."
+          fi
           echo "Variables set (values not shown)."
 
       - name: Deploy this commit
@@ -273,5 +289,7 @@ jobs:
         if: env.MODE == 'deploy'
         env:
           EXPECTED_RELEASE: ${{ github.sha }}
+          # Optional: a registration DVLA knows (e.g. one of DVLA's UAT test registrations).
+          DVLA_TEST_REGISTRATION: ${{ vars.DVLA_STAGING_TEST_REGISTRATION }}
           SIGNUP_TEST_EMAIL_DOMAIN: ${{ vars.STAGING_SIGNUP_EMAIL_DOMAIN }}
         run: pnpm --filter @workspace/mobile run test:staging

@@ -12,6 +12,15 @@ module.exports = ({ config }) => {
   const id = identity(appEnv);
   const name = id.displayName;
 
+  // The DVLA key belongs on the API server only. EXPO_PUBLIC_* values are
+  // compiled into the app, where anyone can extract them.
+  const publicNames = Object.keys(process.env).filter((k) => k.startsWith('EXPO_PUBLIC_'));
+  const dvlaKey = (process.env.DVLA_API_KEY || '').trim();
+  const leaks = publicNames.filter((k) => /DVLA|VES_/i.test(k) || (dvlaKey && String(process.env[k]).includes(dvlaKey)));
+  if (leaks.length) {
+    throw new Error(`Refusing to build: ${leaks.join(', ')} would put DVLA credentials in the app. The DVLA key belongs on the API server only.`);
+  }
+
   // A staging or production build without its backend settings would install
   // but never connect; fail the build instead. (The values are public.)
   if (appEnv === 'staging' || appEnv === 'production') {

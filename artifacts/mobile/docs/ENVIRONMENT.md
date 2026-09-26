@@ -50,8 +50,9 @@ Set these as EAS environment variables when the name is final. See `NAMING.md` f
 | `SUPABASE_URL` | public | `https://<staging-ref>.supabase.co` |
 | `SUPABASE_SECRET_KEY` | **secret** | staging secret key: Storage signed URLs, file deletion, account deletion |
 | `SUPABASE_JWT_SECRET` | **secret** | **not needed**: staging signs tokens with ES256 and the API checks them against the public keys |
-| `DVLA_API_KEY` | **secret** | optional: enables registration lookup |
-| `DVLA_VES_URL` | config | optional override of the DVLA endpoint |
+| `DVLA_API_KEY` | **secret** | optional: enables registration lookup. Server only, never an `EXPO_PUBLIC_*` value (the app build refuses one) |
+| `DVLA_VES_URL` | config | optional: `https://driver-vehicle-licensing.api.gov.uk/vehicle-enquiry/v1/vehicles` (default, live) or the same path on `uat.driver-vehicle-licensing.api.gov.uk`. Any other URL stops the API at startup, so the key can't be sent elsewhere. |
+| `DVLA_TIMEOUT_MS` | config | optional: DVLA request timeout, default `8000` |
 | `STORAGE_WORKER` | config | optional; `off` disables the file clean-up worker |
 | `STORAGE_WORKER_INTERVAL_MS` | config | optional, default `60000` |
 | `LOG_LEVEL` | config | optional, default `info` |
@@ -71,6 +72,9 @@ Set these as EAS environment variables when the name is final. See `NAMING.md` f
 | `RAILWAY_STAGING_TOKEN` | secret | hosted staging API deploys. It's a Railway **project token** for the separate staging project. |
 | `RAILWAY_STAGING_PROJECT_ID` | **variable** | hosted staging API deploys: the staging Railway project's id. The token must belong to it. |
 | `STAGING_API_URL` | **variable** | hosted staging API deploys and tests: `https://…` domain of the staging service |
+| `DVLA_STAGING_API_KEY` | secret, optional | turns on DVLA lookup for staging (copied to the Railway staging service only) |
+| `DVLA_STAGING_VES_URL` | **variable**, optional | DVLA URL for staging: live or UAT (UAT recommended with a UAT key) |
+| `DVLA_STAGING_TEST_REGISTRATION` | **variable**, optional | a registration DVLA knows, for one real lookup per hosted test run |
 | `STAGING_SIGNUP_EMAIL_DOMAIN` | **variable**, optional | domain for sign-up test addresses. Only needed if Supabase rejects the default `example.com` once "Confirm email" is off. Use a domain you control; no email is sent to it. |
 
 ## 5. Supabase Auth settings (dashboard), per project

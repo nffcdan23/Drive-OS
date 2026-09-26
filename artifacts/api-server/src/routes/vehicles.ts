@@ -6,6 +6,8 @@ import { badRequest, handler, notFound, uuidParam } from "../lib/http";
 import { Body } from "../lib/validate";
 import { rateLimit } from "../lib/rateLimit";
 import { config } from "../config";
+import { DvlaClient, LookupError } from "../lib/dvla";
+import { MAX_STORED_REGISTRATION_LENGTH, storedRegistration } from "@workspace/vehicle-registration";
 import { logger } from "../lib/logger";
 import { createSignedDownloadUrl } from "../lib/supabaseAdmin";
 
@@ -45,7 +47,15 @@ function readVehicleFields(b: Body, creating: boolean): Partial<typeof vehicles.
     if (b.has(field)) (out as Record<string, unknown>)[field] = b.str(field, { max })!;
   };
   if (creating || b.has("nickname")) out.nickname = b.str("nickname", { min: 1, max: 60 })!;
-  text("registration", 10);
+  if (b.has("registration")) {
+    // Upper case without whitespace: DVLA's form for a UK plate; a foreign
+    // plate keeps its hyphens so it never turns into a different UK one.
+    const reg = storedRegistration(b.str("registration", { max: 20 })!);
+    if (reg.length > MAX_STORED_REGISTRATION_LENGTH) {
+      throw badRequest("invalid_input", `registration: at most ${MAX_STORED_REGISTRATION_LENGTH} characters`);
+    }
+    out.registration = reg;
+  }
   text("make", 60);
   text("model", 60);
   text("colour", 40);
@@ -58,7 +68,6 @@ function readVehicleFields(b: Body, creating: boolean): Partial<typeof vehicles.
   if (b.has("fuelType")) out.fuelType = b.oneOf("fuelType", FUEL)!;
   if (b.has("mileage")) out.mileage = b.int("mileage", { min: 0, max: 5_000_000 })!;
   if (b.has("visibility")) out.visibility = b.oneOf("visibility", VISIBILITY)!;
-  if (out.registration !== undefined) out.registration = out.registration.replace(/\s+/g, "").toUpperCase();
   return out;
 }
 
@@ -148,67 +157,23 @@ router.post("/vehicles/:id/activate", requireUser, handler(async (req, res) => {
 }));
 
 // ─── DVLA Vehicle Enquiry Service lookup ─────────────────────────────────────
-// The API key stays on the server: a key shipped in the app bundle can be
-// extracted by anyone who installs it.
-type VesVehicle = {
-  registrationNumber?: string; make?: string; colour?: string; fuelType?: string;
-  yearOfManufacture?: number; engineCapacity?: number; motStatus?: string; taxStatus?: string;
-};
+// The key stays on the server (lib/dvla). A lookup only suggests values for the
+// app's unsaved vehicle form; nothing is stored.
+const dvla = new DvlaClient(config.dvla, { log: logger });
 
-/** Maps VES fuel text ("PETROL", "HYBRID ELECTRIC", …) onto the app's options. */
-function normaliseFuelType(raw: string | undefined) {
-  const value = (raw ?? "").toUpperCase();
-  if (!value) return null;
-  if (value.includes("HYBRID") || value.includes("BIFUEL") || value.includes("BI-FUEL")) return "hybrid";
-  if (value.includes("ELECTRIC")) return "electric";
-  if (value.includes("DIESEL") || value.includes("HEAVY OIL")) return "diesel";
-  if (value.includes("PETROL") || value.includes("GAS")) return "petrol";
-  return null;
-}
-
-const formatEngine = (cc: number | undefined) => (!cc || cc <= 0 ? "" : `${(cc / 1000).toFixed(1)}L`);
-
-// POST /api/vehicles/lookup — 10 lookups per minute per user (DVLA quota)
-router.post("/vehicles/lookup", requireUser, rateLimit({ name: "vehicle lookup", windowMs: 60_000, max: 10 }), handler(async (req, res) => {
-  if (!config.dvlaApiKey) {
-    res.status(503).json({ error: "lookup_not_configured", message: "Vehicle lookup is not configured on the server." });
-    return;
-  }
-  const supplied = Body.of(req).str("registration", { max: 20 })!;
-  const registrationNumber = supplied.replace(/\s+/g, "").toUpperCase();
-  if (!/^[A-Z0-9]{2,8}$/.test(registrationNumber)) {
-    res.status(400).json({ error: "invalid_registration", message: "Enter a valid UK registration number." });
-    return;
-  }
-
-  const upstream = await fetch(config.dvlaUrl, {
-    method: "POST",
-    headers: { "x-api-key": config.dvlaApiKey, "Content-Type": "application/json", Accept: "application/json" },
-    body: JSON.stringify({ registrationNumber }),
-    signal: AbortSignal.timeout(10_000),
-  });
-
-  if (upstream.status === 404) { res.status(404).json({ error: "not_found", message: "No vehicle found with that registration." }); return; }
-  if (upstream.status === 400) { res.status(400).json({ error: "invalid_registration", message: "DVLA did not recognise that registration format." }); return; }
-  if (upstream.status === 429) { res.status(429).json({ error: "rate_limited", message: "Too many lookups just now. Try again shortly." }); return; }
-  if (!upstream.ok) {
-    logger.error({ status: upstream.status }, "DVLA VES lookup failed");
-    res.status(502).json({ error: "lookup_unavailable", message: "Vehicle lookup is unavailable right now." });
-    return;
-  }
-
-  const data = (await upstream.json()) as VesVehicle;
-  // VES has no model, power, torque, 0-60 or top speed — those stay manual.
-  res.json({
-    registration: data.registrationNumber ?? registrationNumber,
-    make: data.make ?? "",
-    colour: data.colour ?? "",
-    fuelType: normaliseFuelType(data.fuelType),
-    year: data.yearOfManufacture ?? null,
-    engine: formatEngine(data.engineCapacity),
-    motStatus: data.motStatus ?? null,
-    taxStatus: data.taxStatus ?? null,
-  });
-}));
+// POST /api/vehicles/lookup — per user: 10 a minute, 50 a day
+router.post("/vehicles/lookup", requireUser,
+  rateLimit({ name: "vehicle lookup", windowMs: 60_000, max: 10 }),
+  rateLimit({ name: "vehicle lookup", windowMs: 24 * 60 * 60_000, max: 50 }),
+  handler(async (req, res) => {
+    const supplied = (req.body as { registration?: unknown } | undefined)?.registration;
+    try {
+      res.json(await dvla.lookup(typeof supplied === "string" ? supplied : ""));
+    } catch (err) {
+      if (!(err instanceof LookupError)) throw err;
+      if (err.retryAfterSec) res.setHeader("Retry-After", String(err.retryAfterSec));
+      res.status(err.status).json({ error: err.code, message: err.message });
+    }
+  }));
 
 export default router;

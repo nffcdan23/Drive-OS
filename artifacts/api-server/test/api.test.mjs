@@ -32,6 +32,78 @@ let server;
 let fake;
 const db = new pg.Pool({ connectionString: DB_URL, max: 3 });
 const calls = []; // requests received by the fake Supabase
+let serverOutput = ""; // everything the API logged
+const responses = []; // every response body the API returned
+
+// ─── Stub DVLA Vehicle Enquiry Service ──────────────────────────────────────
+// Answers by registration so each DVLA outcome can be exercised end to end.
+const DVLA_KEY = "test-dvla-key-never-leaves-the-server";
+const dvlaCalls = []; // { registration, apiKey }
+let dvla;
+let dvlaUrl = "";
+const DVLA_VEHICLE = {
+  make: "VOLKSWAGEN", colour: "BLUE", fuelType: "PETROL", yearOfManufacture: 2018, engineCapacity: 1984,
+  taxStatus: "Taxed", taxDueDate: "2027-01-01", motStatus: "Valid", motExpiryDate: "2027-02-01",
+  dateOfLastV5CIssued: "2020-01-01", co2Emissions: 150,
+};
+
+function startStubDvla() {
+  return new Promise((resolve) => {
+    dvla = createServer(async (req, res) => {
+      let raw = "";
+      for await (const chunk of req) raw += chunk;
+      const reg = JSON.parse(raw || "{}").registrationNumber;
+      dvlaCalls.push({ registration: reg, apiKey: req.headers["x-api-key"] });
+      const send = (status, body, headers = {}) => {
+        res.writeHead(status, { "content-type": "application/json", ...headers });
+        res.end(typeof body === "string" ? body : JSON.stringify(body));
+      };
+      if (req.headers["x-api-key"] !== DVLA_KEY) return send(403, { message: "Forbidden" });
+      switch (reg) {
+        case "NF19ABC": return send(404, { errors: [{ status: "404", title: "Vehicle Not Found" }] });
+        case "BR19ABC": return send(400, { errors: [{ status: "400", title: "Bad Request" }] });
+        case "SE19ABC": return send(500, { errors: [{ status: "500" }] });
+        case "BJ19ABC": return send(200, "{not json");
+        case "BG19ABC": return send(200, JSON.stringify({ ...DVLA_VEHICLE, registrationNumber: reg, padding: "x".repeat(100_000) }));
+        case "WT19ABC": return send(200, { ...DVLA_VEHICLE, registrationNumber: reg, yearOfManufacture: "2018" });
+        case "MM19ABC": return send(200, { ...DVLA_VEHICLE, registrationNumber: "ZZ99ZZZ" });
+        case "TO19ABC": return; // never answers
+        case "RL19ABC": return send(429, { message: "Too Many Requests" }, { "retry-after": "1" });
+        case "KY19ABC": return send(403, { message: "Forbidden" });
+        case "ED19ABC": return send(200, { ...DVLA_VEHICLE, registrationNumber: reg, fuelType: "ELECTRIC DIESEL" });
+        case "GB19ABC": return send(200, { ...DVLA_VEHICLE, registrationNumber: reg, fuelType: "GAS BI-FUEL" });
+        case "EV19ABC": return send(200, { ...DVLA_VEHICLE, registrationNumber: reg, fuelType: "ELECTRICITY", engineCapacity: 0 });
+        default: return send(200, { ...DVLA_VEHICLE, registrationNumber: reg });
+      }
+    });
+    dvla.listen(0, "127.0.0.1", () => {
+      dvlaUrl = `http://127.0.0.1:${dvla.address().port}/vehicle-enquiry/v1/vehicles`;
+      resolve();
+    });
+  });
+}
+
+/** Starts another API process (for configuration tests); resolves once it is up or has exited. */
+async function startExtraApi(env) {
+  const port = API_PORT + 1000 + Math.floor(Math.random() * 1000);
+  const entry = fileURLToPath(new URL("../dist/index.mjs", import.meta.url));
+  let out = "";
+  const child = spawn(process.execPath, [entry], {
+    env: {
+      PATH: process.env.PATH, PORT: String(port), DATABASE_URL: DB_URL, SUPABASE_URL: supabaseUrl,
+      SUPABASE_SECRET_KEY: SECRET_KEY, SUPABASE_JWT_SECRET: JWT_SECRET, STORAGE_WORKER: "off", LOG_LEVEL: "warn", ...env,
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  child.stdout.on("data", (d) => { out += d; });
+  child.stderr.on("data", (d) => { out += d; });
+  for (let i = 0; i < 100; i++) {
+    if (child.exitCode !== null) break;
+    try { if ((await fetch(`http://127.0.0.1:${port}/api/healthz`)).ok) break; } catch { /* starting */ }
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return { child, port, output: () => out };
+}
 
 // ─── Fake Supabase (Storage + Auth admin) ───────────────────────────────────
 
@@ -99,9 +171,10 @@ async function call(user, method, path, body, { token, rawBody } = {}) {
     method, headers, body: rawBody ?? (body === undefined ? undefined : JSON.stringify(body)),
   });
   const text = await res.text();
+  responses.push(text);
   let json = null;
   try { json = text ? JSON.parse(text) : null; } catch { json = text; }
-  return { status: res.status, body: json };
+  return { status: res.status, body: json, headers: res.headers };
 }
 
 const get = (u, p) => call(u, "GET", p);
@@ -119,18 +192,19 @@ async function putObject(bucket, name, size, mimetype) {
 
 before(async () => {
   await startFakeSupabase();
+  await startStubDvla();
   const entry = fileURLToPath(new URL("../dist/index.mjs", import.meta.url));
-  let output = "";
   server = spawn(process.execPath, ["--enable-source-maps", entry], {
     env: {
       PATH: process.env.PATH, NODE_ENV: "test", PORT: String(API_PORT), DATABASE_URL: DB_URL,
       SUPABASE_URL: supabaseUrl, SUPABASE_SECRET_KEY: SECRET_KEY, SUPABASE_JWT_SECRET: JWT_SECRET,
       STORAGE_WORKER_INTERVAL_MS: "300", LOG_LEVEL: "warn",
+      DVLA_API_KEY: DVLA_KEY, DVLA_VES_URL: dvlaUrl, DVLA_TIMEOUT_MS: "300",
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
-  server.stdout.on("data", (d) => { output += d; });
-  server.stderr.on("data", (d) => { output += d; });
+  server.stdout.on("data", (d) => { serverOutput += d; });
+  server.stderr.on("data", (d) => { serverOutput += d; });
   for (let i = 0; i < 100; i++) {
     try {
       const r = await fetch(`http://127.0.0.1:${API_PORT}/api/healthz`);
@@ -139,12 +213,14 @@ before(async () => {
     if (server.exitCode !== null) break;
     await new Promise((r) => setTimeout(r, 100));
   }
-  throw new Error(`API did not start:\n${output}`);
+  throw new Error(`API did not start:\n${serverOutput}`);
 });
 
 after(async () => {
   server?.kill("SIGTERM");
   fake?.close();
+  dvla?.closeAllConnections?.();
+  dvla?.close();
   await db.end();
 });
 
@@ -541,4 +617,171 @@ test("account deletion removes data and queues files for the worker", async () =
   const q = await db.query("select count(*)::int as n from private.storage_delete_queue where path = $1", [up.body.path]);
   assert.equal(q.rows[0].n, 0, "queue drained");
   assert.ok(calls.some((c) => c.method === "DELETE" && c.path === "/storage/v1/object/vehicle-photos" && c.body.prefixes.includes(up.body.path)), "file removed via Storage API");
+});
+
+// ─── Registration lookup (DVLA VES, via the local stub) ─────────────────────
+
+const lookup = (u, registration) => post(u, "/vehicles/lookup", registration === undefined ? {} : { registration });
+const dvlaCallCount = () => dvlaCalls.length;
+
+test("vehicles: registrations are stored upper case without spaces; foreign plates keep hyphens", async () => {
+  const u = await newUser();
+  const uk = await post(u, "/vehicles", { nickname: "UK", registration: " ab12 cde " });
+  expect(uk, 201, "create");
+  assert.equal(uk.body.registration, "AB12CDE");
+  const foreign = await post(u, "/vehicles", { nickname: "German", registration: "b-mw 1234" });
+  assert.equal(foreign.body.registration, "B-MW1234");
+  expect(await post(u, "/vehicles", { nickname: "Long", registration: "ABCDE FGHIJK" }), 400, "over 10 characters");
+});
+
+test("lookup: returns suggestions only; the key goes to DVLA and nowhere else; nothing is stored", async () => {
+  const u = await newUser();
+  expect(await call(null, "POST", "/vehicles/lookup", { registration: "AB12CDE" }), 401, "sign-in required");
+
+  const before = dvlaCallCount();
+  const r = await lookup(u, "ab12 cde");
+  expect(r, 200, "lookup");
+  assert.deepEqual(r.body.vehicle, { make: "VOLKSWAGEN", colour: "BLUE", fuelType: "PETROL", yearOfManufacture: 2018, engineCapacityCc: 1984 });
+  assert.deepEqual(r.body.suggested, { make: "Volkswagen", colour: "Blue", fuelType: "petrol", year: 2018, engine: "2.0L" });
+  assert.equal(r.body.registration, "AB12CDE");
+  assert.equal(r.body.displayRegistration, "AB12 CDE");
+  assert.equal(r.body.source, "dvla");
+  assert.ok(!Number.isNaN(Date.parse(r.body.checkedAt)));
+  assert.deepEqual(Object.keys(r.body).sort(), ["checkedAt", "displayRegistration", "registration", "source", "suggested", "vehicle"]);
+  for (const hidden of ["Taxed", "Valid", "2020-01-01", "co2", DVLA_KEY]) {
+    assert.ok(!JSON.stringify(r.body).includes(hidden), `response must not include ${hidden}`);
+  }
+  assert.equal(dvlaCallCount(), before + 1);
+  assert.equal(dvlaCalls.at(-1).apiKey, DVLA_KEY, "key sent to DVLA");
+  assert.equal(dvlaCalls.at(-1).registration, "AB12CDE", "normalised before sending");
+
+  expect(await lookup(u, "AB12CDE"), 200, "cached");
+  assert.equal(dvlaCallCount(), before + 1, "served from the cache");
+  const rows = await db.query("select count(*)::int as n from public.vehicles where owner_id = $1", [u.id]);
+  assert.equal(rows.rows[0].n, 0, "a lookup creates nothing");
+});
+
+test("lookup: fuel types are mapped, including hybrids, LPG and electric", async () => {
+  const u = await newUser();
+  assert.equal((await lookup(u, "ED19ABC")).body.suggested.fuelType, "hybrid", "ELECTRIC DIESEL");
+  assert.equal((await lookup(u, "GB19ABC")).body.suggested.fuelType, "other", "GAS BI-FUEL");
+  const ev = (await lookup(u, "EV19ABC")).body.suggested;
+  assert.equal(ev.fuelType, "electric", "ELECTRICITY");
+  assert.equal(ev.engine, null, "no engine size for an EV");
+});
+
+test("lookup: anything that isn't a UK registration never reaches DVLA", async () => {
+  const u = await newUser();
+  const before = dvlaCallCount();
+  for (const bad of ["", "   ", "B-MW 1234", "ABCDEFGH", "AB12CD€", "123456", "x".repeat(40)]) {
+    const r = await lookup(u, bad);
+    expect(r, 400, JSON.stringify(bad));
+    assert.equal(r.body.error, "invalid_registration");
+  }
+  expect(await lookup(u, undefined), 400, "missing");
+  expect(await call(u, "POST", "/vehicles/lookup", { registration: 12345 }), 400, "not a string");
+  assert.equal(dvlaCallCount(), before);
+});
+
+test("lookup: each DVLA failure becomes a stable error code", async () => {
+  const cases = [
+    ["NF19ABC", 404, "vehicle_not_found"],
+    ["BR19ABC", 400, "invalid_registration"],
+    ["SE19ABC", 503, "lookup_unavailable"],
+    ["BJ19ABC", 502, "lookup_bad_response"],
+    ["BG19ABC", 502, "lookup_bad_response"],
+    ["OK19ABC", 200, null], // a success in between keeps the failure breaker closed
+    ["WT19ABC", 502, "lookup_bad_response"],
+    ["MM19ABC", 502, "lookup_bad_response"],
+    ["TO19ABC", 504, "lookup_timeout"],
+  ];
+  for (const [reg, status, code] of cases) {
+    const u = await newUser();
+    const r = await lookup(u, reg);
+    expect(r, status, reg);
+    if (code) {
+      assert.equal(r.body.error, code, reg);
+      assert.equal(typeof r.body.message, "string");
+      assert.ok(!/errors|Forbidden|Bad Request|padding/.test(JSON.stringify(r.body)), `${reg}: DVLA's own response is never passed on`);
+    }
+  }
+});
+
+test("lookup: 10 a minute per user", async () => {
+  const u = await newUser();
+  await lookup(u, "AB12CDE"); // cached from earlier; no DVLA call
+  const before = dvlaCallCount();
+  for (let i = 0; i < 9; i++) expect(await lookup(u, "AB12CDE"), 200, `lookup ${i + 2}`);
+  const limited = await lookup(u, "AB12CDE");
+  expect(limited, 429, "11th lookup");
+  assert.equal(limited.body.error, "rate_limited");
+  assert.ok(Number(limited.headers.get("retry-after")) > 0);
+  assert.equal(dvlaCallCount(), before, "cache hits only");
+  expect(await lookup(await newUser(), "AB12CDE"), 200, "other users unaffected");
+});
+
+test("lookup: without a key the server says so and never calls DVLA", async () => {
+  const extra = await startExtraApi({ NODE_ENV: "test" });
+  try {
+    const u = await newUser();
+    const before = dvlaCallCount();
+    const res = await fetch(`http://127.0.0.1:${extra.port}/api/vehicles/lookup`, {
+      method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${u.token}` },
+      body: JSON.stringify({ registration: "AB12CDE" }),
+    });
+    assert.equal(res.status, 503);
+    assert.equal((await res.json()).error, "lookup_not_configured");
+    assert.equal(dvlaCallCount(), before);
+  } finally {
+    extra.child.kill("SIGTERM");
+  }
+});
+
+test("lookup: the server refuses to start with a non-DVLA URL (the key can't be sent elsewhere)", async () => {
+  for (const [env, url] of [["production", "https://evil.example/vehicle-enquiry/v1/vehicles"], ["production", dvlaUrl]]) {
+    const extra = await startExtraApi({ NODE_ENV: env, DVLA_API_KEY: DVLA_KEY, DVLA_VES_URL: url });
+    for (let i = 0; i < 50 && extra.child.exitCode === null; i++) await new Promise((r) => setTimeout(r, 100));
+    const exited = extra.child.exitCode;
+    extra.child.kill("SIGTERM");
+    assert.notEqual(exited, null, `${url}: the server must not start`);
+    assert.notEqual(exited, 0);
+    assert.match(extra.output(), /DVLA_VES_URL must be/);
+    assert.ok(!extra.output().includes(DVLA_KEY), "the key is not printed");
+  }
+});
+
+// These leave the lookup paused, so they run last.
+test("lookup: DVLA throttling and a rejected key pause further calls", async () => {
+  const busy = await lookup(await newUser(), "RL19ABC");
+  expect(busy, 503, "DVLA 429");
+  assert.equal(busy.body.error, "lookup_busy");
+  assert.equal(busy.headers.get("retry-after"), "1");
+  let before = dvlaCallCount();
+  const waiting = await lookup(await newUser(), "PA19ABC");
+  assert.equal(waiting.body.error, "lookup_busy", "paused");
+  assert.equal(dvlaCallCount(), before, "no DVLA call while paused");
+  await new Promise((r) => setTimeout(r, 1100));
+  expect(await lookup(await newUser(), "PA19ABC"), 200, "resumes after Retry-After");
+
+  const rejected = await lookup(await newUser(), "KY19ABC");
+  expect(rejected, 503, "DVLA 403");
+  assert.equal(rejected.body.error, "lookup_unavailable");
+  before = dvlaCallCount();
+  expect(await lookup(await newUser(), "PB19ABC"), 503, "paused after the key was rejected");
+  assert.equal(dvlaCallCount(), before);
+  // The log is written asynchronously; give it a moment.
+  for (let i = 0; i < 40 && !/DVLA rejected the API key/.test(serverOutput); i++) await new Promise((r) => setTimeout(r, 50));
+  assert.match(serverOutput, /DVLA rejected the API key/);
+});
+
+test("the DVLA key and looked-up registrations never appear in responses or logs", async () => {
+  await new Promise((r) => setTimeout(r, 300)); // let the last log lines arrive
+  assert.ok(responses.length > 50 && serverOutput.length > 0);
+  for (const secret of [DVLA_KEY]) {
+    assert.ok(!responses.some((r) => r.includes(secret)), "no response contains the key");
+    assert.ok(!serverOutput.includes(secret), "the log does not contain the key");
+  }
+  for (const reg of ["AB12CDE", "SE19ABC", "BJ19ABC", "TO19ABC", "KY19ABC", "RL19ABC"]) {
+    assert.ok(!serverOutput.includes(reg), `the log does not contain ${reg}`);
+  }
 });
