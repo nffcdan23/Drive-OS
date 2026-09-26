@@ -16,6 +16,25 @@ Expo (SDK 57) app for tracking journeys, managing a vehicle garage, saving place
 
 The code lives in `lib/backend/`, which has no React Native dependencies. `CloudSync` is the engine, and `context/AppContext.tsx` wraps it for the screens.
 
+## Running locally (Windows, macOS, Linux)
+
+Needs Node 22 and pnpm 10 (`corepack enable`). From the repository root:
+
+```sh
+pnpm install
+copy artifacts\mobile\.env.example artifacts\mobile\.env   # Windows (macOS/Linux: cp artifacts/mobile/.env.example artifacts/mobile/.env)
+# edit artifacts/mobile/.env: the staging Supabase URL and publishable key
+pnpm mobile
+```
+
+`pnpm mobile` checks the settings, then starts Expo. Press `i` for the iOS simulator, `a` for Android, `w` for web, or scan the QR code with Expo Go. Extra options pass through to `expo start`, for example:
+- `pnpm mobile --tunnel`: when the phone and computer aren't on the same network;
+- `pnpm mobile --clear`: resets Metro's cache.
+
+Inside `artifacts/mobile` the same scripts are `pnpm start`, `pnpm ios`, `pnpm android` and `pnpm web`.
+
+If a setting is missing, or a server secret has been put in `.env`, it stops with a message saying what to fix. `dev:replit`, `replit:build` and `replit:serve` are only used by the old Replit workspace (`.replit-artifact`); local development and EAS builds don't use them.
+
 ## Configuration
 
 The app contains only public values. **Never add the Supabase secret or service-role key, the database password, the DVLA key or any other server secret.** The app refuses to start with a secret key, and CI scans for secrets.
@@ -27,7 +46,7 @@ The app contains only public values. **Never add the Supabase secret or service-
 | `EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | The project's publishable (anon) key |
 | `EXPO_PUBLIC_API_URL` | The DriveOS API base URL (HTTPS outside development) |
 
-- **Local development:** copy `.env.example` to `.env`.
+- **Local development:** copy `.env.example` to `.env` and fill in the staging Supabase values (see *Running locally* below).
 - **EAS builds:** set the values as EAS environment variables. Use `preview` for staging builds and `production` for store builds, for example:
   - `eas env:create --environment preview --name EXPO_PUBLIC_SUPABASE_URL --value https://… --visibility plaintext`
 

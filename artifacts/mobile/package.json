@@ -4,12 +4,17 @@
   "private": true,
   "main": "expo-router/entry",
   "scripts": {
-    "dev": "EXPO_PACKAGER_PROXY_URL=https://$REPLIT_EXPO_DEV_DOMAIN EXPO_PUBLIC_DOMAIN=$REPLIT_DEV_DOMAIN EXPO_PUBLIC_REPL_ID=$REPL_ID REACT_NATIVE_PACKAGER_HOSTNAME=$REPLIT_DEV_DOMAIN pnpm exec expo start --localhost --port $PORT",
-    "build": "node scripts/build.js",
-    "serve": "node server/serve.js",
+    "start": "node scripts/start.js",
+    "dev": "node scripts/start.js",
+    "ios": "node scripts/start.js --ios",
+    "android": "node scripts/start.js --android",
+    "web": "node scripts/start.js --web",
     "typecheck": "tsc -p tsconfig.typecheck.json --noEmit",
     "test": "node --experimental-transform-types --no-warnings --import ./test/register.mjs --test --test-reporter=spec test/unit.test.ts",
-    "test:staging": "node --experimental-transform-types --no-warnings --import ./test/register.mjs test/staging-e2e.ts"
+    "test:staging": "node --experimental-transform-types --no-warnings --import ./test/register.mjs test/staging-e2e.ts",
+    "dev:replit": "EXPO_PACKAGER_PROXY_URL=https://$REPLIT_EXPO_DEV_DOMAIN EXPO_PUBLIC_DOMAIN=$REPLIT_DEV_DOMAIN EXPO_PUBLIC_REPL_ID=$REPL_ID REACT_NATIVE_PACKAGER_HOSTNAME=$REPLIT_DEV_DOMAIN pnpm exec expo start --localhost --port $PORT",
+    "replit:build": "node scripts/build.js",
+    "replit:serve": "node server/serve.js"
   },
   "devDependencies": {
     "@babel/core": "^7.25.2",
