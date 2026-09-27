@@ -747,8 +747,8 @@ test('diagnostics never contain tokens, keys, emails or full URLs', () => {
     const err = new AuthApiError(`Bad token ${jwt} for alex@example.com key sb_publishable_abc123def456 at https://ref.supabase.co/auth/v1/token?grant_type=password&code=secretcode123`, 400, 'bad_jwt');
     authDiag('sign in (email)', { outcome: 'failed', error: err, redirect: 'exp://192.168.1.20:8081/--/auth/callback?code=abcdef' });
     const line = lines.join('\n');
-    assert.match(line, /\[auth\] sign in \(email\) outcome=failed redirect=exp:\/\/192\.168\.1\.20:8081 kind=rejected status=400 code=bad_jwt class=AuthApiError/);
-    for (const secret of [jwt, 'alex@example.com', 'abc123def456', 'grant_type', 'secretcode123', '/--/auth/callback', 'code=abcdef']) {
+    assert.match(line, /\[auth\] sign in \(email\) outcome=failed redirect=exp:\/\/192\.168\.1\.20:8081\/--\/auth\/callback kind=rejected status=400 code=bad_jwt class=AuthApiError/);
+    for (const secret of [jwt, 'alex@example.com', 'abc123def456', 'grant_type', 'secretcode123', 'code=abcdef']) {
       assert.ok(!line.includes(secret), `diagnostics must not include ${secret}`);
     }
     assert.match(line, /https:\/\/ref\.supabase\.co/);
@@ -759,10 +759,10 @@ test('diagnostics never contain tokens, keys, emails or full URLs', () => {
   assert.equal(lines.length, 1);
 });
 
-test('redirects are described by scheme and host only', () => {
-  assert.equal(describeRedirect('exp://192.168.1.20:8081/--/auth/callback'), 'exp://192.168.1.20:8081');
-  assert.equal(describeRedirect('exp://u.exp.direct/--/auth/callback?x=1'), 'exp://u.exp.direct');
-  assert.equal(describeRedirect('driveos-staging://auth/callback'), 'driveos-staging://auth');
+test('redirects are described without their query or fragment', () => {
+  assert.equal(describeRedirect('exp://192.168.1.20:8081/--/auth/callback'), 'exp://192.168.1.20:8081/--/auth/callback');
+  assert.equal(describeRedirect('exp://u.exp.direct/--/auth/callback?code=secret#access_token=t'), 'exp://u.exp.direct/--/auth/callback');
+  assert.equal(describeRedirect('driveos-staging://auth/callback'), 'driveos-staging://auth/callback');
   assert.equal(describeRedirect('not a url'), '(not a URL)');
   assert.equal(redact('see http://host.example/path?token=abc'), 'see http://host.example');
 });

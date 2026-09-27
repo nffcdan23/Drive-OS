@@ -207,9 +207,13 @@ export function redact(text: string): string {
     .slice(0, 300);
 }
 
-/** "exp://192.168.1.20:8081" or "driveos-staging://auth" — scheme and host only, never the path or query. */
+/**
+ * A redirect as it must appear in Supabase's Redirect URLs, e.g.
+ * "exp://192.168.1.20:8081/--/auth/callback": scheme, host and path. The
+ * query and fragment (where return links carry codes and tokens) are dropped.
+ */
 export function describeRedirect(uri: string): string {
-  const m = /^([A-Za-z][A-Za-z0-9+.-]*):\/\/([^/?#]*)/.exec(uri);
+  const m = /^([A-Za-z][A-Za-z0-9+.-]*):\/\/([^?#]*)/.exec(uri);
   return m ? `${m[1]}://${m[2]}` : '(not a URL)';
 }
 
