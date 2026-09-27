@@ -712,3 +712,67 @@ test('the app build refuses anything that would put DVLA credentials in the bund
     Object.assign(process.env, saved);
   }
 });
+
+// ─── Auth error classification and diagnostics ─────────────────────────────
+import { AuthApiError, AuthRetryableFetchError, AuthUnknownError } from '@supabase/supabase-js';
+import { authDiag, classifyAuthError, completeFromUrl, describeAuthError, describeRedirect, redact, setAuthDiagnostics, AuthFlowError } from '@/lib/backend/auth';
+
+test('only a missing response counts as a connection problem', () => {
+  assert.equal(classifyAuthError(new AuthRetryableFetchError('Network request failed', 0)).kind, 'offline');
+  assert.match(describeAuthError(new AuthRetryableFetchError('Network request failed', 0)), /Can't reach the sign-in service/);
+  // A real answer whose message happens to mention "fetch" or "network" is not "offline".
+  const withFetchWord = new AuthApiError('Failed to fetch user from database', 500, 'unexpected_failure');
+  assert.equal(classifyAuthError(withFetchWord).kind, 'service_unavailable');
+  assert.match(describeAuthError(withFetchWord), /unexpected_failure, HTTP 500.*Failed to fetch user/);
+  assert.doesNotMatch(describeAuthError(new AuthApiError('network policy denied', 403, 'not_admin')), /Can't reach/);
+  assert.match(describeAuthError(new AuthRetryableFetchError('{}', 503)), /had a problem \(HTTP 503\)/);
+});
+
+test('Supabase error codes become specific messages; anything else shows the real reason', () => {
+  assert.match(describeAuthError(new AuthApiError('User already registered', 422, 'user_already_exists')), /already exists/);
+  assert.match(describeAuthError(new AuthApiError('Signups not allowed for this instance', 422, 'signup_disabled')), /not being accepted/);
+  assert.match(describeAuthError(new AuthApiError('Unsupported provider: provider is not enabled', 400, 'validation_failed')), /Sign-in failed \(validation_failed, HTTP 400\): Unsupported provider/);
+  assert.match(describeAuthError(new AuthApiError('Invalid login credentials', 400, undefined as unknown as string)), /don't match/);
+  assert.match(describeAuthError(new AuthApiError('Database error saving new user', 500, 'unexpected_failure')), /Database error saving new user/);
+  assert.match(describeAuthError(new AuthUnknownError('JSON Parse error', {})), /Sign-in failed.*JSON Parse error/);
+  assert.equal(describeAuthError(new AuthFlowError('Apple did not return an identity token.')), 'Apple did not return an identity token.');
+  assert.match(describeAuthError(new TypeError('undefined is not a function')), /Sign-in failed: undefined is not a function/);
+});
+
+test('diagnostics never contain tokens, keys, emails or full URLs', () => {
+  const lines: string[] = [];
+  setAuthDiagnostics((l) => lines.push(l));
+  try {
+    const jwt = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.c2lnbmF0dXJlLXNpZ25hdHVyZQ';
+    const err = new AuthApiError(`Bad token ${jwt} for alex@example.com key sb_publishable_abc123def456 at https://ref.supabase.co/auth/v1/token?grant_type=password&code=secretcode123`, 400, 'bad_jwt');
+    authDiag('sign in (email)', { outcome: 'failed', error: err, redirect: 'exp://192.168.1.20:8081/--/auth/callback?code=abcdef' });
+    const line = lines.join('\n');
+    assert.match(line, /\[auth\] sign in \(email\) outcome=failed redirect=exp:\/\/192\.168\.1\.20:8081 kind=rejected status=400 code=bad_jwt class=AuthApiError/);
+    for (const secret of [jwt, 'alex@example.com', 'abc123def456', 'grant_type', 'secretcode123', '/--/auth/callback', 'code=abcdef']) {
+      assert.ok(!line.includes(secret), `diagnostics must not include ${secret}`);
+    }
+    assert.match(line, /https:\/\/ref\.supabase\.co/);
+  } finally {
+    setAuthDiagnostics(null);
+  }
+  authDiag('nothing logged without a sink');
+  assert.equal(lines.length, 1);
+});
+
+test('redirects are described by scheme and host only', () => {
+  assert.equal(describeRedirect('exp://192.168.1.20:8081/--/auth/callback'), 'exp://192.168.1.20:8081');
+  assert.equal(describeRedirect('exp://u.exp.direct/--/auth/callback?x=1'), 'exp://u.exp.direct');
+  assert.equal(describeRedirect('driveos-staging://auth/callback'), 'driveos-staging://auth');
+  assert.equal(describeRedirect('not a url'), '(not a URL)');
+  assert.equal(redact('see http://host.example/path?token=abc'), 'see http://host.example');
+});
+
+test('a return link that arrives twice exchanges its code only once', async () => {
+  let exchanges = 0;
+  const client = { auth: { exchangeCodeForSession: async () => { exchanges++; return { data: { session: { access_token: 't' } }, error: null }; } } } as never;
+  const url = 'exp://192.168.1.20:8081/--/auth/callback?code=same-code-1';
+  const [a, b] = await Promise.all([completeFromUrl(client, url), completeFromUrl(client, url)]);
+  assert.equal(exchanges, 1);
+  assert.deepEqual(a, b);
+  await assert.rejects(completeFromUrl(client, 'driveos-staging://auth/callback?error_description=Access+denied'), /Access denied/);
+});

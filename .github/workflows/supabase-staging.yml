@@ -32,7 +32,7 @@ on:
   workflow_dispatch:
     inputs:
       confirm:
-        description: 'Type deploy-staging to apply the migrations to the STAGING project, or mobile-test to only run the app tests against staging'
+        description: 'Type deploy-staging to apply the migrations to the STAGING project, mobile-test to only run the app tests, or auth-config to show the Auth settings (read-only)'
         required: true
 
 permissions:
@@ -310,3 +310,60 @@ jobs:
           # Optional repository variable (not a secret): domain for sign-up test addresses.
           SIGNUP_TEST_EMAIL_DOMAIN: ${{ vars.STAGING_SIGNUP_EMAIL_DOMAIN }}
         run: pnpm --filter @workspace/mobile run test:staging
+
+  # Read-only: shows how staging Auth is configured for sign-in from the app
+  # and Expo Go (Run workflow with confirm = auth-config). Prints only
+  # non-secret settings; never keys, secrets or tokens.
+  auth-config:
+    name: Staging Auth configuration (read-only)
+    if: github.event_name == 'workflow_dispatch' && inputs.confirm == 'auth-config'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_STAGING_URL }}
+      SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_STAGING_PUBLISHABLE_KEY }}
+      SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_STAGING_PROJECT_REF }}
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+    steps:
+      - name: Auth settings that affect the app
+        run: |
+          if [ -z "$SUPABASE_ACCESS_TOKEN" ]; then
+            echo "::warning::SUPABASE_ACCESS_TOKEN is not set: redirect URLs can't be read; showing public settings only."
+          else
+            curl -sf "https://api.supabase.com/v1/projects/$SUPABASE_PROJECT_REF/config/auth" \
+              -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" > auth.json || { echo "::error::Could not read the Auth config"; exit 1; }
+            python3 - <<'PY'
+          import json
+          c = json.load(open("auth.json"))
+          allow = [u.strip() for u in (c.get("uri_allow_list") or "").split(",") if u.strip()]
+          print("Site URL:            ", c.get("site_url"))
+          print("Redirect URLs:       ", allow or "(none)")
+          print("Email sign-in:       ", c.get("external_email_enabled"))
+          print("Confirm email:       ", not c.get("mailer_autoconfirm"))
+          print("Sign-ups disabled:   ", c.get("disable_signup"))
+          print("Google enabled:      ", c.get("external_google_enabled"))
+          print("Google client ID set:", bool(c.get("external_google_client_id")))
+          print("Google secret set:   ", bool(c.get("external_google_secret")))
+          print("Apple enabled:       ", c.get("external_apple_enabled"))
+          expo_go = any(u.startswith("exp://") for u in allow)
+          print("Expo Go redirect (exp://…) allowed:", expo_go)
+          print("App redirect (driveos-staging://…) allowed:", any(u.startswith("driveos-staging://") for u in allow))
+          PY
+            rm -f auth.json
+          fi
+          echo "Public settings: $(curl -s "${SUPABASE_URL%/}/auth/v1/settings" -H "apikey: $SUPABASE_PUBLISHABLE_KEY" | python3 -c 'import sys,json;d=json.load(sys.stdin);print({k:v for k,v in d.get("external",{}).items() if v}, "autoconfirm:", d.get("mailer_autoconfirm"), "signup disabled:", d.get("disable_signup"))')"
+
+      - name: Google sign-in hands off to Google (no browser, nothing followed)
+        run: |
+          redirect="exp://192.168.1.20:8081/--/auth/callback"
+          challenge=$(python3 -c 'import os,hashlib,base64;v=base64.urlsafe_b64encode(os.urandom(32)).rstrip(b"=");print(base64.urlsafe_b64encode(hashlib.sha256(v).digest()).rstrip(b"=").decode())')
+          out=$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' -G "${SUPABASE_URL%/}/auth/v1/authorize" \
+            --data-urlencode provider=google --data-urlencode "redirect_to=$redirect" \
+            --data-urlencode "code_challenge=$challenge" --data-urlencode code_challenge_method=s256)
+          status=${out%% *}; location=${out#* }
+          host=$(python3 -c 'import sys,urllib.parse as u;print(u.urlsplit(sys.argv[1]).netloc or "-")' "$location")
+          echo "/authorize → HTTP $status, redirects to host: $host"
+          case "$host" in
+            accounts.google.com) echo "OK: Supabase hands Google sign-in off to Google." ;;
+            *) echo "::warning::Google sign-in does not reach Google (is the Google provider enabled with a client ID and secret?)" ;;
+          esac

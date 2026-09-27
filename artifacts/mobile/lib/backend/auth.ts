@@ -4,7 +4,7 @@
  * the session (access + refresh token) is persisted by the storage adapter
  * passed in — the device's secure keychain in the app.
  */
-import { createClient, type AuthError, type Session, type SupabaseClient } from '@supabase/supabase-js';
+import { createClient, isAuthError, isAuthRetryableFetchError, type AuthError, type Session, type SupabaseClient } from '@supabase/supabase-js';
 import type { KeyValueStore } from './storage';
 import { NetworkError } from './http';
 
@@ -122,19 +122,117 @@ export function validateCredentials(email: string, password: string, creating: b
   return null;
 }
 
-/** User-facing text for Supabase Auth errors. */
+export type AuthFailureKind = 'offline' | 'service_unavailable' | 'rejected' | 'flow' | 'unknown';
+
+export interface AuthFailure {
+  kind: AuthFailureKind;
+  /** HTTP status from Supabase Auth (0 when no response arrived). */
+  status: number | null;
+  /** Supabase error code (e.g. "user_already_exists"), when given. */
+  code: string | null;
+  /** Error class name (e.g. "AuthApiError", "AuthRetryableFetchError"). */
+  name: string;
+  message: string;
+}
+
+/**
+ * Classifies a failure by the error's class and HTTP status, never by words
+ * in its message: only "no response at all" is treated as a connection
+ * problem. (Matching "fetch" in messages used to turn real server answers
+ * into "Can't reach the sign-in service".)
+ */
+export function classifyAuthError(err: unknown): AuthFailure {
+  const e = (err ?? {}) as { name?: string; message?: string; status?: number; code?: string };
+  const status = typeof e.status === 'number' ? e.status : null;
+  const code = typeof e.code === 'string' && e.code ? e.code : null;
+  const name = e.name || (err instanceof Error ? err.constructor.name : typeof err);
+  const message = typeof e.message === 'string' ? e.message : String(err);
+  let kind: AuthFailureKind;
+  if (err instanceof AuthFlowError) kind = 'flow';
+  else if (isAuthRetryableFetchError(err)) kind = !status ? 'offline' : 'service_unavailable';
+  else if (isAuthError(err) && status !== null && status >= 500) kind = 'service_unavailable';
+  else if (isAuthError(err)) kind = 'rejected';
+  else kind = 'unknown';
+  return { kind, status, code, name, message };
+}
+
+const CODE_MESSAGES: Record<string, string> = {
+  invalid_credentials: "That email and password don't match an account.",
+  email_not_confirmed: 'Confirm your email first — check your inbox for the link.',
+  user_already_exists: 'An account with this email already exists. Sign in instead.',
+  email_exists: 'An account with this email already exists. Sign in instead.',
+  weak_password: 'Choose a stronger password.',
+  over_request_rate_limit: 'Too many attempts. Wait a minute and try again.',
+  over_email_send_rate_limit: 'Too many emails sent. Wait a few minutes and try again.',
+  signup_disabled: 'New accounts are not being accepted on this server right now.',
+  email_provider_disabled: 'Email sign-in is turned off on this server.',
+  provider_disabled: 'This sign-in method is turned off on this server.',
+  email_address_invalid: "The sign-in service doesn't accept that email address. Try another one.",
+  email_address_not_authorized: "The sign-in service can't send email to that address yet.",
+  flow_state_not_found: 'That sign-in has expired or was started elsewhere. Please start again.',
+  flow_state_expired: 'That sign-in has expired. Please start again.',
+  bad_code_verifier: 'That sign-in was started on another device or app. Please start again here.',
+  otp_expired: 'That link has expired. Request a new one.',
+  same_password: 'Choose a password different from your current one.',
+};
+
+/** User-facing text for Supabase Auth errors: always the real reason. */
 export function describeAuthError(err: unknown): string {
-  const e = err as Partial<AuthError> & { message?: string };
-  const code = (e.code ?? '').toString();
-  const msg = (e.message ?? '').toLowerCase();
-  if (code === 'invalid_credentials' || msg.includes('invalid login credentials')) return 'That email and password don\'t match an account.';
-  if (code === 'email_not_confirmed' || msg.includes('email not confirmed')) return 'Confirm your email first — check your inbox for the link.';
-  if (code === 'user_already_exists' || msg.includes('already registered')) return 'An account with this email already exists. Sign in instead.';
-  if (code === 'weak_password' || msg.includes('password should')) return 'Choose a stronger password.';
-  if (code === 'over_request_rate_limit' || code === 'over_email_send_rate_limit' || msg.includes('rate limit')) return 'Too many attempts. Wait a minute and try again.';
-  if (msg.includes('network') || msg.includes('fetch')) return "Can't reach the sign-in service. Check your connection.";
-  if (err instanceof AuthFlowError) return err.message;
-  return e.message || 'Sign-in failed. Please try again.';
+  const f = classifyAuthError(err);
+  if (f.kind === 'flow') return f.message;
+  if (f.kind === 'offline') return "Can't reach the sign-in service. Check your connection.";
+  if (f.code && CODE_MESSAGES[f.code]) return CODE_MESSAGES[f.code]!;
+  // Older servers answer without a code.
+  const msg = f.message.toLowerCase();
+  if (msg.includes('invalid login credentials')) return CODE_MESSAGES.invalid_credentials!;
+  if (msg.includes('already registered')) return CODE_MESSAGES.user_already_exists!;
+  if (msg.includes('email not confirmed')) return CODE_MESSAGES.email_not_confirmed!;
+  const ref = [f.code, f.status ? `HTTP ${f.status}` : null].filter(Boolean).join(', ');
+  if (f.kind === 'service_unavailable') {
+    return `The sign-in service had a problem${ref ? ` (${ref})` : ''}: ${redact(f.message) || 'no details'}. Try again shortly.`;
+  }
+  return `Sign-in failed${ref ? ` (${ref})` : ''}: ${redact(f.message) || 'no details'}`;
+}
+
+// ─── Development diagnostics ────────────────────────────────────────────────
+
+/** Removes anything sensitive from text: emails, tokens/keys, full URLs (kept as scheme://host). */
+export function redact(text: string): string {
+  return text
+    .replace(/\b[A-Za-z][A-Za-z0-9+.-]*:\/\/([^\s/?#]*)[^\s]*/g, (_m, host) => `${_m.split(':')[0]}://${host}`)
+    .replace(/[^\s@]+@[^\s@]+\.[^\s@]+/g, '<email>')
+    .replace(/\beyJ[\w-]+\.[\w-]+\.[\w-]+/g, '<token>')
+    .replace(/\b(sb_[a-z]+_)[\w-]+/g, '$1<redacted>')
+    .replace(/\b[A-Za-z0-9_-]{32,}\b/g, '<redacted>')
+    .slice(0, 300);
+}
+
+/** "exp://192.168.1.20:8081" or "driveos-staging://auth" — scheme and host only, never the path or query. */
+export function describeRedirect(uri: string): string {
+  const m = /^([A-Za-z][A-Za-z0-9+.-]*):\/\/([^/?#]*)/.exec(uri);
+  return m ? `${m[1]}://${m[2]}` : '(not a URL)';
+}
+
+type DiagSink = (line: string) => void;
+let diagSink: DiagSink | null = null;
+/** Development builds set a sink (console); nothing is logged otherwise. */
+export function setAuthDiagnostics(sink: DiagSink | null) { diagSink = sink; }
+
+/**
+ * Logs an auth step for development: operation, outcome, HTTP status, error
+ * code, class and a redacted message; for redirects, only scheme and host.
+ * Never tokens, passwords, keys, emails or full auth URLs.
+ */
+export function authDiag(operation: string, detail: { error?: unknown; redirect?: string; outcome?: string } = {}) {
+  if (!diagSink) return;
+  const parts = [`[auth] ${operation}`];
+  if (detail.outcome) parts.push(`outcome=${detail.outcome}`);
+  if (detail.redirect) parts.push(`redirect=${describeRedirect(detail.redirect)}`);
+  if (detail.error !== undefined) {
+    const f = classifyAuthError(detail.error);
+    parts.push(`kind=${f.kind}`, `status=${f.status ?? '-'}`, `code=${f.code ?? '-'}`, `class=${f.name}`, `message="${redact(f.message)}"`);
+  }
+  diagSink(parts.join(' '));
 }
 
 export async function signUpWithEmail(client: SupabaseClient, email: string, password: string, redirectTo: string, displayName?: string) {
@@ -222,7 +320,19 @@ export async function completeFromUrl(client: SupabaseClient, url: string): Prom
   const { code, error } = parseAuthCallback(url);
   if (error) throw new AuthFlowError(error);
   if (!code) return null;
-  const { data, error: exchangeError } = await client.auth.exchangeCodeForSession(code);
-  if (exchangeError) throw exchangeError;
-  return data.session;
+  // The same return link can arrive twice (the auth browser's result and the
+  // app's link listener). A code can only be exchanged once, so the second
+  // attempt shares the first one's result instead of failing.
+  const pending = exchanges.get(code);
+  if (pending) return pending;
+  const run = (async () => {
+    const { data, error: exchangeError } = await client.auth.exchangeCodeForSession(code);
+    if (exchangeError) throw exchangeError;
+    return data.session;
+  })();
+  exchanges.set(code, run);
+  if (exchanges.size > 20) exchanges.delete(exchanges.keys().next().value!);
+  return run;
 }
+
+const exchanges = new Map<string, Promise<Session | null>>();

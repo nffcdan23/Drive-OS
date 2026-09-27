@@ -11,13 +11,30 @@ import * as WebBrowser from 'expo-web-browser';
 import * as Crypto from 'expo-crypto';
 import * as AppleAuthentication from 'expo-apple-authentication';
 import {
-  AuthFlowError, completeFromUrl, describeAuthError, isOfflineAuthError, parseAuthCallback, storedSessionUser, oauthUrl, sendPasswordReset, signInWithAppleToken, signInWithEmail,
+  AuthFlowError, authDiag, completeFromUrl, describeAuthError, describeRedirect, setAuthDiagnostics, isOfflineAuthError, parseAuthCallback, storedSessionUser, oauthUrl, sendPasswordReset, signInWithAppleToken, signInWithEmail,
   signUpWithEmail, updatePassword, type Session,
 } from '@/lib/backend/auth';
 import { ep, supabase } from '@/lib/backendClient';
 import { authStorage } from '@/lib/secureStorage';
 
 WebBrowser.maybeCompleteAuthSession();
+
+// Development builds (Expo Go, dev clients) log each auth step: operation,
+// outcome, HTTP status, error code/class/message and the redirect's scheme and
+// host only. Nothing is logged in staging or production builds.
+if (__DEV__) setAuthDiagnostics((line) => console.log(line));
+
+/** Runs an auth operation, logging its outcome (development only) and rethrowing failures. */
+async function traced<T>(operation: string, fn: () => Promise<T>, redirect?: string): Promise<T> {
+  try {
+    const out = await fn();
+    authDiag(operation, { outcome: 'ok', redirect });
+    return out;
+  } catch (err) {
+    authDiag(operation, { outcome: 'failed', error: err, redirect });
+    throw err;
+  }
+}
 
 /** Where Supabase sends users back to the app (must be allow-listed in Supabase Auth). */
 export const authRedirectUrl = () => Linking.createURL('auth/callback');
@@ -97,7 +114,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setLinkError(null);
     try {
       const isRecovery = parseAuthCallback(url).type === 'recovery';
-      const s = await completeFromUrl(client(), url);
+      const s = await traced('handle return link', () => completeFromUrl(client(), url), url);
       if (s && isRecovery) setRecoveringPassword(true);
     } catch (err) {
       // Shown on the return screen rather than leaving the user waiting.
@@ -118,11 +135,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [handleAuthUrl]);
 
   const signIn = useCallback(async (email: string, password: string) => {
-    await signInWithEmail(client(), email, password);
+    await traced('sign in (email)', () => signInWithEmail(client(), email, password));
   }, []);
 
   const signUp = useCallback(async (email: string, password: string, displayName?: string) => {
-    const r = await signUpWithEmail(client(), email, password, authRedirectUrl(), displayName);
+    const redirectTo = authRedirectUrl();
+    const r = await traced('sign up (email)', () => signUpWithEmail(client(), email, password, redirectTo, displayName), redirectTo);
+    authDiag('sign up (email)', { outcome: r.needsConfirmation ? 'needs email confirmation' : 'signed in' });
     return { needsConfirmation: r.needsConfirmation };
   }, []);
 
@@ -140,7 +159,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       throw err;
     }
     if (!credential.identityToken) throw new AuthFlowError('Apple did not return an identity token.');
-    await signInWithAppleToken(client(), credential.identityToken, rawNonce);
+    await traced('apple: sign in', () => signInWithAppleToken(client(), credential.identityToken!, rawNonce));
     // Apple only shares the name on the very first sign-in; keep it.
     const name = [credential.fullName?.givenName, credential.fullName?.familyName].filter(Boolean).join(' ');
     if (name && ep) await ep.updateMe({ displayName: name.slice(0, 50) }).catch(() => {});
@@ -148,14 +167,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const signInWithGoogle = useCallback(async () => {
     const redirectTo = authRedirectUrl();
-    const url = await oauthUrl(client(), 'google', redirectTo);
+    const url = await traced('google: start', () => oauthUrl(client(), 'google', redirectTo), redirectTo);
     const result = await WebBrowser.openAuthSessionAsync(url, redirectTo);
-    if (result.type !== 'success') return; // cancelled or dismissed
-    await completeFromUrl(client(), result.url);
+    authDiag('google: browser', { outcome: result.type, redirect: redirectTo });
+    if (result.type !== 'success') {
+      // Cancelled, or Supabase sent the browser somewhere other than this
+      // app: that happens when the redirect isn't on the project's allowed
+      // Redirect URLs (Expo Go uses exp://<computer>:8081/--/auth/callback).
+      if (__DEV__) authDiag('google: browser', { outcome: `closed without returning; check that ${describeRedirect(redirectTo)} is allowed in Supabase Redirect URLs` });
+      return;
+    }
+    await traced('google: complete', () => completeFromUrl(client(), result.url), result.url);
   }, []);
 
   const requestPasswordReset = useCallback(async (email: string) => {
-    await sendPasswordReset(client(), email, `${authRedirectUrl()}?type=recovery`);
+    await traced('password reset email', () => sendPasswordReset(client(), email, `${authRedirectUrl()}?type=recovery`), authRedirectUrl());
   }, []);
 
   const setNewPassword = useCallback(async (password: string) => {
