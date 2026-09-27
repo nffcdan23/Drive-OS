@@ -353,17 +353,31 @@ jobs:
           fi
           echo "Public settings: $(curl -s "${SUPABASE_URL%/}/auth/v1/settings" -H "apikey: $SUPABASE_PUBLISHABLE_KEY" | python3 -c 'import sys,json;d=json.load(sys.stdin);print({k:v for k,v in d.get("external",{}).items() if v}, "autoconfirm:", d.get("mailer_autoconfirm"), "signup disabled:", d.get("disable_signup"))')"
 
-      - name: Google sign-in hands off to Google (no browser, nothing followed)
+      - name: Which redirect Supabase accepts (no browser, nothing followed)
         run: |
-          redirect="exp://192.168.1.20:8081/--/auth/callback"
-          challenge=$(python3 -c 'import os,hashlib,base64;v=base64.urlsafe_b64encode(os.urandom(32)).rstrip(b"=");print(base64.urlsafe_b64encode(hashlib.sha256(v).digest()).rstrip(b"=").decode())')
-          out=$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' -G "${SUPABASE_URL%/}/auth/v1/authorize" \
-            --data-urlencode provider=google --data-urlencode "redirect_to=$redirect" \
-            --data-urlencode "code_challenge=$challenge" --data-urlencode code_challenge_method=s256)
-          status=${out%% *}; location=${out#* }
-          host=$(python3 -c 'import sys,urllib.parse as u;print(u.urlsplit(sys.argv[1]).netloc or "-")' "$location")
-          echo "/authorize → HTTP $status, redirects to host: $host"
-          case "$host" in
-            accounts.google.com) echo "OK: Supabase hands Google sign-in off to Google." ;;
-            *) echo "::warning::Google sign-in does not reach Google (is the Google provider enabled with a client ID and secret?)" ;;
-          esac
+          # Starts a Google sign-in for each candidate redirect and reads the
+          # "referrer" Supabase recorded in the state it hands to Google: the
+          # URL Supabase will send the browser back to (Site URL = rejected).
+          check() {
+            challenge=$(python3 -c 'import os,hashlib,base64;v=base64.urlsafe_b64encode(os.urandom(32)).rstrip(b"=");print(base64.urlsafe_b64encode(hashlib.sha256(v).digest()).rstrip(b"=").decode())')
+            location=$(curl -s -o /dev/null -w '%{redirect_url}' -G "${SUPABASE_URL%/}/auth/v1/authorize" \
+              --data-urlencode provider=google --data-urlencode "redirect_to=$1" \
+              --data-urlencode "code_challenge=$challenge" --data-urlencode code_challenge_method=s256)
+            python3 - "$1" "$location" <<'PY'
+          import sys, json, base64, urllib.parse as u
+          asked, loc = sys.argv[1], sys.argv[2]
+          q = u.parse_qs(u.urlsplit(loc).query)
+          host = u.urlsplit(loc).netloc or "-"
+          ref = "?"
+          st = (q.get("state") or [""])[0]
+          if st.count(".") == 2:
+              p = st.split(".")[1]; p += "=" * (-len(p) % 4)
+              ref = json.loads(base64.urlsafe_b64decode(p)).get("referrer", "(none)")
+          verdict = "ACCEPTED" if ref == asked else "REJECTED -> falls back to Site URL"
+          print(f"{asked:48} google={host:22} referrer={ref}  {verdict}")
+          PY
+          }
+          check "exp://192.168.0.162:8081/--/auth/callback"
+          check "exp://192.168.0.162:8081"
+          check "driveos-staging://auth/callback"
+          check "https://example.invalid/not-allowed"
