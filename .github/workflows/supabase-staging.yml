@@ -363,6 +363,10 @@ jobs:
           # The probe's own flow_state rows are deleted afterwards.
           password=$(python3 -c "import os,urllib.parse as u; print(u.unquote(u.urlsplit(os.environ['STAGING_DB_URL']).password or ''))")
           [ -n "$password" ] && echo "::add-mask::$password"
+          # The project ref is masked in logs, so compare instead of printing it.
+          for ref in nshffzncumnvmzgtqqph; do
+            case "$SUPABASE_URL" in *"$ref"*) echo "Probing project $ref: yes (the staging secrets point at it)" ;; *) echo "::warning::The staging secrets do NOT point at project $ref" ;; esac
+          done
           cols=$(psql "$STAGING_DB_URL" -X -A -t -c "select string_agg(column_name, ',') from information_schema.columns where table_schema='auth' and table_name='flow_state'")
           echo "auth.flow_state columns: $cols"
           challenges=""
