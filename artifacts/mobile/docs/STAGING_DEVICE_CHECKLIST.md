@@ -34,6 +34,7 @@ This checklist is for what only a phone can show: Keychain, the camera roll, GPS
 6. [ ] ★ **Force-quit and reopen** → still signed in, with no sign-in screen.
 7. [ ] ★ Leave the app for over 1 hour (the access token expires), reopen → still signed in and data loads, because the session refreshed.
 8. [ ] **Forgot password** → the email link opens the app → set a new password → sign in with it. This needs working email, so skip it on staging if Confirm email/SMTP is off.
+9a. [ ] **Expo Go auth diagnostics:** Metro's terminal shows one `[auth] …` line per step. Each shows the operation, the outcome, and for errors the HTTP status, error code and class. Redirects appear as scheme and host only, and nothing secret is logged. Use these lines to report any failure.
 9. [ ] **Google** (once configured) → the account picker → back in the app, signed in.
 10a. [ ] ★ **Offline restart after a long gap:** stay away for over 1 hour, turn on airplane mode, then open the app.
     - You stay signed in, cached data shows, and the banner says Offline. You should **not** see the sign-in screen.

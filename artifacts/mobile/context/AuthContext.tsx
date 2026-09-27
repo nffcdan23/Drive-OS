@@ -11,10 +11,10 @@ import * as WebBrowser from 'expo-web-browser';
 import * as Crypto from 'expo-crypto';
 import * as AppleAuthentication from 'expo-apple-authentication';
 import {
-  AuthFlowError, authDiag, completeFromUrl, describeAuthError, describeRedirect, setAuthDiagnostics, isOfflineAuthError, parseAuthCallback, storedSessionUser, oauthUrl, sendPasswordReset, signInWithAppleToken, signInWithEmail,
+  AuthFlowError, authDiag, completeFromUrl, describeAuthError, describeRedirect, enabledProviders, setAuthDiagnostics, isOfflineAuthError, parseAuthCallback, storedSessionUser, oauthUrl, sendPasswordReset, signInWithAppleToken, signInWithEmail,
   signUpWithEmail, updatePassword, type Session,
 } from '@/lib/backend/auth';
-import { ep, supabase } from '@/lib/backendClient';
+import { backendEnv, ep, supabase } from '@/lib/backendClient';
 import { authStorage } from '@/lib/secureStorage';
 
 WebBrowser.maybeCompleteAuthSession();
@@ -167,6 +167,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const signInWithGoogle = useCallback(async () => {
     const redirectTo = authRedirectUrl();
+    // Without this, a disabled provider only shows Supabase's error page in
+    // the browser, and closing it looks like a silent cancel.
+    if (backendEnv) {
+      const providers = await enabledProviders(backendEnv.supabaseUrl, backendEnv.supabasePublishableKey);
+      if (providers && !providers.google) {
+        const err = new AuthFlowError("Google sign-in isn't enabled on this server yet. Use email and password for now.");
+        authDiag('google: start', { outcome: 'provider disabled on this Supabase project', error: err });
+        throw err;
+      }
+    }
     const url = await traced('google: start', () => oauthUrl(client(), 'google', redirectTo), redirectTo);
     const result = await WebBrowser.openAuthSessionAsync(url, redirectTo);
     authDiag('google: browser', { outcome: result.type, redirect: redirectTo });

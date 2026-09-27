@@ -84,7 +84,7 @@ Set these as EAS environment variables when the name is final. See `NAMING.md` f
 | Auth → Providers → Email → **Confirm email** | **Off**. Lets the automated sign-up test and testers create accounts without the built-in mailer, which only sends to project members. | **On**, with custom SMTP |
 | Auth → Providers → Email → Allow new users | On | On |
 | Auth → Providers → Email → Minimum password length | 8 (matches the app) | 8 |
-| Auth → URL configuration → Redirect URLs | `<scheme>-staging://auth/callback`, plus the Expo Go URL while testing in Expo Go (`exp://<LAN-IP>:8081/--/auth/callback`) | `<scheme>://auth/callback` |
+| Auth → URL configuration → Redirect URLs | `driveos-staging://auth/callback`, plus **`exp://**`** so Google and email links return to Expo Go during development. Expo Go's redirect is `exp://<your computer's IP>:8081/--/auth/callback`; development builds log it as `[auth] … redirect=exp://…`. Staging only, never production. | `<scheme>://auth/callback` |
 | Auth → Providers → Apple | enabled when you're ready; Client IDs = the final staging bundle id (see `NAMING.md`) | final production bundle id |
 | Auth → Providers → Google | enabled with a Google Cloud **Web** OAuth client; redirect URI `https://<ref>.supabase.co/auth/v1/callback` | its own Web client |
 

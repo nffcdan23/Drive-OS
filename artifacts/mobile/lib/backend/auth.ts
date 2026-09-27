@@ -274,6 +274,23 @@ export async function signInWithAppleToken(client: SupabaseClient, identityToken
   return data.session;
 }
 
+/**
+ * Which sign-in providers the Supabase project has enabled, from its public
+ * settings (publishable key only). Null when they can't be read; callers then
+ * carry on and let the sign-in itself report any problem.
+ */
+export async function enabledProviders(url: string, publishableKey: string, fetchImpl: typeof fetch = fetch): Promise<Record<string, boolean> | null> {
+  try {
+    const res = await fetchImpl(`${url.replace(/\/+$/, '')}/auth/v1/settings`, { headers: { apikey: publishableKey } });
+    if (!res.ok) return null;
+    const body = (await res.json()) as { external?: Record<string, unknown> };
+    if (!body.external || typeof body.external !== 'object') return null;
+    return Object.fromEntries(Object.entries(body.external).map(([k, v]) => [k, v === true]));
+  } catch {
+    return null;
+  }
+}
+
 /** Starts a browser-based OAuth sign-in (Google); returns the URL to open. */
 export async function oauthUrl(client: SupabaseClient, provider: 'google' | 'apple', redirectTo: string): Promise<string> {
   const { data, error } = await client.auth.signInWithOAuth({

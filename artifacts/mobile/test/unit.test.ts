@@ -776,3 +776,17 @@ test('a return link that arrives twice exchanges its code only once', async () =
   assert.deepEqual(a, b);
   await assert.rejects(completeFromUrl(client, 'driveos-staging://auth/callback?error_description=Access+denied'), /Access denied/);
 });
+
+import { enabledProviders } from '@/lib/backend/auth';
+
+test('provider check reads public settings and fails open', async () => {
+  const seen: string[] = [];
+  const fetchOk = (async (url: string, init: RequestInit) => {
+    seen.push(`${url} ${(init.headers as Record<string, string>).apikey}`);
+    return new Response(JSON.stringify({ external: { email: true, google: false, apple: false } }), { status: 200 });
+  }) as typeof fetch;
+  assert.deepEqual(await enabledProviders('https://ref.supabase.co/', 'sb_publishable_x', fetchOk), { email: true, google: false, apple: false });
+  assert.deepEqual(seen, ['https://ref.supabase.co/auth/v1/settings sb_publishable_x']);
+  assert.equal(await enabledProviders('https://ref.supabase.co', 'k', (async () => { throw new TypeError('offline'); }) as typeof fetch), null);
+  assert.equal(await enabledProviders('https://ref.supabase.co', 'k', (async () => new Response('nope', { status: 500 })) as typeof fetch), null);
+});
