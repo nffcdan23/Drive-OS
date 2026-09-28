@@ -45,6 +45,23 @@ module.exports = ({ config }) => {
     throw new Error(`Refusing to build: ${secrets.join(', ')} holds a server secret (a Supabase secret or service-role key, or a database URL with a password). Only public values may be EXPO_PUBLIC_*.`);
   }
 
+  // Store builds use the committed identity only. An APP_* override (e.g. a
+  // leftover EAS environment variable) would otherwise register a different
+  // bundle id with Apple, which can't be undone.
+  if ((appEnv === 'staging' || appEnv === 'production') && id.committed) {
+    const overrides = ['APP_DISPLAY_NAME', 'APP_SLUG', 'APP_SCHEME', 'APP_BUNDLE_ID'].filter((k) => process.env[k]);
+    if (overrides.length) {
+      throw new Error(`Refusing to build: ${overrides.join(', ')} would override the ${appEnv} identity committed in app.identity.js. Remove them (check \`eas env:list\`).`);
+    }
+  }
+
+  // The EAS project id lives only in app.identity.js. A copy in app.json (as
+  // `eas init` writes) would also reach builds of the other variant.
+  const staticProjectId = config.extra?.eas?.projectId;
+  if (staticProjectId && staticProjectId !== id.easProjectId) {
+    throw new Error(`app.json has extra.eas.projectId "${staticProjectId}", but the ${appEnv} identity in app.identity.js has ${id.easProjectId ? `"${id.easProjectId}"` : 'none'}. Keep the EAS project id only in app.identity.js: remove "extra.eas" from app.json.`);
+  }
+
   // A staging or production build without its backend settings would install
   // but never connect; fail the build instead. (The values are public.)
   if (appEnv === 'staging' || appEnv === 'production') {
@@ -57,6 +74,7 @@ module.exports = ({ config }) => {
 
   return {
     ...config,
+    ...(id.owner ? { owner: id.owner } : {}),
     name: id.appName,
     slug: id.slug,
     scheme: id.scheme,
@@ -87,9 +105,8 @@ module.exports = ({ config }) => {
     ],
     extra: {
       ...(config.extra || {}),
-      // From `eas init`, recorded in app.identity.js (or EAS_PROJECT_ID), so
-      // no EAS project is tied to the placeholder name.
-      ...(id.easProjectId ? { eas: { projectId: id.easProjectId } } : {}),
+      // From `eas init`, recorded only in app.identity.js (per variant).
+      eas: id.easProjectId ? { projectId: id.easProjectId } : undefined,
       appEnv,
       displayName: name,
       identityIsPlaceholder: id.usingPlaceholders,

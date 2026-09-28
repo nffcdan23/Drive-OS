@@ -25,16 +25,13 @@ These values are in `CHOSEN.staging` in `app.identity.js`, and they are used exa
 
 When App Store Connect asks, you still choose the record's **name** (unique on the App Store; it can change later), **SKU** (permanent, private, e.g. `starscale-drive-staging-ios`) and **primary language**.
 
-## 2. Link the EAS project (once)
+## 2. EAS project (done)
 
-From `artifacts/mobile`, with this configuration on `main`:
+The TestFlight app is linked to the EAS project **`@dancaw23/starscale-drive-staging`**, project id `a5ecd99b-322f-4531-b3d9-4bdd3ddb93cf`. The id and owner are recorded **only** in `CHOSEN.staging` in `app.identity.js`.
 
-```sh
-npx eas-cli@latest login
-npx eas-cli@latest init
-```
-
-`eas init` creates the project and prints its id. It can't write it into `app.config.js` itself. Put the id in `CHOSEN.staging.easProjectId` (or give it to Claude) and commit.
+- `eas init` also writes the id into `app.json` (`extra.eas`). Don't commit that: discard it with `git restore artifacts/mobile/app.json`.
+- A copy in `app.json` that differs from `app.identity.js` stops the build. So does any copy at all in a production (App Store) build, because it would tie that build to the staging project.
+- Don't run `eas init` again for this app.
 
 ## 3. Build settings (EAS "preview" environment, public values only)
 
@@ -46,6 +43,8 @@ npx eas-cli@latest env:create --environment preview --visibility plaintext --nam
 ```
 
 - If `env:list` already shows a variable, use `env:update` instead of `env:create`.
+- Do **not** add `APP_DISPLAY_NAME`, `APP_SLUG`, `APP_SCHEME`, `APP_BUNDLE_ID` or `EAS_PROJECT_ID`: the identity is committed. The TestFlight build refuses `APP_*` overrides, so it can't register a different bundle id with Apple.
+- `EXPO_PUBLIC_APP_ENV=staging` comes from the `testflight` profile in `eas.json`; don't add it to EAS either.
 - The publishable key is the same `sb_publishable_…` value as in your local `.env`.
 - **Never** add `SUPABASE_SECRET_KEY`, `DATABASE_URL` or `DVLA_API_KEY` to EAS: they live on Railway only.
 

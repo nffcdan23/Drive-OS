@@ -356,7 +356,41 @@ test('the staging (TestFlight) identity is chosen; the App Store identity is not
   assert.deepEqual([chosen.appName, chosen.scheme, chosen.bundleId, chosen.usingPlaceholders], ['Name', 'name', 'com.example.name', false]);
   assert.equal(identity('staging', { APP_BUNDLE_ID: 'com.example.name' }).bundleId, 'com.example.name.staging');
   assert.equal(identity('staging', { APP_SCHEME: 'name' }).scheme, 'name-staging');
-  assert.equal(identity('staging', { EAS_PROJECT_ID: 'p-2' }).easProjectId, 'p-2');
+  // The EAS project is linked only in CHOSEN: no environment override, none for the App Store app.
+  assert.deepEqual([tf.easProjectId, tf.owner, tf.committed], ['a5ecd99b-322f-4531-b3d9-4bdd3ddb93cf', 'dancaw23', true]);
+  assert.equal(identity('staging', { EAS_PROJECT_ID: 'p-2' }).easProjectId, 'a5ecd99b-322f-4531-b3d9-4bdd3ddb93cf');
+  assert.deepEqual([store.easProjectId, store.owner, store.committed], [null, null, false]);
+});
+
+test('the build keeps one EAS project id and one identity', () => {
+  const appConfig = createRequire(import.meta.url)('../app.config.js') as (a: { config: object }) => { owner?: string; extra: { eas?: { projectId: string } } };
+  const cfg = (extra: object = {}) => ({ config: { ios: { infoPlist: {} }, android: {}, plugins: [], extra } });
+  const saved = { ...process.env };
+  try {
+    for (const k of Object.keys(process.env)) if (k.startsWith('EXPO_PUBLIC_') || k.startsWith('APP_') || k === 'EAS_PROJECT_ID') delete process.env[k];
+    Object.assign(process.env, {
+      EXPO_PUBLIC_APP_ENV: 'staging',
+      EXPO_PUBLIC_SUPABASE_URL: 'https://example.supabase.co',
+      EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY: 'sb_publishable_' + 'abc',
+      EXPO_PUBLIC_API_URL: 'https://api.example.invalid',
+    });
+    const tf = appConfig(cfg());
+    assert.deepEqual([tf.owner, tf.extra.eas?.projectId], ['dancaw23', 'a5ecd99b-322f-4531-b3d9-4bdd3ddb93cf']);
+    // What `eas init` writes into app.json: harmless when identical, refused when different.
+    assert.doesNotThrow(() => appConfig(cfg({ eas: { projectId: 'a5ecd99b-322f-4531-b3d9-4bdd3ddb93cf' } })));
+    assert.throws(() => appConfig(cfg({ eas: { projectId: 'other' } })), /Keep the EAS project id only in app\.identity\.js/);
+    // The staging project id in app.json must never reach an App Store build.
+    process.env.EXPO_PUBLIC_APP_ENV = 'production';
+    assert.throws(() => appConfig(cfg({ eas: { projectId: 'a5ecd99b-322f-4531-b3d9-4bdd3ddb93cf' } })), /has none/);
+    assert.equal(appConfig(cfg()).extra.eas, undefined, 'the App Store build has no EAS project yet');
+    // A leftover APP_* variable can't replace the committed TestFlight identity.
+    process.env.EXPO_PUBLIC_APP_ENV = 'staging';
+    process.env.APP_BUNDLE_ID = 'com.someone.devtest';
+    assert.throws(() => appConfig(cfg()), /APP_BUNDLE_ID would override the staging identity/);
+  } finally {
+    for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];
+    Object.assign(process.env, saved);
+  }
 });
 
 test('an unchosen identity falls back to placeholders and sets no bundle id', () => {
