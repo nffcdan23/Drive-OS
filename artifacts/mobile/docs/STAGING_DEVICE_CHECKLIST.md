@@ -20,9 +20,7 @@ This checklist is for what only a phone can show: Keychain, the camera roll, GPS
     - Run `npx expo start` with `artifacts/mobile/.env` pointing at staging.
     - Add `exp://<your-LAN-IP>:8081/--/auth/callback` to the Supabase redirect URLs.
     - Sign in with Apple can't be tested in Expo Go against your own App ID. Email and Google can.
-  - **Option B: an internal EAS build** with a **temporary, clearly throwaway** `APP_BUNDLE_ID`.
-    - Example: `com.<yourname>.devtest`, **not** a name you might ship under.
-    - This registers that throwaway id with Apple; you can delete it later.
+  - **Option B: a TestFlight build** of StarScale Drive (`uk.co.starscale.drive.staging`), following `TESTFLIGHT.md`.
     - Use `staging-simulator` for an iOS Simulator build, which needs no Apple registration at all.
 
 ## Accounts

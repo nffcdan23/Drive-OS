@@ -15,7 +15,9 @@
  *                     Without it the native identifiers are left unset, so
  *                     `eas build` stops and asks rather than registering a
  *                     placeholder with Apple.
- *   EAS_PROJECT_ID    printed by `eas init`
+ *
+ * The EAS project (id and owning Expo account) is recorded ONLY in CHOSEN:
+ * not in app.json, not in an environment variable.
  */
 const PLACEHOLDER = {
   displayName: 'DriveOS',
@@ -40,7 +42,9 @@ const CHOSEN = {
     slug: 'starscale-drive-staging',
     scheme: 'starscale-drive-staging',
     bundleId: 'uk.co.starscale.drive.staging',
-    easProjectId: null,
+    /** EAS project @dancaw23/starscale-drive-staging (from `eas init`). */
+    easProjectId: 'a5ecd99b-322f-4531-b3d9-4bdd3ddb93cf',
+    owner: 'dancaw23',
   },
   production: {
     displayName: null,
@@ -48,6 +52,7 @@ const CHOSEN = {
     scheme: null,
     bundleId: null,
     easProjectId: null,
+    owner: null,
   },
 };
 
@@ -69,7 +74,10 @@ function identity(appEnv, env = process.env, chosen = CHOSEN) {
     slug: env.APP_SLUG || c.slug || PLACEHOLDER.slug,
     scheme: env.APP_SCHEME ? suffix(env.APP_SCHEME, '-staging') : c.scheme || suffix(PLACEHOLDER.scheme, '-staging'),
     bundleId,
-    easProjectId: env.EAS_PROJECT_ID || c.easProjectId || null,
+    easProjectId: c.easProjectId || null,
+    owner: c.owner || null,
+    /** True when this variant's identity is committed in CHOSEN. */
+    committed: Boolean(c.bundleId),
     usingPlaceholders: !(env.APP_DISPLAY_NAME || c.displayName) || !bundleId,
   };
 }

@@ -23,19 +23,18 @@ This file lists every value the app, the API and CI need, and where each is set.
 
 ## 2. Mobile app: identity (placeholders until the name is chosen)
 
-These are read by `app.identity.js`, along with `EAS_PROJECT_ID`. None has a final value yet.
+These are read by `app.identity.js`. The EAS project id is recorded only there, per variant.
 
 | Variable | Used for | Default (placeholder) |
 |---|---|---|
 | `APP_DISPLAY_NAME` | Home-screen name and all in-app wording | `DriveOS` |
 | `APP_SLUG` | Expo/EAS project slug | `driveos` |
 | `APP_SCHEME` | Deep-link scheme for sign-in links (`<scheme>://auth/callback`; staging adds `-staging`) | `driveos` |
-| `APP_BUNDLE_ID` | iOS bundle id and Android package (staging adds `.staging`) | **none**: without it, EAS stops and asks, so nothing is registered by accident. For device testing before the name is chosen, use a throwaway id (`STAGING_API.md` §4). |
-| `EAS_PROJECT_ID` | EAS project, printed by `eas init`; set in your shell, not committed | none |
+| `APP_BUNDLE_ID` | iOS bundle id and Android package (staging adds `.staging`) | **none**: without it, EAS stops and asks, so nothing is registered by accident. |
 
 Staging and production builds stop with an error if any `EXPO_PUBLIC_SUPABASE_*` or `EXPO_PUBLIC_API_URL` value is missing.
 
-When the name is final, record the values in `CHOSEN` in `app.identity.js`; the variables above override them. See `NAMING.md` for everything that follows from them, and `TESTFLIGHT.md` for the TestFlight build.
+The staging/TestFlight identity and its EAS project are committed in `CHOSEN.staging` in `app.identity.js`. Staging and production builds **refuse** the variables above once that variant's identity is committed, so don't set them in EAS. They are only for local experiments. See `NAMING.md` for everything that follows from them, and `TESTFLIGHT.md` for the TestFlight build.
 
 ## 3. API server (hosted staging: its own Railway project, set by CI; see `STAGING_API.md`)
 

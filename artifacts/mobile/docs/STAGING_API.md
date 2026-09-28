@@ -83,15 +83,13 @@ From `artifacts/mobile`:
 
 ```sh
 npx eas-cli@latest login
-npx eas-cli@latest init                      # creates the EAS project and prints its id
-export EAS_PROJECT_ID=<the id it printed>     # keep it in your shell; not committed
+# The EAS project and the app identity are already set up and committed
+# (StarScale Drive, uk.co.starscale.drive.staging): see TESTFLIGHT.md.
 
 # Staging build settings (EAS "preview" environment). All of them are public values.
 npx eas-cli@latest env:create --environment preview --visibility plaintext --name EXPO_PUBLIC_SUPABASE_URL --value "https://<staging-ref>.supabase.co"
 npx eas-cli@latest env:create --environment preview --visibility plaintext --name EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY --value "sb_publishable_…"
 npx eas-cli@latest env:create --environment preview --visibility plaintext --name EXPO_PUBLIC_API_URL --value "https://<staging-api>"
-# A THROWAWAY bundle id for testing only. Staging adds ".staging".
-npx eas-cli@latest env:create --environment preview --visibility plaintext --name APP_BUNDLE_ID --value "com.<yourname>.devtest"
 
 npx eas-cli@latest device:create             # register your iPhone (open the link on the phone)
 npx eas-cli@latest build --platform ios --profile staging
@@ -99,13 +97,12 @@ npx eas-cli@latest build --platform ios --profile staging
 
 **How the build installs.** The `staging` profile is **internal distribution** (ad hoc): you install from the link or QR code EAS gives you. It does not go through the App Store or TestFlight.
 
-**What gets registered with Apple.** EAS registers the throwaway id `com.<yourname>.devtest.staging` and an ad hoc provisioning profile. The throwaway id is never your shipping id, so the final name and bundle id remain fully open.
+**What gets registered with Apple.** The same App ID as TestFlight (`uk.co.starscale.drive.staging`) and an ad hoc provisioning profile. Don't set `APP_BUNDLE_ID` in EAS: the build refuses it.
 
 **Before signing in on the phone,** add `starscale-drive-staging://auth/callback` to Supabase staging → Auth → URL configuration → Redirect URLs. This is needed for password-reset and confirmation links.
 
 **No Apple membership yet?** Build `--profile staging-simulator` for the iOS Simulator on a Mac. That needs no Apple registration at all.
 
 ## What stays temporary
-- Name `DriveOS`, scheme `driveos`, slug `driveos`: placeholders (`app.identity.js`).
-- The EAS project id comes from `EAS_PROJECT_ID`, not from the repository. A new EAS project can be created under the final slug later.
-- The throwaway bundle id only exists for testing. The final one is chosen and set with `APP_BUNDLE_ID` later (see `NAMING.md`).
+- The staging/TestFlight identity is final for pre-launch (`CHOSEN.staging` in `app.identity.js`).
+- The public App Store identity (`CHOSEN.production`) is not chosen yet (see `NAMING.md`).
