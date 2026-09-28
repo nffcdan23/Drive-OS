@@ -98,10 +98,10 @@ a modified copy of the migrations.
 
 `.github/workflows/supabase-staging.yml` applies the migrations to the
 **staging** project (never production) and verifies them against the real
-Supabase services. It runs only when deliberately triggered — a commit on the
-working branch whose message contains `[deploy supabase-staging]`, or "Run
-workflow" once the file is on the default branch — and stops at the first
-failing step:
+Supabase services. It runs only when deliberately triggered, and only from
+`main` (the canonical branch) — a commit on `main` whose message contains
+`[deploy supabase-staging]`, or "Run workflow" on `main` — and stops at the
+first failing step:
 
 1. Checks the secrets are set and all refer to the same project.
 2. **Pre-flight** (`tests/staging/preflight.sql`, read-only session): the

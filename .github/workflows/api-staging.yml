@@ -1,11 +1,13 @@
 # Deploys the Express API to the hosted STAGING service (its own Railway
 # project, separate from production) and tests the mobile data layer against it.
 #
-# Runs only when asked:
-#   - a push whose commit message contains  [deploy api-staging]
-#   - or "Run workflow" with confirm = deploy-api-staging
-#   - "Run workflow" with confirm = verify-api-staging runs only the read-only
-#     checks below and changes nothing
+# Runs only when asked, and deploys only from main (the canonical branch):
+#   - a push to main whose commit message contains  [deploy api-staging]
+#   - or "Run workflow" on main with confirm = deploy-api-staging
+#   - "Run workflow" (any branch) with confirm = verify-api-staging runs only
+#     the read-only checks below, including that the service uses the same
+#     Supabase project as the SUPABASE_STAGING_* secrets and is healthy, and
+#     changes nothing
 #
 # Production is out of reach by construction:
 #   - RAILWAY_STAGING_TOKEN is a Railway *project token*, which Railway scopes to
@@ -22,6 +24,7 @@ name: API staging deploy
 
 on:
   push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       confirm:
@@ -63,6 +66,13 @@ jobs:
       # Pinned and more than a week old, like the workspace's minimumReleaseAge rule.
       RAILWAY_CLI_VERSION: 5.57.6
     steps:
+      - name: Deploy only from main
+        if: env.MODE == 'deploy'
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::The hosted API is deployed only from main (this run is on $GITHUB_REF). Merge first, or use verify-api-staging."; exit 1
+          fi
+
       - uses: actions/checkout@v4
 
       - name: Install the Railway CLI
@@ -162,6 +172,38 @@ jobs:
           if not domain or host != domain.lower():
               print("::error::STAGING_API_URL is not the public domain of the staging api service"); sys.exit(1)
           '
+
+      - name: Confirm the hosted chain and its health (read-only)
+        # App → this API → Supabase. Compares the service's settings with the
+        # SUPABASE_STAGING_* secrets and prints yes/no only, never values.
+        if: env.MODE == 'verify'
+        env:
+          # The single pre-launch Supabase project (public: it is in the app too).
+          CANONICAL_SUPABASE_REF: nshffzncumvmmzgtqqph
+        run: |
+          railway variables -p "$RAILWAY_PROJECT_ID" -e "$RAILWAY_ENVIRONMENT" -s "$RAILWAY_SERVICE" --json \
+            | python3 -c '
+          import json, os, sys
+          d = json.load(sys.stdin)
+          e = os.environ
+          checks = [
+              ("SUPABASE_STAGING_PROJECT_REF is the canonical project", e["SUPABASE_PROJECT_REF"] == e["CANONICAL_SUPABASE_REF"]),
+              ("Railway SUPABASE_URL = SUPABASE_STAGING_URL", (d.get("SUPABASE_URL") or "").rstrip("/") == e["SUPABASE_URL"].rstrip("/")),
+              ("Railway DATABASE_URL = SUPABASE_STAGING_DB_URL", d.get("DATABASE_URL") == e["STAGING_DB_URL"]),
+              ("Railway SUPABASE_SECRET_KEY = SUPABASE_STAGING_SECRET_KEY", d.get("SUPABASE_SECRET_KEY") == e["SUPABASE_SECRET_KEY"]),
+          ]
+          for name, ok in checks:
+              print(("yes  " if ok else "NO   ") + name)
+          sys.exit(0 if all(ok for _, ok in checks) else 1)
+          '
+          url="${STAGING_API_URL%/}"
+          release=$(curl -s -D - -o /dev/null "$url/api/healthz" | tr -d '\r' | awk -F': ' 'tolower($1)=="x-app-release"{print $2}')
+          echo "API healthz: serving release ${release:-(none reported)}"
+          ready=$(curl -s "$url/api/readyz")
+          echo "API readyz: $ready"
+          auth=$(curl -s -o /dev/null -w '%{http_code}' "${SUPABASE_URL%/}/auth/v1/health" -H "apikey: $SUPABASE_PUBLISHABLE_KEY")
+          echo "Supabase Auth health: HTTP $auth"
+          [ -n "$release" ] && [ "$ready" = '{"status":"ok","database":"ok"}' ] && [ "$auth" = 200 ]
 
       - name: Read-only checks passed; nothing was changed
         if: env.MODE == 'verify'

@@ -54,14 +54,12 @@ The API's own settings are **not** entered in Railway by hand. Each deploy copie
 
 ## 3. Deploy
 
-Deploys go only to environment **`staging`**, service **`api`**; those names are fixed in the workflow.
+Deploys go only to environment **`staging`**, service **`api`**; those names are fixed in the workflow. They run only from **`main`**, the canonical branch; a deploy started on any other branch stops without changing anything.
 
-To run just the read-only checks (token, project, environment, service, URL), dispatch the workflow with `confirm = verify-api-staging`. It changes nothing.
+To run just the read-only checks, dispatch the workflow (any branch) with `confirm = verify-api-staging`. It changes nothing. It checks the token, project, environment, service and URL; that the service's Supabase settings are the `SUPABASE_STAGING_*` project (`nshffzncumvmmzgtqqph`); and that `/api/healthz`, `/api/readyz` and Supabase Auth answer.
 
-- Push a commit whose message contains `[deploy api-staging]`.
-- Or dispatch the "API staging deploy" workflow on this branch with `confirm = deploy-api-staging`.
-  - The Actions tab only shows the **Run workflow** button once the file is on the default branch.
-  - Until then, dispatch it through the API or ask Claude to.
+- Push a commit to `main` whose message contains `[deploy api-staging]`.
+- Or run the "API staging deploy" workflow on `main` (Actions tab → **Run workflow**) with `confirm = deploy-api-staging`.
 
 The job then:
 1. checks the secrets, that the token belongs to `RAILWAY_STAGING_PROJECT_ID`, and that the project's name contains "staging". Every Railway command names the project, environment and service explicitly;

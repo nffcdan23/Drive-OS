@@ -3,9 +3,13 @@ name: Supabase staging deploy
 # Applies supabase/migrations to the STAGING Supabase project and verifies it
 # against the real Auth, Data API and Storage services. Never production.
 #
+# main is the canonical branch: migrations are applied only from main. The
+# read-only probe and the test runs (which delete everything they create) may
+# also run from claude/** branches.
+#
 # Runs only when deliberately triggered:
-#   * a commit on the working branch whose message contains
-#     "[deploy supabase-staging]" (deploy), "[probe supabase-staging]"
+#   * a commit whose message contains
+#     "[deploy supabase-staging]" (deploy, main only), "[probe supabase-staging]"
 #     (read-only probe plus the rollback-only Storage policy proof — cannot
 #     apply migrations or leave anything behind) or "[api-test supabase-staging]"
 #     (runs the Express API on the runner against staging and exercises it
@@ -13,10 +17,9 @@ name: Supabase staging deploy
 #     everything it creates), "[mobile-test supabase-staging]" (runs the
 #     app's data layer end to end against staging: accounts, sign-in,
 #     vehicles, photos, places, journeys, offline handling, deletion), or
-#   * "Run workflow" (type deploy-staging to deploy, or mobile-test to run
-#     only the app tests; the Actions tab shows the button once this file is
-#     on the default branch, the API can dispatch it on this branch).
-# Every other push to the branch shows this workflow as skipped.
+#   * "Run workflow" (type deploy-staging to deploy from main, mobile-test to
+#     run only the app tests, or auth-config for the read-only Auth settings).
+# Every other push shows this workflow as skipped.
 #
 # Stops at the first step that fails: nothing is applied unless the read-only
 # pre-flight passes, and the verification suites that write test data run
@@ -28,7 +31,7 @@ name: Supabase staging deploy
 
 on:
   push:
-    branches: [claude/determined-cray-hjv7aq]
+    branches: [main, 'claude/**']
   workflow_dispatch:
     inputs:
       confirm:
@@ -88,6 +91,12 @@ jobs:
       SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_STAGING_PROJECT_REF }}
       SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
     steps:
+      - name: Deploy only from main
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::Migrations are applied only from main (this run is on $GITHUB_REF). Merge first."; exit 1
+          fi
+
       - uses: actions/checkout@v4
 
       - name: Check the required secrets are set

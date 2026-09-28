@@ -1,7 +1,8 @@
 # Supabase deployment log
 
 Record of every deployment of `supabase/migrations` to a hosted project.
-Production is never deployed from this branch.
+Production is never deployed by these workflows. Since 2026-09-28, staging
+deploys run only from `main`.
 
 | Date (UTC) | Target | Migrations | Trigger | Result |
 |---|---|---|---|---|
