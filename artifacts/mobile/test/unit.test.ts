@@ -327,7 +327,7 @@ import { base64ToBytes } from '@/lib/backend/bytes';
 import { createRequire } from 'node:module';
 
 test('sign-in return links are parsed from the query and the fragment', () => {
-  assert.deepEqual(parseAuthCallback('driveos-staging://auth/callback?type=recovery&code=abc-123'),
+  assert.deepEqual(parseAuthCallback('starscale-drive-staging://auth/callback?type=recovery&code=abc-123'),
     { code: 'abc-123', error: null, type: 'recovery' });
   assert.deepEqual(parseAuthCallback('exp://192.168.1.2:8081/--/auth/callback#error=access_denied&error_description=Email+link+is+invalid+or+has+expired'),
     { code: null, error: 'Email link is invalid or has expired', type: null });
@@ -341,15 +341,31 @@ test('photo bytes decode from base64', () => {
   assert.equal(base64ToBytes('data:image/jpeg;base64,/9g=').length, 2);
 });
 
-test('the app identity is a placeholder and never sets a bundle id by itself', () => {
+test('the staging (TestFlight) identity is chosen; the App Store identity is not', () => {
   const { identity } = createRequire(import.meta.url)('../app.identity.js');
-  const staging = identity('staging', {});
-  assert.equal(staging.bundleId, null, 'no bundle id without APP_BUNDLE_ID');
-  assert.equal(staging.usingPlaceholders, true);
-  assert.equal(staging.scheme, 'driveos-staging');
+  const tf = identity('staging', {});
+  assert.deepEqual([tf.appName, tf.slug, tf.scheme, tf.bundleId, tf.usingPlaceholders],
+    ['StarScale Drive', 'starscale-drive-staging', 'starscale-drive-staging', 'uk.co.starscale.drive.staging', false]);
+  assert.equal(`${tf.scheme}://auth/callback`, 'starscale-drive-staging://auth/callback');
+  assert.deepEqual(identity('development', {}).bundleId, 'uk.co.starscale.drive.staging', 'local builds are the staging app');
+  const store = identity('production', {});
+  assert.equal(store.bundleId, null, 'no App Store bundle id is set');
+  assert.equal(store.usingPlaceholders, true);
+  // Environment variables are base values; staging adds its suffixes.
   const chosen = identity('production', { APP_DISPLAY_NAME: 'Name', APP_SCHEME: 'name', APP_BUNDLE_ID: 'com.example.name' });
   assert.deepEqual([chosen.appName, chosen.scheme, chosen.bundleId, chosen.usingPlaceholders], ['Name', 'name', 'com.example.name', false]);
   assert.equal(identity('staging', { APP_BUNDLE_ID: 'com.example.name' }).bundleId, 'com.example.name.staging');
+  assert.equal(identity('staging', { APP_SCHEME: 'name' }).scheme, 'name-staging');
+  assert.equal(identity('staging', { EAS_PROJECT_ID: 'p-2' }).easProjectId, 'p-2');
+});
+
+test('an unchosen identity falls back to placeholders and sets no bundle id', () => {
+  const { identity } = createRequire(import.meta.url)('../app.identity.js');
+  const none = { staging: {}, production: {} };
+  const s = identity('staging', {}, none);
+  assert.deepEqual([s.appName, s.scheme, s.bundleId, s.easProjectId, s.usingPlaceholders],
+    ['DriveOS Staging', 'driveos-staging', null, null, true]);
+  assert.deepEqual([identity('production', {}, none).scheme, identity('production', {}, none).bundleId], ['driveos', null]);
 });
 
 // ─── Outbox / sync edge cases (review fixes) ────────────────────────────────
@@ -713,6 +729,40 @@ test('the app build refuses anything that would put DVLA credentials in the bund
   }
 });
 
+test('the app build refuses a Supabase secret, service-role key or database password in a public value', () => {
+  const appConfig = createRequire(import.meta.url)('../app.config.js') as (a: { config: object }) => object;
+  const base = { config: { ios: { infoPlist: {} }, android: {}, plugins: [], extra: {} } };
+  // Built at runtime so no secret-shaped literal sits in the repository.
+  const b64 = (o: object) => Buffer.from(JSON.stringify(o)).toString('base64url');
+  const jwt = (role: string) => [b64({ alg: 'HS256' }), b64({ role }), 'sig'].join('.');
+  const saved = { ...process.env };
+  try {
+    for (const k of Object.keys(process.env)) if (k.startsWith('EXPO_PUBLIC_')) delete process.env[k];
+    Object.assign(process.env, {
+      EXPO_PUBLIC_APP_ENV: 'staging',
+      EXPO_PUBLIC_SUPABASE_URL: 'https://example.supabase.co',
+      EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY: 'sb_publishable_' + 'abc',
+      EXPO_PUBLIC_API_URL: 'https://api.example.invalid',
+    });
+    assert.doesNotThrow(() => appConfig(base), 'public values only');
+    process.env.EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY = jwt('anon');
+    assert.doesNotThrow(() => appConfig(base), 'a legacy anon key is public');
+    for (const [name, value] of [
+      ['EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY', 'sb_' + 'secret_abc'],
+      ['EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY', jwt('service_role')],
+      ['EXPO_PUBLIC_DB', ['postgresql', '://postgres:pw@db.example.test:5432/postgres'].join('')],
+    ] as const) {
+      const before = process.env[name];
+      process.env[name] = value;
+      assert.throws(() => appConfig(base), new RegExp(`${name} holds a server secret`));
+      if (before === undefined) delete process.env[name]; else process.env[name] = before;
+    }
+  } finally {
+    for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];
+    Object.assign(process.env, saved);
+  }
+});
+
 // ─── Auth error classification and diagnostics ─────────────────────────────
 import { AuthApiError, AuthRetryableFetchError, AuthUnknownError } from '@supabase/supabase-js';
 import { authDiag, classifyAuthError, completeFromUrl, describeAuthError, describeRedirect, redact, setAuthDiagnostics, AuthFlowError } from '@/lib/backend/auth';
@@ -762,7 +812,7 @@ test('diagnostics never contain tokens, keys, emails or full URLs', () => {
 test('redirects are described without their query or fragment', () => {
   assert.equal(describeRedirect('exp://192.168.1.20:8081/--/auth/callback'), 'exp://192.168.1.20:8081/--/auth/callback');
   assert.equal(describeRedirect('exp://u.exp.direct/--/auth/callback?code=secret#access_token=t'), 'exp://u.exp.direct/--/auth/callback');
-  assert.equal(describeRedirect('driveos-staging://auth/callback'), 'driveos-staging://auth/callback');
+  assert.equal(describeRedirect('starscale-drive-staging://auth/callback'), 'starscale-drive-staging://auth/callback');
   assert.equal(describeRedirect('not a url'), '(not a URL)');
   assert.equal(redact('see http://host.example/path?token=abc'), 'see http://host.example');
 });
@@ -774,7 +824,7 @@ test('a return link that arrives twice exchanges its code only once', async () =
   const [a, b] = await Promise.all([completeFromUrl(client, url), completeFromUrl(client, url)]);
   assert.equal(exchanges, 1);
   assert.deepEqual(a, b);
-  await assert.rejects(completeFromUrl(client, 'driveos-staging://auth/callback?error_description=Access+denied'), /Access denied/);
+  await assert.rejects(completeFromUrl(client, 'starscale-drive-staging://auth/callback?error_description=Access+denied'), /Access denied/);
 });
 
 import { enabledProviders } from '@/lib/backend/auth';

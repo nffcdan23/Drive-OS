@@ -356,7 +356,7 @@ jobs:
           print("Apple enabled:       ", c.get("external_apple_enabled"))
           expo_go = any(u.startswith("exp://") for u in allow)
           print("Expo Go redirect (exp://…) allowed:", expo_go)
-          print("App redirect (driveos-staging://…) allowed:", any(u.startswith("driveos-staging://") for u in allow))
+          print("App redirect (starscale-drive-staging://…) allowed:", any(u.startswith("starscale-drive-staging://") for u in allow))
           PY
             rm -f auth.json
           fi
@@ -379,7 +379,7 @@ jobs:
           cols=$(psql "$STAGING_DB_URL" -X -A -t -c "select string_agg(column_name, ',') from information_schema.columns where table_schema='auth' and table_name='flow_state'")
           echo "auth.flow_state columns: $cols"
           challenges=""
-          for asked in "exp://192.168.0.162:8081/--/auth/callback" "exp://192.168.0.162:8081" "driveos-staging://auth/callback" "https://example.invalid/not-allowed"; do
+          for asked in "exp://192.168.0.162:8081/--/auth/callback" "exp://192.168.0.162:8081" "starscale-drive-staging://auth/callback" "https://example.invalid/not-allowed"; do
             challenge=$(python3 -c 'import os,hashlib,base64;v=base64.urlsafe_b64encode(os.urandom(32)).rstrip(b"=");print(base64.urlsafe_b64encode(hashlib.sha256(v).digest()).rstrip(b"=").decode())')
             challenges="$challenges'$challenge',"
             host=$(curl -s -o /dev/null -w '%{redirect_url}' -G "${SUPABASE_URL%/}/auth/v1/authorize" \

@@ -27,7 +27,21 @@
       "expo-router",
       "expo-font",
       "expo-web-browser",
-      "expo-image-picker",
+      [
+        "expo-image-picker",
+        {
+          "cameraPermission": false,
+          "microphonePermission": false
+        }
+      ],
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": false,
+          "locationAlwaysPermission": false,
+          "motionUsagePermission": false
+        }
+      ],
       [
         "expo-splash-screen",
         {

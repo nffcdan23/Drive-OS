@@ -37,8 +37,8 @@ file_size_limit = "10MiB"
 
 [auth]
 enabled = true
-site_url = "driveos://"
-additional_redirect_urls = ["driveos://auth-callback"]
+site_url = "starscale-drive-staging://"
+additional_redirect_urls = ["starscale-drive-staging://auth/callback"]
 jwt_expiry = 3600
 enable_refresh_token_rotation = true
 enable_signup = true

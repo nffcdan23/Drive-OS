@@ -1,6 +1,6 @@
 # What depends on the final app name and bundle identifier
 
-The name and bundle id are **not decided**. The current values (`DriveOS`, `driveos`, and candidate `com.driveos.app`) are placeholders in `app.identity.js`. No bundle id is applied to builds until `APP_BUNDLE_ID` is set, so nothing can be registered with Apple or Google by accident.
+**Staging/TestFlight identity (chosen):** `StarScale Drive`, bundle id `uk.co.starscale.drive.staging`, scheme `starscale-drive-staging`, EAS slug `starscale-drive-staging` (in `CHOSEN.staging`, `app.identity.js`). The public App Store identity is **not decided**. For production builds the values (`DriveOS`, `driveos`, and candidate `com.driveos.app`) are still placeholders, and no bundle id is applied, so nothing can be registered for the App Store app by accident.
 
 ## Decide before the first TestFlight build
 
@@ -23,7 +23,6 @@ The name and bundle id are **not decided**. The current values (`DriveOS`, `driv
 - **Code identifiers (`DriveOSEvent`, `@workspace/...`, repository name):** internal; can be renamed at any time.
 
 ## Once the name is chosen, the change is configuration only
-1. Set `APP_DISPLAY_NAME`, `APP_SCHEME`, `APP_BUNDLE_ID` (and `APP_SLUG` before `eas init`) as EAS environment variables.
-2. Register the App ID(s) in Apple Developer, then create the App Store Connect record.
-3. Update the Supabase redirect URLs and Apple Client IDs, and Google's consent screen.
-4. Run `eas build --profile staging` (and later `production`).
+1. Record the values in `CHOSEN` in `app.identity.js` (committed; environment variables still override them). Do this before `eas init`, because it fixes the slug.
+2. Follow `TESTFLIGHT.md`. EAS registers the App ID and creates the App Store Connect record on the first `testflight` build.
+3. Update the Supabase Apple Client IDs and Google's consent screen. The redirect URL only changes if the scheme does.

@@ -1,12 +1,12 @@
 /**
  * App identity — everything that depends on the final app name.
  *
- * ⚠️  PLACEHOLDERS. The final name and bundle identifier have NOT been
- * decided. Nothing here may be registered with Apple/Google or used for an
- * App Store / TestFlight identifier until they are.
+ * The staging (TestFlight) identity is chosen; see CHOSEN. The public App
+ * Store (production) identity is NOT: until it is, production builds use
+ * placeholders and set no bundle id, so nothing can be registered for it.
  *
- * Every value can be overridden with an environment variable, so choosing
- * the final identity later is a configuration change, not a code change.
+ * Once chosen, the values go in CHOSEN below (they are public, so they are
+ * committed). An environment variable overrides each one:
  *
  *   APP_DISPLAY_NAME  name on the home screen and in the app's own text
  *   APP_SLUG          Expo/EAS project slug (fixed once `eas init` is run)
@@ -15,6 +15,7 @@
  *                     Without it the native identifiers are left unset, so
  *                     `eas build` stops and asks rather than registering a
  *                     placeholder with Apple.
+ *   EAS_PROJECT_ID    printed by `eas init`
  */
 const PLACEHOLDER = {
   displayName: 'DriveOS',
@@ -24,21 +25,53 @@ const PLACEHOLDER = {
   bundleIdCandidate: 'com.driveos.app',
 };
 
-/** Resolves the identity for a build variant ('development' | 'staging' | 'production'). */
-function identity(appEnv, env = process.env) {
+/**
+ * The chosen identity, per build variant. Values here are used exactly as
+ * written (no suffixes). null = not chosen: the placeholder is used and no
+ * bundle id is set, so nothing can be registered with Apple by accident.
+ *
+ * staging    = TestFlight / pre-launch app (profiles testflight and staging;
+ *              local development uses it too). Talks to the pre-launch backend.
+ * production = the public App Store app. NOT chosen: nothing is registered.
+ */
+const CHOSEN = {
+  staging: {
+    displayName: 'StarScale Drive',
+    slug: 'starscale-drive-staging',
+    scheme: 'starscale-drive-staging',
+    bundleId: 'uk.co.starscale.drive.staging',
+    easProjectId: null,
+  },
+  production: {
+    displayName: null,
+    slug: null,
+    scheme: null,
+    bundleId: null,
+    easProjectId: null,
+  },
+};
+
+/**
+ * Resolves the identity for a build variant ('development' | 'staging' | 'production').
+ * Order: environment variable (APP_* are base values: staging adds its
+ * suffixes) > CHOSEN for the variant (exact) > placeholder.
+ */
+function identity(appEnv, env = process.env, chosen = CHOSEN) {
   const production = appEnv === 'production';
-  const displayName = env.APP_DISPLAY_NAME || PLACEHOLDER.displayName;
-  const scheme = env.APP_SCHEME || PLACEHOLDER.scheme;
-  const bundleIdBase = env.APP_BUNDLE_ID || null;
+  const c = (production ? chosen.production : chosen.staging) || {};
+  const suffix = (base, s) => (production ? base : `${base}${s}`);
+  const displayName = env.APP_DISPLAY_NAME || c.displayName || PLACEHOLDER.displayName;
+  const bundleId = env.APP_BUNDLE_ID ? suffix(env.APP_BUNDLE_ID, '.staging') : c.bundleId || null;
   return {
     displayName,
-    /** Staging installs side by side with the store app and is labelled as such. */
-    appName: production ? displayName : `${displayName} Staging`,
-    slug: env.APP_SLUG || PLACEHOLDER.slug,
-    scheme: production ? scheme : `${scheme}-staging`,
-    bundleId: bundleIdBase ? (production ? bundleIdBase : `${bundleIdBase}.staging`) : null,
-    usingPlaceholders: !env.APP_DISPLAY_NAME || !env.APP_BUNDLE_ID,
+    /** Staging is labelled as such unless its name was chosen explicitly. */
+    appName: env.APP_DISPLAY_NAME || !c.displayName ? suffix(displayName, ' Staging') : c.displayName,
+    slug: env.APP_SLUG || c.slug || PLACEHOLDER.slug,
+    scheme: env.APP_SCHEME ? suffix(env.APP_SCHEME, '-staging') : c.scheme || suffix(PLACEHOLDER.scheme, '-staging'),
+    bundleId,
+    easProjectId: env.EAS_PROJECT_ID || c.easProjectId || null,
+    usingPlaceholders: !(env.APP_DISPLAY_NAME || c.displayName) || !bundleId,
   };
 }
 
-module.exports = { PLACEHOLDER, identity };
+module.exports = { PLACEHOLDER, CHOSEN, identity };
