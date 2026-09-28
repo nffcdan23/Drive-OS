@@ -327,7 +327,7 @@ import { base64ToBytes } from '@/lib/backend/bytes';
 import { createRequire } from 'node:module';
 
 test('sign-in return links are parsed from the query and the fragment', () => {
-  assert.deepEqual(parseAuthCallback('driveos-staging://auth/callback?type=recovery&code=abc-123'),
+  assert.deepEqual(parseAuthCallback('starscale-drive-staging://auth/callback?type=recovery&code=abc-123'),
     { code: 'abc-123', error: null, type: 'recovery' });
   assert.deepEqual(parseAuthCallback('exp://192.168.1.2:8081/--/auth/callback#error=access_denied&error_description=Email+link+is+invalid+or+has+expired'),
     { code: null, error: 'Email link is invalid or has expired', type: null });
@@ -341,29 +341,31 @@ test('photo bytes decode from base64', () => {
   assert.equal(base64ToBytes('data:image/jpeg;base64,/9g=').length, 2);
 });
 
-test('the app identity is a placeholder and never sets a bundle id by itself', () => {
+test('the staging (TestFlight) identity is chosen; the App Store identity is not', () => {
   const { identity } = createRequire(import.meta.url)('../app.identity.js');
-  const staging = identity('staging', {});
-  assert.equal(staging.bundleId, null, 'no bundle id without APP_BUNDLE_ID');
-  assert.equal(staging.usingPlaceholders, true);
-  assert.equal(staging.scheme, 'driveos-staging');
+  const tf = identity('staging', {});
+  assert.deepEqual([tf.appName, tf.slug, tf.scheme, tf.bundleId, tf.usingPlaceholders],
+    ['StarScale Drive', 'starscale-drive-staging', 'starscale-drive-staging', 'uk.co.starscale.drive.staging', false]);
+  assert.equal(`${tf.scheme}://auth/callback`, 'starscale-drive-staging://auth/callback');
+  assert.deepEqual(identity('development', {}).bundleId, 'uk.co.starscale.drive.staging', 'local builds are the staging app');
+  const store = identity('production', {});
+  assert.equal(store.bundleId, null, 'no App Store bundle id is set');
+  assert.equal(store.usingPlaceholders, true);
+  // Environment variables are base values; staging adds its suffixes.
   const chosen = identity('production', { APP_DISPLAY_NAME: 'Name', APP_SCHEME: 'name', APP_BUNDLE_ID: 'com.example.name' });
   assert.deepEqual([chosen.appName, chosen.scheme, chosen.bundleId, chosen.usingPlaceholders], ['Name', 'name', 'com.example.name', false]);
   assert.equal(identity('staging', { APP_BUNDLE_ID: 'com.example.name' }).bundleId, 'com.example.name.staging');
-  assert.equal(staging.easProjectId, null);
+  assert.equal(identity('staging', { APP_SCHEME: 'name' }).scheme, 'name-staging');
+  assert.equal(identity('staging', { EAS_PROJECT_ID: 'p-2' }).easProjectId, 'p-2');
 });
 
-test('a chosen identity is used once recorded, and the environment still overrides it', () => {
-  const { identity, CHOSEN } = createRequire(import.meta.url)('../app.identity.js');
-  const chosen = { displayName: 'Name', slug: 'name', scheme: 'name', bundleId: 'com.example.name', easProjectId: 'p-1' };
-  const tf = identity('staging', {}, chosen);
-  assert.deepEqual([tf.appName, tf.slug, tf.scheme, tf.bundleId, tf.easProjectId, tf.usingPlaceholders],
-    ['Name Staging', 'name', 'name-staging', 'com.example.name.staging', 'p-1', false]);
-  assert.equal(identity('staging', { APP_BUNDLE_ID: 'com.other.app' }, chosen).bundleId, 'com.other.app.staging');
-  assert.equal(identity('staging', { EAS_PROJECT_ID: 'p-2' }, chosen).easProjectId, 'p-2');
-  // A half-chosen identity (name without bundle id) still counts as a placeholder.
-  assert.equal(identity('staging', {}, { ...chosen, bundleId: null }).usingPlaceholders, true);
-  assert.equal(typeof CHOSEN, 'object');
+test('an unchosen identity falls back to placeholders and sets no bundle id', () => {
+  const { identity } = createRequire(import.meta.url)('../app.identity.js');
+  const none = { staging: {}, production: {} };
+  const s = identity('staging', {}, none);
+  assert.deepEqual([s.appName, s.scheme, s.bundleId, s.easProjectId, s.usingPlaceholders],
+    ['DriveOS Staging', 'driveos-staging', null, null, true]);
+  assert.deepEqual([identity('production', {}, none).scheme, identity('production', {}, none).bundleId], ['driveos', null]);
 });
 
 // ─── Outbox / sync edge cases (review fixes) ────────────────────────────────
@@ -810,7 +812,7 @@ test('diagnostics never contain tokens, keys, emails or full URLs', () => {
 test('redirects are described without their query or fragment', () => {
   assert.equal(describeRedirect('exp://192.168.1.20:8081/--/auth/callback'), 'exp://192.168.1.20:8081/--/auth/callback');
   assert.equal(describeRedirect('exp://u.exp.direct/--/auth/callback?code=secret#access_token=t'), 'exp://u.exp.direct/--/auth/callback');
-  assert.equal(describeRedirect('driveos-staging://auth/callback'), 'driveos-staging://auth/callback');
+  assert.equal(describeRedirect('starscale-drive-staging://auth/callback'), 'starscale-drive-staging://auth/callback');
   assert.equal(describeRedirect('not a url'), '(not a URL)');
   assert.equal(redact('see http://host.example/path?token=abc'), 'see http://host.example');
 });
@@ -822,7 +824,7 @@ test('a return link that arrives twice exchanges its code only once', async () =
   const [a, b] = await Promise.all([completeFromUrl(client, url), completeFromUrl(client, url)]);
   assert.equal(exchanges, 1);
   assert.deepEqual(a, b);
-  await assert.rejects(completeFromUrl(client, 'driveos-staging://auth/callback?error_description=Access+denied'), /Access denied/);
+  await assert.rejects(completeFromUrl(client, 'starscale-drive-staging://auth/callback?error_description=Access+denied'), /Access denied/);
 });
 
 import { enabledProviders } from '@/lib/backend/auth';

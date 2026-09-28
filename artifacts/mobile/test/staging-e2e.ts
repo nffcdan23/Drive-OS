@@ -177,12 +177,12 @@ async function run() {
     check('sign-up through the app (staging config)', false, 'sign-ups are disabled on staging (Auth → Providers → Email → Allow new users)');
   } else {
     try {
-      const r = await signUpWithEmail(phone1.auth, email, password, 'driveos-staging://auth/callback', 'Mobile Tester');
+      const r = await signUpWithEmail(phone1.auth, email, password, 'starscale-drive-staging://auth/callback', 'Mobile Tester');
       userA = r.userId;
       if (userA) createdUsers.add(userA);
       check('sign-up through the app creates a signed-in account', !!userA && !r.needsConfirmation && !!r.session,
         r.needsConfirmation ? 'unexpected: confirmation still required' : 'signed in immediately');
-      const again = await signUpWithEmail(device('same address').auth, email, password, 'driveos-staging://auth/callback').catch((e) => e);
+      const again = await signUpWithEmail(device('same address').auth, email, password, 'starscale-drive-staging://auth/callback').catch((e) => e);
       check('signing up twice with the same email is refused', again instanceof Error, again instanceof Error ? again.message : 'accepted');
     } catch (err) {
       const msg = (err as Error).message;

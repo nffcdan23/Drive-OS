@@ -101,7 +101,7 @@ npx eas-cli@latest build --platform ios --profile staging
 
 **What gets registered with Apple.** EAS registers the throwaway id `com.<yourname>.devtest.staging` and an ad hoc provisioning profile. The throwaway id is never your shipping id, so the final name and bundle id remain fully open.
 
-**Before signing in on the phone,** add `driveos-staging://auth/callback` to Supabase staging → Auth → URL configuration → Redirect URLs. This is needed for password-reset and confirmation links.
+**Before signing in on the phone,** add `starscale-drive-staging://auth/callback` to Supabase staging → Auth → URL configuration → Redirect URLs. This is needed for password-reset and confirmation links.
 
 **No Apple membership yet?** Build `--profile staging-simulator` for the iOS Simulator on a Mac. That needs no Apple registration at all.
 

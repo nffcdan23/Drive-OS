@@ -1,6 +1,6 @@
 # What depends on the final app name and bundle identifier
 
-The name and bundle id are **not decided**. The current values (`DriveOS`, `driveos`, and candidate `com.driveos.app`) are placeholders in `app.identity.js`. No bundle id is applied to builds until `APP_BUNDLE_ID` is set, so nothing can be registered with Apple or Google by accident.
+**Staging/TestFlight identity (chosen):** `StarScale Drive`, bundle id `uk.co.starscale.drive.staging`, scheme `starscale-drive-staging`, EAS slug `starscale-drive-staging` (in `CHOSEN.staging`, `app.identity.js`). The public App Store identity is **not decided**. For production builds the values (`DriveOS`, `driveos`, and candidate `com.driveos.app`) are still placeholders, and no bundle id is applied, so nothing can be registered for the App Store app by accident.
 
 ## Decide before the first TestFlight build
 

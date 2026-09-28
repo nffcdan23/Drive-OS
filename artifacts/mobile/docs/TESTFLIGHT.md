@@ -9,36 +9,32 @@ iPhone (TestFlight) ──▶ API https://api-production-1dafc.up.railway.app �
 | | TestFlight app (now) | App Store app (at launch, later) |
 |---|---|---|
 | Build profile | `testflight` | `production` |
-| Bundle id | `<base>.staging` | `<base>` |
-| Home-screen name | `<Name> Staging` | `<Name>` |
-| Sign-in return link | `driveos-staging://auth/callback` (already allowed in Supabase) | `<scheme>://auth/callback` |
+| Home-screen name | `StarScale Drive` | not chosen |
+| Bundle id | `uk.co.starscale.drive.staging` | not chosen; nothing registered |
+| URL scheme | `starscale-drive-staging` | not chosen |
+| Sign-in return link | `starscale-drive-staging://auth/callback` | not chosen |
+| EAS project slug | `starscale-drive-staging` | its own project, later |
 | Backend | pre-launch (EAS `preview` environment) | production (EAS `production` environment, created at launch) |
 | App Store Connect record | its own record; never released | its own record |
 
 Nothing here creates production infrastructure or publishes anything on the App Store.
 
-## 1. Decisions (permanent once used)
+## 1. Identity (chosen)
 
-Tell Claude these values; they go in `CHOSEN` in `app.identity.js`. They are public, so they are committed.
+These values are in `CHOSEN.staging` in `app.identity.js`, and they are used exactly as written. `CHOSEN.production` stays empty until the App Store identity is decided.
 
-| Value | Example | Permanent? |
-|---|---|---|
-| Bundle id base | `com.yourcompany.appname` (a reverse domain you control) | **Yes.** TestFlight registers `<base>.staging` with Apple. |
-| Display name | `Name` → home screen shows `Name Staging` | No |
-| EAS slug and Expo account | `appname` under your Expo account | Effectively yes (fixed by `eas init`) |
-| App Store Connect name / SKU / language | `Name Staging` / `appname-staging-ios` / English (UK) | Name: changeable. SKU: permanent. The name must be unique on the App Store. |
-| Scheme | keep `driveos` (never shown to users) | Keeping it means no Supabase change |
+When App Store Connect asks, you still choose the record's **name** (unique on the App Store; it can change later), **SKU** (permanent, private, e.g. `starscale-drive-staging-ios`) and **primary language**.
 
 ## 2. Link the EAS project (once)
 
-From `artifacts/mobile`, after `CHOSEN` is committed on `main`:
+From `artifacts/mobile`, with this configuration on `main`:
 
 ```sh
 npx eas-cli@latest login
 npx eas-cli@latest init
 ```
 
-`eas init` creates the project and prints its id. It can't write it into `app.config.js` itself. Put the id in `CHOSEN.easProjectId` (or give it to Claude) and commit.
+`eas init` creates the project and prints its id. It can't write it into `app.config.js` itself. Put the id in `CHOSEN.staging.easProjectId` (or give it to Claude) and commit.
 
 ## 3. Build settings (EAS "preview" environment, public values only)
 
@@ -57,7 +53,7 @@ npx eas-cli@latest env:create --environment preview --visibility plaintext --nam
 
 1. Check that **developer.apple.com → Account** and **App Store Connect → Business** show no agreement waiting to be accepted. A pending agreement makes builds and uploads fail.
 2. On the first build, EAS asks you to sign in with your Apple ID and pick your team. Let it:
-   - register the App ID `<base>.staging`, with the **Sign in with Apple** capability (from `usesAppleSignIn`);
+   - register the App ID `uk.co.starscale.drive.staging`, with the **Sign in with Apple** capability (from `usesAppleSignIn`);
    - create the **Apple Distribution certificate** and the **App Store provisioning profile**.
 
    EAS stores these; nothing is kept in the repository.
@@ -75,13 +71,13 @@ npx eas-cli@latest build --platform ios --profile testflight --auto-submit
 ## 6. Sign-in settings for the installed app
 
 - **Email and password:** nothing to do.
-- **Return link:** `driveos-staging://auth/callback` is already accepted by Supabase. Google, email confirmation and password-reset links all return through it. If you change the scheme, add `<scheme>-staging://auth/callback` in Supabase → Authentication → URL Configuration.
+- **Return link:** the installed app uses `starscale-drive-staging://auth/callback` for Google, email confirmation and password-reset links. **Add it** in Supabase → Authentication → URL Configuration → Redirect URLs (the old `driveos-staging://auth/callback` entry can stay until nothing uses it). Until it is added, those sign-ins return to the Site URL instead of the app.
 - **Google:** enabled in Supabase. In the Google Cloud console, for the Web OAuth client that Supabase uses:
   - **Clients → Authorized redirect URIs** includes `https://nshffzncumvmmzgtqqph.supabase.co/auth/v1/callback`.
   - **Audience → Publishing status:** while it says **Testing**, only the Google accounts listed under **Test users** can sign in. Add each tester, or publish the app (the email/profile scopes need no verification).
 - **Sign in with Apple:** in Supabase → Authentication → Sign In / Providers → **Apple**:
   - turn it on;
-  - set **Client IDs** to `<base>.staging`;
+  - set **Client IDs** to `uk.co.starscale.drive.staging`;
   - save.
 
   No secret key is needed for sign-in from the iOS app. Until this is done, the Apple button in the app says "This sign-in method is turned off on this server." Apple requires Sign in with Apple before App Store release, because the app offers Google sign-in.
