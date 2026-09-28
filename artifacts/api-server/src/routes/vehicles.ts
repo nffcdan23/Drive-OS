@@ -1,254 +1,179 @@
-import { Router } from 'express';
-import { db, vehicles } from '@workspace/db';
-import { eq, and } from 'drizzle-orm';
-import { requireUser } from '../middleware/userId';
-import { param } from '../utils/param';
-import { logger } from '../lib/logger';
+import { Router } from "express";
+import { and, asc, eq, inArray, sql } from "drizzle-orm";
+import { db, vehicles, photos } from "@workspace/db";
+import { requireUser } from "../middleware/auth";
+import { badRequest, handler, notFound, uuidParam } from "../lib/http";
+import { Body } from "../lib/validate";
+import { rateLimit } from "../lib/rateLimit";
+import { config } from "../config";
+import { DvlaClient, LookupError } from "../lib/dvla";
+import { MAX_STORED_REGISTRATION_LENGTH, storedRegistration } from "@workspace/vehicle-registration";
+import { logger } from "../lib/logger";
+import { createSignedDownloadUrl } from "../lib/supabaseAdmin";
 
 const router = Router();
+const FUEL = ["petrol", "diesel", "electric", "hybrid", "other"] as const;
+const VISIBILITY = ["private", "friends", "public"] as const;
+const COVER_URL_TTL = 3600;
 
-// ─── DVLA Vehicle Enquiry Service lookup ─────────────────────────────────────
-// The API key stays on the server: a key shipped in the app bundle can be
-// extracted by anyone who installs it.
-const DVLA_VES_URL =
-  process.env.DVLA_VES_URL ??
-  'https://driver-vehicle-licensing.api.gov.uk/vehicle-enquiry/v1/vehicles';
-
-type VesVehicle = {
-  registrationNumber?: string;
-  make?: string;
-  colour?: string;
-  fuelType?: string;
-  yearOfManufacture?: number;
-  engineCapacity?: number;
-  motStatus?: string;
-  taxStatus?: string;
-};
+type VehicleRow = typeof vehicles.$inferSelect;
 
 /**
- * VES reports fuel as free-ish text ("PETROL", "ELECTRICITY", "HYBRID ELECTRIC",
- * "HEAVY OIL", "GAS BI-FUEL"), so map it onto the four options the app offers.
- * Returns null when it matches none, leaving the user's current choice alone.
+ * Adds `coverPhotoUrl`, a 1-hour signed link to the vehicle's cover photo
+ * (photo buckets are private). A Storage outage only blanks the image.
  */
-function normaliseFuelType(raw: string | undefined) {
-  const value = (raw ?? '').toUpperCase();
-  if (!value) return null;
-  if (value.includes('HYBRID') || value.includes('BIFUEL') || value.includes('BI-FUEL')) return 'hybrid';
-  if (value.includes('ELECTRIC')) return 'electric';
-  if (value.includes('DIESEL') || value.includes('HEAVY OIL')) return 'diesel';
-  if (value.includes('PETROL') || value.includes('GAS')) return 'petrol';
-  return null;
+async function withCoverUrls(rows: VehicleRow[]): Promise<Array<VehicleRow & { coverPhotoUrl: string | null }>> {
+  const ids = rows.map((r) => r.coverPhotoId).filter((id): id is string => !!id);
+  const urls = new Map<string, string>();
+  if (ids.length) {
+    const found = await db.select({ id: photos.id, bucket: photos.bucket, path: photos.storagePath })
+      .from(photos).where(and(inArray(photos.id, ids), eq(photos.status, "ready")));
+    await Promise.all(found.map(async (p) => {
+      try {
+        urls.set(p.id, await createSignedDownloadUrl(p.bucket, p.path, COVER_URL_TTL));
+      } catch (err) {
+        logger.warn({ err }, "Could not sign a vehicle cover photo URL");
+      }
+    }));
+  }
+  return rows.map((r) => ({ ...r, coverPhotoUrl: r.coverPhotoId ? urls.get(r.coverPhotoId) ?? null : null }));
+}
+const withCoverUrl = async (row: VehicleRow) => (await withCoverUrls([row]))[0]!;
+
+/** Reads the editable vehicle fields present in the body. */
+function readVehicleFields(b: Body, creating: boolean): Partial<typeof vehicles.$inferInsert> {
+  const out: Partial<typeof vehicles.$inferInsert> = {};
+  const text = (field: keyof typeof vehicles.$inferInsert & string, max: number) => {
+    if (b.has(field)) (out as Record<string, unknown>)[field] = b.str(field, { max })!;
+  };
+  if (creating || b.has("nickname")) out.nickname = b.str("nickname", { min: 1, max: 60 })!;
+  if (b.has("registration")) {
+    // Upper case without whitespace: DVLA's form for a UK plate; a foreign
+    // plate keeps its hyphens so it never turns into a different UK one.
+    const reg = storedRegistration(b.str("registration", { max: 20 })!);
+    if (reg.length > MAX_STORED_REGISTRATION_LENGTH) {
+      throw badRequest("invalid_input", `registration: at most ${MAX_STORED_REGISTRATION_LENGTH} characters`);
+    }
+    out.registration = reg;
+  }
+  text("make", 60);
+  text("model", 60);
+  text("colour", 40);
+  text("engine", 40);
+  text("power", 40);
+  text("torque", 40);
+  text("zeroToSixty", 20);
+  text("topSpeedSpec", 20);
+  if (b.has("year")) out.year = b.int("year", { min: 1885, max: 2100, nullable: true });
+  if (b.has("fuelType")) out.fuelType = b.oneOf("fuelType", FUEL)!;
+  if (b.has("mileage")) out.mileage = b.int("mileage", { min: 0, max: 5_000_000 })!;
+  if (b.has("visibility")) out.visibility = b.oneOf("visibility", VISIBILITY)!;
+  return out;
 }
 
-/** VES gives engine size in cc; the form wants a label like "1.6L". */
-function formatEngine(cc: number | undefined): string {
-  if (!cc || cc <= 0) return '';
-  return `${(cc / 1000).toFixed(1)}L`;
-}
+// GET /api/vehicles — own vehicles
+router.get("/vehicles", requireUser, handler(async (req, res) => {
+  const rows = await db.select().from(vehicles).where(eq(vehicles.ownerId, req.userId)).orderBy(asc(vehicles.createdAt));
+  res.json(await withCoverUrls(rows));
+}));
 
-// POST /api/vehicles/lookup
-// Declared before /vehicles/:id so the path can never be read as an id.
-router.post('/vehicles/lookup', requireUser, async (req, res, next) => {
-  try {
-    const apiKey = process.env.DVLA_API_KEY;
-    if (!apiKey) {
-      res.status(503).json({
-        error: 'lookup_not_configured',
-        message: 'Vehicle lookup is not configured on the server.',
-      });
-      return;
-    }
+// POST /api/vehicles — idempotent when clientRef is supplied
+router.post("/vehicles", requireUser, handler(async (req, res) => {
+  const b = Body.of(req);
+  const fields = readVehicleFields(b, true);
+  const clientRef = b.str("clientRef", { optional: true, max: 100 });
+  const makeActive = b.bool("isActive", { optional: true }) ?? false;
 
-    const supplied = typeof req.body?.registration === 'string' ? req.body.registration : '';
-    const registrationNumber = supplied.replace(/\s+/g, '').toUpperCase();
-    if (!/^[A-Z0-9]{2,8}$/.test(registrationNumber)) {
-      res.status(400).json({
-        error: 'invalid_registration',
-        message: 'Enter a valid UK registration number.',
-      });
-      return;
-    }
-
-    const upstream = await fetch(DVLA_VES_URL, {
-      method: 'POST',
-      headers: {
-        'x-api-key': apiKey,
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-      },
-      body: JSON.stringify({ registrationNumber }),
-      signal: AbortSignal.timeout(10_000),
-    });
-
-    if (upstream.status === 404) {
-      res.status(404).json({
-        error: 'not_found',
-        message: 'No vehicle found with that registration.',
-      });
-      return;
-    }
-
-    if (upstream.status === 400) {
-      res.status(400).json({
-        error: 'invalid_registration',
-        message: 'DVLA did not recognise that registration format.',
-      });
-      return;
-    }
-
-    if (upstream.status === 429) {
-      res.status(429).json({
-        error: 'rate_limited',
-        message: 'Too many lookups just now. Try again shortly.',
-      });
-      return;
-    }
-
-    if (!upstream.ok) {
-      // 401/403 means our key is wrong or revoked — a server-side problem the
-      // user can do nothing about, so report it as one and never echo the body.
-      logger.error({ status: upstream.status }, 'DVLA VES lookup failed');
-      res.status(502).json({
-        error: 'lookup_unavailable',
-        message: 'Vehicle lookup is unavailable right now.',
-      });
-      return;
-    }
-
-    const data = (await upstream.json()) as VesVehicle;
-
-    // VES has no model, power, torque, 0-60 or top speed — those stay manual.
-    res.json({
-      registration: data.registrationNumber ?? registrationNumber,
-      make: data.make ?? '',
-      colour: data.colour ?? '',
-      fuelType: normaliseFuelType(data.fuelType),
-      year: data.yearOfManufacture ?? null,
-      engine: formatEngine(data.engineCapacity),
-      motStatus: data.motStatus ?? null,
-      taxStatus: data.taxStatus ?? null,
-    });
-  } catch (err) {
-    next(err);
+  if (clientRef) {
+    const [existing] = await db.select().from(vehicles)
+      .where(and(eq(vehicles.ownerId, req.userId), eq(vehicles.clientRef, clientRef))).limit(1);
+    if (existing) { res.status(200).json(await withCoverUrl(existing)); return; }
   }
-});
 
-// GET /api/vehicles
-router.get('/vehicles', requireUser, async (req, res, next) => {
-  try {
-    const rows = await db
-      .select()
-      .from(vehicles)
-      .where(eq(vehicles.userId, req.userId));
-    res.json(rows);
-  } catch (err) {
-    next(err);
-  }
-});
-
-// POST /api/vehicles
-router.post('/vehicles', requireUser, async (req, res, next) => {
-  try {
-    const body = req.body as Partial<typeof vehicles.$inferInsert>;
-    const [row] = await db
-      .insert(vehicles)
-      .values({
-        nickname:     body.nickname     ?? 'My Car',
-        registration: body.registration ?? '',
-        make:         body.make         ?? '',
-        model:        body.model        ?? '',
-        year:         body.year         ?? new Date().getFullYear(),
-        colour:       body.colour       ?? '',
-        fuelType:     body.fuelType     ?? 'petrol',
-        engine:       body.engine       ?? '',
-        power:        body.power        ?? '',
-        torque:       body.torque       ?? '',
-        zeroToSixty:  body.zeroToSixty  ?? '',
-        topSpeedSpec: body.topSpeedSpec ?? '',
-        mileage:      body.mileage      ?? 0,
-        imageUrl:     body.imageUrl     ?? null,
-        isActive:     body.isActive     ?? false,
-        userId:       req.userId,
-      })
+  const row = await db.transaction(async (tx) => {
+    const hasActive = await tx.execute(sql`select 1 from public.vehicles where owner_id = ${req.userId} and is_active`);
+    const active = makeActive || hasActive.rows.length === 0; // first vehicle becomes active
+    if (active) await tx.update(vehicles).set({ isActive: false }).where(and(eq(vehicles.ownerId, req.userId), eq(vehicles.isActive, true)));
+    const [created] = await tx.insert(vehicles)
+      .values({ ...fields, nickname: fields.nickname!, ownerId: req.userId, clientRef: clientRef ?? null, isActive: active })
       .returning();
-    res.status(201).json(row);
-  } catch (err) {
-    next(err);
-  }
-});
+    return created!;
+  });
+  res.status(201).json(await withCoverUrl(row));
+}));
 
-// GET /api/vehicles/:id
-router.get('/vehicles/:id', requireUser, async (req, res, next) => {
-  try {
-    const [row] = await db
-      .select()
-      .from(vehicles)
-      .where(and(eq(vehicles.id, param(req.params.id)), eq(vehicles.userId, req.userId)))
-      .limit(1);
-    if (!row) { res.status(404).json({ error: 'Not found' }); return; }
-    res.json(row);
-  } catch (err) {
-    next(err);
-  }
-});
+// GET /api/vehicles/:id — own vehicle
+router.get("/vehicles/:id", requireUser, handler(async (req, res) => {
+  const [row] = await db.select().from(vehicles)
+    .where(and(eq(vehicles.id, uuidParam(req, "id")), eq(vehicles.ownerId, req.userId))).limit(1);
+  if (!row) throw notFound();
+  res.json(await withCoverUrl(row));
+}));
 
-// PUT /api/vehicles/:id
-router.put('/vehicles/:id', requireUser, async (req, res, next) => {
-  try {
-    const body = req.body as Partial<typeof vehicles.$inferInsert>;
-    const allowed: Partial<typeof vehicles.$inferInsert> = { updatedAt: new Date() };
-    const fields = [
-      'nickname','registration','make','model','year','colour','fuelType',
-      'engine','power','torque','zeroToSixty','topSpeedSpec','mileage','imageUrl','isActive',
-    ] as const;
-    for (const f of fields) {
-      if (body[f] !== undefined) (allowed as Record<string, unknown>)[f] = body[f];
+// PATCH /api/vehicles/:id
+router.patch("/vehicles/:id", requireUser, handler(async (req, res) => {
+  const id = uuidParam(req, "id");
+  const b = Body.of(req);
+  const fields = readVehicleFields(b, false);
+  const [owned] = await db.select({ id: vehicles.id }).from(vehicles)
+    .where(and(eq(vehicles.id, id), eq(vehicles.ownerId, req.userId))).limit(1);
+  if (!owned) throw notFound();
+  if (b.has("coverPhotoId")) {
+    const cover = b.uuid("coverPhotoId", { nullable: true });
+    if (cover) {
+      const [ok] = await db.select({ id: photos.id }).from(photos)
+        .where(and(eq(photos.id, cover), eq(photos.vehicleId, id), eq(photos.ownerId, req.userId), eq(photos.status, "ready"))).limit(1);
+      if (!ok) throw badRequest("invalid_cover_photo", "The cover photo must be a ready photo of this vehicle.");
     }
-
-    const [row] = await db
-      .update(vehicles)
-      .set(allowed)
-      .where(and(eq(vehicles.id, param(req.params.id)), eq(vehicles.userId, req.userId)))
-      .returning();
-
-    if (!row) { res.status(404).json({ error: 'Not found' }); return; }
-    res.json(row);
-  } catch (err) {
-    next(err);
+    fields.coverPhotoId = cover ?? null;
   }
-});
+  const [row] = await db.update(vehicles).set(fields)
+    .where(and(eq(vehicles.id, id), eq(vehicles.ownerId, req.userId))).returning();
+  if (!row) throw notFound();
+  res.json(await withCoverUrl(row));
+}));
 
-// DELETE /api/vehicles/:id
-router.delete('/vehicles/:id', requireUser, async (req, res, next) => {
-  try {
-    await db
-      .delete(vehicles)
-      .where(and(eq(vehicles.id, param(req.params.id)), eq(vehicles.userId, req.userId)));
-    res.status(204).send();
-  } catch (err) {
-    next(err);
-  }
-});
+// DELETE /api/vehicles/:id — photos, documents and records go with it;
+// journeys keep their history (vehicle_id is cleared).
+router.delete("/vehicles/:id", requireUser, handler(async (req, res) => {
+  const [row] = await db.delete(vehicles)
+    .where(and(eq(vehicles.id, uuidParam(req, "id")), eq(vehicles.ownerId, req.userId))).returning({ id: vehicles.id });
+  if (!row) throw notFound();
+  res.status(204).send();
+}));
 
-// POST /api/vehicles/:id/activate – set as active vehicle, deactivate others
-router.post('/vehicles/:id/activate', requireUser, async (req, res, next) => {
-  try {
-    // Deactivate all
-    await db
-      .update(vehicles)
-      .set({ isActive: false, updatedAt: new Date() })
-      .where(eq(vehicles.userId, req.userId));
-    // Activate this one
-    const [row] = await db
-      .update(vehicles)
-      .set({ isActive: true, updatedAt: new Date() })
-      .where(and(eq(vehicles.id, param(req.params.id)), eq(vehicles.userId, req.userId)))
-      .returning();
-    if (!row) { res.status(404).json({ error: 'Not found' }); return; }
-    res.json(row);
-  } catch (err) {
-    next(err);
-  }
-});
+// POST /api/vehicles/:id/activate — exactly one active vehicle, atomically
+router.post("/vehicles/:id/activate", requireUser, handler(async (req, res) => {
+  const id = uuidParam(req, "id");
+  const row = await db.transaction(async (tx) => {
+    const [target] = await tx.select({ id: vehicles.id }).from(vehicles)
+      .where(and(eq(vehicles.id, id), eq(vehicles.ownerId, req.userId))).for("update").limit(1);
+    if (!target) throw notFound();
+    await tx.update(vehicles).set({ isActive: false }).where(and(eq(vehicles.ownerId, req.userId), eq(vehicles.isActive, true)));
+    const [updated] = await tx.update(vehicles).set({ isActive: true }).where(eq(vehicles.id, id)).returning();
+    return updated!;
+  });
+  res.json(await withCoverUrl(row));
+}));
+
+// ─── DVLA Vehicle Enquiry Service lookup ─────────────────────────────────────
+// The key stays on the server (lib/dvla). A lookup only suggests values for the
+// app's unsaved vehicle form; nothing is stored.
+const dvla = new DvlaClient(config.dvla, { log: logger });
+
+// POST /api/vehicles/lookup — per user: 10 a minute, 50 a day
+router.post("/vehicles/lookup", requireUser,
+  rateLimit({ name: "vehicle lookup", windowMs: 60_000, max: 10 }),
+  rateLimit({ name: "vehicle lookup", windowMs: 24 * 60 * 60_000, max: 50 }),
+  handler(async (req, res) => {
+    const supplied = (req.body as { registration?: unknown } | undefined)?.registration;
+    try {
+      res.json(await dvla.lookup(typeof supplied === "string" ? supplied : ""));
+    } catch (err) {
+      if (!(err instanceof LookupError)) throw err;
+      if (err.retryAfterSec) res.setHeader("Retry-After", String(err.retryAfterSec));
+      res.status(err.status).json({ error: err.code, message: err.message });
+    }
+  }));
 
 export default router;

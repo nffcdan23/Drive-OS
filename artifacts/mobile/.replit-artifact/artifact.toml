@@ -12,11 +12,11 @@ paths = [ "/" ]
 localPort = 18115
 
 [services.development]
-run = "pnpm --filter @workspace/mobile run dev"
+run = "pnpm --filter @workspace/mobile run dev:replit"
 
 [services.production]
-build = [ "pnpm", "--filter", "@workspace/mobile", "run", "build" ]
-run = [ "pnpm", "--filter", "@workspace/mobile", "run", "serve" ]
+build = [ "pnpm", "--filter", "@workspace/mobile", "run", "replit:build" ]
+run = [ "pnpm", "--filter", "@workspace/mobile", "run", "replit:serve" ]
 
 [services.env]
 PORT = "18115"

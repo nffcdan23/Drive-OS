@@ -20,7 +20,6 @@ import { LoadingState } from "@/components/LoadingState";
 import { EmptyState } from "@/components/EmptyState";
 import * as Haptics from "expo-haptics";
 
-const MINI_IMAGE = require("@/assets/images/mini-cooper.png");
 
 function VehicleIcon({
   vehicle,
@@ -36,15 +35,6 @@ function VehicleIcon({
         source={{ uri: vehicle.imageUri }}
         style={{ width: size, height: size, borderRadius: 10 }}
         resizeMode="cover"
-      />
-    );
-  }
-  if (vehicle.id === "mock-vehicle-1") {
-    return (
-      <Image
-        source={MINI_IMAGE}
-        style={{ width: size, height: size }}
-        resizeMode="contain"
       />
     );
   }

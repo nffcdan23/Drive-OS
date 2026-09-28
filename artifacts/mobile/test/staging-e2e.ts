@@ -1,0 +1,597 @@
+// ============================================================================
+// Phase 5 end-to-end checks against STAGING (never production, never Railway).
+//
+// Drives the app's own data layer — the same auth, CloudSync, outbox,
+// journey recorder and upload code the app runs — against real Supabase
+// Auth and Storage and the DriveOS API (started on the CI runner against the
+// staging database). "Devices" are separate storage areas, so restarts,
+// reinstalls and second phones are simulated faithfully.
+//
+// Everything created is deleted at the end, also on failure.
+//
+// Env (GitHub secrets, never printed): STAGING_DB_URL, SUPABASE_URL,
+//   SUPABASE_PUBLISHABLE_KEY, SUPABASE_SECRET_KEY
+// Run: node --experimental-transform-types --import ./test/register.mjs test/staging-e2e.ts
+// ============================================================================
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
+import { randomBytes, randomUUID } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
+import { accessTokenGetter, authServerProbe, createAuthClient, currentAccessToken, signInWithEmail, signUpWithEmail, storedSessionUser, type SupabaseClient } from '@/lib/backend/auth';
+import { ApiClient, ApiError, AuthRequiredError, NetworkError, type ConnectionState } from '@/lib/backend/http';
+import { endpoints, type Endpoints } from '@/lib/backend/endpoints';
+import { CloudSync } from '@/lib/backend/cloudSync';
+import { MemoryStore, LEGACY_KEYS } from '@/lib/backend/storage';
+import type { Vehicle } from '@/lib/backend/model';
+import { toJourney } from '@/lib/backend/mappers';
+
+const need = (k: string) => {
+  const v = process.env[k];
+  if (!v) { console.error(`Missing environment variable ${k}`); process.exit(2); }
+  return v;
+};
+const DB_URL = need('STAGING_DB_URL');
+const BASE = need('SUPABASE_URL').replace(/\/+$/, '');
+const PUB_KEY = need('SUPABASE_PUBLISHABLE_KEY');
+const SEC_KEY = need('SUPABASE_SECRET_KEY');
+const RUN = process.env.GITHUB_RUN_ID ?? String(Date.now());
+// Domain for sign-up test addresses. Only used when staging auto-confirms
+// sign-ups, so no email is ever sent to it. Override with the repository
+// variable STAGING_SIGNUP_EMAIL_DOMAIN if Supabase rejects the default.
+const SIGNUP_DOMAIN = process.env.SIGNUP_TEST_EMAIL_DOMAIN || 'example.com';
+const PORT = 18090;
+// Set STAGING_API_URL to test the hosted staging API instead of a local one.
+const HOSTED_API = process.env.STAGING_API_URL?.replace(/\/+$/, '') || null;
+const API_URL = HOSTED_API ?? `http://127.0.0.1:${PORT}`;
+
+const adminHeaders: Record<string, string> = SEC_KEY.startsWith('sb_') ? { apikey: SEC_KEY } : { apikey: SEC_KEY, Authorization: `Bearer ${SEC_KEY}` };
+const sql = (q: string) => execFileSync('psql', [DB_URL, '-X', '-A', '-t', '-q', '-v', 'ON_ERROR_STOP=1', '-c', q], { encoding: 'utf8' }).trim();
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+const results: Array<{ name: string; ok: boolean; detail: string }> = [];
+function check(name: string, ok: unknown, detail = '') {
+  results.push({ name, ok: !!ok, detail });
+  console.log(`${ok ? 'ok  ' : 'FAIL'} ${name}${detail ? ` — ${detail}` : ''}`);
+}
+function section(title: string) { console.log(`\n── ${title}`); }
+
+// 1x1 JPEG
+const JPEG = Buffer.from('/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wgALCAABAAEBAREA/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxA=', 'base64');
+
+/** One simulated phone: its own secure store, Supabase client, API client and CloudSync. */
+interface Device {
+  name: string;
+  store: MemoryStore;
+  auth: SupabaseClient;
+  api: ApiClient;
+  ep: Endpoints;
+  connection: ConnectionState | 'unknown';
+  /** Simulated network failures for this phone. */
+  network: 'up' | 'offline' | 'server-error' | 'lose-response';
+  sync?: CloudSync;
+}
+
+function device(name: string, store = new MemoryStore()): Device {
+  const d = { name, store, connection: 'unknown', network: 'up' } as Device;
+  // Every request from this "phone" (auth and API) goes through its simulated network.
+  const net = (async (url: string, init?: RequestInit) => {
+    if (d.network === 'offline') throw new TypeError('Network request failed');
+    if (d.network === 'server-error' && url.startsWith(API_URL)) return new Response('{"error":"internal_error","message":"Something went wrong."}', { status: 503 });
+    const res = await fetch(url, init);
+    // The server handled the request but the reply never reached the phone.
+    if (d.network === 'lose-response' && url.startsWith(API_URL)) { await res.text(); throw new TypeError('Network request failed'); }
+    return res;
+  }) as typeof fetch;
+  d.auth = createAuthClient({ url: BASE, publishableKey: PUB_KEY, storage: store, fetchImpl: net });
+  d.api = new ApiClient({
+    baseUrl: API_URL,
+    getAccessToken: accessTokenGetter(d.auth, authServerProbe(BASE, PUB_KEY, net)), // the app's own logic
+    refreshAccessToken: async () => (await d.auth.auth.refreshSession()).data.session?.access_token ?? null,
+    onStatus: (s, detail) => { d.connection = s; d.sync?.reportConnection(s, detail); },
+    fetchImpl: net,
+  });
+  d.ep = endpoints(d.api);
+  return d;
+}
+
+function cloud(d: Device, userId: string, clock?: { t: number }): CloudSync {
+  d.sync?.dispose();
+  d.sync = new CloudSync({
+    ep: d.ep, store: d.store, userId, publishableKey: PUB_KEY, newId: () => randomUUID(), timezone: () => 'Europe/London',
+    ...(clock ? { now: () => clock.t } : {}),
+    prepareFile: async () => ({ body: JPEG, size: JPEG.length, mimeType: 'image/jpeg' }),
+    fetchImpl: ((url: string, init?: RequestInit) => (d.network === 'offline'
+      ? Promise.reject(new TypeError('Network request failed')) : fetch(url, init))) as typeof fetch,
+  });
+  return d.sync;
+}
+
+const createdUsers = new Set<string>();
+
+/** Waits until a Storage object is gone (the API's worker removes queued files). */
+async function objectRemoved(bucket: string, path: string): Promise<boolean> {
+  for (let i = 0; i < 30; i++) {
+    if (sql(`select count(*) from storage.objects where bucket_id = '${bucket}' and name = '${path}'`) === '0') return true;
+    await sleep(1000);
+  }
+  return false;
+}
+const photoPath = (id: string) => sql(`select storage_path from public.photos where id = '${id}'`);
+
+async function adminCreate(email: string, password: string, name: string): Promise<string> {
+  const r = await fetch(`${BASE}/auth/v1/admin/users`, {
+    method: 'POST', headers: { ...adminHeaders, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password, email_confirm: true, user_metadata: { display_name: name } }),
+  });
+  const j = await r.json() as { id?: string };
+  if (!r.ok || !j.id) throw new Error(`Auth admin could not create a test user (HTTP ${r.status})`);
+  createdUsers.add(j.id);
+  return j.id;
+}
+
+function startApi(): ChildProcess {
+  const entry = fileURLToPath(new URL('../../api-server/dist/index.mjs', import.meta.url));
+  return spawn(process.execPath, ['--enable-source-maps', entry], {
+    env: {
+      PATH: process.env.PATH, NODE_ENV: 'production', PORT: String(PORT), LOG_LEVEL: 'warn',
+      DATABASE_URL: DB_URL, SUPABASE_URL: BASE, SUPABASE_SECRET_KEY: SEC_KEY, STORAGE_WORKER_INTERVAL_MS: '1000',
+    },
+    stdio: ['ignore', 'inherit', 'inherit'],
+  });
+}
+
+async function waitForApi(child: ChildProcess | null) {
+  for (let i = 0; i < 100; i++) {
+    if (child && child.exitCode !== null) throw new Error(`API exited with code ${child.exitCode}`);
+    try { if ((await fetch(`${API_URL}/api/healthz`)).ok) return; } catch { /* starting */ }
+    await sleep(200);
+  }
+  throw new Error('API did not start');
+}
+
+async function run() {
+  // ─── Staging Auth configuration (what the app can use) ───────────────────
+  section('Staging Auth providers');
+  const settings = await (await fetch(`${BASE}/auth/v1/settings`, { headers: { apikey: PUB_KEY } })).json() as {
+    external?: Record<string, boolean>; mailer_autoconfirm?: boolean; disable_signup?: boolean;
+  };
+  const ext = settings.external ?? {};
+  console.log(`     email: ${ext.email ? 'on' : 'off'} · Apple: ${ext.apple ? 'on' : 'off'} · Google: ${ext.google ? 'on' : 'off'} · ` +
+    `email confirmation: ${settings.mailer_autoconfirm ? 'off (auto-confirm)' : 'required'} · sign-ups: ${settings.disable_signup ? 'disabled' : 'allowed'}`);
+  check('email + password sign-in is enabled on staging', ext.email === true);
+
+  let email = `driveos-mobile-${RUN}-a@${SIGNUP_DOMAIN}`;
+  const password = randomBytes(18).toString('base64url');
+  console.log(`::add-mask::${password}`);
+
+  // ─── 1. Create an email + password account ───────────────────────────────
+  section('1. Create an email/password account');
+  const phone1 = device('phone 1');
+  let userA: string | null = null;
+  if (!settings.mailer_autoconfirm) {
+    // With confirmation on and Supabase's built-in mailer, a sign-up needs a
+    // deliverable address the mailer is allowed to send to, so a throwaway
+    // test account can't be created without emailing someone. Not attempted.
+    check('sign-up through the app (staging config)', false,
+      'staging requires email confirmation — turn off "Confirm email" for the staging project (Auth → Providers → Email), or add custom SMTP');
+  } else if (settings.disable_signup) {
+    check('sign-up through the app (staging config)', false, 'sign-ups are disabled on staging (Auth → Providers → Email → Allow new users)');
+  } else {
+    try {
+      const r = await signUpWithEmail(phone1.auth, email, password, 'driveos-staging://auth/callback', 'Mobile Tester');
+      userA = r.userId;
+      if (userA) createdUsers.add(userA);
+      check('sign-up through the app creates a signed-in account', !!userA && !r.needsConfirmation && !!r.session,
+        r.needsConfirmation ? 'unexpected: confirmation still required' : 'signed in immediately');
+      const again = await signUpWithEmail(device('same address').auth, email, password, 'driveos-staging://auth/callback').catch((e) => e);
+      check('signing up twice with the same email is refused', again instanceof Error, again instanceof Error ? again.message : 'accepted');
+    } catch (err) {
+      const msg = (err as Error).message;
+      check('sign-up through the app creates a signed-in account', false,
+        /invalid/i.test(msg) ? `${msg} — set the repository variable STAGING_SIGNUP_EMAIL_DOMAIN to a domain you control` : msg);
+    }
+  }
+  if (!userA) {
+    // Carry on with the other scenarios using an account made by the admin API.
+    email = `driveos-mobile-${RUN}-a@example.com`;
+    userA = await adminCreate(email, password, 'Mobile Tester');
+    await signInWithEmail(phone1.auth, email, password);
+  }
+  const me = await phone1.ep.getMe();
+  check('the new account has a cloud profile (sign-up trigger)', me.id === userA && me.displayName === 'Mobile Tester', me.displayName);
+
+  // ─── 2–4. Sign out, sign in, session survives restart ────────────────────
+  section('2. Sign out');
+  await phone1.auth.auth.signOut({ scope: 'local' });
+  check('no session is left on the phone after sign-out', !(await phone1.auth.auth.getSession()).data.session);
+  const afterSignOut = await phone1.ep.getMe().catch((e) => e);
+  check('the app cannot call the API while signed out', afterSignOut instanceof AuthRequiredError);
+
+  section('3. Sign back in');
+  await signInWithEmail(phone1.auth, email, password);
+  check('signed in again with email + password', (await phone1.ep.getMe()).id === userA);
+  const wrong = await signInWithEmail(phone1.auth, email, 'wrong-password').catch((e) => e);
+  check('a wrong password is refused', wrong instanceof Error);
+  await signInWithEmail(phone1.auth, email, password);
+
+  section('4. Session survives an app restart');
+  const phone1b = device('phone 1 after restart', phone1.store); // same secure storage, new process
+  const restored = (await phone1b.auth.auth.getSession()).data.session;
+  check('session restored from secure storage', restored?.user.id === userA);
+  const refreshed = await phone1b.auth.auth.refreshSession();
+  check('refresh token works after restart', !!refreshed.data.session && !refreshed.error);
+  check('API accepts the restored session', (await phone1b.ep.getMe()).id === userA);
+  const p1 = phone1b; // continue as the restarted app
+
+  // ─── 5. Profile persists ─────────────────────────────────────────────────
+  section('5. Profile persists');
+  let app = cloud(p1, userA);
+  await app.start();
+  await app.sync();
+  await app.updateProfile({ name: 'Alex Driver', bio: 'Weekend B-roads' });
+  await app.outbox.flush();
+  const fresh = device('fresh install');
+  await signInWithEmail(fresh.auth, email, password);
+  const freshApp = cloud(fresh, userA);
+  await freshApp.start();
+  await freshApp.refresh();
+  check('profile edits are stored in the cloud', freshApp.data.profile.name === 'Alex Driver' && freshApp.data.profile.bio === 'Weekend B-roads', freshApp.data.profile.name);
+  check('level and XP come from the server', freshApp.data.profile.level === 1 && freshApp.data.profile.xp === 0);
+  freshApp.dispose();
+
+  // ─── 6–8. Vehicles and photos ────────────────────────────────────────────
+  section('6. Add a vehicle');
+  const vehicleInput: Omit<Vehicle, 'id'> = {
+    nickname: 'Test MX-5', registration: 'AB12CDE', make: 'Mazda', model: 'MX-5', year: 2019, colour: 'Red', fuelType: 'petrol',
+    engine: '2.0L', power: '184 PS', torque: '', zeroToSixty: '', topSpeed: '', mileage: 12000, fuelPercentage: 0, imageUri: null, isActive: false,
+  };
+  const localId = await app.addVehicle(vehicleInput);
+  await app.outbox.flush();
+  const vehicle = app.data.vehicles.find((v) => v.nickname === 'Test MX-5');
+  check('vehicle saved to the account', !!vehicle && !vehicle.id.startsWith('local:') && app.status.pendingChanges === 0, `${localId} → ${vehicle?.id}`);
+  check('first vehicle is the active one', vehicle?.isActive === true);
+  const vehicleId = vehicle!.id;
+  await app.writeCache();
+
+  section('7. Restart: vehicle remains');
+  app.dispose();
+  app = cloud(p1, userA);
+  await app.start();
+  check('vehicle shown from the phone cache straight after restart', app.data.vehicles.some((v) => v.id === vehicleId));
+  await app.refresh();
+  check('vehicle still there after refreshing from the server', app.data.vehicles.some((v) => v.id === vehicleId));
+
+  section('8. Upload a vehicle photo');
+  await app.updateVehicle(vehicleId, { imageUri: 'file:///data/photo.jpg' });
+  await app.outbox.flush();
+  const withPhoto = app.data.vehicles.find((v) => v.id === vehicleId);
+  check('photo uploaded to Storage and set as the cover', !!withPhoto?.imageUri?.startsWith(BASE) && app.status.rejected.length === 0, app.status.rejected[0]?.message ?? '');
+  const img = withPhoto?.imageUri ? await fetch(withPhoto.imageUri) : null;
+  check('the cover photo URL downloads the image', img?.status === 200, `HTTP ${img?.status}`);
+
+  section('8b. Replacing and removing photos cleans up Storage');
+  const firstPhoto = withPhoto!.coverPhotoId!;
+  const firstPath = photoPath(firstPhoto);
+  await app.updateVehicle(vehicleId, { imageUri: 'file:///data/photo-2.jpg' });
+  await app.outbox.flush();
+  const replaced = app.data.vehicles.find((v) => v.id === vehicleId);
+  check('replacement photo becomes the cover', !!replaced?.coverPhotoId && replaced.coverPhotoId !== firstPhoto && !!replaced.imageUri);
+  check('the replaced photo\'s file is removed from Storage', await objectRemoved('vehicle-photos', firstPath));
+  const secondPath = photoPath(replaced!.coverPhotoId!);
+  await app.updateVehicle(vehicleId, { imageUri: null });
+  await app.outbox.flush();
+  check('removing the photo clears the cover on the server', !(await p1.ep.getVehicle(vehicleId)).coverPhotoId);
+  check('the removed photo\'s file is removed from Storage', await objectRemoved('vehicle-photos', secondPath));
+  await app.updateVehicle(vehicleId, { imageUri: 'file:///data/photo-3.jpg' });
+  await app.outbox.flush();
+  check('a new photo can be added again', !!app.data.vehicles.find((v) => v.id === vehicleId)?.imageUri);
+
+  await app.setAvatar('file:///data/avatar.jpg');
+  await app.outbox.flush();
+  const avatarUrl = app.data.profile.avatarUrl ?? '';
+  const avatarRes = avatarUrl.startsWith('http') ? await fetch(avatarUrl) : null;
+  check('avatar uploaded and publicly viewable', avatarRes?.status === 200, `HTTP ${avatarRes?.status}`);
+  const firstAvatar = sql(`select avatar_path from public.profiles where id = '${userA}'`);
+  await app.setAvatar('file:///data/avatar-2.jpg');
+  await app.outbox.flush();
+  check('replacing the avatar removes the old file', await objectRemoved('avatars', firstAvatar));
+
+  // ─── 9–10. Saved places & Beauty Spots ───────────────────────────────────
+  section('9. Save a location');
+  const homeLocal = await app.addPlace({ kind: 'home', name: 'Home', coordinate: { latitude: 51.5007, longitude: -0.1246 }, visibility: 'public' });
+  await app.outbox.flush();
+  const home = app.data.places.find((p) => p.kind === 'home');
+  check('Home saved to the account', !!home && !home.id.startsWith('local:'), `${homeLocal} → ${home?.id}`);
+  check('Home is private even when asked to be public', home?.visibility === 'private');
+
+  section('10. Create a Beauty Spot');
+  await app.addPlace({ kind: 'beauty_spot', name: 'Staging Viewpoint', category: 'viewpoint', visibility: 'public', description: 'Test spot', coordinate: { latitude: 54.4609, longitude: -3.0886 } });
+  await app.outbox.flush();
+  const spot = app.data.places.find((p) => p.kind === 'beauty_spot');
+  check('Beauty Spot saved as public', !!spot && !spot.id.startsWith('local:') && spot.visibility === 'public');
+
+  // ─── 11–12. Record a journey ─────────────────────────────────────────────
+  section('11. Record a journey');
+  const clock = { t: Date.now() - 12 * 60_000 };
+  app.dispose();
+  app = cloud(p1, userA, clock);
+  await app.start();
+  await app.refresh();
+  await app.startDrive(app.data.vehicles.find((v) => v.id === vehicleId)!);
+  let lat = 54.40, lng = -3.10, kept = 0;
+  const FIXES = 540;
+  for (let s = 0; s < FIXES; s++) {
+    clock.t += 1000;
+    if (app.addFix({ latitude: lat, longitude: lng, speedMs: 15, headingDeg: 0, accuracyM: 6, altitudeM: 120, timestamp: clock.t })) kept++;
+    lat += 15 / 111_320;
+    lng += Math.sin(s / 60) * 0.00005;
+  }
+  const endClock = Date.now();
+  clock.t = endClock;
+  const journey = await app.endDrive();
+  check('GPS points thinned before upload', kept > 150 && kept < FIXES / 2, `${kept} of ${FIXES} fixes kept`);
+  check('journey uploaded and completed on the server', !!journey && !journey.id.startsWith('local:') && journey.syncState === 'synced', journey?.id);
+  check('distance computed by the server from the route', !!journey && journey.distance > 7.5 && journey.distance < 8.5, `${journey?.distance} km`);
+  check('XP awarded by the server', (journey?.xpEarned ?? 0) >= 50, `${journey?.xpEarned} XP`);
+  check('route polyline returned for display', (journey?.routeCoordinates.length ?? 0) >= 10, `${journey?.routeCoordinates.length} points`);
+  const journeyId = journey!.id;
+  await app.writeCache();
+
+  section('12. Journey persists and its route displays after restart');
+  app.dispose();
+  const reinstall = device('reinstalled app');
+  await signInWithEmail(reinstall.auth, email, password);
+  const app2 = cloud(reinstall, userA);
+  await app2.start();
+  await app2.refresh();
+  const again = app2.data.journeys.find((j) => j.id === journeyId);
+  check('journey present after reinstall', !!again);
+  check('route displays after restart (decoded from the server)', (again?.routeCoordinates.length ?? 0) >= 10, `${again?.routeCoordinates.length} points`);
+  check('journey stats match the server', again?.distance === journey?.distance && again?.xpEarned === journey?.xpEarned);
+  check('XP and totals updated on the profile', app2.data.profile.totalJourneys === 1 && app2.data.profile.xp >= 150, `XP ${app2.data.profile.xp}`);
+  app2.dispose();
+
+  // ─── 13. Second account can't see private data ───────────────────────────
+  section('13. A second account cannot access private data');
+  const emailB = `driveos-mobile-${RUN}-b@example.com`;
+  const passwordB = randomBytes(18).toString('base64url');
+  console.log(`::add-mask::${passwordB}`);
+  const userB = await adminCreate(emailB, passwordB, 'Other Driver');
+  const phoneB = device('other person\'s phone');
+  await signInWithEmail(phoneB.auth, emailB, passwordB);
+  const status = async (p: Promise<unknown>) => p.then(() => 200, (e) => (e instanceof ApiError ? e.status : 0));
+  check('B cannot read A\'s vehicle', (await status(phoneB.api.get(`/vehicles/${vehicleId}`))) === 404);
+  check('B cannot edit A\'s vehicle', (await status(phoneB.ep.updateVehicle(vehicleId, { nickname: 'Mine' }))) === 404);
+  check('B cannot see A\'s private journey', (await status(phoneB.ep.getJourney(journeyId))) === 404);
+  check('B cannot read A\'s raw GPS points', (await status(phoneB.api.get(`/journeys/${journeyId}/points`))) === 404);
+  check('B cannot see A\'s Home', (await status(phoneB.api.get(`/locations/${home!.id}`))) === 404);
+  const bPhotos = await phoneB.ep.listPhotos({ vehicleId }).catch(() => []);
+  check('B cannot list A\'s vehicle photos', Array.isArray(bPhotos) && bPhotos.length === 0);
+  check('B\'s own lists contain none of A\'s data',
+    (await phoneB.ep.listVehicles()).length === 0 && (await phoneB.ep.listJourneys()).length === 0 && (await phoneB.ep.listLocations()).length === 0);
+  const bNearby = await phoneB.ep.nearbySpots(54.46, -3.09, 5000);
+  check('B can see A\'s public Beauty Spot', bNearby.some((s) => s.id === spot!.id));
+  check('B does not see A\'s Home among nearby spots', !bNearby.some((s) => s.id === home!.id));
+  const aPhoto = app.data.vehicles.find((v) => v.id === vehicleId)?.coverPhotoId ?? '';
+  check('B cannot open A\'s photo', (await status(phoneB.api.get(`/photos/${aPhoto}`))) === 404);
+  check('B cannot upload a photo to A\'s vehicle',
+    (await status(phoneB.ep.requestUpload({ kind: 'vehicle-photo', parentId: vehicleId, sizeBytes: 100, mimeType: 'image/jpeg' }))) === 404);
+  check('B cannot delete A\'s Home', (await status(phoneB.ep.deleteLocation(home!.id))) === 404
+    && (await p1.ep.listLocations()).some((l) => l.id === home!.id));
+  check('B cannot change A\'s journey', (await status(phoneB.ep.updateJourney(journeyId, { name: 'Mine' }))) === 404);
+
+  // ─── 14. Offline / server failures are visible ───────────────────────────
+  section('14. Offline and server failures are visible');
+  const app3 = cloud(p1, userA);
+  await app3.start();
+  p1.network = 'offline';
+  await app3.addVehicle({ ...vehicleInput, nickname: 'Offline Golf', registration: '', isActive: false });
+  await app3.outbox.flush();
+  const offlineCar = app3.data.vehicles.find((v) => v.nickname === 'Offline Golf');
+  check('offline: the change shows at once, marked as waiting', offlineCar?.syncState === 'pending');
+  check('offline: status reports offline with 1 change waiting', app3.status.connection === 'offline' && app3.status.pendingChanges === 1,
+    `${app3.status.connection}, ${app3.status.pendingChanges} pending, "${app3.status.lastError}"`);
+  p1.network = 'server-error';
+  await app3.refresh();
+  check('server failure: status reports a server problem', app3.status.connection === 'server_error' && !!app3.status.lastError, app3.status.lastError ?? '');
+  check('server failure: cached data is still shown', app3.data.vehicles.some((v) => v.id === vehicleId));
+  p1.network = 'up';
+  await app3.sync();
+  check('back online: the waiting change uploads', app3.status.pendingChanges === 0 && app3.status.connection === 'online'
+    && (await p1.ep.listVehicles()).some((v) => v.nickname === 'Offline Golf'));
+
+  section('14b. Lost responses and offline drives never duplicate');
+  p1.network = 'lose-response';
+  await app3.addVehicle({ ...vehicleInput, nickname: 'Idempotent Civic', registration: '', isActive: false });
+  await app3.addPlace({ kind: 'favourite_road', name: 'Idempotent Road', coordinate: { latitude: 54.5, longitude: -3.1 } });
+  await app3.outbox.flush();
+  check('a lost reply leaves the change waiting', app3.status.pendingChanges >= 1);
+  p1.network = 'up';
+  await app3.sync();
+  const civics = (await p1.ep.listVehicles()).filter((v) => v.nickname === 'Idempotent Civic').length;
+  const roads = (await p1.ep.listLocations()).filter((l) => l.name === 'Idempotent Road').length;
+  check('the retried vehicle exists exactly once', civics === 1, `${civics} copies`);
+  check('the retried place exists exactly once', roads === 1, `${roads} copies`);
+
+  const offClock = { t: Date.now() - 8 * 60_000 };
+  const app5 = cloud(p1, userA, offClock);
+  await app5.start();
+  p1.network = 'offline';
+  await app5.startDrive(null);
+  let olat = 54.3;
+  let olng = -2.9, offKept = 0;
+  // A winding road (a straight one would rightly simplify to its two ends).
+  for (let s2 = 0; s2 < 240; s2++) {
+    offClock.t += 1000;
+    if (app5.addFix({ latitude: olat, longitude: olng, speedMs: 14, accuracyM: 5, timestamp: offClock.t })) offKept++;
+    const heading = Math.sin(s2 / 20) * 1.2; // radians east of north, swinging left and right
+    olat += (14 * Math.cos(heading)) / 111_320;
+    olng += (14 * Math.sin(heading)) / (111_320 * Math.cos((olat * Math.PI) / 180));
+  }
+  offClock.t = Date.now();
+  const offDrive = await app5.endDrive();
+  check('a drive recorded offline is kept on the phone', offDrive?.syncState === 'pending' && app5.status.pendingJourneys === 1);
+  p1.network = 'up';
+  const beforeIds = new Set((await p1.ep.listJourneys()).map((j) => j.id));
+  const before = beforeIds.size;
+  await app5.sync();
+  await app5.sync(); // retrying must not create a second copy
+  const after = await p1.ep.listJourneys();
+  check('the offline drive uploads once back online, exactly once', after.length === before + 1 && app5.status.pendingJourneys === 0, `${before} → ${after.length}`);
+  const uploaded = after.find((j) => !beforeIds.has(j.id));
+  const serverRoute = uploaded ? toJourney(await p1.ep.getJourney(uploaded.id)).routeCoordinates.length : 0;
+  const rawPoints = uploaded ? (await p1.api.get<unknown[]>(`/journeys/${uploaded.id}/points`)).length : 0;
+  check('every GPS point kept offline reached the server', rawPoints === offKept, `${rawPoints} of ${offKept}`);
+  const shown = app5.data.journeys.find((j) => j.id === uploaded?.id);
+  check('its route is available from the server and shown on the phone', serverRoute > 5 && shown?.syncState === 'synced' && shown.routeCoordinates.length > 5,
+    `server ${serverRoute} points, phone ${shown?.routeCoordinates.length ?? 0} points`);
+  app5.dispose();
+
+  // ─── 16. Same account on a second phone ──────────────────────────────────
+  section('16. Same account on a second phone sees the same cloud data');
+  const phone2 = device('second phone');
+  await signInWithEmail(phone2.auth, email, password);
+  const app4 = cloud(phone2, userA);
+  await app4.start();
+  check('second phone starts with nothing cached', app4.data.vehicles.length === 0);
+  await app4.refresh();
+  const ids = (xs: Array<{ id: string }>) => xs.map((x) => x.id).sort().join(',');
+  await app3.refresh();
+  const serverVehicles = (await p1.ep.listVehicles()).length;
+  check('same vehicles', ids(app4.data.vehicles) === ids(app3.data.vehicles) && app4.data.vehicles.length === serverVehicles, `${app4.data.vehicles.length} of ${serverVehicles}`);
+  check('same journeys', ids(app4.data.journeys) === ids(app3.data.journeys) && app4.data.journeys.some((j) => j.id === journeyId));
+  const serverPlaces = (await p1.ep.listLocations()).length;
+  check('same saved places and Beauty Spots', ids(app4.data.places) === ids(app3.data.places) && app4.data.places.length === serverPlaces, `${app4.data.places.length} of ${serverPlaces}`);
+  check('same profile', app4.data.profile.name === 'Alex Driver' && app4.data.profile.xp === app3.data.profile.xp);
+  check('vehicle photo visible on the second phone', !!app4.data.vehicles.find((v) => v.id === vehicleId)?.imageUri);
+  check('legacy device data keys untouched', LEGACY_KEYS.every((k) => !phone2.store.data.has(k)));
+
+  section('17. Sessions across devices and offline start');
+  await phone2.auth.auth.signOut({ scope: 'local' });
+  check('signing out one phone leaves the other signed in', (await p1.ep.getMe()).id === userA && !(await phone2.auth.auth.getSession()).data.session);
+  // Offline cold start more than an hour later: copy phone 1's saved session and expire its access token.
+  const coldStore = new MemoryStore();
+  for (const [k, v] of phone1.store.data) coldStore.data.set(k, v);
+  const key = [...coldStore.data.keys()].find((k) => k.endsWith('-auth-token'))!;
+  const saved = JSON.parse(coldStore.data.get(key)!);
+  saved.expires_at = Math.floor(Date.now() / 1000) - 60;
+  coldStore.data.set(key, JSON.stringify(saved));
+  const cold = device('phone restarted offline', coldStore);
+  cold.network = 'offline';
+  const offlineToken = await currentAccessToken(cold.auth).catch((e) => e);
+  check('offline with an expired token: treated as offline, not signed out', offlineToken instanceof NetworkError);
+  check('the saved account is still known offline', (await storedSessionUser(cold.auth, coldStore))?.id === userA);
+  const coldApp = cloud(cold, userA);
+  await coldApp.start();
+  check('cached data is available offline after the restart', coldApp.data.vehicles.some((v) => v.id === vehicleId));
+  cold.network = 'up';
+  // The app retries on its own schedule; allow for the probe's few-second throttle.
+  let meId: string | null = null;
+  const backAt = Date.now();
+  for (let i = 0; i < 5 && !meId; i++) {
+    meId = await cold.ep.getMe().then((u) => u.id).catch(() => null);
+    if (!meId) await sleep(2000);
+  }
+  check('back online: the session refreshes and the API works', meId === userA, `after ${Math.round((Date.now() - backAt) / 1000)} s`);
+  coldApp.dispose();
+  app3.dispose();
+  app4.dispose();
+
+  // ─── 18. Registration lookup (DVLA v1) ───────────────────────────────────
+  // At most one DVLA call per run. Without a key on the API the section only
+  // checks that it says so; with DVLA_TEST_REGISTRATION it checks a real answer.
+  section('18. Registration lookup (DVLA)');
+  p1.network = 'up';
+  const foreign = await p1.ep.lookupVehicle('B-MW 1234').catch((e) => e);
+  check('a non-UK registration is refused without contacting DVLA', foreign instanceof ApiError && foreign.code === 'invalid_registration');
+  const testReg = process.env.DVLA_TEST_REGISTRATION?.trim() || '';
+  const probeReg = testReg || 'AB12 CDE';
+  const masked = probeReg.replace(/\s+/g, '').toUpperCase().replace(/^(.{4}).*$/, '$1***');
+  const probe = await p1.ep.lookupVehicle(probeReg).catch((e) => e);
+  if (!(probe instanceof ApiError && probe.code === 'lookup_not_configured')) {
+    const outcome = probe instanceof Error ? (probe as ApiError).code ?? 'error' : 'found';
+    console.log(`     live DVLA lookup of ${masked} through the hosted API: ${outcome}`);
+  }
+  const leakKey = process.env.LEAK_CHECK_DVLA_KEY?.trim();
+  if (leakKey) {
+    const bodies = [probe, foreign].map((x) => (x instanceof ApiError ? JSON.stringify({ code: x.code, message: x.message }) : JSON.stringify(x)));
+    check('lookup responses never contain the DVLA key', bodies.every((b) => !b.includes(leakKey)));
+  }
+  if (probe instanceof ApiError && probe.code === 'lookup_not_configured') {
+    console.log('     DVLA lookup is not configured on this API (no key): live checks skipped');
+    check('without a key the API says lookup is not connected', true);
+  } else if (testReg) {
+    check('a known registration returns DVLA suggestions only',
+      !(probe instanceof Error) && !!probe.suggested?.make && !('tax' in probe) && !('mot' in probe),
+      probe instanceof Error ? (probe as ApiError).code ?? probe.message : `${probe.suggested.year ?? ''} ${probe.suggested.make}`);
+  } else {
+    check('DVLA answers (found or not found)',
+      !(probe instanceof Error) || (probe instanceof ApiError && probe.code === 'vehicle_not_found'),
+      probe instanceof Error ? (probe as ApiError).code ?? probe.message : 'found');
+  }
+  check('a lookup failure never marks the API as down', p1.connection !== 'server_error', String(p1.connection));
+
+  // ─── 15. Account deletion ────────────────────────────────────────────────
+  section('15. Account deletion');
+  await p1.ep.deleteAccount();
+  const authUser = await fetch(`${BASE}/auth/v1/admin/users/${userA}`, { headers: adminHeaders });
+  check('the Auth account is gone', authUser.status === 404, `HTTP ${authUser.status}`);
+  check('profile, vehicles, journeys and places are gone',
+    sql(`select (select count(*) from public.profiles where id = '${userA}') + (select count(*) from public.vehicles where owner_id = '${userA}')
+         + (select count(*) from public.journeys where owner_id = '${userA}') + (select count(*) from public.saved_locations where owner_id = '${userA}')`) === '0');
+  const signIn = await signInWithEmail(device('after deletion').auth, email, password).catch((e) => e);
+  check('the deleted account can no longer sign in', signIn instanceof Error);
+  let filesGone = false;
+  for (let i = 0; i < 30 && !filesGone; i++) {
+    await sleep(1000);
+    filesGone = sql(`select count(*) from storage.objects where split_part(name, '/', 1) = '${userA}'`) === '0';
+  }
+  check('the account\'s files were removed from Storage', filesGone);
+  createdUsers.delete(userA);
+  void userB;
+}
+
+async function cleanup() {
+  for (const id of createdUsers) {
+    const files = sql(`select bucket_id || '|' || name from storage.objects where split_part(name, '/', 1) = '${id}'`);
+    const byBucket: Record<string, string[]> = {};
+    for (const line of files ? files.split('\n') : []) { const [b, n] = line.split('|'); (byBucket[b!] ??= []).push(n!); }
+    for (const [bucket, prefixes] of Object.entries(byBucket)) {
+      await fetch(`${BASE}/storage/v1/object/${bucket}`, { method: 'DELETE', headers: { ...adminHeaders, 'Content-Type': 'application/json' }, body: JSON.stringify({ prefixes }) });
+    }
+    await fetch(`${BASE}/auth/v1/admin/users/${id}`, { method: 'DELETE', headers: adminHeaders });
+  }
+  for (let i = 0; i < 20; i++) {
+    if (sql(`select count(*) from private.storage_delete_queue`) === '0') break;
+    await sleep(1000);
+  }
+}
+
+const api = HOSTED_API ? null : startApi();
+let failed = false;
+try {
+  await waitForApi(api);
+  if (HOSTED_API) {
+    section(`Hosted staging API (${HOSTED_API})`);
+    const health = await fetch(`${HOSTED_API}/api/healthz`);
+    const release = health.headers.get('x-app-release');
+    check('served over HTTPS', HOSTED_API.startsWith('https://') && health.ok);
+    if (process.env.EXPECTED_RELEASE) check('the deployed build is this commit', release === process.env.EXPECTED_RELEASE, release ?? 'no header');
+    const ready = await fetch(`${HOSTED_API}/api/readyz`).then((r) => r.json()).catch(() => null) as { database?: string } | null;
+    check('the hosted API reaches the staging database', ready?.database === 'ok');
+  }
+  await run();
+} catch (err) {
+  failed = true;
+  console.error(`ERROR: ${(err as Error).stack ?? err}`);
+} finally {
+  try { await cleanup(); } catch (err) { failed = true; console.error(`Cleanup error: ${(err as Error).message}`); }
+  api?.kill('SIGTERM');
+}
+
+const leftovers = sql(`
+  select (select count(*) from auth.users where email like 'driveos-mobile-${RUN}-%')
+       + (select count(*) from public.profiles p join auth.users u on u.id = p.id where u.email like 'driveos-mobile-${RUN}-%')`);
+check('nothing left behind (test accounts)', leftovers === '0', `${leftovers} leftover rows`);
+const bad = results.filter((r) => !r.ok);
+console.log(`\n${results.length - bad.length}/${results.length} Phase 5 staging checks passed`);
+process.exit(failed || bad.length ? 1 : 0);

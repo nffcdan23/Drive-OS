@@ -1,0 +1,59 @@
+# Supabase CLI project configuration for DriveOS.
+#
+# Used by the Supabase CLI for the local development stack and for linking to
+# a hosted project. Migrations in ./migrations are applied to a hosted project
+# with `supabase db push` (the Supabase CLI command — NOT drizzle-kit push).
+# Hosted Auth/Storage settings are managed in the Supabase dashboard; nothing
+# in this file is sent to a hosted project unless explicitly pushed.
+
+project_id = "drive-os"
+
+[api]
+enabled = true
+port = 54321
+# Only these schemas are reachable through the Data API. `private` is never
+# exposed. Tables in `public` are additionally locked by RLS and by having no
+# privileges granted to anon/authenticated (see migration 0012).
+schemas = ["public", "graphql_public"]
+extra_search_path = ["public", "extensions"]
+max_rows = 1000
+
+[db]
+port = 54322
+shadow_port = 54320
+major_version = 17
+
+[db.seed]
+# Reference data (default categories, achievements) is created by the
+# migrations themselves so that every environment gets it.
+enabled = false
+
+[realtime]
+enabled = true
+
+[storage]
+enabled = true
+file_size_limit = "10MiB"
+
+[auth]
+enabled = true
+site_url = "driveos://"
+additional_redirect_urls = ["driveos://auth-callback"]
+jwt_expiry = 3600
+enable_refresh_token_rotation = true
+enable_signup = true
+# Guest/anonymous accounts are deliberately off (real accounts only).
+enable_anonymous_sign_ins = false
+
+[auth.email]
+enable_signup = true
+enable_confirmations = true
+otp_length = 6
+otp_expiry = 3600
+
+# Sign in with Apple — enabled once the Apple Developer credentials exist.
+# Secrets are read from the environment, never committed.
+[auth.external.apple]
+enabled = false
+client_id = "env(SUPABASE_AUTH_EXTERNAL_APPLE_CLIENT_ID)"
+secret = "env(SUPABASE_AUTH_EXTERNAL_APPLE_SECRET)"

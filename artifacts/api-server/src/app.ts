@@ -3,7 +3,8 @@ import cors from "cors";
 import pinoHttpImport from "pino-http";
 import router from "./routes";
 import { logger } from "./lib/logger";
- 
+import { errorHandler, notFoundHandler } from "./middleware/errors";
+
 /**
  * `pino-http` is a CommonJS module whose type definitions use `export =`
  * (a callable function with a namespace merged onto it).  Under some
@@ -25,11 +26,11 @@ interface PinoHttpRequest {
   method?: string;
   url?: string;
 }
- 
+
 interface PinoHttpResponse {
   statusCode?: number;
 }
- 
+
 interface PinoHttpOptions {
   logger: typeof logger;
   serializers: {
@@ -37,13 +38,16 @@ interface PinoHttpOptions {
     res(res: PinoHttpResponse): unknown;
   };
 }
- 
+
 const pinoHttp = pinoHttpImport as unknown as (
   opts: PinoHttpOptions,
 ) => RequestHandler;
- 
+
 const app: Express = express();
- 
+
+app.disable("x-powered-by");
+app.set("trust proxy", 1); // Railway terminates TLS in front of the API
+
 app.use(
   pinoHttp({
     logger,
@@ -63,11 +67,12 @@ app.use(
     },
   }),
 );
+// The mobile app is not a browser; CORS only matters for the web build.
 app.use(cors());
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
- 
+app.use(express.json({ limit: "512kb" }));
+
 app.use("/api", router);
- 
+app.use(notFoundHandler);
+app.use(errorHandler);
+
 export default app;
- 

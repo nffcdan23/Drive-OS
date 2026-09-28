@@ -1,5 +1,5 @@
 import { ScreenTitle } from "@/components/Cockpit";
-import React, { useCallback, useEffect, useRef } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   View,
   Text,
@@ -9,7 +9,14 @@ import {
   Platform,
   AppState,
   AppStateStatus,
+  Alert,
+  Modal,
+  TextInput,
+  ActivityIndicator,
 } from "react-native";
+import { Image } from "expo-image";
+import * as ImagePicker from "expo-image-picker";
+import { describeError } from "@/lib/backend/http";
 import { useRouter, useFocusEffect } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -27,7 +34,40 @@ export default function ProfileScreen() {
     resolvedUnitSystem,
     profileStats,
     refreshProfileStats,
+    updateProfile,
+    setAvatar,
   } = useApp();
+  const [editing, setEditing] = useState(false);
+  const [form, setForm] = useState({ name: "", username: "", bio: "" });
+  const [avatarBusy, setAvatarBusy] = useState(false);
+
+  const openEdit = () => {
+    setForm({ name: userProfile.name, username: userProfile.username ?? "", bio: userProfile.bio ?? "" });
+    setEditing(true);
+  };
+  const saveEdit = () => {
+    if (!form.name.trim()) { Alert.alert("Name required", "Enter the name other drivers will see."); return; }
+    if (form.username.trim() && !/^[A-Za-z0-9_.]{3,30}$/.test(form.username.trim())) {
+      Alert.alert("Username", "Use 3–30 letters, numbers, dots or underscores.");
+      return;
+    }
+    updateProfile({ name: form.name.trim(), username: form.username.trim() || undefined, bio: form.bio.trim() });
+    setEditing(false);
+  };
+  const pickAvatar = async () => {
+    const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (perm.status !== "granted") { Alert.alert("Photo access needed", "Allow photo access to choose a profile picture."); return; }
+    const r = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"], allowsEditing: true, aspect: [1, 1], quality: 0.9 });
+    if (r.canceled || !r.assets[0]?.uri) return;
+    setAvatarBusy(true);
+    try {
+      await setAvatar(r.assets[0].uri);
+    } catch (err) {
+      Alert.alert("Profile picture not saved", describeError(err));
+    } finally {
+      setAvatarBusy(false);
+    }
+  };
 
   // Refresh stats whenever this screen comes into focus
   useFocusEffect(
@@ -51,7 +91,8 @@ export default function ProfileScreen() {
     return () => sub.remove();
   }, [refreshProfileStats]);
 
-  const xpProgress = userProfile.xp / userProfile.xpToNextLevel;
+  // The server reports XP remaining in the current 1,000-XP level.
+  const xpProgress = 1 - userProfile.xpToNextLevel / 1000;
   const unlockedAchievements = userProfile.achievements.filter(
     (a) => a.unlockedAt !== null,
   );
@@ -227,9 +268,14 @@ export default function ProfileScreen() {
         {/* Hero */}
         <View style={styles.heroSection}>
           <ScreenTitle title="Driver profile" eyebrow="Every mile counts" />
-          <View style={styles.avatar}>
-            <Text style={styles.avatarText}>{userProfile.name.charAt(0)}</Text>
-          </View>
+          <TouchableOpacity style={styles.avatar} onPress={pickAvatar} accessibilityLabel="Change profile picture" disabled={avatarBusy}>
+            {userProfile.avatarUrl ? (
+              <Image source={{ uri: userProfile.avatarUrl }} style={{ width: 64, height: 64, borderRadius: 18 }} contentFit="cover" />
+            ) : (
+              <Text style={styles.avatarText}>{userProfile.name.charAt(0)}</Text>
+            )}
+            {avatarBusy ? <ActivityIndicator style={{ position: "absolute" }} color={colors.primary} /> : null}
+          </TouchableOpacity>
           <Text style={styles.driverName}>{userProfile.name}</Text>
           <View style={styles.levelRow}>
             <View style={styles.levelBadge}>
@@ -344,12 +390,12 @@ export default function ProfileScreen() {
               {
                 icon: "person-outline",
                 label: "Edit Profile",
-                onPress: () => {},
+                onPress: openEdit,
               },
               {
                 icon: "shield-checkmark-outline",
-                label: "Privacy & Location Sharing",
-                onPress: () => {},
+                label: "Account & Settings",
+                onPress: () => router.push("/settings"),
               },
               {
                 icon: "walk-outline",
@@ -391,6 +437,37 @@ export default function ProfileScreen() {
           </View>
         </View>
       </ScrollView>
+
+      <Modal visible={editing} transparent animationType="slide" onRequestClose={() => setEditing(false)}>
+        <View style={{ flex: 1, justifyContent: "flex-end", backgroundColor: "rgba(0,0,0,0.5)" }}>
+          <View style={{ backgroundColor: colors.card, padding: 20, paddingBottom: insets.bottom + 20, borderTopLeftRadius: 24, borderTopRightRadius: 24, gap: 10 }}>
+            <Text style={{ color: colors.foreground, fontSize: 18, fontFamily: "Inter_700Bold" }}>Edit profile</Text>
+            {([
+              ["name", "Display name", 50],
+              ["username", "Username (optional)", 30],
+              ["bio", "Bio (optional)", 500],
+            ] as const).map(([key, label, max]) => (
+              <TextInput
+                key={key}
+                placeholder={label}
+                placeholderTextColor={colors.mutedForeground}
+                value={form[key]}
+                onChangeText={(t) => setForm((f) => ({ ...f, [key]: t }))}
+                maxLength={max}
+                autoCapitalize={key === "username" ? "none" : "sentences"}
+                multiline={key === "bio"}
+                style={{ minHeight: 46, borderRadius: 12, borderWidth: 1, borderColor: colors.input, color: colors.foreground, paddingHorizontal: 14, paddingVertical: 10, fontSize: 16, fontFamily: "Inter_400Regular" }}
+              />
+            ))}
+            <TouchableOpacity onPress={saveEdit} style={{ height: 48, borderRadius: 12, backgroundColor: colors.primary, alignItems: "center", justifyContent: "center" }}>
+              <Text style={{ color: colors.primaryForeground, fontFamily: "Inter_600SemiBold", fontSize: 16 }}>Save</Text>
+            </TouchableOpacity>
+            <TouchableOpacity onPress={() => setEditing(false)} style={{ alignItems: "center", padding: 8 }}>
+              <Text style={{ color: colors.primary, fontFamily: "Inter_600SemiBold" }}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }

@@ -1,0 +1,357 @@
+# Deploys the Express API to the hosted STAGING service (its own Railway
+# project, separate from production) and tests the mobile data layer against it.
+#
+# Runs only when asked, and deploys only from main (the canonical branch):
+#   - a push to main whose commit message contains  [deploy api-staging]
+#   - or "Run workflow" on main with confirm = deploy-api-staging
+#   - "Run workflow" (any branch) with confirm = verify-api-staging runs only
+#     the read-only checks below, including that the service uses the same
+#     Supabase project as the SUPABASE_STAGING_* secrets and is healthy, and
+#     changes nothing
+#
+# Production is out of reach by construction:
+#   - RAILWAY_STAGING_TOKEN is a Railway *project token*, which Railway scopes to
+#     one project and one environment. Create it in the staging project only.
+#   - Every Railway command names the project, environment and service
+#     explicitly (the CLI can otherwise create a new project), and the job
+#     refuses to deploy unless the token resolves to RAILWAY_STAGING_PROJECT_ID
+#     and that project's name contains "staging".
+#   - Every Supabase value comes from the SUPABASE_STAGING_* secrets and is
+#     checked to belong to the same staging project before anything changes.
+#   - The Railway build settings are added to the uploaded copy only; there is
+#     no railway.json at the repository root, so production's builds are unaffected.
+name: API staging deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "deploy-api-staging" to deploy the API to hosted staging, or "verify-api-staging" for the read-only checks only'
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: api-staging-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy the API to hosted staging
+    if: >-
+      (github.event_name == 'push' && contains(github.event.head_commit.message, '[deploy api-staging]')) ||
+      (github.event_name == 'workflow_dispatch' && (inputs.confirm == 'deploy-api-staging' || inputs.confirm == 'verify-api-staging'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_STAGING_TOKEN }}
+      RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_STAGING_PROJECT_ID }}
+      # Fixed on purpose: deploys go only to environment "staging", service "api".
+      RAILWAY_ENVIRONMENT: staging
+      RAILWAY_SERVICE: api
+      MODE: ${{ (github.event_name == 'workflow_dispatch' && inputs.confirm == 'verify-api-staging') && 'verify' || 'deploy' }}
+      STAGING_API_URL: ${{ vars.STAGING_API_URL }}
+      STAGING_DB_URL: ${{ secrets.SUPABASE_STAGING_DB_URL }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_STAGING_URL }}
+      SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_STAGING_PUBLISHABLE_KEY }}
+      SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_STAGING_SECRET_KEY }}
+      SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_STAGING_PROJECT_REF }}
+      # Optional: DVLA registration lookup on staging. The key only ever goes to
+      # the Railway staging service; the URL must be DVLA's (UAT recommended).
+      DVLA_STAGING_API_KEY: ${{ secrets.DVLA_STAGING_API_KEY }}
+      DVLA_STAGING_VES_URL: ${{ vars.DVLA_STAGING_VES_URL }}
+      # Pinned and more than a week old, like the workspace's minimumReleaseAge rule.
+      RAILWAY_CLI_VERSION: 5.57.6
+    steps:
+      - name: Deploy only from main
+        if: env.MODE == 'deploy'
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::The hosted API is deployed only from main (this run is on $GITHUB_REF). Merge first, or use verify-api-staging."; exit 1
+          fi
+
+      - uses: actions/checkout@v4
+
+      - name: Install the Railway CLI
+        run: |
+          npm install --global --no-audit --no-fund "@railway/cli@$RAILWAY_CLI_VERSION"
+          railway --version
+          echo "::group::railway up --help"; railway up --help || true; echo "::endgroup::"
+          echo "::group::railway variables --help"; railway variables --help || true; echo "::endgroup::"
+
+      - name: Check the secrets and that they all point at staging
+        run: |
+          missing=0
+          for name in RAILWAY_TOKEN RAILWAY_PROJECT_ID STAGING_API_URL STAGING_DB_URL SUPABASE_URL SUPABASE_PUBLISHABLE_KEY SUPABASE_SECRET_KEY SUPABASE_PROJECT_REF; do
+            if [ -z "${!name}" ]; then echo "::error::$name is not set (see artifacts/mobile/docs/STAGING_API.md)"; missing=1; fi
+          done
+          [ "$missing" = 0 ] || exit 1
+          password=$(python3 -c "import os,urllib.parse as u; print(u.unquote(u.urlsplit(os.environ['STAGING_DB_URL']).password or ''))")
+          [ -n "$password" ] && echo "::add-mask::$password"
+          case "$SUPABASE_URL" in
+            "https://$SUPABASE_PROJECT_REF.supabase.co"|"https://$SUPABASE_PROJECT_REF.supabase.co/") ;;
+            *) echo "::error::SUPABASE_STAGING_URL does not match SUPABASE_STAGING_PROJECT_REF"; exit 1 ;;
+          esac
+          case "$STAGING_DB_URL" in
+            *"$SUPABASE_PROJECT_REF"*) ;;
+            *) echo "::error::SUPABASE_STAGING_DB_URL is not for SUPABASE_STAGING_PROJECT_REF"; exit 1 ;;
+          esac
+          case "$STAGING_API_URL" in
+            https://*) ;;
+            *) echo "::error::STAGING_API_URL must be an https:// URL"; exit 1 ;;
+          esac
+          echo "Secrets are set and refer to the same Supabase staging project."
+
+      - name: Confirm the token, project, environment and service (read-only)
+        # Runs even if the step above found a problem, so every issue is reported
+        # at once; deploy steps below still need every check to pass.
+        if: ${{ !cancelled() && env.RAILWAY_TOKEN != '' && env.RAILWAY_PROJECT_ID != '' }}
+        run: |
+          railway status --json > "$RUNNER_TEMP/railway-status.json"
+          python3 - "$RUNNER_TEMP/railway-status.json" <<'PY'
+          import json, os, sys
+          want = os.environ["RAILWAY_PROJECT_ID"]
+          status = json.load(open(sys.argv[1]))
+          def find_project(o):
+              if isinstance(o, dict):
+                  if o.get("id") == want and isinstance(o.get("name"), str):
+                      return o
+                  for v in o.values():
+                      r = find_project(v)
+                      if r: return r
+              elif isinstance(o, list):
+                  for v in o:
+                      r = find_project(v)
+                      if r: return r
+              return None
+          def names_under(o, word, inside=False, out=None):
+              out = set() if out is None else out
+              if isinstance(o, dict):
+                  if inside and isinstance(o.get("name"), str):
+                      out.add(o["name"])
+                  for k, v in o.items():
+                      names_under(v, word, inside or word in k.lower(), out)
+              elif isinstance(o, list):
+                  for v in o:
+                      names_under(v, word, inside, out)
+              return out
+          project = find_project(status)
+          fail = lambda msg: (print(f"::error::{msg}; refusing to continue."), sys.exit(1))
+          if not project:
+              fail("The Railway token does not belong to RAILWAY_STAGING_PROJECT_ID")
+          envs = names_under(project, "environment")
+          services = names_under(project, "service")
+          print(f"Railway project: {project['name']}")
+          print(f"Environments: {sorted(envs)}")
+          print(f"Services: {sorted(services)}")
+          if "staging" not in project["name"].lower():
+              fail(f'Project "{project["name"]}" does not have "staging" in its name')
+          if os.environ["RAILWAY_ENVIRONMENT"] not in envs:
+              fail('The project has no environment named "staging"')
+          if os.environ["RAILWAY_SERVICE"] not in services:
+              fail('The project has no service named "api"')
+          print("Token, project, environment and service verified.")
+          PY
+          rm -f "$RUNNER_TEMP/railway-status.json"
+          # The token can read the target service's settings (names only are shown).
+          railway variables -p "$RAILWAY_PROJECT_ID" -e "$RAILWAY_ENVIRONMENT" -s "$RAILWAY_SERVICE" --json \
+            | python3 -c '
+          import json, os, sys, urllib.parse
+          d = json.load(sys.stdin)
+          if not isinstance(d, dict):
+              print("::error::Unexpected variables format"); sys.exit(1)
+          print("Current variable names on staging/api:", sorted(d))
+          # STAGING_API_URL must be this service'"'"'s own public domain.
+          url = os.environ["STAGING_API_URL"]
+          host = urllib.parse.urlsplit(url if "://" in url else "//" + url).hostname
+          domain = d.get("RAILWAY_PUBLIC_DOMAIN")
+          print(f"STAGING_API_URL host: {host}; staging/api public domain: {domain}")
+          if not domain or host != domain.lower():
+              print("::error::STAGING_API_URL is not the public domain of the staging api service"); sys.exit(1)
+          '
+
+      - name: Confirm the hosted chain and its health (read-only)
+        # App → this API → Supabase. Compares the service's settings with the
+        # SUPABASE_STAGING_* secrets and prints yes/no only, never values.
+        if: env.MODE == 'verify'
+        env:
+          # The single pre-launch Supabase project (public: it is in the app too).
+          CANONICAL_SUPABASE_REF: nshffzncumvmmzgtqqph
+        run: |
+          railway variables -p "$RAILWAY_PROJECT_ID" -e "$RAILWAY_ENVIRONMENT" -s "$RAILWAY_SERVICE" --json \
+            | python3 -c '
+          import json, os, sys
+          d = json.load(sys.stdin)
+          e = os.environ
+          checks = [
+              ("SUPABASE_STAGING_PROJECT_REF is the canonical project", e["SUPABASE_PROJECT_REF"] == e["CANONICAL_SUPABASE_REF"]),
+              ("Railway SUPABASE_URL = SUPABASE_STAGING_URL", (d.get("SUPABASE_URL") or "").rstrip("/") == e["SUPABASE_URL"].rstrip("/")),
+              ("Railway DATABASE_URL = SUPABASE_STAGING_DB_URL", d.get("DATABASE_URL") == e["STAGING_DB_URL"]),
+              ("Railway SUPABASE_SECRET_KEY = SUPABASE_STAGING_SECRET_KEY", d.get("SUPABASE_SECRET_KEY") == e["SUPABASE_SECRET_KEY"]),
+          ]
+          for name, ok in checks:
+              print(("yes  " if ok else "NO   ") + name)
+          sys.exit(0 if all(ok for _, ok in checks) else 1)
+          '
+          url="${STAGING_API_URL%/}"
+          release=$(curl -s -D - -o /dev/null "$url/api/healthz" | tr -d '\r' | awk -F': ' 'tolower($1)=="x-app-release"{print $2}')
+          echo "API healthz: serving release ${release:-(none reported)}"
+          ready=$(curl -s "$url/api/readyz")
+          echo "API readyz: $ready"
+          auth=$(curl -s -o /dev/null -w '%{http_code}' "${SUPABASE_URL%/}/auth/v1/health" -H "apikey: $SUPABASE_PUBLISHABLE_KEY")
+          echo "Supabase Auth health: HTTP $auth"
+          [ -n "$release" ] && [ "$ready" = '{"status":"ok","database":"ok"}' ] && [ "$auth" = 200 ]
+
+      - name: Read-only checks passed; nothing was changed
+        if: env.MODE == 'verify'
+        run: echo "verify-api-staging mode stops here."
+
+      - uses: pnpm/action-setup@v4
+        if: env.MODE == 'deploy'
+
+      - uses: actions/setup-node@v4
+        if: env.MODE == 'deploy'
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      - name: Install dependencies
+        if: env.MODE == 'deploy'
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck and build the API before deploying
+        if: env.MODE == 'deploy'
+        run: |
+          pnpm run typecheck:libs
+          pnpm --filter @workspace/api-server run typecheck
+          pnpm --filter @workspace/api-server run build
+
+      - name: Set the staging service's variables (staging values only)
+        if: env.MODE == 'deploy'
+        run: |
+          put() {  # value on stdin, never on the command line or in the log
+            railway variables -p "$RAILWAY_PROJECT_ID" -e "$RAILWAY_ENVIRONMENT" -s "$RAILWAY_SERVICE" \
+              --skip-deploys --set-from-stdin "$1" > /dev/null
+          }
+          printf '%s' production | put NODE_ENV
+          printf '%s' info | put LOG_LEVEL
+          printf '%s' "$STAGING_DB_URL" | put DATABASE_URL
+          printf '%s' "${SUPABASE_URL%/}" | put SUPABASE_URL
+          printf '%s' "$SUPABASE_SECRET_KEY" | put SUPABASE_SECRET_KEY
+          printf '%s' 5000 | put STORAGE_WORKER_INTERVAL_MS
+          printf '%s' "$GITHUB_SHA" | put APP_RELEASE
+          printf '%s' Dockerfile | put RAILWAY_DOCKERFILE_PATH
+          if [ -n "$DVLA_STAGING_API_KEY" ]; then
+            url="${DVLA_STAGING_VES_URL:-https://driver-vehicle-licensing.api.gov.uk/vehicle-enquiry/v1/vehicles}"
+            case "$url" in
+              https://driver-vehicle-licensing.api.gov.uk/vehicle-enquiry/v1/vehicles|https://uat.driver-vehicle-licensing.api.gov.uk/vehicle-enquiry/v1/vehicles) ;;
+              *) echo "::error::DVLA_STAGING_VES_URL must be DVLA's live or UAT vehicle-enquiry URL"; exit 1 ;;
+            esac
+            printf '%s' "$DVLA_STAGING_API_KEY" | put DVLA_API_KEY
+            printf '%s' "$url" | put DVLA_VES_URL
+            echo "DVLA lookup configured for staging ($url)."
+          else
+            echo "No DVLA_STAGING_API_KEY secret: lookup on staging reports lookup_not_configured."
+          fi
+          echo "Variables set (values not shown)."
+
+      - name: Deploy this commit
+        if: env.MODE == 'deploy'
+        run: |
+          # Upload a clean copy of the commit with the staging build settings added.
+          dir="$RUNNER_TEMP/deploy"
+          mkdir -p "$dir"
+          git archive HEAD | tar -x -C "$dir"
+          cp deploy/railway.staging.json "$dir/railway.json"
+          # Railway picks a root Dockerfile over its automatic builder. This is the
+          # uploaded copy only; the repository root has no Dockerfile.
+          cp deploy/Dockerfile.staging "$dir/Dockerfile"
+          cd "$dir"
+          railway up -p "$RAILWAY_PROJECT_ID" -e "$RAILWAY_ENVIRONMENT" -s "$RAILWAY_SERVICE" --ci \
+            --message "staging $GITHUB_SHA"
+
+      - name: Show Railway build and deploy logs (on failure)
+        if: failure() && env.MODE == 'deploy'
+        run: |
+          r() { railway "$@" -p "$RAILWAY_PROJECT_ID" -e "$RAILWAY_ENVIRONMENT" -s "$RAILWAY_SERVICE"; }
+          echo "::group::Deployments"; r deployment list || true; echo "::endgroup::"
+          echo "::group::Latest deployment (JSON, status and reason)"
+          r deployment list --json | python3 -c '
+          import json, sys
+          d = json.load(sys.stdin)
+          items = d if isinstance(d, list) else d.get("deployments") or d.get("items") or [d]
+          if items:
+              latest = items[0]
+              # Show everything except anything that looks like variables.
+              def scrub(o):
+                  if isinstance(o, dict):
+                      return {k: ("<hidden>" if "variable" in k.lower() or k.lower() == "env" else scrub(v)) for k, v in o.items()}
+                  if isinstance(o, list):
+                      return [scrub(v) for v in o]
+                  return o
+              print(json.dumps(scrub(latest), indent=2)[:6000])
+          ' || true
+          echo "::endgroup::"
+          echo "::group::Deployment events (Railway API)"
+          dep=$(r deployment list --json | python3 -c 'import sys,json; d=json.load(sys.stdin); i=d if isinstance(d,list) else d.get("deployments") or [d]; print(i[0]["id"])' || true)
+          for q in \
+            "{\"query\":\"query { deploymentEvents(id: \\\"$dep\\\", first: 50) { edges { node { step createdAt completedAt payload { error } } } } }\"}" \
+            "{\"query\":\"query { deployment(id: \\\"$dep\\\") { status statusUpdatedAt canRedeploy } }\"}"; do
+            curl -s https://backboard.railway.com/graphql/v2 -H "Project-Access-Token: $RAILWAY_TOKEN" \
+              -H 'Content-Type: application/json' -d "$q" | python3 -m json.tool | head -120 || true
+          done
+          echo "::endgroup::"
+          echo "::group::Build log"; r logs --build --lines 300 || true; echo "::endgroup::"
+          echo "::group::Deploy log"; r logs --deployment --lines 200 || true; echo "::endgroup::"
+
+      - name: Wait until this commit is serving
+        if: env.MODE == 'deploy'
+        run: |
+          url="${STAGING_API_URL%/}"
+          for i in $(seq 1 60); do
+            release=$(curl -s -D - -o /dev/null "$url/api/healthz" | tr -d '\r' | awk -F': ' 'tolower($1)=="x-app-release"{print $2}')
+            if [ "$release" = "$GITHUB_SHA" ]; then echo "Serving $release"; break; fi
+            echo "Waiting (serving: ${release:-nothing yet})"; sleep 10
+          done
+          [ "$release" = "$GITHUB_SHA" ] || { echo "::error::The hosted API is not serving this commit"; exit 1; }
+          ready=$(curl -s "$url/api/readyz")
+          echo "readyz: $ready"
+          [ "$ready" = '{"status":"ok","database":"ok"}' ]
+
+      - name: Install PostgreSQL client
+        if: env.MODE == 'deploy'
+        run: |
+          sudo apt-get update -q
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q postgresql-client-16
+
+      - name: Test the app's data layer against the hosted staging API
+        if: env.MODE == 'deploy'
+        env:
+          EXPECTED_RELEASE: ${{ github.sha }}
+          # Optional: a registration DVLA knows (e.g. one of DVLA's UAT test registrations).
+          DVLA_TEST_REGISTRATION: ${{ vars.DVLA_STAGING_TEST_REGISTRATION }}
+          SIGNUP_TEST_EMAIL_DOMAIN: ${{ vars.STAGING_SIGNUP_EMAIL_DOMAIN }}
+          # Only compared against lookup responses (never printed or sent anywhere).
+          LEAK_CHECK_DVLA_KEY: ${{ secrets.DVLA_STAGING_API_KEY }}
+        run: pnpm --filter @workspace/mobile run test:staging
+
+      - name: The DVLA key is not in the staging logs
+        if: env.MODE == 'deploy'
+        run: |
+          if [ -z "$DVLA_STAGING_API_KEY" ]; then echo "No DVLA key configured; nothing to check."; exit 0; fi
+          logs="$RUNNER_TEMP/railway-logs.txt"
+          r() { railway "$@" -p "$RAILWAY_PROJECT_ID" -e "$RAILWAY_ENVIRONMENT" -s "$RAILWAY_SERVICE"; }
+          { r logs --deployment --lines 2000; r logs --build --lines 2000; } > "$logs" 2>&1 || true
+          lines=$(wc -l < "$logs")
+          # Compared literally and quietly: the key is never printed.
+          if grep -qF -- "$DVLA_STAGING_API_KEY" "$logs"; then
+            rm -f "$logs"; echo "::error::The DVLA key appears in the staging logs"; exit 1
+          fi
+          if grep -qiE "x-api-key: *[A-Za-z0-9]" "$logs"; then
+            rm -f "$logs"; echo "::error::An x-api-key header value appears in the staging logs"; exit 1
+          fi
+          rm -f "$logs"
+          echo "Checked $lines lines of staging runtime and build logs: no DVLA key."
