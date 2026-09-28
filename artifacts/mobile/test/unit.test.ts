@@ -350,6 +350,20 @@ test('the app identity is a placeholder and never sets a bundle id by itself', (
   const chosen = identity('production', { APP_DISPLAY_NAME: 'Name', APP_SCHEME: 'name', APP_BUNDLE_ID: 'com.example.name' });
   assert.deepEqual([chosen.appName, chosen.scheme, chosen.bundleId, chosen.usingPlaceholders], ['Name', 'name', 'com.example.name', false]);
   assert.equal(identity('staging', { APP_BUNDLE_ID: 'com.example.name' }).bundleId, 'com.example.name.staging');
+  assert.equal(staging.easProjectId, null);
+});
+
+test('a chosen identity is used once recorded, and the environment still overrides it', () => {
+  const { identity, CHOSEN } = createRequire(import.meta.url)('../app.identity.js');
+  const chosen = { displayName: 'Name', slug: 'name', scheme: 'name', bundleId: 'com.example.name', easProjectId: 'p-1' };
+  const tf = identity('staging', {}, chosen);
+  assert.deepEqual([tf.appName, tf.slug, tf.scheme, tf.bundleId, tf.easProjectId, tf.usingPlaceholders],
+    ['Name Staging', 'name', 'name-staging', 'com.example.name.staging', 'p-1', false]);
+  assert.equal(identity('staging', { APP_BUNDLE_ID: 'com.other.app' }, chosen).bundleId, 'com.other.app.staging');
+  assert.equal(identity('staging', { EAS_PROJECT_ID: 'p-2' }, chosen).easProjectId, 'p-2');
+  // A half-chosen identity (name without bundle id) still counts as a placeholder.
+  assert.equal(identity('staging', {}, { ...chosen, bundleId: null }).usingPlaceholders, true);
+  assert.equal(typeof CHOSEN, 'object');
 });
 
 // ─── Outbox / sync edge cases (review fixes) ────────────────────────────────
@@ -707,6 +721,40 @@ test('the app build refuses anything that would put DVLA credentials in the bund
     process.env.DVLA_API_KEY = 'secret-dvla-key-123';
     process.env.EXPO_PUBLIC_EXTRA = 'prefix-secret-dvla-key-123';
     assert.throws(() => appConfig(base), /EXPO_PUBLIC_EXTRA/);
+  } finally {
+    for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];
+    Object.assign(process.env, saved);
+  }
+});
+
+test('the app build refuses a Supabase secret, service-role key or database password in a public value', () => {
+  const appConfig = createRequire(import.meta.url)('../app.config.js') as (a: { config: object }) => object;
+  const base = { config: { ios: { infoPlist: {} }, android: {}, plugins: [], extra: {} } };
+  // Built at runtime so no secret-shaped literal sits in the repository.
+  const b64 = (o: object) => Buffer.from(JSON.stringify(o)).toString('base64url');
+  const jwt = (role: string) => [b64({ alg: 'HS256' }), b64({ role }), 'sig'].join('.');
+  const saved = { ...process.env };
+  try {
+    for (const k of Object.keys(process.env)) if (k.startsWith('EXPO_PUBLIC_')) delete process.env[k];
+    Object.assign(process.env, {
+      EXPO_PUBLIC_APP_ENV: 'staging',
+      EXPO_PUBLIC_SUPABASE_URL: 'https://example.supabase.co',
+      EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY: 'sb_publishable_' + 'abc',
+      EXPO_PUBLIC_API_URL: 'https://api.example.invalid',
+    });
+    assert.doesNotThrow(() => appConfig(base), 'public values only');
+    process.env.EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY = jwt('anon');
+    assert.doesNotThrow(() => appConfig(base), 'a legacy anon key is public');
+    for (const [name, value] of [
+      ['EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY', 'sb_' + 'secret_abc'],
+      ['EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY', jwt('service_role')],
+      ['EXPO_PUBLIC_DB', ['postgresql', '://postgres:pw@db.example.test:5432/postgres'].join('')],
+    ] as const) {
+      const before = process.env[name];
+      process.env[name] = value;
+      assert.throws(() => appConfig(base), new RegExp(`${name} holds a server secret`));
+      if (before === undefined) delete process.env[name]; else process.env[name] = before;
+    }
   } finally {
     for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];
     Object.assign(process.env, saved);

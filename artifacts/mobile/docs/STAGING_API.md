@@ -73,6 +73,8 @@ Check it yourself: `curl -i https://<staging-api>/api/readyz` → `{"status":"ok
 
 ## 4. The staging iPhone build (EAS)
 
+For TestFlight, use the `testflight` profile instead: see `TESTFLIGHT.md`. The `staging` profile below is an ad hoc build for registered devices.
+
 **Needs:** an Expo account, and an Apple Developer Program membership (for installing on a physical iPhone).
 
 **Doesn't need:** an App Store Connect record, TestFlight, or the final bundle id.
