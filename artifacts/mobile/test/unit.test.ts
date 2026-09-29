@@ -821,6 +821,59 @@ test('the motion purpose string stays true: the app never requests motion activi
   assert.match(plist.NSMotionUsageDescription, /never requests it/);
 });
 
+import { shareInFlight } from '@/lib/shareInFlight';
+
+test('location permission: concurrent requests share one answer', async () => {
+  // Models expo-location's iOS requester: while the system prompt is open it
+  // keeps only the latest caller, so an earlier caller never hears back.
+  let calls = 0;
+  let latest: ((status: string) => void) | null = null;
+  const nativeRequest = () => { calls++; return new Promise<string>((resolve) => { latest = resolve; }); };
+  const settled = (p: Promise<unknown>) => Promise.race([p.then(() => true), new Promise((r) => setTimeout(() => r(false), 20))]);
+
+  // Before: the map's position watcher and compass each asked directly.
+  const position = nativeRequest();
+  const compass = nativeRequest();
+  latest!('granted'); // the user taps Allow
+  assert.equal(await settled(compass), true);
+  assert.equal(await settled(position), false, 'the first caller is left waiting (no location on the map)');
+
+  // After: both go through one shared request and both get the answer.
+  calls = 0;
+  const request = shareInFlight(nativeRequest);
+  const a = request();
+  const b = request();
+  assert.equal(calls, 1, 'one native request while the prompt is open');
+  latest!('granted');
+  assert.deepEqual(await Promise.all([a, b]), ['granted', 'granted']);
+  // Once answered, a later call asks again (e.g. after a change in Settings).
+  const c = request();
+  assert.equal(calls, 2);
+  latest!('denied');
+  assert.equal(await c, 'denied');
+  // A failure reaches every waiting caller and doesn't block the next request.
+  const failing = shareInFlight(() => Promise.reject(new Error('boom')));
+  await Promise.all([assert.rejects(failing(), /boom/), assert.rejects(failing(), /boom/)]);
+  await assert.rejects(failing(), /boom/);
+});
+
+test('location permission is only requested through the shared helper', async () => {
+  const { readdir, readFile } = await import('node:fs/promises');
+  const { join } = await import('node:path');
+  const root = new URL('..', import.meta.url).pathname;
+  const offenders: string[] = [];
+  const walk = async (dir: string): Promise<void> => {
+    for (const e of await readdir(dir, { withFileTypes: true })) {
+      const path = join(dir, e.name);
+      if (e.isDirectory()) await walk(path);
+      else if (/\.(ts|tsx|js)$/.test(e.name) && path !== join(root, 'lib/locationPermission.ts')
+        && /\.requestForegroundPermissionsAsync\(/.test(await readFile(path, 'utf8'))) offenders.push(path.slice(root.length));
+    }
+  };
+  for (const dir of ['app', 'components', 'context', 'hooks', 'lib', 'constants']) await walk(join(root, dir));
+  assert.deepEqual(offenders, [], 'use requestForegroundLocation() from lib/locationPermission');
+});
+
 // ─── Auth error classification and diagnostics ─────────────────────────────
 import { AuthApiError, AuthRetryableFetchError, AuthUnknownError } from '@supabase/supabase-js';
 import { authDiag, classifyAuthError, completeFromUrl, describeAuthError, describeRedirect, redact, setAuthDiagnostics, AuthFlowError } from '@/lib/backend/auth';

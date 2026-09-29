@@ -31,6 +31,7 @@ import ActiveDriveOverlay, {
   ActiveDriveMode,
 } from "@/components/ActiveDriveOverlay";
 import * as Location from "expo-location";
+import { requestForegroundLocation } from "@/lib/locationPermission";
 
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -692,7 +693,7 @@ export default function MapScreen() {
         );
         webWatchIdRef.current = watchId;
       } else {
-        const { status } = await Location.requestForegroundPermissionsAsync();
+        const { status } = await requestForegroundLocation();
         if (cancelled) return;
         if (status !== "granted") {
           setUserLocation(CONFIG.DEMO_REGION);
@@ -754,10 +755,11 @@ export default function MapScreen() {
     async function startCompass() {
       try {
         // watchHeadingAsync rejects if it runs before location access is
-        // granted.  This previously raced the location watcher's own request,
-        // lost, and the rejection was swallowed — so the compass never started
-        // and heading only ever came from GPS course while actually moving.
-        const { status } = await Location.requestForegroundPermissionsAsync();
+        // granted, so wait for the answer.  The position watcher asks at the
+        // same moment; requestForegroundLocation shares one request between
+        // them, because on iOS a second concurrent request leaves the first
+        // waiting forever (the map then never got a position after "Allow").
+        const { status } = await requestForegroundLocation();
         if (cancelled || status !== "granted") return;
 
         const sub = await Location.watchHeadingAsync((h) => {
