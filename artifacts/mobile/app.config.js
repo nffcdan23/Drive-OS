@@ -88,6 +88,12 @@ module.exports = ({ config }) => {
         NSLocationWhenInUseUsageDescription: `${name} uses your location to show your position on the map and record your drives while the app is open.`,
         NSPhotoLibraryUsageDescription: `${name} needs access to your photos to set your vehicle and profile pictures.`,
         NSPhotoLibraryAddUsageDescription: `${name} needs to save journey photos to your library.`,
+        // Required, but never shown: expo-location compiles Core Motion
+        // activity code (CMMotionActivityManager) into every iOS app, and App
+        // Store Connect rejects a binary that references it without this key.
+        // The prompt only appears if the app calls expo-location's motion
+        // activity functions, which it doesn't (a unit test keeps it that way).
+        NSMotionUsageDescription: `${name} doesn't use your motion and fitness activity. Its location component includes this capability, but the app never requests it.`,
         ITSAppUsesNonExemptEncryption: false,
       },
     },
@@ -96,8 +102,8 @@ module.exports = ({ config }) => {
       ...(id.bundleId ? { package: id.bundleId.replace(/-/g, '_') } : {}),
     },
     // Permission prompts: only the ones above. app.json turns off the camera,
-    // microphone, motion and "Always" location prompts the plugins would add
-    // by default; nothing in the app uses them.
+    // microphone and "Always" location prompts the plugins would add by
+    // default (nothing in the app uses them); Face ID is turned off here.
     plugins: [
       ...config.plugins,
       'expo-apple-authentication',

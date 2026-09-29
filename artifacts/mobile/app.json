@@ -38,8 +38,7 @@
         "expo-location",
         {
           "locationAlwaysAndWhenInUsePermission": false,
-          "locationAlwaysPermission": false,
-          "motionUsagePermission": false
+          "locationAlwaysPermission": false
         }
       ],
       [

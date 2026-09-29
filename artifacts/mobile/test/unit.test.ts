@@ -797,6 +797,30 @@ test('the app build refuses a Supabase secret, service-role key or database pass
   }
 });
 
+test('the motion purpose string stays true: the app never requests motion activity', async () => {
+  // expo-location compiles Core Motion activity code into the iOS app, so App
+  // Store Connect requires NSMotionUsageDescription. The string says the app
+  // never requests it; these are the only calls that could show the prompt.
+  const { readdir, readFile } = await import('node:fs/promises');
+  const { join } = await import('node:path');
+  const root = new URL('..', import.meta.url).pathname;
+  const motionCalls = /\b(requestMotionActivityPermissionsAsync|getMotionActivityPermissionsAsync|getMotionActivityAsync|watchMotionActivityAsync)\b/;
+  const offenders: string[] = [];
+  const walk = async (dir: string): Promise<void> => {
+    for (const e of await readdir(dir, { withFileTypes: true })) {
+      const path = join(dir, e.name);
+      if (e.isDirectory()) await walk(path);
+      else if (/\.(ts|tsx|js)$/.test(e.name) && motionCalls.test(await readFile(path, 'utf8'))) offenders.push(path.slice(root.length));
+    }
+  };
+  for (const dir of ['app', 'components', 'context', 'hooks', 'lib', 'constants']) await walk(join(root, dir));
+  assert.deepEqual(offenders, [], 'a motion activity call needs a real purpose string in app.config.js first');
+
+  const appConfig = createRequire(import.meta.url)('../app.config.js') as (a: { config: object }) => { ios: { infoPlist: Record<string, string> } };
+  const plist = appConfig({ config: { ios: { infoPlist: {} }, android: {}, plugins: [], extra: {} } }).ios.infoPlist;
+  assert.match(plist.NSMotionUsageDescription, /never requests it/);
+});
+
 // ─── Auth error classification and diagnostics ─────────────────────────────
 import { AuthApiError, AuthRetryableFetchError, AuthUnknownError } from '@supabase/supabase-js';
 import { authDiag, classifyAuthError, completeFromUrl, describeAuthError, describeRedirect, redact, setAuthDiagnostics, AuthFlowError } from '@/lib/backend/auth';
