@@ -13,6 +13,7 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as Location from 'expo-location';
+import { requestForegroundLocation } from '@/lib/locationPermission';
 import * as Haptics from 'expo-haptics';
 import { useColors } from '@/hooks/useColors';
 import { useApp, type NearbySpot, type SavedPlace } from '@/context/AppContext';
@@ -38,7 +39,7 @@ const SPOT_CATEGORIES: Array<{ id: SpotCategory; label: string }> = [
 const VISIBILITY_LABEL: Record<Visibility, string> = { private: 'Only me', friends: 'Friends', public: 'Everyone' };
 
 async function currentPosition(): Promise<{ latitude: number; longitude: number }> {
-  const { status } = await Location.requestForegroundPermissionsAsync();
+  const { status } = await requestForegroundLocation();
   if (status !== 'granted') throw new Error('Allow location access to save or find places.');
   const last = await Location.getLastKnownPositionAsync({ maxAge: 60_000 });
   const pos = last ?? await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
