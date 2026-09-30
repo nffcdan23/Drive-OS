@@ -3,7 +3,14 @@ import { APP_NAME } from "@/constants/brand";
 import { describeError } from "@/lib/backend/http";
 import { KeyboardAwareScrollViewCompat } from "@/components/KeyboardAwareScrollViewCompat";
 import { ScreenTitle, Disclosure } from "@/components/Cockpit";
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
+import {
+  SectionHeader,
+  CommunityPreviewCard,
+  EventPreviewCard,
+  UserActivityCard,
+} from "@/components/Discovery";
+import { sectionAccent } from "@/constants/colors";
 import {
   View,
   Text,
@@ -15,8 +22,9 @@ import {
   Modal,
   Alert,
   Switch,
+  Image,
 } from "react-native";
-import { useRouter } from "expo-router";
+import { useRouter, useLocalSearchParams } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useColors } from "@/hooks/useColors";
@@ -32,7 +40,7 @@ import * as Haptics from "expo-haptics";
 
 const STATUS_COLOR: Record<Friend["status"], string> = {
   online: "#22c55e",
-  driving: "#F4631A",
+  driving: "#00CFE8",
   offline: "#9ca3af",
 };
 const STATUS_LABEL: Record<Friend["status"], string> = {
@@ -61,11 +69,11 @@ const CONVOY_SECTIONS = [
   { key: "public", label: "Public" },
 ] as const;
 
-type CommunityTab = "convoys" | "friends" | "groups" | "events";
+type CommunityTab = "overview" | "convoys" | "friends" | "groups" | "events";
 type ConvoySection = "my" | "joined" | "public";
 
 export default function CommunityScreen() {
-  const colors = useColors();
+  const colors = { ...useColors(), primary: sectionAccent.social };
   const insets = useSafeAreaInsets();
   const router = useRouter();
   const {
@@ -93,8 +101,28 @@ export default function CommunityScreen() {
     refreshProfileStats,
   } = useApp();
 
-  const [activeTab, setActiveTab] = useState<CommunityTab>("convoys");
+  const [activeTab, setActiveTab] = useState<CommunityTab>("overview");
   const [convoySection, setConvoySection] = useState<ConvoySection>("public");
+
+  const { section } = useLocalSearchParams<{ section?: string }>();
+  const [query, setQuery] = useState("");
+  useEffect(() => {
+    if (
+      section === "convoys" ||
+      section === "events" ||
+      section === "friends" ||
+      section === "groups"
+    )
+      setActiveTab(section);
+  }, [section]);
+  const matches = (name: string) =>
+    name.toLowerCase().includes(query.trim().toLowerCase());
+  const liveFriends = friends.filter(
+    (f) => f.status !== "offline" && matches(f.name),
+  );
+  const activeConvoys = convoys.filter(
+    (c) => c.status === "active" && matches(c.name),
+  );
 
   // Convoy create
   const [showCreateConvoy, setShowCreateConvoy] = useState(false);
@@ -155,7 +183,6 @@ export default function CommunityScreen() {
       fontSize: 28,
       fontWeight: "700",
       color: colors.foreground,
-      fontFamily: "Inter_700Bold",
     },
     addBtn: {
       minHeight: 44,
@@ -172,7 +199,6 @@ export default function CommunityScreen() {
       fontSize: 13,
       fontWeight: "600",
       color: colors.primaryForeground,
-      fontFamily: "Inter_600SemiBold",
     },
     tabRow: {
       flexDirection: "row",
@@ -185,8 +211,9 @@ export default function CommunityScreen() {
     tab: {
       minHeight: 44,
       justifyContent: "center",
-      flex: 1,
+      flexGrow: 0,
       paddingVertical: 8,
+      paddingHorizontal: 12,
       alignItems: "center",
       borderBottomWidth: 2,
       borderBottomColor: "transparent",
@@ -195,9 +222,9 @@ export default function CommunityScreen() {
     tabText: {
       fontSize: 13,
       color: colors.mutedForeground,
-      fontFamily: "Inter_500Medium",
+      fontWeight: "500",
     },
-    tabTextActive: { color: colors.primary, fontFamily: "Inter_600SemiBold" },
+    tabTextActive: { color: colors.primary, fontWeight: "600" },
     content: { flex: 1, paddingBottom: Math.max(insets.bottom, 12) + 100 },
     // Section pills (for convoys)
     sectionRow: {
@@ -222,7 +249,7 @@ export default function CommunityScreen() {
     sectionPillText: {
       fontSize: 12,
       color: colors.mutedForeground,
-      fontFamily: "Inter_500Medium",
+      fontWeight: "500",
     },
     sectionPillTextActive: { color: colors.primaryForeground },
     sectionHeader: {
@@ -237,7 +264,6 @@ export default function CommunityScreen() {
       fontSize: 15,
       fontWeight: "600",
       color: colors.foreground,
-      fontFamily: "Inter_600SemiBold",
     },
     // Cards
     card: {
@@ -259,7 +285,7 @@ export default function CommunityScreen() {
       fontSize: 16,
       fontWeight: "700",
       color: colors.foreground,
-      fontFamily: "Inter_700Bold",
+
       flex: 1,
     },
     tag: {
@@ -271,13 +297,12 @@ export default function CommunityScreen() {
     tagText: {
       fontSize: 11,
       color: colors.mutedForeground,
-      fontFamily: "Inter_400Regular",
     },
     privateTagText: { color: colors.primary },
     cardMeta: {
       fontSize: 13,
       color: colors.mutedForeground,
-      fontFamily: "Inter_400Regular",
+
       marginTop: 4,
     },
     cardDivider: {
@@ -290,7 +315,6 @@ export default function CommunityScreen() {
     statText: {
       fontSize: 13,
       color: colors.mutedForeground,
-      fontFamily: "Inter_400Regular",
     },
     actionRow: { flexDirection: "row", gap: 8, marginTop: 12 },
     primaryBtn: {
@@ -306,7 +330,6 @@ export default function CommunityScreen() {
       fontSize: 14,
       fontWeight: "600",
       color: colors.primaryForeground,
-      fontFamily: "Inter_600SemiBold",
     },
     secondaryBtn: {
       minHeight: 44,
@@ -321,7 +344,7 @@ export default function CommunityScreen() {
     secondaryBtnText: {
       fontSize: 14,
       color: colors.foreground,
-      fontFamily: "Inter_500Medium",
+      fontWeight: "500",
     },
     destructiveBtn: { borderColor: colors.destructive },
     destructiveBtnText: { color: colors.destructive },
@@ -350,13 +373,11 @@ export default function CommunityScreen() {
       fontSize: 15,
       fontWeight: "600",
       color: colors.foreground,
-      fontFamily: "Inter_600SemiBold",
     },
     friendName: {
       fontSize: 15,
       fontWeight: "600",
       color: colors.foreground,
-      fontFamily: "Inter_600SemiBold",
     },
     statusRow: {
       flexDirection: "row",
@@ -368,12 +389,10 @@ export default function CommunityScreen() {
     statusText: {
       fontSize: 12,
       color: colors.mutedForeground,
-      fontFamily: "Inter_400Regular",
     },
     locationText: {
       fontSize: 12,
       color: colors.mutedForeground,
-      fontFamily: "Inter_400Regular",
     },
     friendActions: { marginLeft: "auto", flexDirection: "row", gap: 6 },
     iconAction: { padding: 6, borderRadius: 8, backgroundColor: colors.muted },
@@ -391,12 +410,11 @@ export default function CommunityScreen() {
       fontSize: 16,
       fontWeight: "700",
       color: colors.foreground,
-      fontFamily: "Inter_700Bold",
     },
     groupMeta: {
       fontSize: 13,
       color: colors.mutedForeground,
-      fontFamily: "Inter_400Regular",
+
       marginTop: 4,
     },
     memberBadge: {
@@ -413,7 +431,7 @@ export default function CommunityScreen() {
     memberBadgeText: {
       fontSize: 11,
       color: colors.primary,
-      fontFamily: "Inter_500Medium",
+      fontWeight: "500",
     },
     // Events
     eventCard: {
@@ -429,12 +447,11 @@ export default function CommunityScreen() {
       fontSize: 16,
       fontWeight: "700",
       color: colors.foreground,
-      fontFamily: "Inter_700Bold",
     },
     eventMeta: {
       fontSize: 13,
       color: colors.mutedForeground,
-      fontFamily: "Inter_400Regular",
+
       marginTop: 3,
     },
     rsvpRow: { flexDirection: "row", gap: 8, marginTop: 12 },
@@ -458,7 +475,6 @@ export default function CommunityScreen() {
       fontSize: 13,
       fontWeight: "600",
       color: colors.foreground,
-      fontFamily: "Inter_600SemiBold",
     },
     rsvpBtnTextGoing: { color: "#fff" },
     rsvpBtnTextInterested: { color: colors.primary },
@@ -471,7 +487,7 @@ export default function CommunityScreen() {
       fontSize: 14,
       color: colors.mutedForeground,
       textAlign: "center",
-      fontFamily: "Inter_400Regular",
+
       marginTop: 10,
     },
     // Modal
@@ -499,13 +515,13 @@ export default function CommunityScreen() {
       fontSize: 20,
       fontWeight: "700",
       color: colors.foreground,
-      fontFamily: "Inter_700Bold",
+
       marginBottom: 20,
     },
     inputLabel: {
       fontSize: 13,
       color: colors.mutedForeground,
-      fontFamily: "Inter_500Medium",
+      fontWeight: "500",
       marginBottom: 6,
       marginTop: 12,
     },
@@ -515,7 +531,7 @@ export default function CommunityScreen() {
       padding: 14,
       fontSize: 15,
       color: colors.foreground,
-      fontFamily: "Inter_400Regular",
+
       borderWidth: StyleSheet.hairlineWidth,
       borderColor: colors.border,
     },
@@ -529,12 +545,11 @@ export default function CommunityScreen() {
     toggleLabel: {
       fontSize: 15,
       color: colors.foreground,
-      fontFamily: "Inter_400Regular",
     },
     privacyNote: {
       fontSize: 12,
       color: colors.mutedForeground,
-      fontFamily: "Inter_400Regular",
+
       marginTop: 4,
       marginBottom: 12,
     },
@@ -559,7 +574,7 @@ export default function CommunityScreen() {
     privacyOptionText: {
       fontSize: 12,
       color: colors.mutedForeground,
-      fontFamily: "Inter_500Medium",
+      fontWeight: "500",
     },
     privacyOptionTextActive: { color: colors.primary },
     submitBtn: {
@@ -573,7 +588,6 @@ export default function CommunityScreen() {
       fontSize: 16,
       fontWeight: "600",
       color: "#fff",
-      fontFamily: "Inter_600SemiBold",
     },
   });
 
@@ -730,7 +744,7 @@ export default function CommunityScreen() {
     const isOwn = convoy.isOwn;
     const isJoined = convoy.isJoined;
     return (
-      <View style={[styles.card, isJoined && styles.cardActiveConvoy]}>
+      <GlassSurface style={[styles.card, isJoined && styles.cardActiveConvoy]}>
         <View style={styles.convoyHeader}>
           <Text style={styles.convoyName}>{convoy.name}</Text>
           <View style={{ flexDirection: "row", gap: 4 }}>
@@ -848,13 +862,13 @@ export default function CommunityScreen() {
             </TouchableOpacity>
           )}
         </View>
-      </View>
+      </GlassSurface>
     );
   }
 
   function FriendRow({ item }: { item: Friend }) {
     return (
-      <View style={styles.friendCard}>
+      <GlassSurface style={styles.friendCard}>
         <View style={styles.avatar}>
           <Text style={styles.avatarText}>{item.initials}</Text>
         </View>
@@ -868,11 +882,6 @@ export default function CommunityScreen() {
               ]}
             />
             <Text style={styles.statusText}>{STATUS_LABEL[item.status]}</Text>
-            {item.location ? (
-              <Text style={[styles.locationText, { marginLeft: 6 }]}>
-                {item.location}
-              </Text>
-            ) : null}
           </View>
         </View>
         <View style={styles.friendActions}>
@@ -904,13 +913,24 @@ export default function CommunityScreen() {
             />
           </TouchableOpacity>
         </View>
-      </View>
+      </GlassSurface>
     );
   }
 
   function GroupCard({ group }: { group: Group }) {
     return (
-      <View style={styles.groupCard}>
+      <GlassSurface style={styles.groupCard}>
+        {group.logoUri && (
+          <Image
+            source={{ uri: group.logoUri }}
+            style={{
+              width: 64,
+              height: 64,
+              borderRadius: 16,
+              marginBottom: 12,
+            }}
+          />
+        )}
         <View
           style={{
             flexDirection: "row",
@@ -962,10 +982,7 @@ export default function CommunityScreen() {
                   );
                   Alert.alert("Joined!", `You've joined ${group.name}.`);
                 } else if (group.membershipMethod === "request") {
-                  Alert.alert(
-                    "Request sent",
-                    `Your request to join ${group.name} has been sent to the admins.`,
-                  );
+                  joinGroup(group.id);
                 } else {
                   Alert.alert(
                     "Invite Only",
@@ -991,7 +1008,7 @@ export default function CommunityScreen() {
             </TouchableOpacity>
           )}
         </View>
-      </View>
+      </GlassSurface>
     );
   }
 
@@ -999,7 +1016,19 @@ export default function CommunityScreen() {
     const isGoing = event.rsvpStatus === "going";
     const isInterested = event.rsvpStatus === "interested";
     return (
-      <View style={styles.eventCard}>
+      <GlassSurface style={styles.eventCard}>
+        {event.coverUri && (
+          <Image
+            source={{ uri: event.coverUri }}
+            resizeMode="cover"
+            style={{
+              width: "100%",
+              height: 150,
+              borderRadius: 14,
+              marginBottom: 12,
+            }}
+          />
+        )}
         <View
           style={{
             flexDirection: "row",
@@ -1059,11 +1088,26 @@ export default function CommunityScreen() {
             <Text style={styles.rsvpBtnText}>Details</Text>
           </TouchableOpacity>
         </View>
-      </View>
+      </GlassSurface>
     );
   }
 
   const tabHeaderAction = () => {
+    if (activeTab === "overview")
+      return {
+        label: "Add",
+        onPress: () =>
+          Alert.alert("Social", "Bring people together.", [
+            { text: "Add Friend", onPress: () => setShowAddFriend(true) },
+            {
+              text: "Create Community",
+              onPress: () => setShowCreateGroup(true),
+            },
+            { text: "Create Event", onPress: () => setShowCreateEvent(true) },
+            { text: "Create Convoy", onPress: () => setShowCreateConvoy(true) },
+            { text: "Cancel", style: "cancel" },
+          ]),
+      };
     if (activeTab === "convoys")
       return { label: "Create", onPress: () => setShowCreateConvoy(true) };
     if (activeTab === "friends")
@@ -1079,43 +1123,261 @@ export default function CommunityScreen() {
   return (
     <View style={styles.container}>
       <View style={styles.header}>
-        <ScreenTitle title="Community" eyebrow="Better roads. Together." />
+        <ScreenTitle
+          title="Social"
+          eyebrow="See who’s driving and what’s happening."
+        />
         {action && (
           <GlassButton
-            material="accent"
             style={styles.addBtn}
+            accessibilityLabel={
+              activeTab === "overview"
+                ? "Add friend, community, event or convoy"
+                : action.label
+            }
             onPress={action.onPress}
           >
-            <Ionicons name="add" size={14} color="#fff" />
-            <Text style={styles.addBtnText}>{action.label}</Text>
+            <Ionicons name="add" size={22} color={colors.foreground} />
+            {activeTab !== "overview" && (
+              <Text style={[styles.addBtnText, { color: colors.foreground }]}>
+                {action.label}
+              </Text>
+            )}
           </GlassButton>
         )}
       </View>
 
+      <GlassSurface
+        style={{
+          marginHorizontal: 20,
+          marginBottom: 12,
+          minHeight: 50,
+          borderRadius: 24,
+          paddingHorizontal: 14,
+          flexDirection: "row",
+          alignItems: "center",
+          gap: 10,
+        }}
+      >
+        <Ionicons name="search" size={18} color={colors.mutedForeground} />
+        <TextInput
+          value={query}
+          onChangeText={setQuery}
+          placeholder="Search friends, communities or events"
+          placeholderTextColor={colors.mutedForeground}
+          accessibilityLabel="Search Social"
+          style={{
+            flex: 1,
+            minHeight: 50,
+            color: colors.foreground,
+            fontSize: 14,
+          }}
+        />
+      </GlassSurface>
       {/* Tab bar */}
-      <View style={styles.tabRow}>
-        {(["convoys", "friends", "groups", "events"] as CommunityTab[]).map(
-          (t) => (
-            <TouchableOpacity
-              key={t}
-              style={[styles.tab, activeTab === t && styles.tabActive]}
-              onPress={() => setActiveTab(t)}
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        style={{ flexGrow: 0, flexShrink: 0, height: 64 }}
+        contentContainerStyle={styles.tabRow}
+      >
+        {(
+          [
+            "overview",
+            "friends",
+            "groups",
+            "events",
+            "convoys",
+          ] as CommunityTab[]
+        ).map((t) => (
+          <TouchableOpacity
+            key={t}
+            accessibilityRole="button"
+            accessibilityState={{ selected: activeTab === t }}
+            style={[styles.tab, activeTab === t && styles.tabActive]}
+            onPress={() => setActiveTab(t)}
+          >
+            <Text
+              style={[styles.tabText, activeTab === t && styles.tabTextActive]}
             >
-              <Text
-                style={[
-                  styles.tabText,
-                  activeTab === t && styles.tabTextActive,
-                ]}
+              {t === "groups"
+                ? "Communities"
+                : t === "overview"
+                  ? "Now"
+                  : t.charAt(0).toUpperCase() + t.slice(1)}
+              {t === "friends" && pendingRequests.length > 0
+                ? ` (${pendingRequests.length})`
+                : ""}
+            </Text>
+          </TouchableOpacity>
+        ))}
+      </ScrollView>
+
+      {activeTab === "overview" && (
+        <ScrollView
+          showsVerticalScrollIndicator={false}
+          keyboardShouldPersistTaps="handled"
+          contentContainerStyle={{
+            paddingBottom: Math.max(insets.bottom, 12) + 100,
+          }}
+        >
+          <GlassSurface
+            style={{
+              marginHorizontal: 20,
+              marginTop: 16,
+              paddingVertical: 16,
+              borderRadius: 20,
+              flexDirection: "row",
+            }}
+          >
+            {[
+              [
+                friends.filter((f) => f.status === "online").length,
+                "online",
+                "people-outline",
+              ],
+              [
+                friends.filter((f) => f.status === "driving").length,
+                "driving",
+                "car-outline",
+              ],
+              [
+                convoys.filter((c) => c.status === "active").length,
+                "live convoys",
+                "git-network-outline",
+              ],
+            ].map(([count, label, icon]) => (
+              <View
+                key={label}
+                style={{ flex: 1, alignItems: "center", gap: 5 }}
               >
-                {t.charAt(0).toUpperCase() + t.slice(1)}
-                {t === "friends" && pendingRequests.length > 0
-                  ? ` (${pendingRequests.length})`
-                  : ""}
+                <Ionicons name={icon as any} size={24} color={colors.primary} />
+                <Text
+                  style={{
+                    color: colors.foreground,
+                    fontSize: 21,
+                    fontWeight: "600",
+                  }}
+                >
+                  {count}
+                </Text>
+                <Text style={styles.cardMeta}>{label}</Text>
+              </View>
+            ))}
+          </GlassSurface>
+          {liveFriends.length > 0 && (
+            <>
+              <SectionHeader
+                title="Live Now"
+                onPress={() => setActiveTab("friends")}
+              />
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={{ paddingHorizontal: 20, gap: 12 }}
+              >
+                {liveFriends.map((friend) => (
+                  <UserActivityCard
+                    key={friend.id}
+                    friend={friend}
+                    onPress={() => setActiveTab("friends")}
+                  />
+                ))}
+              </ScrollView>
+            </>
+          )}
+          <SectionHeader
+            title="Communities"
+            onPress={() => setActiveTab("groups")}
+          />
+          {groups.filter((g) => matches(g.name)).length > 0 ? (
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={{ paddingHorizontal: 20, gap: 12 }}
+            >
+              {groups
+                .filter((g) => matches(g.name))
+                .map((group) => (
+                  <CommunityPreviewCard
+                    key={group.id}
+                    group={group}
+                    onPress={() => router.push(`/group/${group.id}`)}
+                  />
+                ))}
+            </ScrollView>
+          ) : (
+            <GlassSurface
+              style={{ marginHorizontal: 20, padding: 20, borderRadius: 20 }}
+            >
+              <Text style={styles.groupName}>Find your people</Text>
+              <Text style={[styles.cardMeta, { marginTop: 6 }]}>
+                {query
+                  ? "No communities match your search."
+                  : "Create a community around your car, your area or your favourite roads."}
               </Text>
-            </TouchableOpacity>
-          ),
-        )}
-      </View>
+            </GlassSurface>
+          )}
+          <SectionHeader
+            title="Events & Convoys"
+            onPress={() => setActiveTab("events")}
+          />
+          {events.filter((e) => matches(e.name)).length > 0 && (
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={{ paddingHorizontal: 20, gap: 12 }}
+            >
+              {events
+                .filter((e) => matches(e.name))
+                .map((event) => (
+                  <EventPreviewCard
+                    key={event.id}
+                    event={event}
+                    onPress={() => router.push(`/event/${event.id}`)}
+                  />
+                ))}
+            </ScrollView>
+          )}
+          {activeConvoys.map((convoy) => (
+            <ConvoyCard key={convoy.id} convoy={convoy} />
+          ))}
+          {!events.filter((e) => matches(e.name)).length &&
+            !activeConvoys.length && (
+              <GlassSurface
+                style={{ marginHorizontal: 20, padding: 20, borderRadius: 20 }}
+              >
+                <Text style={styles.eventName}>Your next shared drive</Text>
+                <Text style={[styles.cardMeta, { marginTop: 6 }]}>
+                  {query
+                    ? "No events or live convoys match your search."
+                    : "No events or live convoys yet. Plan something with your community."}
+                </Text>
+              </GlassSurface>
+            )}
+          <SectionHeader
+            title="Friends"
+            onPress={() => setActiveTab("friends")}
+          />
+          {friends
+            .filter((f) => matches(f.name))
+            .slice(0, 3)
+            .map((friend) => (
+              <FriendRow key={friend.id} item={friend} />
+            ))}
+          {!friends.length && (
+            <GlassButton
+              style={{ marginHorizontal: 20, padding: 18, borderRadius: 20 }}
+              onPress={() => setShowAddFriend(true)}
+            >
+              <Text style={styles.friendName}>Add a friend</Text>
+              <Text style={[styles.cardMeta, { marginTop: 5 }]}>
+                Connect using their friend code.
+              </Text>
+            </GlassButton>
+          )}
+        </ScrollView>
+      )}
 
       {/* ── Convoys tab ── */}
       {activeTab === "convoys" && (
@@ -1126,71 +1388,6 @@ export default function CommunityScreen() {
           }}
           showsVerticalScrollIndicator={false}
         >
-          <View
-            style={{
-              marginHorizontal: 20,
-              marginTop: 20,
-              padding: 24,
-              backgroundColor: colors.card,
-              borderRadius: 20,
-              borderWidth: 1,
-              borderColor: colors.border,
-            }}
-          >
-            <Ionicons
-              name="git-network-outline"
-              size={36}
-              color={colors.primary}
-            />
-            <Text
-              style={{
-                fontFamily: "Archivo_700Bold",
-                fontSize: 28,
-                color: colors.foreground,
-                marginTop: 16,
-              }}
-            >
-              Find your people. Enjoy the drive.
-            </Text>
-            <Text
-              style={{
-                fontFamily: "Inter_400Regular",
-                fontSize: 14,
-                lineHeight: 22,
-                color: colors.mutedForeground,
-                marginTop: 8,
-              }}
-            >
-              Shared routes, weekend escapes and the people who make the miles
-              matter.
-            </Text>
-            <View style={{ flexDirection: "row", gap: 28, marginTop: 24 }}>
-              <View>
-                <Text
-                  style={{
-                    fontFamily: "Archivo_700Bold",
-                    fontSize: 24,
-                    color: colors.foreground,
-                  }}
-                >
-                  {myConvoys.length + joinedConvoys.length}
-                </Text>
-                <Text style={styles.cardMeta}>Your convoys</Text>
-              </View>
-              <View>
-                <Text
-                  style={{
-                    fontFamily: "Archivo_700Bold",
-                    fontSize: 24,
-                    color: colors.foreground,
-                  }}
-                >
-                  {publicConvoys.length}
-                </Text>
-                <Text style={styles.cardMeta}>Open convoys</Text>
-              </View>
-            </View>
-          </View>
           <ScrollView
             horizontal
             showsHorizontalScrollIndicator={false}
@@ -1217,7 +1414,7 @@ export default function CommunityScreen() {
             ))}
           </ScrollView>
           {convoySection === "my" &&
-            (myConvoys.length === 0 ? (
+            (myConvoys.filter((item) => matches(item.name)).length === 0 ? (
               <View style={styles.emptyBox}>
                 <Ionicons
                   name="car-sport-outline"
@@ -1229,10 +1426,12 @@ export default function CommunityScreen() {
                 </Text>
               </View>
             ) : (
-              myConvoys.map((c) => <ConvoyCard key={c.id} convoy={c} />)
+              myConvoys
+                .filter((c) => matches(c.name))
+                .map((c) => <ConvoyCard key={c.id} convoy={c} />)
             ))}
           {convoySection === "joined" &&
-            (joinedConvoys.length === 0 ? (
+            (joinedConvoys.filter((item) => matches(item.name)).length === 0 ? (
               <View style={styles.emptyBox}>
                 <Ionicons
                   name="people-outline"
@@ -1244,10 +1443,12 @@ export default function CommunityScreen() {
                 </Text>
               </View>
             ) : (
-              joinedConvoys.map((c) => <ConvoyCard key={c.id} convoy={c} />)
+              joinedConvoys
+                .filter((c) => matches(c.name))
+                .map((c) => <ConvoyCard key={c.id} convoy={c} />)
             ))}
           {convoySection === "public" &&
-            (publicConvoys.length === 0 ? (
+            (publicConvoys.filter((item) => matches(item.name)).length === 0 ? (
               <View style={styles.emptyBox}>
                 <Ionicons
                   name="earth-outline"
@@ -1259,7 +1460,9 @@ export default function CommunityScreen() {
                 </Text>
               </View>
             ) : (
-              publicConvoys.map((c) => <ConvoyCard key={c.id} convoy={c} />)
+              publicConvoys
+                .filter((c) => matches(c.name))
+                .map((c) => <ConvoyCard key={c.id} convoy={c} />)
             ))}
         </ScrollView>
       )}
@@ -1321,7 +1524,7 @@ export default function CommunityScreen() {
           <View style={styles.sectionHeader}>
             <Text style={styles.sectionTitle}>Friends · {friends.length}</Text>
           </View>
-          {friends.length === 0 ? (
+          {friends.filter((item) => matches(item.name)).length === 0 ? (
             <View style={styles.emptyBox}>
               <Ionicons
                 name="people-outline"
@@ -1333,7 +1536,9 @@ export default function CommunityScreen() {
               </Text>
             </View>
           ) : (
-            friends.map((f) => <FriendRow key={f.id} item={f} />)
+            friends
+              .filter((f) => matches(f.name))
+              .map((f) => <FriendRow key={f.id} item={f} />)
           )}
         </ScrollView>
       )}
@@ -1347,7 +1552,7 @@ export default function CommunityScreen() {
           }}
           showsVerticalScrollIndicator={false}
         >
-          {groups.length === 0 ? (
+          {groups.filter((item) => matches(item.name)).length === 0 ? (
             <View style={styles.emptyBox}>
               <Ionicons
                 name="shield-outline"
@@ -1359,7 +1564,9 @@ export default function CommunityScreen() {
               </Text>
             </View>
           ) : (
-            groups.map((g) => <GroupCard key={g.id} group={g} />)
+            groups
+              .filter((g) => matches(g.name))
+              .map((g) => <GroupCard key={g.id} group={g} />)
           )}
         </ScrollView>
       )}
@@ -1373,7 +1580,7 @@ export default function CommunityScreen() {
           }}
           showsVerticalScrollIndicator={false}
         >
-          {events.length === 0 ? (
+          {events.filter((item) => matches(item.name)).length === 0 ? (
             <View style={styles.emptyBox}>
               <Ionicons
                 name="calendar-outline"
@@ -1385,7 +1592,9 @@ export default function CommunityScreen() {
               </Text>
             </View>
           ) : (
-            events.map((e) => <EventCard key={e.id} event={e} />)
+            events
+              .filter((e) => matches(e.name))
+              .map((e) => <EventCard key={e.id} event={e} />)
           )}
         </ScrollView>
       )}
@@ -1533,9 +1742,7 @@ export default function CommunityScreen() {
           <GlassSurface material="dense" style={styles.modalContent}>
             <View style={styles.modalHandle} />
             <Text style={styles.modalTitle}>Add Friend</Text>
-            <Text style={styles.inputLabel}>
-              Their friend code
-            </Text>
+            <Text style={styles.inputLabel}>Their friend code</Text>
             <TextInput
               style={styles.input}
               placeholder="e.g. K7M2QX9P"
@@ -1566,7 +1773,7 @@ export default function CommunityScreen() {
                   fontSize: 18,
                   fontWeight: "700",
                   color: colors.primary,
-                  fontFamily: "Inter_700Bold",
+
                   flex: 1,
                   letterSpacing: 2,
                 }}
@@ -1596,7 +1803,10 @@ export default function CommunityScreen() {
               onPress={async () => {
                 const code = friendSearch.replace(/\s+/g, "").toUpperCase();
                 if (!/^[A-Z0-9]{8}$/.test(code)) {
-                  Alert.alert("Enter a friend code", "Friend codes are 8 letters and numbers.");
+                  Alert.alert(
+                    "Enter a friend code",
+                    "Friend codes are 8 letters and numbers.",
+                  );
                   return;
                 }
                 try {
@@ -1604,7 +1814,9 @@ export default function CommunityScreen() {
                   setFriendSearch("");
                   setShowAddFriend(false);
                   Alert.alert(
-                    result === "accepted" ? "You're now friends" : "Request sent",
+                    result === "accepted"
+                      ? "You're now friends"
+                      : "Request sent",
                     result === "accepted"
                       ? "They had already sent you a request, so you're now connected."
                       : `They'll see your request next time they open ${APP_NAME}.`,

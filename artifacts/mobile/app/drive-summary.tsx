@@ -169,7 +169,7 @@ export default function DriveSummaryScreen() {
 
   function handleBackToMap() {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    router.replace('/(tabs)');
+    router.replace('/(tabs)/(drive)');
   }
 
   return (

@@ -1,82 +1,124 @@
-import { StyleSheet, View } from "react-native";
-import { GlassSurface } from "@/components/Glass";
 import React from "react";
+import { Platform, StyleSheet, Text, View } from "react-native";
 import { Tabs } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
+import { SymbolView } from "expo-symbols";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { useColors } from "@/hooks/useColors";
+import { GlassSurface } from "@/components/Glass";
+import { sectionAccent } from "@/constants/colors";
 import { useApp } from "@/context/AppContext";
 
+const destinations = [
+  {
+    name: "(drive)",
+    title: "Drive",
+    icon: "navigate-outline",
+    symbol: "road.lanes",
+    accent: sectionAccent.drive,
+  },
+  {
+    name: "journeys",
+    title: "Drives",
+    icon: "time-outline",
+    symbol: "clock",
+    accent: sectionAccent.drives,
+  },
+  {
+    name: "garage",
+    title: "Garage",
+    icon: "car-outline",
+    symbol: "car",
+    accent: sectionAccent.garage,
+  },
+  {
+    name: "community",
+    title: "Social",
+    icon: "people-outline",
+    symbol: "person.2",
+    accent: sectionAccent.social,
+  },
+  {
+    name: "profile",
+    title: "Profile",
+    icon: "person-outline",
+    symbol: "person.crop.circle",
+    accent: sectionAccent.profile,
+  },
+] as const;
+
 export default function TabLayout() {
-  const colors = useColors();
   const insets = useSafeAreaInsets();
   const { isDriving } = useApp();
   return (
     <Tabs
       screenOptions={{
         headerShown: false,
-        tabBarActiveTintColor: colors.primary,
-        tabBarInactiveTintColor: colors.tabInactive,
+        tabBarShowLabel: false,
         tabBarStyle: isDriving
           ? { display: "none" }
           : {
               position: "absolute",
               bottom: Math.max(insets.bottom, 12),
-              marginHorizontal: 8,
-              borderRadius: 30,
+              marginHorizontal: 12,
               height: 72,
-              paddingTop: 8,
-              paddingBottom: 7,
+              borderRadius: 32,
+              paddingTop: 5,
+              paddingBottom: 5,
               backgroundColor: "transparent",
-              borderTopColor: colors.border,
               borderTopWidth: 0,
-              shadowColor: "#000",
-              shadowOpacity: 0.3,
-              shadowRadius: 20,
-              shadowOffset: { width: 0, height: 8 },
               elevation: 0,
             },
         tabBarBackground: () => (
           <GlassSurface
-            style={[StyleSheet.absoluteFill, { borderRadius: 30 }]}
+            style={[StyleSheet.absoluteFill, { borderRadius: 32 }]}
           />
         ),
-        tabBarItemStyle: { borderRadius: 22, marginHorizontal: 0 },
-        tabBarLabelStyle: {
-          fontFamily: "Inter_600SemiBold",
-          fontSize: 10,
-          marginTop: 3,
-        },
+        tabBarItemStyle: { borderRadius: 26 },
       }}
     >
-      {(
-        [
-          ["index", "Map", "navigate-outline"],
-          ["journeys", "Journeys", "git-merge-outline"],
-          ["garage", "Garage", "car-sport-outline"],
-          ["community", "Community", "people-outline"],
-          ["profile", "Profile", "person-circle-outline"],
-        ] as const
-      ).map(([name, title, icon]) => (
+      {destinations.map(({ name, title, icon, symbol, accent }) => (
         <Tabs.Screen
           key={name}
           name={name}
           options={{
             title,
-            tabBarIcon: ({ color, focused }) => (
+            tabBarAccessibilityLabel: title,
+            tabBarIcon: ({ focused }) => (
               <View
-                style={{
-                  width: 48,
-                  height: 32,
-                  borderRadius: 16,
-                  alignItems: "center",
-                  justifyContent: "center",
-                  backgroundColor: focused
-                    ? "rgba(196,130,53,0.18)"
-                    : "transparent",
-                }}
+                style={[
+                  styles.item,
+                  focused && {
+                    backgroundColor: accent + "22",
+                    borderColor: accent + "55",
+                  },
+                ]}
               >
-                <Ionicons name={icon} size={23} color={color} />
+                {Platform.OS === "ios" ? (
+                  <SymbolView
+                    name={symbol}
+                    tintColor={focused ? accent : "#A9B3BE"}
+                    style={{ width: 24, height: 24 }}
+                  />
+                ) : (
+                  <Ionicons
+                    name={icon}
+                    size={23}
+                    color={focused ? accent : "#A9B3BE"}
+                  />
+                )}
+                <Text
+                  maxFontSizeMultiplier={1.3}
+                  numberOfLines={1}
+                  style={[
+                    styles.label,
+                    {
+                      color: focused ? accent : "#A9B3BE",
+                      fontWeight: focused ? "600" : "400",
+                    },
+                  ]}
+                >
+                  {title}
+                </Text>
               </View>
             ),
           }}
@@ -85,3 +127,17 @@ export default function TabLayout() {
     </Tabs>
   );
 }
+const styles = StyleSheet.create({
+  item: {
+    minWidth: 52,
+    height: 60,
+    paddingHorizontal: 5,
+    borderRadius: 24,
+    borderWidth: 1,
+    borderColor: "transparent",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 4,
+  },
+  label: { fontSize: 10 },
+});

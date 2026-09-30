@@ -1,355 +1,296 @@
-import { GlassButton } from "@/components/Glass";
-import { ScreenTitle, Disclosure } from "@/components/Cockpit";
-import React, { useState } from "react";
+import React from "react";
 import {
   View,
   Text,
-  FlatList,
+  ScrollView,
   StyleSheet,
-  TouchableOpacity,
-  Platform,
   Image,
-  Alert,
+  useWindowDimensions,
 } from "react-native";
 import { useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
+import { LinearGradient } from "expo-linear-gradient";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { useColors } from "@/hooks/useColors";
-import { useApp, Vehicle } from "@/context/AppContext";
+import { GlassButton, GlassSurface } from "@/components/Glass";
+import { ScreenTitle } from "@/components/Cockpit";
 import { LoadingState } from "@/components/LoadingState";
 import { EmptyState } from "@/components/EmptyState";
+import { useApp } from "@/context/AppContext";
+import colors, { sectionAccent } from "@/constants/colors";
 import * as Haptics from "expo-haptics";
 
-
-function VehicleIcon({
-  vehicle,
-  size = 60,
-}: {
-  vehicle: Vehicle;
-  size?: number;
-}) {
-  const colors = useColors();
-  if (vehicle.imageUri) {
-    return (
-      <Image
-        source={{ uri: vehicle.imageUri }}
-        style={{ width: size, height: size, borderRadius: 10 }}
-        resizeMode="cover"
-      />
-    );
-  }
-  return (
-    <View
-      style={{
-        width: size,
-        height: size,
-        alignItems: "center",
-        justifyContent: "center",
-        backgroundColor: colors.muted,
-        borderRadius: 10,
-      }}
-    >
-      <Ionicons name="car" size={size * 0.55} color={colors.mutedForeground} />
-    </View>
-  );
-}
-
+const c = colors.dark;
+const accent = sectionAccent.garage;
 export default function GarageScreen() {
-  const colors = useColors();
+  const { vehicles, activeVehicle, setActiveVehicle, isLoading } = useApp();
   const insets = useSafeAreaInsets();
+  const { height } = useWindowDimensions();
   const router = useRouter();
-  const { vehicles, setActiveVehicle, deleteVehicle, isLoading } = useApp();
-
-  const styles = StyleSheet.create({
-    container: { flex: 1, backgroundColor: colors.background },
-    header: {
-      paddingTop: insets.top + 24,
-      paddingHorizontal: 20,
-      paddingBottom: 16,
-      backgroundColor: colors.background,
-      borderBottomWidth: StyleSheet.hairlineWidth,
-      borderBottomColor: colors.border,
-      flexDirection: "row",
-      alignItems: "flex-end",
-      justifyContent: "space-between",
-    },
-    headerTitle: {
-      fontSize: 28,
-      fontWeight: "700",
-      color: colors.foreground,
-      fontFamily: "Inter_700Bold",
-    },
-    addBtn: {
-      minHeight: 44,
-      justifyContent: "center",
-      flexDirection: "row",
-      alignItems: "center",
-      gap: 6,
-      backgroundColor: colors.primary,
-      borderRadius: 20,
-      paddingHorizontal: 14,
-      paddingVertical: 8,
-    },
-    addBtnText: {
-      fontSize: 14,
-      fontWeight: "600",
-      color: colors.primaryForeground,
-      fontFamily: "Inter_600SemiBold",
-    },
-    vehicleCard: {
-      marginHorizontal: 20,
-      marginBottom: 12,
-      backgroundColor: colors.card,
-      borderRadius: 18,
-      padding: 16,
-      borderWidth: StyleSheet.hairlineWidth,
-      borderColor: colors.border,
-    },
-    vehicleCardActive: { borderColor: colors.primary, borderWidth: 1 },
-    activeBadge: {
-      position: "absolute",
-      top: 24,
-      right: 28,
-      zIndex: 2,
-      backgroundColor: colors.primary,
-      borderRadius: 10,
-      paddingHorizontal: 8,
-      paddingVertical: 3,
-    },
-    activeBadgeText: {
-      fontSize: 10,
-      fontWeight: "600",
-      color: colors.primaryForeground,
-      fontFamily: "Inter_600SemiBold",
-    },
-    cardRow: { gap: 16 },
-    cardInfo: { flex: 1 },
-    cardNickname: {
-      fontSize: 26,
-      fontWeight: "700",
-      color: colors.foreground,
-      fontFamily: "Inter_700Bold",
-    },
-    cardSubtitle: {
-      fontSize: 13,
-      color: colors.mutedForeground,
-      marginTop: 2,
-      fontFamily: "Inter_400Regular",
-    },
-    cardDivider: {
-      height: StyleSheet.hairlineWidth,
-      backgroundColor: colors.border,
-      marginVertical: 12,
-    },
-    statsRow: { flexDirection: "row", justifyContent: "space-between" },
-    statItem: { alignItems: "center" },
-    statValue: {
-      fontSize: 14,
-      fontWeight: "600",
-      color: colors.foreground,
-      fontFamily: "Inter_600SemiBold",
-    },
-    statLabel: {
-      fontSize: 11,
-      color: colors.mutedForeground,
-      fontFamily: "Inter_400Regular",
-      marginTop: 1,
-    },
-    cardActions: { flexDirection: "row", gap: 8, marginTop: 12 },
-    actionBtn: {
-      minHeight: 44,
-      justifyContent: "center",
-      flex: 1,
-      paddingVertical: 8,
-      borderRadius: 10,
-      borderWidth: 1,
-      borderColor: colors.border,
-      alignItems: "center",
-    },
-    actionBtnText: {
-      fontSize: 13,
-      color: colors.foreground,
-      fontFamily: "Inter_500Medium",
-    },
-    setActiveBtn: {
-      borderColor: colors.primary,
-      backgroundColor: colors.primary + "10",
-    },
-    setActiveBtnText: { color: colors.primary },
-    listContent: {
-      paddingTop: 16,
-      paddingBottom: Math.max(insets.bottom, 12) + 100,
-    },
-    noActiveNote: {
-      margin: 20,
-      marginBottom: 0,
-      padding: 14,
-      backgroundColor: colors.muted,
-      borderRadius: 12,
-      borderWidth: 1,
-      borderColor: colors.border,
-    },
-    noActiveText: {
-      fontSize: 13,
-      color: colors.mutedForeground,
-      fontFamily: "Inter_400Regular",
-    },
-  });
-
-  function handleDelete(v: Vehicle) {
-    Alert.alert(
-      "Remove this vehicle?",
-      `"${v.nickname}" will be removed from your garage. Saved journeys will keep a historical record of this vehicle.`,
-      [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "Remove Vehicle",
-          style: "destructive",
-          onPress: () => {
-            deleteVehicle(v.id);
-            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-          },
-        },
-      ],
-    );
-  }
-
-  const activeVehicle = vehicles.find((v) => v.isActive) ?? null;
-  const showNoActiveNote = vehicles.length > 0 && !activeVehicle;
-
-  function VehicleCard({ vehicle }: { vehicle: Vehicle }) {
-    const isActive = vehicle.isActive;
-    return (
-      <View style={[styles.vehicleCard, isActive && styles.vehicleCardActive]}>
-        {isActive && (
-          <View style={styles.activeBadge}>
-            <Text style={styles.activeBadgeText}>ACTIVE</Text>
-          </View>
-        )}
-        <TouchableOpacity
-          onPress={() => router.push(`/vehicle/${vehicle.id}`)}
-          activeOpacity={0.7}
-        >
-          <View style={styles.cardRow}>
-            <View
-              style={{
-                alignItems: "center",
-                backgroundColor: colors.background,
-                borderRadius: 14,
-                padding: 16,
-                marginBottom: 4,
-              }}
-            >
-              <VehicleIcon vehicle={vehicle} size={180} />
-            </View>
-            <View style={styles.cardInfo}>
-              <Text style={styles.cardNickname}>{vehicle.nickname}</Text>
-              <Text style={styles.cardSubtitle}>
-                {vehicle.year} {vehicle.make} {vehicle.model}
-              </Text>
-              <Text style={styles.cardSubtitle}>
-                {vehicle.registration} · {vehicle.colour}
-              </Text>
-            </View>
-          </View>
-        </TouchableOpacity>
-        <View style={styles.cardDivider} />
-        <View style={styles.statsRow}>
-          <View style={styles.statItem}>
-            <Text style={styles.statValue}>
-              {vehicle.mileage.toLocaleString()}
-            </Text>
-            <Text style={styles.statLabel}>Miles</Text>
-          </View>
-          <View style={styles.statItem}>
-            <Text style={styles.statValue}>{vehicle.power || "—"}</Text>
-            <Text style={styles.statLabel}>Power</Text>
-          </View>
-          <View style={styles.statItem}>
-            <Text style={styles.statValue}>{vehicle.zeroToSixty || "—"}</Text>
-            <Text style={styles.statLabel}>0–60</Text>
-          </View>
-          <View style={styles.statItem}>
-            <Text style={styles.statValue}>
-              {vehicle.fuelType.charAt(0).toUpperCase() +
-                vehicle.fuelType.slice(1)}
-            </Text>
-            <Text style={styles.statLabel}>Fuel</Text>
-          </View>
-        </View>
-        <View style={styles.cardActions}>
-          {!isActive && (
-            <TouchableOpacity
-              style={[styles.actionBtn, styles.setActiveBtn]}
-              onPress={() => {
-                setActiveVehicle(vehicle.id);
-                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-              }}
-            >
-              <Text style={[styles.actionBtnText, styles.setActiveBtnText]}>
-                Set Active
-              </Text>
-            </TouchableOpacity>
-          )}
-          <TouchableOpacity
-            style={styles.actionBtn}
-            onPress={() => router.push(`/vehicle/${vehicle.id}`)}
-          >
-            <Text style={styles.actionBtnText}>Edit</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={styles.actionBtn}
-            onPress={() => handleDelete(vehicle)}
-          >
-            <Text style={[styles.actionBtnText, { color: colors.destructive }]}>
-              Remove
-            </Text>
-          </TouchableOpacity>
-        </View>
-      </View>
-    );
-  }
-
+  const add = () => router.push("/vehicle/new");
   return (
-    <View style={styles.container}>
-      <View style={styles.header}>
-        <ScreenTitle title="Garage" eyebrow="Your collection" />
+    <View style={s.page}>
+      <View style={[s.header, { paddingTop: insets.top + 18 }]}>
+        <ScreenTitle
+          title="Garage"
+          eyebrow="Your car, ready for the next drive."
+        />
         <GlassButton
-          material="accent"
-          style={styles.addBtn}
-          onPress={() => router.push("/vehicle/new")}
+          style={s.add}
+          onPress={add}
+          accessibilityLabel="Add Vehicle"
         >
-          <Ionicons name="add" size={16} color={colors.primaryForeground} />
-          <Text style={styles.addBtnText}>Add Vehicle</Text>
+          <Ionicons name="add" size={28} color={c.foreground} />
         </GlassButton>
       </View>
-
-      {showNoActiveNote && (
-        <View style={styles.noActiveNote}>
-          <Text style={styles.noActiveText}>
-            No active vehicle. Tap "Set Active" on a vehicle to select it.
-          </Text>
-        </View>
-      )}
-
-      {/* Loading skeleton */}
-      {isLoading && vehicles.length === 0 ? (
-        <LoadingState rows={3} style={{ paddingTop: 16 }} />
+      {isLoading && !vehicles.length ? (
+        <LoadingState rows={3} />
       ) : (
-        <FlatList
-          data={vehicles}
-          keyExtractor={(item) => item.id}
-          contentContainerStyle={styles.listContent}
-          renderItem={({ item }) => <VehicleCard vehicle={item} />}
-          ListEmptyComponent={
+        <ScrollView
+          showsVerticalScrollIndicator={false}
+          contentContainerStyle={{
+            paddingHorizontal: 16,
+            paddingBottom: Math.max(insets.bottom, 12) + 100,
+          }}
+        >
+          {activeVehicle ? (
+            <GlassButton
+              onPress={() => router.push(`/vehicle/${activeVehicle.id}`)}
+              accessibilityLabel={`Open ${activeVehicle.nickname || activeVehicle.model}`}
+              style={[
+                s.hero,
+                {
+                  minHeight: Math.max(
+                    420,
+                    height - insets.top - Math.max(insets.bottom, 12) - 210,
+                  ),
+                  ...(vehicles.length > 1 ? { minHeight: 370 } : {}),
+                },
+              ]}
+            >
+              {activeVehicle.imageUri ? (
+                <Image
+                  source={{ uri: activeVehicle.imageUri }}
+                  style={StyleSheet.absoluteFill}
+                  resizeMode="cover"
+                />
+              ) : (
+                <View style={s.placeholder}>
+                  <Ionicons
+                    name="car-sport-outline"
+                    size={140}
+                    color={c.mutedForeground}
+                  />
+                  <Text style={s.muted}>Add a photo in Vehicle Details</Text>
+                </View>
+              )}
+              <LinearGradient
+                pointerEvents="none"
+                colors={["rgba(0,0,0,0.7)", "transparent", "rgba(0,0,0,0.8)"]}
+                locations={[0, 0.45, 1]}
+                style={StyleSheet.absoluteFill}
+              />
+              <View style={s.heroHeading}>
+                <View style={s.row}>
+                  <Ionicons name="star" size={16} color={accent} />
+                  <Text style={s.primary}>Primary Car</Text>
+                  <Ionicons
+                    name="chevron-forward"
+                    size={18}
+                    color="white"
+                    style={{ marginLeft: "auto" }}
+                  />
+                </View>
+                <Text style={s.name}>
+                  {activeVehicle.nickname ||
+                    `${activeVehicle.make} ${activeVehicle.model}`}
+                </Text>
+                <Text style={s.description}>
+                  {activeVehicle.year} {activeVehicle.make}{" "}
+                  {activeVehicle.model}
+                </Text>
+              </View>
+              <GlassSurface material="dense" style={s.stats}>
+                {(
+                  [
+                    [
+                      "speedometer-outline",
+                      activeVehicle.mileage.toLocaleString(),
+                      "Total Miles",
+                    ],
+                    ["flash-outline", activeVehicle.power || "—", "Power"],
+                    ["water-outline", activeVehicle.fuelType, "Fuel"],
+                  ] as const
+                ).map(([icon, value, label]) => (
+                  <View key={label} style={s.stat}>
+                    <Ionicons name={icon} size={23} color={c.foreground} />
+                    <Text numberOfLines={1} style={s.value}>
+                      {value}
+                    </Text>
+                    <Text style={s.muted}>{label}</Text>
+                  </View>
+                ))}
+              </GlassSurface>
+            </GlassButton>
+          ) : (
             <EmptyState
               icon="car-outline"
-              title="Empty Garage"
-              subtitle="Add your first vehicle to get started with journey tracking."
-            />
-          }
-        />
+              title="Your garage starts here"
+              subtitle="Add your first vehicle to make it yours."
+            >
+              <GlassButton
+                style={[s.select, { paddingHorizontal: 24, marginTop: 20 }]}
+                onPress={add}
+              >
+                <Text style={s.description}>Add Vehicle</Text>
+              </GlassButton>
+            </EmptyState>
+          )}
+          {vehicles.length > 1 && (
+            <>
+              <View style={[s.row, { marginTop: 24, marginBottom: 12 }]}>
+                <Text style={s.section}>My Vehicles</Text>
+                <Text style={[s.muted, { marginLeft: "auto" }]}>
+                  {vehicles.length} vehicles
+                </Text>
+              </View>
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={{ gap: 12 }}
+              >
+                {vehicles.map((v) => (
+                  <GlassSurface
+                    key={v.id}
+                    style={[
+                      s.vehicle,
+                      v.id === activeVehicle?.id && { borderColor: accent },
+                    ]}
+                  >
+                    <GlassButton
+                      style={s.thumbnail}
+                      onPress={() => router.push(`/vehicle/${v.id}`)}
+                      accessibilityLabel={`Open ${v.nickname || v.model}`}
+                    >
+                      {v.imageUri ? (
+                        <Image
+                          source={{ uri: v.imageUri }}
+                          style={StyleSheet.absoluteFill}
+                          resizeMode="cover"
+                        />
+                      ) : (
+                        <Ionicons
+                          name="car-sport-outline"
+                          size={42}
+                          color={c.mutedForeground}
+                        />
+                      )}
+                    </GlassButton>
+                    <Text numberOfLines={1} style={s.smallName}>
+                      {v.nickname || v.model}
+                    </Text>
+                    <Text style={s.muted}>
+                      {v.year} {v.make}
+                    </Text>
+                    <GlassButton
+                      style={s.select}
+                      onPress={() => {
+                        setActiveVehicle(v.id);
+                        void Haptics.selectionAsync();
+                      }}
+                      accessibilityLabel={`Make ${v.nickname || v.model} your primary car`}
+                      accessibilityState={{
+                        selected: v.id === activeVehicle?.id,
+                      }}
+                    >
+                      <Text
+                        style={{
+                          color:
+                            v.id === activeVehicle?.id ? accent : c.foreground,
+                          fontSize: 12,
+                        }}
+                      >
+                        {v.id === activeVehicle?.id
+                          ? "Primary Car"
+                          : "Set Primary"}
+                      </Text>
+                    </GlassButton>
+                  </GlassSurface>
+                ))}
+                <GlassButton style={[s.vehicle, s.addCard]} onPress={add}>
+                  <Ionicons
+                    name="add-circle-outline"
+                    size={36}
+                    color={c.foreground}
+                  />
+                  <Text style={s.description}>Add Vehicle</Text>
+                </GlassButton>
+              </ScrollView>
+            </>
+          )}
+        </ScrollView>
       )}
     </View>
   );
 }
+const s = StyleSheet.create({
+  page: { flex: 1, backgroundColor: c.background },
+  header: {
+    paddingHorizontal: 20,
+    paddingBottom: 20,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+  },
+  add: {
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    alignItems: "center",
+    justifyContent: "center",
+    marginLeft: "auto",
+  },
+  hero: { borderRadius: 26, justifyContent: "space-between", padding: 18 },
+  placeholder: {
+    ...StyleSheet.absoluteFill,
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 16,
+    backgroundColor: c.card,
+  },
+  heroHeading: { gap: 6 },
+  row: { flexDirection: "row", alignItems: "center", gap: 8 },
+  primary: { color: accent, fontSize: 14, fontWeight: "600" },
+  name: {
+    color: "white",
+    fontSize: 30,
+    fontWeight: "700",
+    letterSpacing: -0.8,
+  },
+  description: { color: c.foreground, fontSize: 14 },
+  stats: { borderRadius: 22, paddingVertical: 18, flexDirection: "row" },
+  stat: { flex: 1, alignItems: "center", gap: 6, paddingHorizontal: 4 },
+  value: {
+    color: c.foreground,
+    fontSize: 17,
+    fontWeight: "600",
+    textTransform: "capitalize",
+  },
+  muted: { color: c.mutedForeground, fontSize: 12 },
+  section: { color: c.foreground, fontSize: 20, fontWeight: "600" },
+  vehicle: { width: 160, padding: 10, borderRadius: 18, gap: 6 },
+  thumbnail: {
+    height: 100,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  smallName: { color: c.foreground, fontWeight: "600", fontSize: 14 },
+  select: {
+    minHeight: 44,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 12,
+    marginTop: 4,
+  },
+  addCard: { alignItems: "center", justifyContent: "center", gap: 12 },
+});

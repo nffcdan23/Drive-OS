@@ -1,53 +1,68 @@
-import React, { useState } from 'react';
-import { APP_NAME } from '@/constants/brand';
+import React, { useState } from "react";
 import {
-  View, Text, StyleSheet, TouchableOpacity, ScrollView,
-  Platform, Alert, Modal, ActivityIndicator, TextInput,
-} from 'react-native';
-import { useRouter } from 'expo-router';
-import { Ionicons } from '@expo/vector-icons';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useColors } from '@/hooks/useColors';
-import { useApp } from '@/context/AppContext';
-import { useAuth } from '@/context/AuthContext';
-import { describeError } from '@/lib/backend/http';
-import { UnitSystem, UNIT_SYSTEM_OPTIONS } from '@/lib/units';
-import * as Haptics from 'expo-haptics';
-
+  View,
+  Text,
+  StyleSheet,
+  ScrollView,
+  Alert,
+  Modal,
+  ActivityIndicator,
+  TextInput,
+  Switch,
+  Linking,
+} from "react-native";
+import { useRouter, useLocalSearchParams } from "expo-router";
+import { Ionicons } from "@expo/vector-icons";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+import Constants from "expo-constants";
+import { GlassSurface, GlassButton } from "@/components/Glass";
+import { ScreenTitle } from "@/components/Cockpit";
+import { AccountPreferences } from "@/components/AccountPreferences";
+import { useSignOut } from "@/hooks/useSignOut";
+import { useApp } from "@/context/AppContext";
+import { useAuth } from "@/context/AuthContext";
+import { describeError } from "@/lib/backend/http";
+import { UNIT_SYSTEM_OPTIONS } from "@/lib/units";
+import colors, { sectionAccent } from "@/constants/colors";
+const c = colors.dark;
+const sectionTitles: Record<string, string> = {
+  account: "Account",
+  privacy: "Privacy",
+  notifications: "Notifications",
+  preferences: "App Preferences",
+  help: "Help & Support",
+  legal: "Legal",
+};
+const subtitles: Record<string, string> = {
+  account: "Your personal information and account.",
+  privacy: "Control your data and how you appear to others.",
+  notifications: "Choose which in-app alerts matter to you.",
+  preferences: "Make Derwent feel right for you.",
+  help: "A little help for the road ahead.",
+  legal: "App information and policy documents.",
+};
 export default function SettingsScreen() {
-  const colors = useColors();
+  const { section: requested } = useLocalSearchParams<{ section?: string }>();
+  const section =
+    requested && sectionTitles[requested] ? requested : "preferences";
   const insets = useSafeAreaInsets();
   const router = useRouter();
-  const { isPassengerMode, togglePassengerMode, unitSystem, setUnitSystem, hasUnsyncedWork, clearLocalData, deleteAccount, retrySync, sync } = useApp();
+  const {
+    isPassengerMode,
+    togglePassengerMode,
+    unitSystem,
+    setUnitSystem,
+    deleteAccount,
+    retrySync,
+    sync,
+    userProfile,
+  } = useApp();
   const { email, signOut } = useAuth();
+  const handleSignOut = useSignOut();
   const [showDelete, setShowDelete] = useState(false);
-  const [deleteText, setDeleteText] = useState('');
+  const [deleteText, setDeleteText] = useState("");
   const [deleting, setDeleting] = useState(false);
-
-  async function doSignOut() {
-    await clearLocalData();
-    await signOut();
-  }
-
-  function handleSignOut() {
-    if (hasUnsyncedWork()) {
-      Alert.alert(
-        'Changes not uploaded yet',
-        'Some changes or drives are still on this phone and haven\'t reached your account. Signing out now will lose them.',
-        [
-          { text: 'Try to upload', onPress: () => { void retrySync(); } },
-          { text: 'Sign out anyway', style: 'destructive', onPress: () => { void doSignOut(); } },
-          { text: 'Cancel', style: 'cancel' },
-        ],
-      );
-      return;
-    }
-    Alert.alert('Sign out?', 'Your data stays in your account. Sign in again on any phone to get it back.', [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Sign out', onPress: () => { void doSignOut(); } },
-    ]);
-  }
-
+  const [syncing, setSyncing] = useState(false);
   async function handleDeleteAccount() {
     setDeleting(true);
     try {
@@ -55,328 +70,377 @@ export default function SettingsScreen() {
       setShowDelete(false);
       await signOut().catch(() => {});
     } catch (err) {
-      Alert.alert('Account not deleted', describeError(err));
+      Alert.alert("Account not deleted", describeError(err));
     } finally {
       setDeleting(false);
     }
   }
-
-  const [showUnitsPicker, setShowUnitsPicker] = useState(false);
-
-  const styles = StyleSheet.create({
-    container: { flex: 1, backgroundColor: colors.background },
-    header: {
-      paddingTop: Platform.OS === 'web' ? 67 + insets.top : insets.top,
-      paddingHorizontal: 16, paddingBottom: 12,
-      flexDirection: 'row', alignItems: 'center', gap: 12,
-      backgroundColor: colors.background,
-      borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border,
-    },
-    backBtn: { padding: 4 },
-    headerTitle: { flex: 1, fontSize: 17, fontWeight: '600', color: colors.foreground, fontFamily: 'Inter_600SemiBold' },
-    scroll: { flex: 1 },
-    content: { padding: 20, paddingBottom: 40 },
-    sectionTitle: {
-      fontSize: 13, fontWeight: '600', color: colors.mutedForeground,
-      fontFamily: 'Inter_600SemiBold', textTransform: 'uppercase', letterSpacing: 0.5,
-      marginBottom: 8, marginTop: 20,
-    },
-    card: {
-      backgroundColor: colors.card, borderRadius: 16, overflow: 'hidden',
-      borderWidth: StyleSheet.hairlineWidth, borderColor: colors.border,
-    },
-    row: {
-      flexDirection: 'row', alignItems: 'center', gap: 12, padding: 16,
-      borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border,
-    },
-    rowLast: { borderBottomWidth: 0 },
-    rowIcon: {
-      width: 36, height: 36, borderRadius: 10, alignItems: 'center', justifyContent: 'center',
-    },
-    rowLabel: { flex: 1, fontSize: 15, color: colors.foreground, fontFamily: 'Inter_400Regular' },
-    rowSub: { fontSize: 12, color: colors.mutedForeground, fontFamily: 'Inter_400Regular', marginTop: 1 },
-    // Passenger mode toggle card
-    passengerCard: {
-      backgroundColor: isPassengerMode ? colors.primary + '15' : colors.card,
-      borderRadius: 16, padding: 16,
-      borderWidth: isPassengerMode ? 2 : StyleSheet.hairlineWidth,
-      borderColor: isPassengerMode ? colors.primary : colors.border,
-    },
-    passengerCardTop: { flexDirection: 'row', alignItems: 'center', gap: 12 },
-    passengerIconWrap: {
-      width: 48, height: 48, borderRadius: 24,
-      backgroundColor: isPassengerMode ? colors.primary : colors.muted,
-      alignItems: 'center', justifyContent: 'center',
-    },
-    passengerTitle: { fontSize: 17, fontWeight: '600', color: colors.foreground, fontFamily: 'Inter_600SemiBold', flex: 1 },
-    passengerToggle: {
-      width: 52, height: 30, borderRadius: 15, borderWidth: 1,
-      borderColor: isPassengerMode ? colors.primary : colors.border,
-      backgroundColor: isPassengerMode ? colors.primary : colors.muted,
-      padding: 2, justifyContent: 'center',
-    },
-    passengerThumb: {
-      width: 24, height: 24, borderRadius: 12, backgroundColor: '#fff',
-      alignSelf: isPassengerMode ? 'flex-end' : 'flex-start',
-    },
-    passengerDesc: {
-      fontSize: 13, color: colors.mutedForeground, fontFamily: 'Inter_400Regular',
-      lineHeight: 19, marginTop: 12,
-    },
-    passengerBullet: {
-      fontSize: 13, color: colors.mutedForeground, fontFamily: 'Inter_400Regular',
-      marginTop: 4, paddingLeft: 8,
-    },
-    activeIndicator: {
-      marginTop: 12, flexDirection: 'row', alignItems: 'center', gap: 8,
-      backgroundColor: colors.primary, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6,
-      alignSelf: 'flex-start',
-    },
-    activeIndicatorText: { fontSize: 12, fontWeight: '600', color: '#fff', fontFamily: 'Inter_600SemiBold' },
-    futureNote: {
-      backgroundColor: colors.muted, borderRadius: 12, padding: 14, marginTop: 8,
-    },
-    futureNoteTitle: { fontSize: 14, fontWeight: '600', color: colors.foreground, fontFamily: 'Inter_600SemiBold' },
-    futureNoteText: { fontSize: 13, color: colors.mutedForeground, fontFamily: 'Inter_400Regular', marginTop: 4, lineHeight: 19 },
-    // Modal
-    modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' },
-    modalContent: {
-      backgroundColor: colors.card, borderTopLeftRadius: 24, borderTopRightRadius: 24,
-      padding: 24, paddingBottom: Math.max(insets.bottom, 16) + 16,
-    },
-    modalHandle: { width: 40, height: 4, backgroundColor: colors.border, borderRadius: 2, alignSelf: 'center', marginBottom: 20 },
-    modalTitle: { fontSize: 18, fontWeight: '700', color: colors.foreground, fontFamily: 'Inter_700Bold', marginBottom: 4 },
-    modalSub: { fontSize: 13, color: colors.mutedForeground, fontFamily: 'Inter_400Regular', marginBottom: 20 },
-    modalRow: {
-      flexDirection: 'row', alignItems: 'center', gap: 12,
-      paddingVertical: 14, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border,
-    },
-    modalRowLast: { borderBottomWidth: 0 },
-    modalOptionIcon: {
-      width: 40, height: 40, borderRadius: 10, alignItems: 'center', justifyContent: 'center',
-    },
-    modalRowLabel: { flex: 1, fontSize: 15, color: colors.foreground, fontFamily: 'Inter_400Regular' },
-    modalRowLabelActive: { color: colors.primary, fontFamily: 'Inter_600SemiBold' },
-    modalRowSub: { fontSize: 12, color: colors.mutedForeground, fontFamily: 'Inter_400Regular', marginTop: 1 },
-  });
-
-  function handleTogglePassenger() {
-    togglePassengerMode();
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-  }
-
-  function handleSelectUnit(s: UnitSystem) {
-    setUnitSystem(s);
-    Haptics.selectionAsync();
-    setShowUnitsPicker(false);
-  }
-
-  const currentUnitLabel = UNIT_SYSTEM_OPTIONS.find((o) => o.value === unitSystem)?.label ?? 'Automatic';
-
-  const UNIT_ICONS: Record<UnitSystem, string> = {
-    auto:     'globe-outline',
-    imperial: 'flag-outline',
-    metric:   'calculator-outline',
-  };
-
-  const settingsRows: Array<{
-    icon: string; iconBg: string; label: string; sub?: string; onPress: () => void; last?: boolean;
-  }> = [
-    { icon: 'speedometer-outline', iconBg: '#F4631A', label: 'Units of measurement', sub: currentUnitLabel, onPress: () => { setShowUnitsPicker(true); Haptics.selectionAsync(); } },
-    { icon: 'location-outline',    iconBg: '#3b82f6', label: 'Location Sharing',     sub: 'Allow friends to see your location', onPress: () => {} },
-    { icon: 'shield-checkmark-outline', iconBg: '#22c55e', label: 'Privacy',          sub: 'Manage what friends can see', onPress: () => {} },
-    { icon: 'notifications-outline',    iconBg: '#f59e0b', label: 'Notifications',    sub: 'Convoy invites, journey reminders', onPress: () => {} },
-    { icon: 'bluetooth-outline',   iconBg: '#8b5cf6', label: 'OBD2 Dongle',          sub: 'Connect a diagnostics dongle', onPress: () => {} },
-    { icon: 'tablet-landscape-outline', iconBg: '#06b6d4', label: 'HUD Display',     sub: 'Connect a heads-up display device', onPress: () => {}, last: true },
+  const legalLinks = [
+    { label: "Terms", url: process.env.EXPO_PUBLIC_TERMS_URL },
+    { label: "Privacy Policy", url: process.env.EXPO_PUBLIC_PRIVACY_URL },
   ];
-
+  const openLink = (url: string) => {
+    void Linking.openURL(url).catch((err) =>
+      Alert.alert("Could not open link", describeError(err)),
+    );
+  };
   return (
-    <View style={styles.container}>
-      <View style={styles.header}>
-        <TouchableOpacity style={styles.backBtn} onPress={() => router.back()}>
-          <Ionicons name="chevron-back" size={24} color={colors.foreground} />
-        </TouchableOpacity>
-        <Text style={styles.headerTitle}>Settings</Text>
-      </View>
-
-      <ScrollView style={styles.scroll} contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
-
-        <Text style={styles.sectionTitle}>Passenger Mode</Text>
-        <TouchableOpacity style={styles.passengerCard} onPress={handleTogglePassenger} activeOpacity={0.85}>
-          <View style={styles.passengerCardTop}>
-            <View style={styles.passengerIconWrap}>
-              <Ionicons name="walk-outline" size={22} color={isPassengerMode ? '#fff' : colors.mutedForeground} />
-            </View>
-            <Text style={styles.passengerTitle}>Passenger Mode</Text>
-            <View style={styles.passengerToggle}>
-              <View style={styles.passengerThumb} />
-            </View>
-          </View>
-          <Text style={styles.passengerDesc}>
-            When active, location may continue updating but:
-          </Text>
-          <Text style={styles.passengerBullet}>· Journey data is not recorded</Text>
-          <Text style={styles.passengerBullet}>· Speed is not attributed to your vehicle</Text>
-          <Text style={styles.passengerBullet}>· Top-speed records are not updated</Text>
-          <Text style={styles.passengerBullet}>· XP and achievements are not awarded</Text>
-          {isPassengerMode && (
-            <View style={styles.activeIndicator}>
-              <Ionicons name="checkmark-circle" size={14} color="#fff" />
-              <Text style={styles.activeIndicatorText}>Passenger Mode Active</Text>
-            </View>
-          )}
-        </TouchableOpacity>
-
-        <Text style={styles.sectionTitle}>App Settings</Text>
-        <View style={styles.card}>
-          {settingsRows.map((item, i) => (
-            <TouchableOpacity
-              key={i}
-              style={[styles.row, item.last && styles.rowLast]}
-              onPress={item.onPress}
-            >
-              <View style={[styles.rowIcon, { backgroundColor: item.iconBg + '20' }]}>
-                <Ionicons name={item.icon as any} size={18} color={item.iconBg} />
-              </View>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.rowLabel}>{item.label}</Text>
-                {item.sub && <Text style={styles.rowSub}>{item.sub}</Text>}
-              </View>
-              <Ionicons name="chevron-forward" size={16} color={colors.mutedForeground} />
-            </TouchableOpacity>
-          ))}
+    <View style={s.page}>
+      <ScrollView
+        showsVerticalScrollIndicator={false}
+        contentContainerStyle={{
+          paddingTop: insets.top + 12,
+          paddingHorizontal: 18,
+          paddingBottom: insets.bottom + 36,
+        }}
+        keyboardShouldPersistTaps="handled"
+      >
+        <GlassButton
+          style={s.back}
+          onPress={() => router.back()}
+          accessibilityLabel="Back"
+        >
+          <Ionicons name="arrow-back" size={23} color={c.foreground} />
+        </GlassButton>
+        <View style={{ marginTop: 16, marginBottom: 24 }}>
+          <ScreenTitle
+            title={sectionTitles[section]}
+            eyebrow={subtitles[section]}
+          />
         </View>
-
-        <Text style={styles.sectionTitle}>Account</Text>
-        <View style={styles.card}>
-          <View style={styles.row}>
-            <View style={[styles.rowIcon, { backgroundColor: colors.primary + '20' }]}>
-              <Ionicons name="person-circle-outline" size={18} color={colors.primary} />
-            </View>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.rowLabel}>Signed in</Text>
-              <Text style={styles.rowSub}>{email ?? 'Apple ID / Google account'}</Text>
-              <Text style={styles.rowSub}>
-                {sync.lastSyncedAt ? `Last synced ${new Date(sync.lastSyncedAt).toLocaleString('en-GB')}` : 'Not synced yet'}
+        {(section === "privacy" || section === "notifications") && (
+          <AccountPreferences section={section} />
+        )}
+        {section === "account" && (
+          <>
+            <GlassSurface style={s.card}>
+              <Text style={s.title}>Profile Information</Text>
+              {[
+                ["Name", userProfile.name],
+                [
+                  "Username",
+                  userProfile.username ? `@${userProfile.username}` : "Not set",
+                ],
+                ["Email Address", email || "Linked sign-in account"],
+                ["Bio", userProfile.bio || "Not set"],
+              ].map(([label, value]) => (
+                <View key={label} style={s.infoRow}>
+                  <Text style={s.label}>{label}</Text>
+                  <Text style={[s.note, { flex: 1, textAlign: "right" }]}>
+                    {value}
+                  </Text>
+                </View>
+              ))}
+              <Text style={s.note}>
+                Edit your name, photo and bio from Profile.
               </Text>
-            </View>
-          </View>
-          <TouchableOpacity style={styles.row} onPress={handleSignOut} accessibilityRole="button">
-            <View style={[styles.rowIcon, { backgroundColor: colors.mutedForeground + '20' }]}>
-              <Ionicons name="log-out-outline" size={18} color={colors.foreground} />
-            </View>
-            <Text style={styles.rowLabel}>Sign out</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={[styles.row, styles.rowLast]} onPress={() => { setDeleteText(''); setShowDelete(true); }} accessibilityRole="button">
-            <View style={[styles.rowIcon, { backgroundColor: colors.destructive + '20' }]}>
-              <Ionicons name="trash-outline" size={18} color={colors.destructive} />
-            </View>
-            <Text style={[styles.rowLabel, { color: colors.destructive }]}>Delete account</Text>
-          </TouchableOpacity>
-        </View>
-
-        <Text style={styles.sectionTitle}>Future Features</Text>
-        <View style={styles.futureNote}>
-          <Text style={styles.futureNoteTitle}>OBD2 &amp; HUD Integration</Text>
-          <Text style={styles.futureNoteText}>
-            Real-time diagnostics via OBD2 dongle and heads-up display support are planned for a future update.
-            Vehicle health data, live stats overlay, and more.
-          </Text>
-        </View>
-
-        <View style={[styles.futureNote, { marginTop: 10 }]}>
-          <Text style={styles.futureNoteTitle}>DVLA Vehicle Lookup</Text>
-          <Text style={styles.futureNoteText}>
-            Automatic vehicle details from the registration plate, looked up by the {APP_NAME} server
-            (the DVLA key never ships in the app). Available when the server has it configured.
-          </Text>
-        </View>
+            </GlassSurface>
+            <GlassSurface style={s.card}>
+              <Text style={s.title}>Account Status</Text>
+              <Text style={s.note}>
+                {sync.lastSyncedAt
+                  ? `Last synced ${new Date(sync.lastSyncedAt).toLocaleString("en-GB")}`
+                  : "Not synced yet"}
+              </Text>
+              <GlassButton style={s.action} onPress={handleSignOut}>
+                <Ionicons
+                  name="log-out-outline"
+                  size={20}
+                  color={c.foreground}
+                />
+                <Text style={s.label}>Log Out</Text>
+              </GlassButton>
+            </GlassSurface>
+            <GlassSurface style={s.card}>
+              <Text style={s.title}>Account Management</Text>
+              <GlassButton
+                style={s.action}
+                onPress={() => {
+                  setDeleteText("");
+                  setShowDelete(true);
+                }}
+              >
+                <Ionicons
+                  name="trash-outline"
+                  size={20}
+                  color={c.destructive}
+                />
+                <Text style={[s.label, { color: c.destructive }]}>
+                  Delete Account
+                </Text>
+              </GlassButton>
+            </GlassSurface>
+          </>
+        )}
+        {section === "preferences" && (
+          <>
+            <GlassSurface style={s.card}>
+              <Text style={s.title}>Units of Measurement</Text>
+              {UNIT_SYSTEM_OPTIONS.map((option) => (
+                <GlassButton
+                  key={option.value}
+                  style={s.action}
+                  onPress={() => setUnitSystem(option.value)}
+                  accessibilityState={{ selected: unitSystem === option.value }}
+                >
+                  <View style={{ flex: 1 }}>
+                    <Text style={s.label}>{option.label}</Text>
+                    <Text style={s.note}>{option.sub}</Text>
+                  </View>
+                  {unitSystem === option.value && (
+                    <Ionicons
+                      name="checkmark"
+                      size={21}
+                      color={sectionAccent.profile}
+                    />
+                  )}
+                </GlassButton>
+              ))}
+            </GlassSurface>
+            <GlassSurface style={s.card}>
+              <View style={s.infoRow}>
+                <View style={{ flex: 1 }}>
+                  <Text style={s.title}>Passenger Mode</Text>
+                  <Text style={s.note}>
+                    Location may update, but drives, speed records and XP are
+                    not recorded.
+                  </Text>
+                </View>
+                <Switch
+                  accessibilityLabel="Passenger Mode"
+                  value={isPassengerMode}
+                  onValueChange={togglePassengerMode}
+                  trackColor={{ true: sectionAccent.profile }}
+                />
+              </View>
+            </GlassSurface>
+          </>
+        )}
+        {section === "help" && (
+          <>
+            <GlassSurface style={s.card}>
+              <Text style={s.title}>On the Road</Text>
+              <Text style={s.label}>Recording a drive</Text>
+              <Text style={s.note}>
+                Tap Start Drive on Drive. Pause, resume or finish from the
+                recording controls.
+              </Text>
+              <Text style={s.label}>Choosing a destination</Text>
+              <Text style={s.note}>
+                Tap the search field on Drive. Choose a saved place or search an
+                address to open directions in your maps app.
+              </Text>
+              <Text style={s.label}>Your vehicles</Text>
+              <Text style={s.note}>
+                Open a car in Garage to edit its details and photo. With
+                multiple cars, use Set Primary to choose your driving vehicle.
+              </Text>
+            </GlassSurface>
+            <GlassSurface style={s.card}>
+              <Text style={s.title}>Connection & Sync</Text>
+              <Text style={s.note}>
+                Recorded drives and edits stay on your phone while waiting to
+                upload. Keep the app open with a connection to retry.
+              </Text>
+              <GlassButton
+                style={s.action}
+                disabled={syncing}
+                onPress={() => {
+                  setSyncing(true);
+                  void retrySync()
+                    .catch((err) =>
+                      Alert.alert("Sync failed", describeError(err)),
+                    )
+                    .finally(() => setSyncing(false));
+                }}
+              >
+                {syncing ? (
+                  <ActivityIndicator color={c.primary} />
+                ) : (
+                  <Ionicons name="refresh" size={20} color={c.primary} />
+                )}
+                <Text style={s.label}>Retry Uploads</Text>
+              </GlassButton>
+            </GlassSurface>
+          </>
+        )}
+        {section === "legal" && (
+          <>
+            <GlassSurface style={s.card}>
+              <Text style={s.title}>Policy Documents</Text>
+              {legalLinks.map((link) => (
+                <GlassButton
+                  key={link.label}
+                  style={s.action}
+                  disabled={!link.url}
+                  accessibilityState={{ disabled: !link.url }}
+                  onPress={() => link.url && openLink(link.url)}
+                >
+                  <View style={{ flex: 1 }}>
+                    <Text style={s.label}>{link.label}</Text>
+                    {!link.url && <Text style={s.note}>Not available yet</Text>}
+                  </View>
+                  {link.url && (
+                    <Ionicons
+                      name="open-outline"
+                      size={18}
+                      color={c.mutedForeground}
+                    />
+                  )}
+                </GlassButton>
+              ))}
+            </GlassSurface>
+            <GlassSurface style={s.card}>
+              <Text style={s.title}>Derwent</Text>
+              <Text style={s.note}>
+                Version {Constants.expoConfig?.version || "—"}
+              </Text>
+              <Text style={s.note}>
+                Built with Expo, React Native and Supabase.
+              </Text>
+              <GlassButton
+                style={s.action}
+                onPress={() =>
+                  openLink("https://github.com/expo/expo/blob/main/LICENSE")
+                }
+              >
+                <Text style={s.label}>Expo Licence</Text>
+                <Ionicons
+                  name="open-outline"
+                  size={18}
+                  color={c.mutedForeground}
+                />
+              </GlassButton>
+              <GlassButton
+                style={s.action}
+                onPress={() =>
+                  openLink(
+                    "https://github.com/facebook/react-native/blob/main/LICENSE",
+                  )
+                }
+              >
+                <Text style={s.label}>React Native Licence</Text>
+                <Ionicons
+                  name="open-outline"
+                  size={18}
+                  color={c.mutedForeground}
+                />
+              </GlassButton>
+            </GlassSurface>
+          </>
+        )}
       </ScrollView>
-
-      {/* Delete account confirmation */}
-      <Modal visible={showDelete} transparent animationType="fade" onRequestClose={() => setShowDelete(false)}>
-        <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center', padding: 24 }}>
-          <View style={{ backgroundColor: colors.card, borderRadius: 20, padding: 20, gap: 12 }}>
-            <Text style={{ color: colors.foreground, fontSize: 18, fontFamily: 'Inter_700Bold' }}>Delete your account?</Text>
-            <Text style={{ color: colors.mutedForeground, fontSize: 14, fontFamily: 'Inter_400Regular', lineHeight: 20 }}>
-              This permanently deletes your profile, vehicles, photos, documents, journeys, saved places, Beauty Spots,
-              friends and memberships from {APP_NAME} on every device. It can't be undone.
-            </Text>
-            <Text style={{ color: colors.foreground, fontSize: 14, fontFamily: 'Inter_600SemiBold' }}>Type DELETE to confirm</Text>
-            <TextInput
-              value={deleteText} onChangeText={setDeleteText} autoCapitalize="characters" autoCorrect={false}
-              style={{ height: 46, borderRadius: 12, borderWidth: 1, borderColor: colors.input, color: colors.foreground, paddingHorizontal: 14, fontSize: 16 }}
-            />
-            <TouchableOpacity
-              disabled={deleteText !== 'DELETE' || deleting}
-              onPress={handleDeleteAccount}
-              style={{ height: 48, borderRadius: 12, alignItems: 'center', justifyContent: 'center', backgroundColor: deleteText === 'DELETE' ? colors.destructive : colors.muted }}
-            >
-              {deleting ? <ActivityIndicator color={colors.destructiveForeground} /> : (
-                <Text style={{ color: deleteText === 'DELETE' ? colors.destructiveForeground : colors.mutedForeground, fontFamily: 'Inter_600SemiBold', fontSize: 16 }}>Delete permanently</Text>
-              )}
-            </TouchableOpacity>
-            <TouchableOpacity onPress={() => setShowDelete(false)} style={{ alignItems: 'center', padding: 8 }}>
-              <Text style={{ color: colors.primary, fontFamily: 'Inter_600SemiBold', fontSize: 15 }}>Cancel</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-      </Modal>
-
-      {/* Units of measurement picker */}
       <Modal
-        visible={showUnitsPicker}
+        visible={showDelete}
         transparent
         animationType="slide"
-        onRequestClose={() => setShowUnitsPicker(false)}
+        onRequestClose={() => {
+          if (!deleting) setShowDelete(false);
+        }}
       >
-        <TouchableOpacity
-          style={styles.modalOverlay}
-          activeOpacity={1}
-          onPress={() => setShowUnitsPicker(false)}
-        >
-          <TouchableOpacity activeOpacity={1} onPress={() => {}}>
-            <View style={styles.modalContent}>
-              <View style={styles.modalHandle} />
-              <Text style={styles.modalTitle}>Units of measurement</Text>
-              <Text style={styles.modalSub}>
-                Choose how distances and speeds are displayed across the app.
-              </Text>
-              {UNIT_SYSTEM_OPTIONS.map((opt, i) => {
-                const isActive = unitSystem === opt.value;
-                const isLast = i === UNIT_SYSTEM_OPTIONS.length - 1;
-                return (
-                  <TouchableOpacity
-                    key={opt.value}
-                    style={[styles.modalRow, isLast && styles.modalRowLast]}
-                    onPress={() => handleSelectUnit(opt.value)}
-                  >
-                    <View style={[
-                      styles.modalOptionIcon,
-                      { backgroundColor: isActive ? colors.primary + '20' : colors.muted },
-                    ]}>
-                      <Ionicons
-                        name={UNIT_ICONS[opt.value] as any}
-                        size={18}
-                        color={isActive ? colors.primary : colors.mutedForeground}
-                      />
-                    </View>
-                    <View style={{ flex: 1 }}>
-                      <Text style={[styles.modalRowLabel, isActive && styles.modalRowLabelActive]}>
-                        {opt.label}
-                      </Text>
-                      <Text style={styles.modalRowSub}>{opt.sub}</Text>
-                    </View>
-                    {isActive && (
-                      <Ionicons name="checkmark-circle" size={22} color={colors.primary} />
-                    )}
-                  </TouchableOpacity>
-                );
-              })}
-            </View>
-          </TouchableOpacity>
-        </TouchableOpacity>
+        <View style={s.overlay}>
+          <GlassSurface
+            material="dense"
+            style={[
+              s.sheet,
+              { paddingBottom: Math.max(insets.bottom, 16) + 16 },
+            ]}
+          >
+            <Text style={s.title}>Delete your account?</Text>
+            <Text style={s.note}>
+              This permanently deletes your account and its data. Type DELETE to
+              confirm.
+            </Text>
+            <TextInput
+              accessibilityLabel="Type DELETE to confirm account deletion"
+              value={deleteText}
+              onChangeText={setDeleteText}
+              editable={!deleting}
+              autoCapitalize="characters"
+              placeholder="DELETE"
+              placeholderTextColor={c.mutedForeground}
+              style={s.input}
+            />
+            <GlassButton
+              style={[s.action, { justifyContent: "center" }]}
+              disabled={deleteText !== "DELETE" || deleting}
+              onPress={() => void handleDeleteAccount()}
+            >
+              {deleting ? (
+                <ActivityIndicator color={c.destructive} />
+              ) : (
+                <Text
+                  style={{
+                    color:
+                      deleteText === "DELETE"
+                        ? c.destructive
+                        : c.mutedForeground,
+                  }}
+                >
+                  Delete Account Permanently
+                </Text>
+              )}
+            </GlassButton>
+            <GlassButton
+              style={[s.action, { justifyContent: "center" }]}
+              disabled={deleting}
+              onPress={() => setShowDelete(false)}
+            >
+              <Text style={s.label}>Cancel</Text>
+            </GlassButton>
+          </GlassSurface>
+        </View>
       </Modal>
     </View>
   );
 }
+const s = StyleSheet.create({
+  page: { flex: 1, backgroundColor: c.background },
+  back: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  card: { borderRadius: 22, padding: 18, marginBottom: 16, gap: 12 },
+  title: { color: c.foreground, fontSize: 18, fontWeight: "600" },
+  label: { color: c.foreground, fontSize: 15 },
+  note: { color: c.mutedForeground, fontSize: 13, lineHeight: 20 },
+  infoRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 16,
+    paddingVertical: 12,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: c.border,
+  },
+  action: {
+    minHeight: 52,
+    borderRadius: 16,
+    padding: 14,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+  },
+  overlay: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.55)",
+    justifyContent: "flex-end",
+  },
+  sheet: {
+    padding: 24,
+    gap: 16,
+    borderTopLeftRadius: 28,
+    borderTopRightRadius: 28,
+  },
+  input: {
+    minHeight: 52,
+    borderWidth: 1,
+    borderColor: c.border,
+    borderRadius: 16,
+    paddingHorizontal: 16,
+    color: c.foreground,
+    fontSize: 16,
+  },
+});

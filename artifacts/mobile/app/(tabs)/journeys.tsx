@@ -87,7 +87,7 @@ function filterByPeriod(journeys: Journey[], period: TimePeriod): Journey[] {
 }
 
 export default function JourneysScreen() {
-  const colors = useColors();
+  const colors = { ...useColors(), primary: "#6CB9F4" };
   const insets = useSafeAreaInsets();
   const router = useRouter();
   const {
@@ -194,7 +194,6 @@ export default function JourneysScreen() {
       fontSize: 28,
       fontWeight: "700",
       color: colors.foreground,
-      fontFamily: "Inter_700Bold",
     },
     headerActions: {
       flexDirection: "row",
@@ -235,7 +234,7 @@ export default function JourneysScreen() {
     periodBtnText: {
       fontSize: 13,
       color: colors.mutedForeground,
-      fontFamily: "Inter_500Medium",
+      fontWeight: "500",
     },
     periodBtnTextActive: { color: colors.primaryForeground },
     // Stats section
@@ -245,7 +244,7 @@ export default function JourneysScreen() {
       color: colors.mutedForeground,
       textTransform: "uppercase",
       letterSpacing: 0.6,
-      fontFamily: "Inter_600SemiBold",
+
       paddingHorizontal: 20,
       marginBottom: 10,
     },
@@ -263,12 +262,11 @@ export default function JourneysScreen() {
       fontSize: 28,
       fontWeight: "700",
       color: colors.foreground,
-      fontFamily: "Inter_700Bold",
     },
     primaryLabel: {
       fontSize: 12,
       color: colors.mutedForeground,
-      fontFamily: "Inter_400Regular",
+
       marginTop: 2,
     },
     secondaryStats: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
@@ -285,12 +283,11 @@ export default function JourneysScreen() {
       fontSize: 16,
       fontWeight: "700",
       color: colors.foreground,
-      fontFamily: "Inter_700Bold",
     },
     secondaryLabel: {
       fontSize: 11,
       color: colors.mutedForeground,
-      fontFamily: "Inter_400Regular",
+
       marginTop: 2,
     },
     xpCard: {
@@ -309,12 +306,10 @@ export default function JourneysScreen() {
       fontSize: 18,
       fontWeight: "700",
       color: colors.primary,
-      fontFamily: "Inter_700Bold",
     },
     xpLabel: {
       fontSize: 12,
       color: colors.primary,
-      fontFamily: "Inter_400Regular",
     },
     divider: {
       height: StyleSheet.hairlineWidth,
@@ -346,7 +341,7 @@ export default function JourneysScreen() {
     filterBtnText: {
       fontSize: 12,
       color: colors.mutedForeground,
-      fontFamily: "Inter_500Medium",
+      fontWeight: "500",
     },
     filterBtnTextActive: { color: colors.primary },
     // Sort row
@@ -360,7 +355,6 @@ export default function JourneysScreen() {
     sortLabel: {
       fontSize: 13,
       color: colors.mutedForeground,
-      fontFamily: "Inter_400Regular",
     },
     sortBtn: {
       minHeight: 44,
@@ -377,14 +371,14 @@ export default function JourneysScreen() {
     sortBtnText: {
       fontSize: 13,
       color: colors.foreground,
-      fontFamily: "Inter_500Medium",
+      fontWeight: "500",
     },
     // Journey card
     journeyCard: {
       marginHorizontal: 20,
       marginBottom: 10,
       backgroundColor: colors.card,
-      borderRadius: 16,
+      borderRadius: 22,
       padding: 16,
       borderWidth: StyleSheet.hairlineWidth,
       borderColor: colors.border,
@@ -398,13 +392,13 @@ export default function JourneysScreen() {
       fontSize: 16,
       fontWeight: "600",
       color: colors.foreground,
-      fontFamily: "Inter_600SemiBold",
+
       flex: 1,
     },
     journeyDate: {
       fontSize: 12,
       color: colors.mutedForeground,
-      fontFamily: "Inter_400Regular",
+
       marginTop: 2,
     },
     cardMeta: { flexDirection: "row", gap: 6, marginTop: 6, flexWrap: "wrap" },
@@ -420,7 +414,6 @@ export default function JourneysScreen() {
     tagText: {
       fontSize: 11,
       color: colors.mutedForeground,
-      fontFamily: "Inter_400Regular",
     },
     convoyTag: { backgroundColor: colors.primary + "15" },
     convoyTagText: { color: colors.primary },
@@ -435,12 +428,11 @@ export default function JourneysScreen() {
       fontSize: 14,
       fontWeight: "600",
       color: colors.foreground,
-      fontFamily: "Inter_600SemiBold",
     },
     statItemLabel: {
       fontSize: 11,
       color: colors.mutedForeground,
-      fontFamily: "Inter_400Regular",
+
       marginTop: 1,
     },
     cardFooter: {
@@ -457,7 +449,6 @@ export default function JourneysScreen() {
     vehicleTagText: {
       fontSize: 11,
       color: colors.mutedForeground,
-      fontFamily: "Inter_400Regular",
     },
     xpBadge: {
       flexDirection: "row",
@@ -472,14 +463,13 @@ export default function JourneysScreen() {
       fontSize: 11,
       fontWeight: "600",
       color: colors.primary,
-      fontFamily: "Inter_600SemiBold",
     },
     emptyContainer: { alignItems: "center", paddingTop: 60, paddingBottom: 40 },
     emptyTitle: {
       fontSize: 17,
       fontWeight: "600",
       color: colors.foreground,
-      fontFamily: "Inter_600SemiBold",
+
       marginTop: 12,
     },
     emptyText: {
@@ -487,7 +477,7 @@ export default function JourneysScreen() {
       color: colors.mutedForeground,
       marginTop: 6,
       textAlign: "center",
-      fontFamily: "Inter_400Regular",
+
       paddingHorizontal: 40,
     },
     listContent: { paddingBottom: Math.max(insets.bottom, 12) + 100 },
@@ -517,7 +507,7 @@ export default function JourneysScreen() {
       fontSize: 18,
       fontWeight: "700",
       color: colors.foreground,
-      fontFamily: "Inter_700Bold",
+
       marginBottom: 16,
     },
     modalRow: {
@@ -531,9 +521,8 @@ export default function JourneysScreen() {
     modalRowText: {
       fontSize: 15,
       color: colors.foreground,
-      fontFamily: "Inter_400Regular",
     },
-    modalRowActive: { color: colors.primary, fontFamily: "Inter_600SemiBold" },
+    modalRowActive: { color: colors.primary, fontWeight: "600" },
   });
 
   function JourneyCard({ item }: { item: Journey }) {
@@ -543,7 +532,7 @@ export default function JourneysScreen() {
       : null;
     const isConvoy = item.journeyType === "convoy";
     return (
-      <TouchableOpacity
+      <GlassButton
         style={styles.journeyCard}
         onPress={() => router.push(`/journey/${item.id}`)}
       >
@@ -563,14 +552,45 @@ export default function JourneysScreen() {
         </View>
         <View style={styles.cardMeta}>
           {item.syncState && item.syncState !== "synced" && (
-            <View style={[styles.tag, { borderLeftWidth: 2, borderLeftColor: item.syncState === "failed" ? colors.destructive : colors.primary }]}>
+            <View
+              style={[
+                styles.tag,
+                {
+                  borderLeftWidth: 2,
+                  borderLeftColor:
+                    item.syncState === "failed"
+                      ? colors.destructive
+                      : colors.primary,
+                },
+              ]}
+            >
               <Ionicons
-                name={item.syncState === "failed" ? "alert-circle-outline" : "cloud-upload-outline"}
+                name={
+                  item.syncState === "failed"
+                    ? "alert-circle-outline"
+                    : "cloud-upload-outline"
+                }
                 size={10}
-                color={item.syncState === "failed" ? colors.destructive : colors.primary}
+                color={
+                  item.syncState === "failed"
+                    ? colors.destructive
+                    : colors.primary
+                }
               />
-              <Text style={[styles.tagText, { color: item.syncState === "failed" ? colors.destructive : colors.primary }]}>
-                {item.syncState === "failed" ? "Upload failed" : "Waiting to upload"}
+              <Text
+                style={[
+                  styles.tagText,
+                  {
+                    color:
+                      item.syncState === "failed"
+                        ? colors.destructive
+                        : colors.primary,
+                  },
+                ]}
+              >
+                {item.syncState === "failed"
+                  ? "Upload failed"
+                  : "Waiting to upload"}
               </Text>
             </View>
           )}
@@ -645,7 +665,7 @@ export default function JourneysScreen() {
             </View>
           )}
         </View>
-      </TouchableOpacity>
+      </GlassButton>
     );
   }
 
@@ -658,7 +678,7 @@ export default function JourneysScreen() {
   return (
     <View style={styles.container}>
       <View style={styles.header}>
-        <ScreenTitle title="Journeys" eyebrow="Your driving archive" />
+        <ScreenTitle title="Drives" eyebrow="Your journeys, remembered." />
         <View style={styles.headerActions}>
           <GlassButton
             style={styles.iconBtn}
@@ -1058,7 +1078,7 @@ export default function JourneysScreen() {
                   style={{
                     fontSize: 15,
                     color: colors.primary,
-                    fontFamily: "Inter_500Medium",
+                    fontWeight: "500",
                   }}
                 >
                   Add Category

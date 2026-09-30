@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 // Unit tests for the app's data layer (no network).
 // Run: node --experimental-transform-types --import ./test/register.mjs --test test/unit.test.ts
 import { test } from 'node:test';
@@ -803,7 +804,7 @@ test('the motion purpose string stays true: the app never requests motion activi
   // never requests it; these are the only calls that could show the prompt.
   const { readdir, readFile } = await import('node:fs/promises');
   const { join } = await import('node:path');
-  const root = new URL('..', import.meta.url).pathname;
+  const root = fileURLToPath(new URL('..', import.meta.url));
   const motionCalls = /\b(requestMotionActivityPermissionsAsync|getMotionActivityPermissionsAsync|getMotionActivityAsync|watchMotionActivityAsync)\b/;
   const offenders: string[] = [];
   const walk = async (dir: string): Promise<void> => {
@@ -860,7 +861,7 @@ test('location permission: concurrent requests share one answer', async () => {
 test('location permission is only requested through the shared helper', async () => {
   const { readdir, readFile } = await import('node:fs/promises');
   const { join } = await import('node:path');
-  const root = new URL('..', import.meta.url).pathname;
+  const root = fileURLToPath(new URL('..', import.meta.url));
   const offenders: string[] = [];
   const walk = async (dir: string): Promise<void> => {
     for (const e of await readdir(dir, { withFileTypes: true })) {

@@ -12,8 +12,8 @@ export function ScreenTitle({
 }) {
   return (
     <View style={{ flexShrink: 1 }}>
-      <Text style={styles.eyebrow}>{eyebrow}</Text>
       <Text style={styles.title}>{title}</Text>
+      <Text style={styles.eyebrow}>{eyebrow}</Text>
     </View>
   );
 }
@@ -46,17 +46,17 @@ export function Disclosure({
 }
 const styles = StyleSheet.create({
   eyebrow: {
-    color: c.primary,
+    color: c.mutedForeground,
     fontFamily: cockpit.type.label,
-    fontSize: 11,
-    letterSpacing: 2,
-    marginBottom: 6,
-    textTransform: "uppercase",
+    fontSize: 14,
+    lineHeight: 20,
+    marginTop: 5,
   },
   title: {
     color: c.foreground,
     fontFamily: cockpit.type.display,
     fontSize: 32,
+    fontWeight: "700",
     letterSpacing: -1,
   },
   disclosure: {

@@ -531,7 +531,7 @@ export default function ActiveDriveOverlay({
           <Text
             style={{
               color: TEXT_SECONDARY,
-              fontFamily: "Inter_600SemiBold",
+              fontWeight: "600",
               fontSize: 12,
             }}
           >
@@ -647,13 +647,11 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: "600",
     color: TEXT_PRIMARY,
-    fontFamily: "Inter_600SemiBold",
   },
   driveStatusTimer: {
     fontSize: 13,
     fontWeight: "700",
     color: TEXT_PRIMARY,
-    fontFamily: "Inter_700Bold",
   },
   gpsCard: {
     backgroundColor: palette.dark.card,
@@ -669,13 +667,11 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: "700",
     color: TEXT_PRIMARY,
-    fontFamily: "Inter_700Bold",
   },
   gpsRow: { flexDirection: "row", alignItems: "center", gap: 4, marginTop: 1 },
   gpsStatus: {
     fontSize: 12,
     color: TEXT_SECONDARY,
-    fontFamily: "Inter_400Regular",
   },
   gpsBars: { flexDirection: "row", alignItems: "flex-end", gap: 2 },
   gpsBar: { width: 3, borderRadius: 1.5 },
@@ -699,19 +695,17 @@ const styles = StyleSheet.create({
     fontSize: 28,
     fontWeight: "700",
     color: TEXT_PRIMARY,
-    fontFamily: "Inter_700Bold",
   },
   navInstruction: {
     fontSize: 14,
     color: TEXT_PRIMARY,
-    fontFamily: "Inter_400Regular",
+
     marginTop: 2,
   },
   navRoad: {
     fontSize: 13,
     fontWeight: "600",
     color: ORANGE,
-    fontFamily: "Inter_600SemiBold",
   },
   navProgress: {
     position: "absolute",
@@ -742,7 +736,7 @@ const styles = StyleSheet.create({
   accuracyWarnText: {
     fontSize: 11,
     color: "#1C1C1E",
-    fontFamily: "Inter_600SemiBold",
+    fontWeight: "600",
   },
   mapControls: {
     position: "absolute",
@@ -781,7 +775,6 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: "700",
     color: TEXT_PRIMARY,
-    fontFamily: "Inter_700Bold",
   },
   passengerNote: {
     position: "absolute",
@@ -797,7 +790,7 @@ const styles = StyleSheet.create({
   passengerNoteText: {
     fontSize: 12,
     color: "#fff",
-    fontFamily: "Inter_500Medium",
+    fontWeight: "500",
     textAlign: "center",
     textShadowColor: "rgba(0,0,0,0.5)",
     textShadowOffset: { width: 0, height: 1 },
@@ -842,7 +835,7 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: "600",
     color: TEXT_SECONDARY,
-    fontFamily: "Inter_600SemiBold",
+
     letterSpacing: 0.8,
     textAlign: "center",
   },
@@ -850,13 +843,13 @@ const styles = StyleSheet.create({
     fontSize: 20,
     fontWeight: "700",
     color: TEXT_PRIMARY,
-    fontFamily: "Inter_700Bold",
+
     textAlign: "center",
   },
   statUnit: {
     fontSize: 11,
     color: TEXT_SECONDARY,
-    fontFamily: "Inter_400Regular",
+
     textAlign: "center",
   },
 
@@ -879,7 +872,7 @@ const styles = StyleSheet.create({
   speedoLabel: {
     fontSize: 11,
     color: TEXT_SECONDARY,
-    fontFamily: "Inter_500Medium",
+    fontWeight: "500",
     letterSpacing: 1.2,
     marginBottom: 2,
   },
@@ -887,13 +880,13 @@ const styles = StyleSheet.create({
     fontSize: 48,
     fontWeight: "700",
     color: TEXT_PRIMARY,
-    fontFamily: "Inter_700Bold",
+
     lineHeight: 54,
   },
   speedoUnit: {
     fontSize: 11,
     color: TEXT_SECONDARY,
-    fontFamily: "Inter_400Regular",
+
     marginTop: 1,
   },
 
@@ -915,7 +908,7 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: "700",
     color: TEXT_PRIMARY,
-    fontFamily: "Inter_700Bold",
+
     letterSpacing: 0.8,
   },
   endDriveBtn: {
@@ -940,7 +933,7 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: "700",
     color: palette.dark.primaryForeground,
-    fontFamily: "Inter_700Bold",
+
     letterSpacing: 0.5,
   },
 });

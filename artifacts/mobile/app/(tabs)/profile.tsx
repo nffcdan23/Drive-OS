@@ -1,4 +1,7 @@
-import { ScreenTitle } from "@/components/Cockpit";
+import { GlassButton, GlassSurface } from "@/components/Glass";
+import { useSignOut } from "@/hooks/useSignOut";
+import { sectionAccent } from "@/constants/colors";
+import { ScreenTitle, Disclosure } from "@/components/Cockpit";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   View,
@@ -25,11 +28,14 @@ import { useApp } from "@/context/AppContext";
 import { formatDistance, distanceUnit } from "@/lib/units";
 
 export default function ProfileScreen() {
-  const colors = useColors();
+  const colors = { ...useColors(), primary: sectionAccent.profile };
+  const handleSignOut = useSignOut();
   const insets = useSafeAreaInsets();
   const router = useRouter();
   const {
     userProfile,
+    activeVehicle,
+    groups,
     journeys,
     resolvedUnitSystem,
     profileStats,
@@ -42,22 +48,50 @@ export default function ProfileScreen() {
   const [avatarBusy, setAvatarBusy] = useState(false);
 
   const openEdit = () => {
-    setForm({ name: userProfile.name, username: userProfile.username ?? "", bio: userProfile.bio ?? "" });
+    setForm({
+      name: userProfile.name,
+      username: userProfile.username ?? "",
+      bio: userProfile.bio ?? "",
+    });
     setEditing(true);
   };
   const saveEdit = () => {
-    if (!form.name.trim()) { Alert.alert("Name required", "Enter the name other drivers will see."); return; }
-    if (form.username.trim() && !/^[A-Za-z0-9_.]{3,30}$/.test(form.username.trim())) {
-      Alert.alert("Username", "Use 3–30 letters, numbers, dots or underscores.");
+    if (!form.name.trim()) {
+      Alert.alert("Name required", "Enter the name other drivers will see.");
       return;
     }
-    updateProfile({ name: form.name.trim(), username: form.username.trim() || undefined, bio: form.bio.trim() });
+    if (
+      form.username.trim() &&
+      !/^[A-Za-z0-9_.]{3,30}$/.test(form.username.trim())
+    ) {
+      Alert.alert(
+        "Username",
+        "Use 3–30 letters, numbers, dots or underscores.",
+      );
+      return;
+    }
+    updateProfile({
+      name: form.name.trim(),
+      username: form.username.trim() || undefined,
+      bio: form.bio.trim(),
+    });
     setEditing(false);
   };
   const pickAvatar = async () => {
     const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (perm.status !== "granted") { Alert.alert("Photo access needed", "Allow photo access to choose a profile picture."); return; }
-    const r = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"], allowsEditing: true, aspect: [1, 1], quality: 0.9 });
+    if (perm.status !== "granted") {
+      Alert.alert(
+        "Photo access needed",
+        "Allow photo access to choose a profile picture.",
+      );
+      return;
+    }
+    const r = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ["images"],
+      allowsEditing: true,
+      aspect: [1, 1],
+      quality: 0.9,
+    });
     if (r.canceled || !r.assets[0]?.uri) return;
     setAvatarBusy(true);
     try {
@@ -99,354 +133,346 @@ export default function ProfileScreen() {
 
   const styles = StyleSheet.create({
     container: { flex: 1, backgroundColor: colors.background },
-    scroll: { flex: 1 },
-    content: {
-      paddingBottom: Math.max(insets.bottom, 12) + 100,
-    },
-    heroSection: {
-      paddingTop: insets.top + 24,
-      paddingHorizontal: 20,
-      paddingBottom: 24,
-      backgroundColor: colors.card,
-      borderBottomWidth: StyleSheet.hairlineWidth,
-      borderBottomColor: colors.border,
-      alignItems: "flex-start",
-    },
+    row: { flexDirection: "row", alignItems: "center", gap: 12 },
+    name: { color: colors.foreground, fontSize: 25, fontWeight: "700" },
+    muted: { color: colors.mutedForeground, fontSize: 13, lineHeight: 19 },
+    panel: { borderRadius: 22, padding: 18, marginBottom: 14 },
     avatar: {
-      marginTop: 24,
-      width: 64,
-      height: 64,
-      borderRadius: 18,
-      backgroundColor: colors.primary + "20",
+      width: 72,
+      height: 72,
+      borderRadius: 36,
       alignItems: "center",
       justifyContent: "center",
+      backgroundColor: colors.secondary,
       borderWidth: 1,
       borderColor: colors.primary,
     },
-    avatarText: {
-      fontSize: 28,
-      fontWeight: "700",
-      color: colors.primary,
-      fontFamily: "Inter_700Bold",
-    },
-    driverName: {
-      fontSize: 30,
-      fontWeight: "700",
-      color: colors.foreground,
-      fontFamily: "Inter_700Bold",
-      marginTop: 12,
-    },
-    levelRow: {
-      flexDirection: "row",
-      alignItems: "center",
-      gap: 6,
-      marginTop: 4,
-    },
-    levelBadge: {
-      backgroundColor: colors.primary,
-      borderRadius: 10,
-      paddingHorizontal: 10,
-      paddingVertical: 3,
-    },
-    levelBadgeText: {
-      fontSize: 12,
-      fontWeight: "700",
-      color: colors.primaryForeground,
-      fontFamily: "Inter_700Bold",
-    },
-    levelLabel: {
-      fontSize: 13,
-      color: colors.mutedForeground,
-      fontFamily: "Inter_400Regular",
-    },
-    xpRow: { width: "100%", marginTop: 14 },
-    xpLabelRow: {
-      flexDirection: "row",
-      justifyContent: "space-between",
-      marginBottom: 6,
-    },
-    xpLabel: {
-      fontSize: 12,
-      color: colors.mutedForeground,
-      fontFamily: "Inter_400Regular",
-    },
-    xpBar: { height: 6, backgroundColor: colors.muted, borderRadius: 3 },
-    xpFill: { height: 6, borderRadius: 3, backgroundColor: colors.primary },
-    settingsBtn: {
-      minWidth: 48,
-      minHeight: 48,
-      alignItems: "center",
-      justifyContent: "center",
-      position: "absolute",
-      top: insets.top + 24,
-      right: 20,
-    },
-    statsSection: { padding: 20 },
-    sectionTitle: {
-      fontSize: 16,
-      fontWeight: "600",
-      color: colors.foreground,
-      fontFamily: "Inter_600SemiBold",
-      marginBottom: 12,
-    },
-    statsGrid: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
-    statCard: {
-      flex: 1,
-      minWidth: "45%",
-      backgroundColor: colors.card,
-      borderRadius: 14,
-      padding: 14,
-      borderWidth: StyleSheet.hairlineWidth,
-      borderColor: colors.border,
-      alignItems: "center",
-    },
-    statValue: {
-      fontSize: 20,
-      fontWeight: "700",
-      color: colors.foreground,
-      fontFamily: "Inter_700Bold",
-      marginTop: 6,
-    },
-    statLabel: {
-      fontSize: 12,
-      color: colors.mutedForeground,
-      fontFamily: "Inter_400Regular",
-      marginTop: 2,
-      textAlign: "center",
-    },
-    achievementsSection: { paddingHorizontal: 20, paddingBottom: 12 },
-    achievementRow: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
-    achievementCard: {
-      width: "30%",
-      alignItems: "center",
-      padding: 10,
-      borderRadius: 14,
-      backgroundColor: colors.card,
-      borderWidth: StyleSheet.hairlineWidth,
-      borderColor: colors.border,
-    },
-    achievementLocked: { opacity: 0.35 },
-    achievementTitle: {
-      fontSize: 10,
-      fontWeight: "600",
-      color: colors.foreground,
-      fontFamily: "Inter_600SemiBold",
-      textAlign: "center",
-      marginTop: 6,
-    },
-    settingsSection: { paddingHorizontal: 20 },
-    settingsCard: {
-      backgroundColor: colors.card,
-      borderRadius: 16,
-      borderWidth: StyleSheet.hairlineWidth,
-      borderColor: colors.border,
-      overflow: "hidden",
-    },
+    stat: { flex: 1, alignItems: "center", gap: 4 },
+    value: { color: colors.foreground, fontSize: 18, fontWeight: "600" },
     settingsRow: {
+      minHeight: 70,
+      paddingVertical: 14,
       flexDirection: "row",
       alignItems: "center",
-      gap: 12,
-      padding: 16,
+      gap: 14,
       borderBottomWidth: StyleSheet.hairlineWidth,
       borderBottomColor: colors.border,
     },
-    settingsLabel: {
-      flex: 1,
-      fontSize: 15,
-      color: colors.foreground,
-      fontFamily: "Inter_400Regular",
-    },
+    label: { color: colors.foreground, fontSize: 16 },
   });
-
   return (
     <View style={styles.container}>
       <ScrollView
-        style={styles.scroll}
-        contentContainerStyle={styles.content}
         showsVerticalScrollIndicator={false}
+        contentContainerStyle={{
+          paddingTop: insets.top + 20,
+          paddingHorizontal: 18,
+          paddingBottom: Math.max(insets.bottom, 12) + 100,
+        }}
       >
-        {/* Hero */}
-        <View style={styles.heroSection}>
-          <ScreenTitle title="Driver profile" eyebrow="Every mile counts" />
-          <TouchableOpacity style={styles.avatar} onPress={pickAvatar} accessibilityLabel="Change profile picture" disabled={avatarBusy}>
-            {userProfile.avatarUrl ? (
-              <Image source={{ uri: userProfile.avatarUrl }} style={{ width: 64, height: 64, borderRadius: 18 }} contentFit="cover" />
-            ) : (
-              <Text style={styles.avatarText}>{userProfile.name.charAt(0)}</Text>
-            )}
-            {avatarBusy ? <ActivityIndicator style={{ position: "absolute" }} color={colors.primary} /> : null}
-          </TouchableOpacity>
-          <Text style={styles.driverName}>{userProfile.name}</Text>
-          <View style={styles.levelRow}>
-            <View style={styles.levelBadge}>
-              <Text style={styles.levelBadgeText}>LVL {userProfile.level}</Text>
-            </View>
-            <Text style={styles.levelLabel}>Driver</Text>
-          </View>
-          <View style={styles.xpRow}>
-            <View style={styles.xpLabelRow}>
-              <Text style={styles.xpLabel}>
-                {userProfile.xp.toLocaleString()} XP
-              </Text>
-              <Text style={styles.xpLabel}>
-                {userProfile.xpToNextLevel.toLocaleString()} XP to Level{" "}
-                {userProfile.level + 1}
-              </Text>
-            </View>
-            <View style={styles.xpBar}>
-              <View
-                style={[
-                  styles.xpFill,
-                  { width: `${Math.min(100, xpProgress * 100)}%` as any },
-                ]}
-              />
-            </View>
-          </View>
-        </View>
-
-        <TouchableOpacity
-          style={styles.settingsBtn}
-          onPress={() => router.push("/settings")}
-        >
-          <Ionicons
-            name="settings-outline"
-            size={24}
-            color={colors.foreground}
+        <View style={[styles.row, { marginBottom: 22 }]}>
+          <ScreenTitle
+            title="Profile"
+            eyebrow="Your account, settings and preferences."
           />
-        </TouchableOpacity>
-
-        {/* Stats */}
-        <View style={styles.statsSection}>
-          <Text style={styles.sectionTitle}>Your driving record</Text>
-          <View style={styles.statsGrid}>
-            <View style={styles.statCard}>
-              <Ionicons
-                name="navigate-outline"
-                size={20}
-                color={colors.primary}
-              />
-              <Text style={styles.statValue}>
-                {formatDistance(profileStats.totalDistance, resolvedUnitSystem)}
-              </Text>
-              <Text style={styles.statLabel}>
-                Total {distanceUnit(resolvedUnitSystem)}
-              </Text>
-            </View>
-            <View style={styles.statCard}>
-              <Ionicons name="flag-outline" size={20} color={colors.primary} />
-              <Text style={styles.statValue}>{profileStats.journeys}</Text>
-              <Text style={styles.statLabel}>Journeys</Text>
-            </View>
-            <View style={styles.statCard}>
-              <Ionicons name="car-outline" size={20} color={colors.primary} />
-              <Text style={styles.statValue}>{profileStats.vehicles}</Text>
-              <Text style={styles.statLabel}>Vehicles</Text>
-            </View>
-            <View style={styles.statCard}>
-              <Ionicons
-                name="people-outline"
-                size={20}
-                color={colors.primary}
-              />
-              <Text style={styles.statValue}>{profileStats.friends}</Text>
-              <Text style={styles.statLabel}>Friends</Text>
-            </View>
-          </View>
+          <GlassButton
+            style={{
+              width: 44,
+              height: 44,
+              borderRadius: 22,
+              alignItems: "center",
+              justifyContent: "center",
+              marginLeft: "auto",
+            }}
+            onPress={() => router.push("/settings")}
+            accessibilityLabel="App Preferences"
+          >
+            <Ionicons
+              name="settings-outline"
+              size={22}
+              color={colors.foreground}
+            />
+          </GlassButton>
         </View>
-
-        {/* Achievements */}
-        <View style={styles.achievementsSection}>
-          <Text style={styles.sectionTitle}>
-            Achievements · {unlockedAchievements.length}/
-            {userProfile.achievements.length}
-          </Text>
-          <View style={styles.achievementRow}>
-            {userProfile.achievements.map((ach) => (
-              <View
-                key={ach.id}
+        <GlassSurface style={styles.panel}>
+          <View style={[styles.row, { flexWrap: "wrap" }]}>
+            <TouchableOpacity
+              style={styles.avatar}
+              onPress={pickAvatar}
+              accessibilityRole="button"
+              accessibilityLabel="Change profile picture"
+              disabled={avatarBusy}
+            >
+              {userProfile.avatarUrl ? (
+                <Image
+                  source={{ uri: userProfile.avatarUrl }}
+                  style={{ width: 70, height: 70, borderRadius: 35 }}
+                  contentFit="cover"
+                />
+              ) : (
+                <Text style={[styles.name, { color: colors.primary }]}>
+                  {userProfile.name.charAt(0)}
+                </Text>
+              )}
+              {avatarBusy && (
+                <ActivityIndicator
+                  style={{ position: "absolute" }}
+                  color={colors.primary}
+                />
+              )}
+            </TouchableOpacity>
+            <View style={{ flex: 1, minWidth: 90 }}>
+              <Text style={styles.name}>{userProfile.name}</Text>
+              {userProfile.username && (
+                <Text style={styles.muted}>@{userProfile.username}</Text>
+              )}
+            </View>
+            <GlassButton
+              onPress={openEdit}
+              style={{ minHeight: 44, paddingHorizontal: 12, borderRadius: 20 }}
+              accessibilityLabel="Edit Profile"
+            >
+              <Text
                 style={[
-                  styles.achievementCard,
-                  !ach.unlockedAt && styles.achievementLocked,
+                  styles.muted,
+                  { color: colors.foreground, marginVertical: 12 },
                 ]}
               >
-                <Ionicons
-                  name={ach.icon as any}
-                  size={24}
-                  color={
-                    ach.unlockedAt ? colors.primary : colors.mutedForeground
-                  }
-                />
-                <Text style={styles.achievementTitle}>{ach.title}</Text>
+                Edit Profile
+              </Text>
+            </GlassButton>
+          </View>
+          <View style={[styles.row, { marginTop: 22, gap: 0 }]}>
+            {[
+              [profileStats.journeys, "Drives"],
+              [
+                formatDistance(
+                  profileStats.totalDistance,
+                  resolvedUnitSystem,
+                ).replace(/ (mi|km)$/, ""),
+                distanceUnit(resolvedUnitSystem) === "mi"
+                  ? "Miles"
+                  : "Kilometres",
+              ],
+              [profileStats.friends, "Friends"],
+              [groups.filter((g) => g.isMember).length, "Communities"],
+            ].map(([value, label]) => (
+              <View key={label} style={styles.stat}>
+                <Text
+                  numberOfLines={1}
+                  adjustsFontSizeToFit
+                  style={styles.value}
+                >
+                  {value}
+                </Text>
+                <Text style={[styles.muted, { fontSize: 10 }]}>{label}</Text>
               </View>
             ))}
           </View>
-        </View>
-
-        {/* Settings shortcuts */}
-        <View style={styles.settingsSection}>
-          <Text style={[styles.sectionTitle, { marginTop: 20 }]}>Settings</Text>
-          <View style={styles.settingsCard}>
-            {[
-              {
-                icon: "person-outline",
-                label: "Edit Profile",
-                onPress: openEdit,
-              },
-              {
-                icon: "shield-checkmark-outline",
-                label: "Account & Settings",
-                onPress: () => router.push("/settings"),
-              },
-              {
-                icon: "walk-outline",
-                label: "Passenger Mode",
-                onPress: () => router.push("/settings"),
-              },
-              {
-                icon: "car-outline",
-                label: "Connected Devices (OBD / HUD)",
-                onPress: () => {},
-              },
-              {
-                icon: "information-circle-outline",
-                label: "About this app",
-                onPress: () => {},
-              },
-            ].map((item, i) => (
-              <TouchableOpacity
-                key={i}
-                style={[
-                  styles.settingsRow,
-                  i === 4 && { borderBottomWidth: 0 },
-                ]}
-                onPress={item.onPress}
+        </GlassSurface>
+        {activeVehicle && (
+          <GlassButton
+            style={[styles.panel, styles.row]}
+            onPress={() => router.push(`/vehicle/${activeVehicle.id}`)}
+          >
+            {activeVehicle.imageUri ? (
+              <Image
+                source={{ uri: activeVehicle.imageUri }}
+                style={{ width: 80, height: 58, borderRadius: 12 }}
+                contentFit="cover"
+              />
+            ) : (
+              <Ionicons
+                name="car-outline"
+                size={38}
+                color={colors.mutedForeground}
+              />
+            )}
+            <View style={{ flex: 1 }}>
+              <Text style={styles.muted}>Current Vehicle</Text>
+              <Text style={[styles.label, { marginTop: 4 }]}>
+                {activeVehicle.nickname ||
+                  `${activeVehicle.make} ${activeVehicle.model}`}
+              </Text>
+              <Text style={styles.muted}>
+                {activeVehicle.year} · {activeVehicle.make}
+              </Text>
+            </View>
+            <Ionicons
+              name="chevron-forward"
+              size={18}
+              color={colors.mutedForeground}
+            />
+          </GlassButton>
+        )}
+        <GlassSurface style={[styles.panel, { paddingVertical: 0 }]}>
+          {(
+            [
+              [
+                "person-outline",
+                "Account",
+                "Personal details, email and security",
+                "account",
+              ],
+              [
+                "lock-closed-outline",
+                "Privacy",
+                "Visibility, recordings and location",
+                "privacy",
+              ],
+              [
+                "notifications-outline",
+                "Notifications",
+                "Friends, communities and events",
+                "notifications",
+              ],
+              [
+                "options-outline",
+                "App Preferences",
+                "Units and passenger mode",
+                "preferences",
+              ],
+              [
+                "help-circle-outline",
+                "Help & Support",
+                "Using Derwent and connection help",
+                "help",
+              ],
+              [
+                "document-text-outline",
+                "Legal",
+                "Terms, privacy and licences",
+                "legal",
+              ],
+            ] as const
+          ).map(([icon, label, subtitle, section], index) => (
+            <TouchableOpacity
+              key={section}
+              accessibilityRole="button"
+              onPress={() =>
+                router.push({ pathname: "/settings", params: { section } })
+              }
+              style={[
+                styles.settingsRow,
+                index === 5 && { borderBottomWidth: 0 },
+              ]}
+            >
+              <Ionicons name={icon} size={23} color={colors.foreground} />
+              <View style={{ flex: 1 }}>
+                <Text style={styles.label}>{label}</Text>
+                <Text style={[styles.muted, { marginTop: 3, fontSize: 12 }]}>
+                  {subtitle}
+                </Text>
+              </View>
+              <Ionicons
+                name="chevron-forward"
+                size={16}
+                color={colors.mutedForeground}
+              />
+            </TouchableOpacity>
+          ))}
+        </GlassSurface>
+        <GlassSurface style={[styles.panel, { paddingHorizontal: 0 }]}>
+          <Disclosure title={`Driving record · Level ${userProfile.level}`}>
+            <View style={{ paddingHorizontal: 18, gap: 12 }}>
+              <Text style={styles.muted}>
+                {userProfile.xp.toLocaleString()} XP ·{" "}
+                {userProfile.xpToNextLevel.toLocaleString()} to next level
+              </Text>
+              <View
+                style={{
+                  height: 4,
+                  borderRadius: 2,
+                  backgroundColor: colors.secondary,
+                }}
               >
-                <Ionicons
-                  name={item.icon as any}
-                  size={20}
-                  color={colors.mutedForeground}
+                <View
+                  style={{
+                    height: 4,
+                    borderRadius: 2,
+                    backgroundColor: colors.primary,
+                    width: `${Math.max(0, Math.min(100, xpProgress * 100))}%`,
+                  }}
                 />
-                <Text style={styles.settingsLabel}>{item.label}</Text>
-                <Ionicons
-                  name="chevron-forward"
-                  size={16}
-                  color={colors.mutedForeground}
-                />
-              </TouchableOpacity>
-            ))}
-          </View>
-        </View>
+              </View>
+              <Text style={styles.label}>
+                Achievements · {unlockedAchievements.length}/
+                {userProfile.achievements.length}
+              </Text>
+              {userProfile.achievements.map((ach) => (
+                <View
+                  key={ach.id}
+                  style={[styles.row, { opacity: ach.unlockedAt ? 1 : 0.5 }]}
+                >
+                  <Ionicons
+                    name={ach.icon as any}
+                    size={20}
+                    color={colors.primary}
+                  />
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.label}>{ach.title}</Text>
+                    <Text style={styles.muted}>{ach.description}</Text>
+                  </View>
+                </View>
+              ))}
+            </View>
+          </Disclosure>
+        </GlassSurface>
+        <GlassButton
+          style={[styles.panel, styles.row, { minHeight: 56 }]}
+          onPress={handleSignOut}
+          accessibilityLabel="Log Out"
+        >
+          <Ionicons
+            name="log-out-outline"
+            size={23}
+            color={colors.destructive}
+          />
+          <Text style={[styles.label, { color: colors.destructive }]}>
+            Log Out
+          </Text>
+        </GlassButton>
       </ScrollView>
 
-      <Modal visible={editing} transparent animationType="slide" onRequestClose={() => setEditing(false)}>
-        <View style={{ flex: 1, justifyContent: "flex-end", backgroundColor: "rgba(0,0,0,0.5)" }}>
-          <View style={{ backgroundColor: colors.card, padding: 20, paddingBottom: insets.bottom + 20, borderTopLeftRadius: 24, borderTopRightRadius: 24, gap: 10 }}>
-            <Text style={{ color: colors.foreground, fontSize: 18, fontFamily: "Inter_700Bold" }}>Edit profile</Text>
-            {([
-              ["name", "Display name", 50],
-              ["username", "Username (optional)", 30],
-              ["bio", "Bio (optional)", 500],
-            ] as const).map(([key, label, max]) => (
+      <Modal
+        visible={editing}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setEditing(false)}
+      >
+        <View
+          style={{
+            flex: 1,
+            justifyContent: "flex-end",
+            backgroundColor: "rgba(0,0,0,0.5)",
+          }}
+        >
+          <View
+            style={{
+              backgroundColor: colors.card,
+              padding: 20,
+              paddingBottom: insets.bottom + 20,
+              borderTopLeftRadius: 24,
+              borderTopRightRadius: 24,
+              gap: 10,
+            }}
+          >
+            <Text
+              style={{
+                color: colors.foreground,
+                fontSize: 18,
+                fontWeight: "700",
+              }}
+            >
+              Edit profile
+            </Text>
+            {(
+              [
+                ["name", "Display name", 50],
+                ["username", "Username (optional)", 30],
+                ["bio", "Bio (optional)", 500],
+              ] as const
+            ).map(([key, label, max]) => (
               <TextInput
                 key={key}
                 placeholder={label}
@@ -456,14 +482,45 @@ export default function ProfileScreen() {
                 maxLength={max}
                 autoCapitalize={key === "username" ? "none" : "sentences"}
                 multiline={key === "bio"}
-                style={{ minHeight: 46, borderRadius: 12, borderWidth: 1, borderColor: colors.input, color: colors.foreground, paddingHorizontal: 14, paddingVertical: 10, fontSize: 16, fontFamily: "Inter_400Regular" }}
+                style={{
+                  minHeight: 46,
+                  borderRadius: 12,
+                  borderWidth: 1,
+                  borderColor: colors.input,
+                  color: colors.foreground,
+                  paddingHorizontal: 14,
+                  paddingVertical: 10,
+                  fontSize: 16,
+                }}
               />
             ))}
-            <TouchableOpacity onPress={saveEdit} style={{ height: 48, borderRadius: 12, backgroundColor: colors.primary, alignItems: "center", justifyContent: "center" }}>
-              <Text style={{ color: colors.primaryForeground, fontFamily: "Inter_600SemiBold", fontSize: 16 }}>Save</Text>
+            <TouchableOpacity
+              onPress={saveEdit}
+              style={{
+                height: 48,
+                borderRadius: 12,
+                backgroundColor: colors.primary,
+                alignItems: "center",
+                justifyContent: "center",
+              }}
+            >
+              <Text
+                style={{
+                  color: colors.primaryForeground,
+                  fontWeight: "600",
+                  fontSize: 16,
+                }}
+              >
+                Save
+              </Text>
             </TouchableOpacity>
-            <TouchableOpacity onPress={() => setEditing(false)} style={{ alignItems: "center", padding: 8 }}>
-              <Text style={{ color: colors.primary, fontFamily: "Inter_600SemiBold" }}>Cancel</Text>
+            <TouchableOpacity
+              onPress={() => setEditing(false)}
+              style={{ alignItems: "center", padding: 8 }}
+            >
+              <Text style={{ color: colors.primary, fontWeight: "600" }}>
+                Cancel
+              </Text>
             </TouchableOpacity>
           </View>
         </View>

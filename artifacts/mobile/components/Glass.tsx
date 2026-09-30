@@ -18,7 +18,6 @@ import {
 } from "react-native";
 import { BlurView } from "expo-blur";
 import { GlassView, isLiquidGlassAvailable } from "expo-glass-effect";
-import { LinearGradient } from "expo-linear-gradient";
 import colors from "@/constants/colors";
 
 // One set of OS listeners for all material surfaces, including modal portals.
@@ -101,7 +100,11 @@ export function GlassBackground({
     <View
       pointerEvents="none"
       accessible={false}
-      style={[StyleSheet.absoluteFill, { zIndex: -1 }]}
+      style={[
+        StyleSheet.absoluteFill,
+        shape,
+        { zIndex: -1, overflow: "hidden" },
+      ]}
     >
       {material === "accent" ? (
         <View
@@ -121,16 +124,23 @@ export function GlassBackground({
         <GlassView
           colorScheme="dark"
           glassEffectStyle="regular"
-          tintColor="rgba(16,24,32,0.45)"
+          tintColor={
+            material === "dense" ? "rgba(12,18,24,0.78)" : "rgba(16,24,32,0.45)"
+          }
           style={[StyleSheet.absoluteFill, shape]}
         />
       ) : (
-        <BlurView tint="dark" intensity={45} style={StyleSheet.absoluteFill} />
+        <BlurView
+          tint="dark"
+          intensity={45}
+          style={[StyleSheet.absoluteFill, shape]}
+        />
       )}
-      {material !== "accent" && !opaque && (
+      {material !== "accent" && !opaque && !nativeGlass && (
         <View
           style={[
             StyleSheet.absoluteFill,
+            shape,
             {
               backgroundColor:
                 material === "dense"
@@ -138,17 +148,6 @@ export function GlassBackground({
                   : "rgba(16,24,32,0.42)",
             },
           ]}
-        />
-      )}
-      {!reduceTransparency && (
-        <LinearGradient
-          colors={[
-            "rgba(255,255,255,0.12)",
-            "rgba(255,255,255,0.015)",
-            "rgba(255,255,255,0)",
-          ]}
-          locations={[0, 0.4, 1]}
-          style={StyleSheet.absoluteFill}
         />
       )}
     </View>
@@ -165,7 +164,12 @@ export function GlassSurface({
   return (
     <View
       {...props}
-      style={[style, styles.material, focused && styles.focused]}
+      style={[
+        styles.material,
+        style,
+        { backgroundColor: "transparent" },
+        focused && styles.focused,
+      ]}
     >
       <GlassBackground shape={corners(style)} material={material} />
       {children}
@@ -213,7 +217,11 @@ export function GlassButton({
         animate(1);
         onPressOut?.(event);
       }}
-      style={[style, styles.material, { transform: [{ scale }] }]}
+      style={[
+        styles.material,
+        style,
+        { backgroundColor: "transparent", transform: [{ scale }] },
+      ]}
     >
       <GlassBackground shape={corners(style)} material={material} />
       {children}
@@ -222,8 +230,8 @@ export function GlassButton({
 }
 const styles = StyleSheet.create({
   focused: {
-    borderColor: "rgba(224,175,105,0.75)",
-    borderTopColor: "rgba(244,206,150,0.85)",
+    borderColor: "rgba(0,207,232,0.5)",
+    borderTopColor: "rgba(180,242,250,0.65)",
   },
   material: {
     isolation: "isolate",
