@@ -133,6 +133,19 @@ function smoothHeading(
 // shaded trailing half so the direction reads at a glance.  Rotated by the
 // marker to point where the vehicle is heading.  Poor GPS accuracy is surfaced
 // by the "Poor GPS signal" banner rather than anything on the marker itself.
+//
+// The rotating arrow sits inside a fixed square frame that never rotates.
+// react-native-maps' Apple Maps marker sizes and centres its annotation view
+// from its first child's frame on every layout, and a rotated view's frame is
+// its bounding box, which changes with the angle.  With the arrow as that
+// child, heading changes resized and re-centred the live annotation view
+// (AIRMapMarker layoutSubviews → reactSetFrame), which is what made the
+// marker blink as it turned.  The frame below is that child instead: its size
+// fits the arrow at any angle (the 40×44 diagonal is 59.5) and never changes,
+// so turning the arrow is a pure transform on a view MapKit never sees move.
+// collapsable={false} keeps the new architecture from flattening it away,
+// which would put the rotating view back in its place.
+const ARROW_FRAME = 60;
 const LocationArrow = React.memo(function LocationArrow({
   rotation,
 }: {
@@ -143,30 +156,40 @@ const LocationArrow = React.memo(function LocationArrow({
     outputRange: ["0deg", "360deg"],
   });
   return (
-    <Animated.View
+    <View
+      collapsable={false}
       style={{
-        width: 40,
-        height: 44,
+        width: ARROW_FRAME,
+        height: ARROW_FRAME,
         alignItems: "center",
         justifyContent: "center",
-        transform: [{ rotate: spin }],
       }}
     >
-      <Svg width={35} height={40} viewBox="0 0 34 40">
-        {/* Soft ground shadow, offset down a touch to lift the arrow off the map */}
-        <Path d="M17 5 L31 37 L17 29 L3 37 Z" fill="#000000" opacity={0.18} />
-        <Path
-          d="M17 3 L31 35 L17 27 L3 35 Z"
-          fill="#FFFFFF"
-          stroke="#1C1C1E"
-          strokeWidth={2.5}
-          strokeLinejoin="round"
-          strokeLinecap="round"
-        />
-        {/* Fold shading on the trailing half */}
-        <Path d="M17 3 L31 35 L17 27 Z" fill="#1C1C1E" opacity={0.13} />
-      </Svg>
-    </Animated.View>
+      <Animated.View
+        style={{
+          width: 40,
+          height: 44,
+          alignItems: "center",
+          justifyContent: "center",
+          transform: [{ rotate: spin }],
+        }}
+      >
+        <Svg width={35} height={40} viewBox="0 0 34 40">
+          {/* Soft ground shadow, offset down a touch to lift the arrow off the map */}
+          <Path d="M17 5 L31 37 L17 29 L3 37 Z" fill="#000000" opacity={0.18} />
+          <Path
+            d="M17 3 L31 35 L17 27 L3 35 Z"
+            fill="#FFFFFF"
+            stroke="#1C1C1E"
+            strokeWidth={2.5}
+            strokeLinejoin="round"
+            strokeLinecap="round"
+          />
+          {/* Fold shading on the trailing half */}
+          <Path d="M17 3 L31 35 L17 27 Z" fill="#1C1C1E" opacity={0.13} />
+        </Svg>
+      </Animated.View>
+    </View>
   );
 });
 
