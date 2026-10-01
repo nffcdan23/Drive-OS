@@ -999,3 +999,154 @@ test('a user pinch sets the zoom that follow then holds', () => {
   target.set({ altitude: 0, zoom: Number.NaN });
   assert.deepEqual(target.current, { zoom: 17, altitude: 700 });
 });
+
+// ─── Drive map live-position smoothing ──────────────────────────────────────
+
+import {
+  LocationSmoother, FollowCameraEaser, approachAngle, metersBetween, offsetMeters, lookAheadCenter,
+  extrapolationSeconds, SMOOTHING, type LatLng,
+} from '@/lib/locationSmoothing';
+
+const START: LatLng = { latitude: 52.9225, longitude: -1.4746 };
+const distM = (a: LatLng, b: LatLng) => { const d = metersBetween(a, b); return Math.hypot(d.x, d.y); };
+// A car heading 60° at `speed` m/s, position at time t (ms)
+const truthAt = (t: number, speed: number, course = 60) =>
+  offsetMeters(START, speed * (t / 1000) * Math.sin(course * Math.PI / 180), speed * (t / 1000) * Math.cos(course * Math.PI / 180));
+// Deterministic noise in [-1, 1)
+const rand = (() => { let s = 7; return () => ((s = (s * 16807) % 2147483647) / 2147483647) * 2 - 1; })();
+
+/** Drives the smoother at 60 fps; fixes are [arrivalMs, fix] pairs */
+function simulateDrive(fixes: Array<[number, Parameters<LocationSmoother['addFix']>[0]]>, endMs: number) {
+  const sm = new LocationSmoother();
+  const frames: Array<{ t: number; p: LatLng }> = [];
+  let next = 0;
+  for (let t = 0; t <= endMs; t += 1000 / 60) {
+    while (next < fixes.length && fixes[next]![0] <= t) sm.addFix(fixes[next]![1], fixes[next++]![0]);
+    const p = sm.sample(t);
+    if (p) frames.push({ t, p });
+  }
+  return { sm, frames };
+}
+
+test('at motorway speed the display glides with no per-fix jump and no lag', () => {
+  const speed = 31; // ~70 mph
+  const fixes: Array<[number, Parameters<LocationSmoother['addFix']>[0]]> = [];
+  for (let t = 0; t <= 20_000; t += 1000) {
+    const taken = t - 150; // delivered 150 ms after the fix was taken
+    fixes.push([t, { ...truthAt(taken, speed), speed, course: 60, accuracy: 5, time: taken }]);
+  }
+  const { frames } = simulateDrive(fixes, 20_000);
+  const frameM = speed / 60;
+  let maxStep = 0, maxErr = 0;
+  for (let i = 1; i < frames.length; i++) {
+    maxStep = Math.max(maxStep, distM(frames[i - 1]!.p, frames[i]!.p));
+    maxErr = Math.max(maxErr, distM(frames[i]!.p, truthAt(frames[i]!.t, speed)));
+  }
+  assert.ok(maxStep < frameM * 1.05, `jumped ${maxStep.toFixed(2)} m in one frame (steady ${frameM.toFixed(2)})`);
+  assert.ok(maxErr < 0.5, `trailed the car by ${maxErr.toFixed(2)} m`);
+});
+
+test('irregular, noisy fixes still give continuous motion that tracks the GPS', () => {
+  const speed = 13; // ~30 mph
+  const fixes: Array<[number, Parameters<LocationSmoother['addFix']>[0]]> = [];
+  let t = 0;
+  while (t < 30_000) {
+    const p = offsetMeters(truthAt(t, speed), rand() * 3, rand() * 3); // ±3 m GPS noise
+    fixes.push([t, { ...p, speed: speed + rand() * 0.5, course: 60 + rand() * 3, accuracy: 6, time: t }]);
+    t += 600 + Math.abs(rand()) * 1000; // 0.6–1.6 s gaps
+  }
+  const { frames } = simulateDrive(fixes, 30_000);
+  const frameM = speed / 60;
+  let maxStep = 0, maxErr = 0;
+  for (let i = 1; i < frames.length; i++) {
+    maxStep = Math.max(maxStep, distM(frames[i - 1]!.p, frames[i]!.p));
+    if (frames[i]!.t > 2000) maxErr = Math.max(maxErr, distM(frames[i]!.p, truthAt(frames[i]!.t, speed)));
+  }
+  // A raw-fix display would hop ~13 m at each fix; corrections here are spread out
+  assert.ok(maxStep < frameM * 2.5, `jumped ${maxStep.toFixed(2)} m in one frame`);
+  assert.ok(maxErr < 6, `drifted ${maxErr.toFixed(2)} m from the true track`);
+});
+
+test('a parked car stays still through GPS jitter and the loop can rest', () => {
+  const fixes: Array<[number, Parameters<LocationSmoother['addFix']>[0]]> = [];
+  for (let t = 0; t <= 10_000; t += 1000) {
+    fixes.push([t, { ...offsetMeters(START, rand() * 2.5, rand() * 2.5), speed: 0.2, course: Math.abs(rand()) * 359, accuracy: 8, time: t }]);
+  }
+  const { sm, frames } = simulateDrive(fixes, 10_000);
+  const first = frames[0]!.p;
+  assert.ok(frames.every((f) => distM(f.p, first) === 0), 'parked car moved');
+  assert.equal(sm.isSettled(10_000), true);
+  // Unknown speed and course (some Android fixes) is stationary too, not a guess
+  const sm2 = new LocationSmoother();
+  sm2.addFix({ ...START, speed: null, course: null, accuracy: 5, time: 0 }, 0);
+  assert.deepEqual(sm2.sample(5000), START);
+});
+
+test('when fixes stop, the display coasts briefly then stops instead of driving on', () => {
+  const speed = 20;
+  const fixes: Array<[number, Parameters<LocationSmoother['addFix']>[0]]> = [];
+  for (let t = 0; t <= 5000; t += 1000) fixes.push([t, { ...truthAt(t, speed), speed, course: 60, accuracy: 5, time: t }]);
+  const { sm, frames } = simulateDrive(fixes, 15_000);
+  const last = frames[frames.length - 1]!.p;
+  const coasted = distM(truthAt(5000, speed), last);
+  assert.ok(Math.abs(coasted - speed * extrapolationSeconds(Infinity)) < 0.01);
+  assert.ok(coasted < speed * 2, `coasted ${coasted.toFixed(1)} m on no data`);
+  assert.equal(sm.isSettled(15_000), true);
+  // ...and velocity never jumps while it slows (no sudden stop)
+  for (let i = 1; i < frames.length; i++) assert.ok(distM(frames[i - 1]!.p, frames[i]!.p) < (speed / 60) * 1.05);
+});
+
+test('a real relocation snaps; an ordinary correction blends and converges', () => {
+  const sm = new LocationSmoother();
+  assert.equal(sm.addFix({ ...START, speed: 0, course: null, accuracy: 5, time: 0 }, 0), 'snap');
+  const far = offsetMeters(START, 2000, 0);
+  assert.equal(sm.addFix({ ...far, speed: 0, course: null, accuracy: 5, time: 1000 }, 1000), 'snap');
+  assert.deepEqual(sm.sample(1000), far);
+  const near = offsetMeters(far, 0, 20);
+  assert.equal(sm.addFix({ ...near, speed: 0, course: null, accuracy: 5, time: 2000 }, 2000), 'blend');
+  assert.ok(distM(sm.sample(2000)!, far) < 1e-6, 'a new fix must not move the display instantly');
+  assert.ok(distM(sm.sample(2000 + SMOOTHING.correctionTauMs * 10)!, near) < SMOOTHING.settledM);
+  assert.equal(sm.isSettled(2000 + SMOOTHING.correctionTauMs * 10), true);
+});
+
+test('heading easing turns the short way round north', () => {
+  let h = 350;
+  for (let i = 0; i < 5; i++) {
+    h = approachAngle(h, 10, 16, 250);
+    assert.ok(h > 349 || h < 11, `went the long way: ${h}`);
+  }
+  assert.ok(Math.abs(approachAngle(350, 10, 10_000, 250) - 10) < 1e-6);
+});
+
+test('the follow camera adds no lag when following and eases in from a panned map', () => {
+  const target = (position: LatLng, heading = 60) =>
+    ({ position, heading, pitch: 50, altitude: 450, zoom: 17, lookAheadM: 80 });
+  const cam = new FollowCameraEaser();
+  assert.equal(cam.step(target(START), 16), null); // unseeded: hands off
+  // Resume from a map panned 400 m away, flat and zoomed out
+  cam.seed({ center: offsetMeters(START, 400, 0), heading: 0, pitch: 0, altitude: 2000 }, target(START));
+  let prev = cam.step(target(START), 16)!.pose;
+  let settledAt = -1;
+  for (let i = 1; i < 200 && settledAt < 0; i++) {
+    const s = cam.step(target(START), 16)!;
+    // An exponential ease moves 400·(1−e^(−16/280)) ≈ 22 m in its first frame
+    assert.ok(distM(prev.center, s.pose.center) < 30, 'recentring jumped');
+    prev = s.pose;
+    if (s.settled) settledAt = i;
+  }
+  assert.ok(settledAt > 0 && settledAt * 16 < 3000, `took ${settledAt * 16} ms to settle`);
+  // Settled: the camera is exactly the target, so steady following has no lag
+  let pos = START;
+  for (let i = 0; i < 120; i++) {
+    pos = offsetMeters(pos, 0.3, 0.2);
+    const { pose } = cam.step(target(pos, 60 + i * 0.5), 16)!;
+    assert.ok(distM(pose.center, lookAheadCenter(pos, 60 + i * 0.5, 80)) < 1e-6);
+    assert.equal(pose.heading, 60 + i * 0.5);
+    assert.equal(pose.altitude, 450); // heading changes never touch zoom
+    assert.equal(pose.pitch, 50);
+  }
+  // A seed thousands of metres away jumps rather than smearing across the map
+  const far = new FollowCameraEaser();
+  far.seed({ center: offsetMeters(START, 50_000, 0) }, target(START));
+  assert.ok(distM(far.step(target(START), 16)!.pose.center, lookAheadCenter(START, 60, 80)) < 1e-6);
+});

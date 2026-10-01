@@ -23,7 +23,6 @@ import MapView, {
   MarkerAnimated,
   AnimatedRegion,
   MapType,
-  Camera,
   Polyline,
 } from "react-native-maps";
 import ActiveDriveOverlay, {
@@ -32,6 +31,14 @@ import ActiveDriveOverlay, {
 import * as Location from "expo-location";
 import { requestForegroundLocation } from "@/lib/locationPermission";
 import { buildFollowCamera, FollowZoomTarget } from "@/lib/followCamera";
+import {
+  approachAngle,
+  angleDelta,
+  FollowCameraEaser,
+  type FollowCameraTarget,
+  type ReportedPose,
+  LocationSmoother,
+} from "@/lib/locationSmoothing";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const NAV_ZOOM = 17;
@@ -50,20 +57,24 @@ const STREET_ALTITUDE = 700;
 const MIN_SPEED_FOR_GPS_HEADING = 6;
 // Heading smoothing factor (lower = smoother but laggier)
 const HEADING_SMOOTH = 0.18;
-// Minimum heading change (degrees) before the compass re-animates the camera.
-// Without this, magnetometer noise re-animates the map constantly when still.
+// Minimum heading change (degrees) before the compass moves the heading target.
+// Without this, magnetometer noise keeps the map turning constantly when still.
 const COMPASS_CAMERA_MIN_DELTA_DEG = 2;
 // Heading convergence per GPS fix.  Fixes arrive ~1/s, so a low factor would
-// take many seconds to come round a corner; animateCamera eases the visuals.
+// take many seconds to come round a corner; the frame loop eases the visuals.
 const GPS_HEADING_SMOOTH = 0.5;
-// Camera animation is stretched to cover the gap until the next fix, so the
-// map is always mid-animation.  A duration shorter than the gap is what makes
-// following look like hop-pause-hop rather than a glide.
-const CAMERA_ANIM_MIN_MS = 400;
-const CAMERA_ANIM_MAX_MS = 1500;
-const CAMERA_ANIM_DEFAULT_MS = 1000;
-// Rotation from the compass should feel immediate, so it uses a short fixed one
-const COMPASS_ANIM_MS = 300;
+// How quickly the drawn heading (arrow and heading-up map) follows its target,
+// eased every frame so a new fix or compass step turns smoothly, not in steps
+const HEADING_DISPLAY_TAU_MS = 250;
+// Below this the drawn heading has caught up and the frame loop can rest
+const HEADING_SETTLED_DEG = 0.05;
+// The heading readout and Android marker rotation are React state; refreshing
+// them on every compass tick re-rendered the whole screen many times a second
+const HEADING_UI_INTERVAL_MS = 100;
+// Region-change events within this long of our last camera write are ours
+const PROGRAMMATIC_GRACE_MS = 300;
+// Longest frame step honoured, so a stall (app backgrounded) doesn't lurch
+const MAX_FRAME_DT_MS = 100;
 // Camera tilt during an active drive, for the forward-looking 3D nav view.
 // Apple sits near 60 and Google near 45; 50 splits them.  Only ever applied
 // heading-up — a tilted north-up map is disorienting rather than useful.
@@ -78,10 +89,6 @@ const MAX_PLAUSIBLE_KMH = 300;
 // Max accuracy (metres) to accept a reading; >50 m shows warning
 const ACCURACY_WARNING_M = 50;
 const ACCURACY_REJECT_M = 120;
-
-// react-native-maps types timing() as requiring a full Region plus a `toValue`
-// its implementation overwrites per key — it animates only the keys it is given.
-type RegionTimingConfig = Parameters<AnimatedRegion["timing"]>[0];
 
 type FollowMode = "following" | "free";
 type HeadingMode = "heading-up" | "north-up";
@@ -119,27 +126,6 @@ function smoothHeading(
 ): number {
   const diff = ((target - current + 540) % 360) - 180; // [-180, 180]
   return (((current + diff * factor) % 360) + 360) % 360;
-}
-
-/**
- * Returns a map centre shifted *behind* the vehicle by offsetMeters so the
- * vehicle marker appears in the lower portion of the screen.
- */
-function getOffsetCenter(
-  lat: number,
-  lon: number,
-  headingDeg: number,
-  offsetMeters: number,
-): { latitude: number; longitude: number } {
-  const R = 6371000;
-  const reverseDeg = (headingDeg + 180) % 360;
-  const revRad = reverseDeg * (Math.PI / 180);
-  const dLat = (offsetMeters / R) * Math.cos(revRad) * (180 / Math.PI);
-  const dLon =
-    (offsetMeters / (R * Math.cos(lat * (Math.PI / 180)))) *
-    Math.sin(revRad) *
-    (180 / Math.PI);
-  return { latitude: lat + dLat, longitude: lon + dLon };
 }
 
 // ─── Location Arrow ──────────────────────────────────────────────────────────
@@ -383,6 +369,7 @@ export default function MapScreen() {
   const [isPaused, setIsPaused] = useState(false);
   const [gpsAccuracy, setGpsAccuracy] = useState<number | null>(null);
   const isPausedRef = useRef(false);
+  const lastAccuracyRef = useRef<number | null>(null);
 
   // ── Refs (avoid stale closures in callbacks) ──
   const mapRef = useRef<MapView>(null);
@@ -394,12 +381,25 @@ export default function MapScreen() {
   // Latest device-compass bearing, used whenever GPS course is untrustworthy
   const compassHeadingRef = useRef<number | null>(null);
   const lastSpeedKmhRef = useRef(0);
-  // Heading the camera was last animated to, for the compass jitter threshold
-  const lastCameraHeadingRef = useRef(0);
-  // Wall-clock of the previous fix, used to size the next camera animation
-  const lastFixTimeRef = useRef<number | null>(null);
-  // Marker position is animated separately from the camera; if it snapped to
-  // each fix while the camera glided, the car would visibly jump then settle.
+  // Heading the drawn arrow/map is easing toward.  GPS sets it every fix; the
+  // compass only moves it past COMPASS_CAMERA_MIN_DELTA_DEG, to ignore jitter.
+  const headingTargetRef = useRef(0);
+  // Heading actually drawn this frame, eased toward headingTargetRef
+  const drawnHeadingRef = useRef(0);
+  // ── Visual smoothing layer ──
+  // Raw fixes still go to recording untouched; these only decide what's drawn.
+  // The marker and follow camera are both written every frame from the same
+  // smoothed position, so the car stays put on screen while the map glides.
+  const [locationSmoother] = useState(() => new LocationSmoother());
+  const [cameraEaser] = useState(() => new FollowCameraEaser());
+  const frameIdRef = useRef<number | null>(null);
+  const lastFrameAtRef = useRef(0);
+  const lastHeadingUiAtRef = useRef(0);
+  const seedingCameraRef = useRef(false);
+  const markerDrawnAtRef = useRef<{
+    latitude: number;
+    longitude: number;
+  } | null>(null);
   const markerCoordRef = useRef(
     new AnimatedRegion({
       latitude: CONFIG.DEMO_REGION.latitude,
@@ -408,7 +408,6 @@ export default function MapScreen() {
       longitudeDelta: 0,
     }),
   );
-  const hasMarkerPositionRef = useRef(false);
   // Distinguishes "a drive just ended" from "no drive has started yet"
   const wasDrivingRef = useRef(false);
   const lastPositionRef = useRef<{
@@ -441,8 +440,7 @@ export default function MapScreen() {
   // the angle is where the phone points minus where the map is turned to.
   const syncArrowRotation = useCallback(() => {
     const angle =
-      (((smoothedHeadingRef.current - mapHeadingRef.current) % 360) + 360) %
-      360;
+      (((drawnHeadingRef.current - mapHeadingRef.current) % 360) + 360) % 360;
     arrowRotation.setValue(angle);
   }, [arrowRotation]);
 
@@ -489,51 +487,178 @@ export default function MapScreen() {
     }).start();
   }, [followMode]);
 
-  // ── Camera animation ─────────────────────────────────────────────────────
-  const animateCameraToFollow = useCallback(
-    (
-      loc: { latitude: number; longitude: number },
-      heading: number,
-      offsetM = 0,
-      durationMs = CAMERA_ANIM_DEFAULT_MS,
-      resetZoom = false,
-    ) => {
-      if (!mapRef.current || Platform.OS === "web") return;
-      programmaticUntilRef.current = Date.now() + durationMs + 300;
-      // Automatic callers wait out the gesture window, so reaching here means
-      // any gesture is over; a deliberate action like resume overrides it.
-      zoomTarget.clearGesture();
+  // ── Smoothed marker + follow camera, drawn every frame ───────────────────
+  // GPS fixes and compass steps only move targets; this loop draws toward
+  // them each frame.  It writes the marker and the camera from the same
+  // smoothed position in the same frame, so the vehicle holds still on screen
+  // while the map glides, and it stops itself once nothing is moving.
+  const followTargetFor = useCallback(
+    (position: { latitude: number; longitude: number }): FollowCameraTarget => {
+      const isHeadingUp = headingModeRef.current === "heading-up";
+      const zoom = zoomTarget.current;
+      return {
+        position,
+        heading: isHeadingUp ? drawnHeadingRef.current : 0,
+        pitch: pitchFor(isDrivingRef.current, headingModeRef.current),
+        altitude: zoom.altitude,
+        zoom: zoom.zoom,
+        // Centre exactly on the vehicle, except driving heading-up, where the
+        // telemetry panel covers the lower screen and the car sits above it
+        lookAheadM:
+          isHeadingUp && isDrivingRef.current ? DRIVE_LOOK_AHEAD_M : 0,
+      };
+    },
+    [zoomTarget],
+  );
 
+  // Start the follow camera from wherever the map is now, so entering follow
+  // (resume, locate, after a pinch) eases over rather than jumping
+  const seedFollowCamera = useCallback(
+    (current: ReportedPose) => {
+      const position = locationSmoother.sample(Date.now());
+      if (position) cameraEaser.seed(current, followTargetFor(position));
+    },
+    [locationSmoother, cameraEaser, followTargetFor],
+  );
+
+  const frameLoopRef = useRef<() => void>(() => {});
+  const wakeFrameLoop = useCallback(() => {
+    if (frameIdRef.current != null) return;
+    lastFrameAtRef.current = Date.now();
+    frameIdRef.current = requestAnimationFrame(() => frameLoopRef.current());
+  }, []);
+
+  const requestCameraSeed = useCallback(() => {
+    if (seedingCameraRef.current || !mapRef.current) return;
+    seedingCameraRef.current = true;
+    mapRef.current
+      .getCamera()
+      .then((cam) => seedFollowCamera(cam))
+      // No live camera to start from: start from the target itself
+      .catch(() => seedFollowCamera({}))
+      .finally(() => {
+        seedingCameraRef.current = false;
+        wakeFrameLoop();
+      });
+  }, [seedFollowCamera, wakeFrameLoop]);
+
+  frameLoopRef.current = () => {
+    frameIdRef.current = null;
+    const now = Date.now();
+    const dt = Math.min(
+      Math.max(now - lastFrameAtRef.current, 0),
+      MAX_FRAME_DT_MS,
+    );
+    lastFrameAtRef.current = now;
+
+    // ── Heading: ease the drawn heading toward its target ──
+    drawnHeadingRef.current = approachAngle(
+      drawnHeadingRef.current,
+      headingTargetRef.current,
+      dt,
+      HEADING_DISPLAY_TAU_MS,
+    );
+    const headingSettled =
+      Math.abs(angleDelta(drawnHeadingRef.current, headingTargetRef.current)) <
+      HEADING_SETTLED_DEG;
+    if (headingSettled) drawnHeadingRef.current = headingTargetRef.current;
+
+    const position = locationSmoother.sample(now);
+    let cameraSettled = true;
+    if (position) {
+      // ── Marker ── (skipped when only the heading is moving)
+      const drawn = markerDrawnAtRef.current;
+      if (
+        !drawn ||
+        drawn.latitude !== position.latitude ||
+        drawn.longitude !== position.longitude
+      ) {
+        markerDrawnAtRef.current = position;
+        markerCoordRef.current.setValue({
+          latitude: position.latitude,
+          longitude: position.longitude,
+          latitudeDelta: 0,
+          longitudeDelta: 0,
+        });
+      }
+
+      // ── Follow camera ──
+      if (
+        followModeRef.current === "following" &&
+        mapRef.current &&
+        Platform.OS !== "web"
+      ) {
+        if (zoomTarget.gestureActive(now)) {
+          // Hands off while the user touches the map.  Afterwards, start again
+          // from wherever they left it, or the map would jump to catch up.
+          cameraEaser.reset();
+          cameraSettled = false;
+        } else if (!cameraEaser.isSeeded) {
+          requestCameraSeed();
+          cameraSettled = false;
+        } else {
+          const step = cameraEaser.step(followTargetFor(position), dt);
+          if (step) {
+            const { pose } = step;
+            programmaticUntilRef.current = now + PROGRAMMATIC_GRACE_MS;
+            mapHeadingRef.current = pose.heading;
+            // A plain (unanimated) set: the motion comes from this loop.  A
+            // native animation per fix is what produced hop-pause-hop.
+            mapRef.current.setCamera(
+              buildFollowCamera(
+                pose.center,
+                pose.heading,
+                pose.pitch,
+                pose,
+                Platform.OS,
+              ),
+            );
+            cameraSettled = step.settled;
+          }
+        }
+      }
+    }
+    syncArrowRotation();
+
+    const settled =
+      headingSettled && cameraSettled && locationSmoother.isSettled(now);
+    // The readout is React state, so it's refreshed at a modest rate
+    if (settled || now - lastHeadingUiAtRef.current >= HEADING_UI_INTERVAL_MS) {
+      lastHeadingUiAtRef.current = now;
+      setDisplayHeading(Math.round(drawnHeadingRef.current) % 360);
+    }
+    if (!settled) {
+      frameIdRef.current = requestAnimationFrame(() => frameLoopRef.current());
+    }
+  };
+
+  useEffect(
+    () => () => {
+      if (frameIdRef.current != null) cancelAnimationFrame(frameIdRef.current);
+      frameIdRef.current = null;
+    },
+    [],
+  );
+
+  // Enter follow mode.  With the live camera in hand it eases from there;
+  // otherwise the loop fetches it first.
+  const startFollowing = useCallback(
+    (resetZoom: boolean, current?: ReportedPose) => {
+      zoomTarget.clearGesture();
       if (resetZoom) {
         zoomTarget.set({
           zoom: NAV_ZOOM,
           altitude: isDrivingRef.current ? DRIVE_ALTITUDE : STREET_ALTITUDE,
         });
       }
-
-      const isHeadingUp = headingModeRef.current === "heading-up";
-      const mapHeading = isHeadingUp ? heading : 0;
-      const center = isHeadingUp
-        ? getOffsetCenter(loc.latitude, loc.longitude, heading, offsetM)
-        : loc;
-
-      mapHeadingRef.current = mapHeading;
-      syncArrowRotation();
-
-      // The zoom is always stated outright, from the held target.  Leaving it
-      // out let each call re-derive altitude from the previous (often still
-      // animating) camera, which ratcheted the map outward a little at a time.
-      const camera: Partial<Camera> = buildFollowCamera(
-        center,
-        mapHeading,
-        pitchFor(isDrivingRef.current, headingModeRef.current),
-        zoomTarget.current,
-        Platform.OS,
-      );
-
-      mapRef.current.animateCamera(camera, { duration: durationMs });
+      const wasFollowing = followModeRef.current === "following";
+      followModeRef.current = "following";
+      setFollowMode("following");
+      if (current) seedFollowCamera(current);
+      else if (!wasFollowing) cameraEaser.reset();
+      wakeFrameLoop();
     },
-    [syncArrowRotation, zoomTarget],
+    [zoomTarget, cameraEaser, seedFollowCamera, wakeFrameLoop],
   );
 
   // ── Process a new GPS position ────────────────────────────────────────────
@@ -552,7 +677,12 @@ export default function MapScreen() {
       // ── Accuracy filter ──
       if (accuracy != null && accuracy > ACCURACY_REJECT_M) return;
       setAccuracyWarning(accuracy != null && accuracy > ACCURACY_WARNING_M);
-      if (accuracy != null) setGpsAccuracy(accuracy);
+      // Only the drive overlay shows the figure; outside a drive, setting it on
+      // every fix re-rendered the screen each second for nothing
+      if (accuracy != null) {
+        lastAccuracyRef.current = accuracy;
+        if (isDrivingRef.current) setGpsAccuracy(accuracy);
+      }
 
       // ── Plausibility filter ──
       const prev = lastPositionRef.current;
@@ -568,39 +698,33 @@ export default function MapScreen() {
 
       // ── Update stored location ──
       const coord = { latitude: lat, longitude: lon };
+      const firstFix = userLocationRef.current == null;
       userLocationRef.current = coord;
-      setUserLocation(coord);
+      // The state only gates the marker's first render.  Setting it on every
+      // fix re-rendered the whole screen each second for nothing.
+      if (firstFix) setUserLocation(coord);
 
-      // ── Size this animation to the gap since the last fix ──
-      const sinceLastFix =
-        lastFixTimeRef.current != null
-          ? now - lastFixTimeRef.current
-          : CAMERA_ANIM_DEFAULT_MS;
-      lastFixTimeRef.current = now;
-      const animMs = Math.min(
-        CAMERA_ANIM_MAX_MS,
-        Math.max(CAMERA_ANIM_MIN_MS, sinceLastFix),
-      );
-
-      // ── Glide the marker to the new fix (first fix lands instantly) ──
-      if (!hasMarkerPositionRef.current) {
-        markerCoordRef.current.setValue({
+      // ── Visual smoothing (display only; recording below gets the raw fix) ──
+      locationSmoother.addFix(
+        {
           latitude: lat,
           longitude: lon,
+          speed: speedMs,
+          course: gpsHeading,
+          accuracy,
+          time: fixTime ?? now,
+        },
+        now,
+      );
+      // The first fix lands as-is; place the marker before it first renders so
+      // it never flashes at the placeholder coordinate
+      if (firstFix) {
+        markerDrawnAtRef.current = coord;
+        markerCoordRef.current.setValue({
+          ...coord,
           latitudeDelta: 0,
           longitudeDelta: 0,
         });
-        hasMarkerPositionRef.current = true;
-      } else {
-        // Deltas are deliberately omitted so only the position animates
-        markerCoordRef.current
-          .timing({
-            latitude: lat,
-            longitude: lon,
-            duration: animMs,
-            useNativeDriver: false,
-          } as unknown as RegionTimingConfig)
-          .start();
       }
 
       // ── Record to active drive ──
@@ -638,30 +762,20 @@ export default function MapScreen() {
         // Stationary or crawling: GPS course is noise, so face where the phone faces
         targetHeading = compassHeadingRef.current;
       }
-      // Smooth toward target heading.  animateCamera eases the rotation itself,
-      // so this only needs to damp GPS jitter, not do the visual smoothing.
+      // Smooth toward target heading.  The frame loop eases the rotation on
+      // screen, so this only needs to damp GPS jitter.
       const newHeading = smoothHeading(
         smoothedHeadingRef.current,
         targetHeading,
         GPS_HEADING_SMOOTH,
       );
       smoothedHeadingRef.current = newHeading;
-      setDisplayHeading(Math.round(newHeading));
-      syncArrowRotation();
+      headingTargetRef.current = newHeading;
 
-      // ── Drive camera follow ──
-      // Held off while the user's fingers are on the map, so follow never
-      // fights a pinch and the camera it settles at is unambiguously theirs.
-      if (
-        followModeRef.current === "following" &&
-        !zoomTarget.gestureActive(Date.now())
-      ) {
-        const offset = isDrivingRef.current ? DRIVE_LOOK_AHEAD_M : 0;
-        animateCameraToFollow(coord, newHeading, offset, animMs);
-        lastCameraHeadingRef.current = newHeading;
-      }
+      // ── Draw: marker, heading and follow camera glide from here ──
+      wakeFrameLoop();
     },
-    [animateCameraToFollow, updateDriveCoordinate, zoomTarget],
+    [locationSmoother, updateDriveCoordinate, wakeFrameLoop],
   );
 
   // ── Location watcher lifecycle ────────────────────────────────────────────
@@ -786,26 +900,15 @@ export default function MapScreen() {
             HEADING_SMOOTH,
           );
           smoothedHeadingRef.current = newHeading;
-          setDisplayHeading(Math.round(newHeading));
-          syncArrowRotation();
 
-          const delta = Math.abs(
-            ((newHeading - lastCameraHeadingRef.current + 540) % 360) - 180,
-          );
+          // Magnetometer noise stays below the threshold; real turns of the
+          // phone move the target, and the frame loop turns arrow and map.
           if (
-            delta >= COMPASS_CAMERA_MIN_DELTA_DEG &&
-            followModeRef.current === "following" &&
-            headingModeRef.current === "heading-up" &&
-            userLocationRef.current &&
-            !zoomTarget.gestureActive(Date.now())
+            Math.abs(angleDelta(headingTargetRef.current, newHeading)) >=
+            COMPASS_CAMERA_MIN_DELTA_DEG
           ) {
-            lastCameraHeadingRef.current = newHeading;
-            animateCameraToFollow(
-              userLocationRef.current,
-              newHeading,
-              isDrivingRef.current ? DRIVE_LOOK_AHEAD_M : 0,
-              COMPASS_ANIM_MS,
-            );
+            headingTargetRef.current = newHeading;
+            wakeFrameLoop();
           }
         });
         if (cancelled) {
@@ -827,21 +930,14 @@ export default function MapScreen() {
         headingSubRef.current = null;
       }
     };
-  }, [animateCameraToFollow, zoomTarget]);
+  }, [wakeFrameLoop]);
 
-  // When a drive starts, immediately enter follow mode and animate to location
+  // When a drive starts, immediately enter follow mode; the frame loop eases
+  // in the nav zoom, tilt and look-ahead
   useEffect(() => {
     if (isDriving) {
-      setFollowMode("following");
-      if (userLocationRef.current) {
-        animateCameraToFollow(
-          userLocationRef.current,
-          smoothedHeadingRef.current,
-          DRIVE_LOOK_AHEAD_M,
-          PITCH_TRANSITION_MS,
-          true,
-        );
-      }
+      setGpsAccuracy(lastAccuracyRef.current);
+      startFollowing(true);
     } else if (
       wasDrivingRef.current &&
       mapRef.current &&
@@ -849,14 +945,19 @@ export default function MapScreen() {
     ) {
       // Drive over: drop the tilt back to flat, leaving position and zoom alone.
       // Guarded so mounting flat doesn't fire a pointless camera animation.
-      programmaticUntilRef.current = Date.now() + PITCH_TRANSITION_MS + 300;
-      mapRef.current.animateCamera(
-        { pitch: 0 },
-        { duration: PITCH_TRANSITION_MS },
-      );
+      if (followModeRef.current === "following") {
+        // The follow target is flat again now; the loop eases down to it
+        wakeFrameLoop();
+      } else {
+        programmaticUntilRef.current = Date.now() + PITCH_TRANSITION_MS + 300;
+        mapRef.current.animateCamera(
+          { pitch: 0 },
+          { duration: PITCH_TRANSITION_MS },
+        );
+      }
     }
     wasDrivingRef.current = isDriving;
-  }, [isDriving, animateCameraToFollow]);
+  }, [isDriving, startFollowing, wakeFrameLoop]);
 
   // ── Drive timer ────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -876,18 +977,10 @@ export default function MapScreen() {
 
   // ── Follow mode resume ────────────────────────────────────────────────────
   const handleResumeFollowing = useCallback(() => {
-    setFollowMode("following");
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    if (userLocationRef.current) {
-      animateCameraToFollow(
-        userLocationRef.current,
-        smoothedHeadingRef.current,
-        isDrivingRef.current ? DRIVE_LOOK_AHEAD_M : 0,
-        600,
-        true,
-      );
-    }
-  }, [animateCameraToFollow]);
+    // Back to the nav zoom, eased over from wherever the user left the map
+    startFollowing(true);
+  }, [startFollowing]);
 
   // ── Heading mode toggle ───────────────────────────────────────────────────
   const handleToggleHeadingMode = useCallback(() => {
@@ -895,28 +988,34 @@ export default function MapScreen() {
       headingMode === "heading-up" ? "north-up" : "heading-up";
     setHeadingMode(next);
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    if (followMode === "following" && userLocationRef.current) {
-      // The ref is normally synced by an effect after render; the camera needs
-      // the new mode now.  Zoom stays at the held target — switching modes
-      // only changes rotation and tilt.
-      headingModeRef.current = next;
-      animateCameraToFollow(
-        userLocationRef.current,
-        smoothedHeadingRef.current,
-        isDrivingRef.current ? DRIVE_LOOK_AHEAD_M : 0,
-        600,
-      );
+    // The ref is normally synced by an effect after render; the camera needs
+    // the new mode now.  Zoom stays at the held target — switching modes only
+    // changes rotation, tilt and look-ahead, which the frame loop eases over.
+    headingModeRef.current = next;
+    const position = locationSmoother.sample(Date.now());
+    if (followMode === "following" && position) {
+      cameraEaser.retarget(followTargetFor(position));
     }
-  }, [headingMode, followMode, animateCameraToFollow]);
+    wakeFrameLoop();
+  }, [
+    headingMode,
+    followMode,
+    locationSmoother,
+    cameraEaser,
+    followTargetFor,
+    wakeFrameLoop,
+  ]);
 
   // ── Map user-interaction detection ────────────────────────────────────────
   const handleMapPanDrag = useCallback(() => {
     zoomTarget.gestureMoved(Date.now());
     if (followModeRef.current === "following") {
+      followModeRef.current = "free";
+      cameraEaser.reset();
       setFollowMode("free");
       Haptics.selectionAsync();
     }
-  }, [zoomTarget]);
+  }, [zoomTarget, cameraEaser]);
 
   const handleMapTouchStart = useCallback(() => {
     zoomTarget.touchStart(Date.now());
@@ -929,11 +1028,14 @@ export default function MapScreen() {
   const handleRegionChangeComplete = useCallback(() => {
     // Adopt the zoom the map settled at only when the user moved it, so a
     // pinch is respected on the next follow update.  Settles after our own
-    // animations are ignored: Apple Maps reports back a slightly different
+    // camera writes are ignored: Apple Maps reports back a slightly different
     // (often mid-flight) altitude, and adopting it on every heading tick
-    // compounded into the map steadily zooming out.
-    const fromGesture = zoomTarget.gestureActive(Date.now());
-    if (Platform.OS !== "web" && mapRef.current) {
+    // compounded into the map steadily zooming out.  While following, the
+    // frame loop writes the camera every frame, so this fires every frame
+    // too; only the user's moves are worth reading back.
+    const now = Date.now();
+    const fromGesture = zoomTarget.gestureActive(now);
+    if (fromGesture && Platform.OS !== "web" && mapRef.current) {
       mapRef.current
         .getCamera()
         .then((cam) => {
@@ -942,17 +1044,24 @@ export default function MapScreen() {
             mapHeadingRef.current = cam.heading;
             syncArrowRotation();
           }
+          // Still following (a pinch): carry on from where they left it
+          if (followModeRef.current === "following") {
+            seedFollowCamera(cam);
+            wakeFrameLoop();
+          }
         })
         .catch(() => {});
     }
 
-    if (Date.now() < programmaticUntilRef.current) return;
+    if (now < programmaticUntilRef.current) return;
 
     // User triggered this change
     if (followModeRef.current === "following") {
+      followModeRef.current = "free";
+      cameraEaser.reset();
       setFollowMode("free");
     }
-  }, [zoomTarget]);
+  }, [zoomTarget, cameraEaser, seedFollowCamera, wakeFrameLoop]);
 
   // ── Drive controls ────────────────────────────────────────────────────────
   function handleStartDrive() {
@@ -985,11 +1094,16 @@ export default function MapScreen() {
         const zoom = (cam.zoom ?? 15) + 1;
         // An explicit zoom pick becomes the zoom follow mode holds
         zoomTarget.set({ zoom });
+        // While following, the frame loop owns the camera and eases to it
+        if (followModeRef.current === "following") {
+          wakeFrameLoop();
+          return;
+        }
         programmaticUntilRef.current = Date.now() + 500;
         mapRef.current?.animateCamera({ zoom }, { duration: 200 });
       })
       .catch(() => {});
-  }, [zoomTarget]);
+  }, [zoomTarget, wakeFrameLoop]);
 
   const handleZoomOut = useCallback(() => {
     if (!mapRef.current || Platform.OS === "web") return;
@@ -999,11 +1113,16 @@ export default function MapScreen() {
         const zoom = (cam.zoom ?? 15) - 1;
         // An explicit zoom pick becomes the zoom follow mode holds
         zoomTarget.set({ zoom });
+        // While following, the frame loop owns the camera and eases to it
+        if (followModeRef.current === "following") {
+          wakeFrameLoop();
+          return;
+        }
         programmaticUntilRef.current = Date.now() + 500;
         mapRef.current?.animateCamera({ zoom }, { duration: 200 });
       })
       .catch(() => {});
-  }, [zoomTarget]);
+  }, [zoomTarget, wakeFrameLoop]);
 
   // ── Location button ──────────────────────────────────────────────────────
   // Smoothly animates to the user's current position, restores follow mode,
@@ -1025,9 +1144,11 @@ export default function MapScreen() {
     let targetZoom = STREET_ZOOM;
     let targetAlt = STREET_ALTITUDE;
     let preserveZoom = false;
+    let liveCamera: ReportedPose | undefined;
 
     try {
       const cam = await mapRef.current.getCamera();
+      liveCamera = cam;
       // Android exposes `zoom`; iOS exposes `altitude` (and often both)
       if (cam.zoom != null && cam.zoom >= MIN_ZOOM_TO_PRESERVE) {
         targetZoom = cam.zoom;
@@ -1047,38 +1168,10 @@ export default function MapScreen() {
       // getCamera() unavailable — fall through to street defaults
     }
 
-    const heading = smoothedHeadingRef.current;
-    const isHeadingUp = headingModeRef.current === "heading-up";
-
-    // Centre exactly on the user.  The only exception is an active drive in
-    // heading-up mode, where the telemetry panel covers the lower screen and
-    // the vehicle needs to sit above it.
-    const center =
-      isHeadingUp && isDrivingRef.current
-        ? getOffsetCenter(
-            loc.latitude,
-            loc.longitude,
-            heading,
-            DRIVE_LOOK_AHEAD_M,
-          )
-        : loc;
-
-    mapHeadingRef.current = isHeadingUp ? heading : 0;
-    syncArrowRotation();
-    zoomTarget.clearGesture();
-    programmaticUntilRef.current = Date.now() + 900;
-    mapRef.current.animateCamera(
-      {
-        center,
-        heading: isHeadingUp ? heading : 0,
-        zoom: targetZoom,
-        pitch: pitchFor(isDrivingRef.current, headingModeRef.current),
-        altitude: targetAlt,
-      },
-      { duration: 600 },
-    );
-    lastCameraHeadingRef.current = isHeadingUp ? heading : 0;
-  }, [zoomTarget]);
+    // Centre on the user (above the telemetry panel when driving heading-up),
+    // eased over from the live camera by the frame loop
+    startFollowing(false, liveCamera);
+  }, [zoomTarget, startFollowing]);
 
   // ── Formatters ────────────────────────────────────────────────────────────
   function formatDriveTime(sec: number) {
