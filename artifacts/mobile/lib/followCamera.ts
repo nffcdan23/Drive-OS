@@ -16,8 +16,32 @@ export type CameraPlatform = "ios" | "android" | "web" | "windows" | "macos";
 export interface FollowZoom {
   /** Google zoom level, read by Android */
   zoom: number;
-  /** Apple Maps camera altitude in metres, read by iOS */
-  altitude: number;
+  /**
+   * Apple Maps camera distance, eye to map centre, in metres.  Held instead of
+   * altitude because altitude is eye height: the same altitude at a steeper
+   * pitch puts the camera further away, and MapKit limits pitch by distance.
+   */
+  distance: number;
+}
+
+const DEG = Math.PI / 180;
+// cos(pitch) floor, so a near-horizontal reading can't explode the distance
+const MIN_COS = 0.1;
+
+/** Eye height (what MapKit's camera.altitude means) for a distance and pitch */
+export function altitudeForDistance(
+  distance: number,
+  pitchDeg: number,
+): number {
+  return distance * Math.max(Math.cos(pitchDeg * DEG), MIN_COS);
+}
+
+/** Camera distance for a reported altitude and pitch */
+export function distanceForAltitude(
+  altitude: number,
+  pitchDeg: number,
+): number {
+  return altitude / Math.max(Math.cos(pitchDeg * DEG), MIN_COS);
 }
 
 export interface FollowCamera {
@@ -32,12 +56,14 @@ export interface FollowCamera {
 export interface ReportedCamera {
   zoom?: number;
   altitude?: number;
+  pitch?: number;
 }
 
 /**
  * Builds a follow camera.  Position and heading come from the caller; the zoom
- * comes only from the held target.  iOS reads altitude and Android reads zoom,
- * and setting both lets them fight, so exactly one is stated.
+ * comes only from the held target.  iOS reads altitude (derived here from the
+ * distance and pitch) and Android reads zoom, and setting both lets them
+ * fight, so exactly one is stated.
  */
 export function buildFollowCamera(
   center: { latitude: number; longitude: number },
@@ -47,8 +73,9 @@ export function buildFollowCamera(
   platform: CameraPlatform,
 ): FollowCamera {
   const camera: FollowCamera = { center, heading, pitch };
-  if (platform === "ios") camera.altitude = target.altitude;
-  else camera.zoom = target.zoom;
+  if (platform === "ios") {
+    camera.altitude = altitudeForDistance(target.distance, pitch);
+  } else camera.zoom = target.zoom;
   return camera;
 }
 
@@ -78,17 +105,21 @@ export class FollowZoomTarget {
     return { ...this.target };
   }
 
-  /** Sets the target outright, for deliberate resets and explicit zoom picks */
-  set(next: ReportedCamera): void {
+  /**
+   * Sets the target outright, for deliberate resets and explicit zoom picks.
+   * Takes a distance directly, or the altitude and pitch the map reported.
+   */
+  set(next: Partial<FollowZoom> & ReportedCamera): void {
     if (next.zoom != null && Number.isFinite(next.zoom)) {
       this.target.zoom = next.zoom;
     }
-    if (
-      next.altitude != null &&
-      Number.isFinite(next.altitude) &&
-      next.altitude > 0
-    ) {
-      this.target.altitude = next.altitude;
+    const distance =
+      next.distance ??
+      (next.altitude != null
+        ? distanceForAltitude(next.altitude, next.pitch ?? 0)
+        : undefined);
+    if (distance != null && Number.isFinite(distance) && distance > 0) {
+      this.target.distance = distance;
     }
   }
 

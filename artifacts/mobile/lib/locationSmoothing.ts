@@ -13,6 +13,8 @@
 //
 // Kept free of React Native imports so it can be unit-tested under node.
 
+import { distanceForAltitude } from "./followCamera";
+
 export interface LatLng {
   latitude: number;
   longitude: number;
@@ -74,8 +76,9 @@ export function offsetMeters(p: LatLng, x: number, y: number): LatLng {
 }
 
 /**
- * A map centre shifted *behind* the vehicle by `meters` along `headingDeg`, so
- * the vehicle sits in the lower part of the screen in heading-up mode.
+ * A map centre `meters` *ahead* of the vehicle along `headingDeg`.  In
+ * heading-up mode ahead is up the screen, so the vehicle draws below the
+ * centre and most of the view is road in front of it.
  */
 export function lookAheadCenter(
   p: LatLng,
@@ -83,8 +86,8 @@ export function lookAheadCenter(
   meters: number,
 ): LatLng {
   if (meters === 0) return p;
-  const back = (headingDeg + 180) * DEG;
-  return offsetMeters(p, meters * Math.sin(back), meters * Math.cos(back));
+  const ahead = headingDeg * DEG;
+  return offsetMeters(p, meters * Math.sin(ahead), meters * Math.cos(ahead));
 }
 
 /**
@@ -290,10 +293,10 @@ export interface FollowCameraTarget {
   /** Map bearing to hold (the vehicle heading in heading-up, 0 in north-up) */
   heading: number;
   pitch: number;
-  /** iOS altitude (m) and Android zoom; whichever the platform reads is used */
-  altitude: number;
+  /** iOS camera distance, eye to centre (m), and Android zoom */
+  distance: number;
   zoom: number;
-  /** How far behind the vehicle the centre sits (0 unless driving heading-up) */
+  /** How far ahead of the vehicle the centre sits (0 in north-up) */
   lookAheadM: number;
 }
 
@@ -301,23 +304,27 @@ export interface FollowCameraPose {
   center: LatLng;
   heading: number;
   pitch: number;
-  altitude: number;
+  distance: number;
   zoom: number;
 }
 
-/** The camera as the map reports it (react-native-maps getCamera) */
+/**
+ * A camera to ease from: what the map reports (react-native-maps getCamera,
+ * which gives altitude), or a pose this easer produced (which gives distance)
+ */
 export interface ReportedPose {
   center?: LatLng;
   heading?: number;
   pitch?: number;
   altitude?: number;
+  distance?: number;
   zoom?: number;
 }
 
 export const CAMERA_EASING = {
   // Recentring (resume following) and bearing changes of mode
   offsetTauMs: 280,
-  // Tilt in/out at drive start/end and heading-mode switches (~95% in 0.8 s)
+  // Tilt in/out on entering follow and heading-mode switches (~95% in 0.8 s)
   pitchTauMs: 270,
   zoomTauMs: 270,
   lookAheadTauMs: 300,
@@ -338,7 +345,7 @@ export const CAMERA_EASING = {
 export class FollowCameraEaser {
   private seeded = false;
   private pitch = 0;
-  private logAltitude = 0;
+  private logDistance = 0;
   private zoom = 0;
   private lookAhead = 0;
   // Decaying offsets from the target, set when seeding from the live camera
@@ -360,11 +367,12 @@ export class FollowCameraEaser {
   /** Starts easing from the camera the map is showing now */
   seed(current: ReportedPose, target: FollowCameraTarget): void {
     this.pitch = current.pitch ?? target.pitch;
-    this.logAltitude = Math.log(
-      current.altitude != null && current.altitude > 0
-        ? current.altitude
-        : target.altitude,
-    );
+    const distance =
+      current.distance ??
+      (current.altitude != null && current.altitude > 0
+        ? distanceForAltitude(current.altitude, this.pitch)
+        : target.distance);
+    this.logDistance = Math.log(distance);
     this.zoom = current.zoom ?? target.zoom;
     this.lookAhead = target.lookAheadM;
     this.headingOffset =
@@ -402,9 +410,9 @@ export class FollowCameraEaser {
     if (!this.seeded) return null;
     const e = CAMERA_EASING;
     this.pitch = approach(this.pitch, target.pitch, dtMs, e.pitchTauMs);
-    this.logAltitude = approach(
-      this.logAltitude,
-      Math.log(target.altitude),
+    this.logDistance = approach(
+      this.logDistance,
+      Math.log(target.distance),
       dtMs,
       e.zoomTauMs,
     );
@@ -421,13 +429,13 @@ export class FollowCameraEaser {
       this.centerY,
     );
     // Report the target itself once there, not exp(log(x)) ≈ x
-    const eased = Math.exp(this.logAltitude);
-    const altitude =
-      Math.abs(eased - target.altitude) < e.settledM ? target.altitude : eased;
+    const eased = Math.exp(this.logDistance);
+    const distance =
+      Math.abs(eased - target.distance) < e.settledM ? target.distance : eased;
 
     const settled =
       Math.abs(this.pitch - target.pitch) < e.settledDeg &&
-      Math.abs(altitude - target.altitude) < e.settledM &&
+      Math.abs(distance - target.distance) < e.settledM &&
       Math.abs(this.zoom - target.zoom) < 0.001 &&
       Math.abs(this.lookAhead - target.lookAheadM) < e.settledM &&
       Math.abs(this.headingOffset) < e.settledDeg &&
@@ -435,14 +443,14 @@ export class FollowCameraEaser {
     if (settled) {
       // Land exactly, so a settled camera is the target and nothing drifts
       this.pitch = target.pitch;
-      this.logAltitude = Math.log(target.altitude);
+      this.logDistance = Math.log(target.distance);
       this.zoom = target.zoom;
       this.lookAhead = target.lookAheadM;
       this.headingOffset = 0;
       this.centerX = 0;
       this.centerY = 0;
     }
-    this.last = { center, heading, pitch: this.pitch, altitude, zoom: this.zoom };
+    this.last = { center, heading, pitch: this.pitch, distance, zoom: this.zoom };
     return { pose: this.last, settled };
   }
 }

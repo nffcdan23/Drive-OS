@@ -32,6 +32,12 @@ import * as Location from "expo-location";
 import { requestForegroundLocation } from "@/lib/locationPermission";
 import { buildFollowCamera, FollowZoomTarget } from "@/lib/followCamera";
 import {
+  lookAheadForSpeed,
+  NAV_CAMERA,
+  navPitch,
+} from "@/lib/navigationCamera";
+import {
+  approach,
   approachAngle,
   angleDelta,
   FollowCameraEaser,
@@ -41,18 +47,8 @@ import {
 } from "@/lib/locationSmoothing";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
-const NAV_ZOOM = 17;
-// Metres to shift camera during an active drive — keeps the vehicle visible
-// above the telemetry panel (which covers the bottom ~35% of the screen).
-// Outside an active drive the camera centres exactly on the vehicle.
-const DRIVE_LOOK_AHEAD_M = 80;
-// Zoom levels: below MIN_ZOOM_TO_PRESERVE the user is too far out, so we
-// reset to STREET_ZOOM on locate.  Above MIN_ZOOM_TO_PRESERVE we keep theirs.
-const MIN_ZOOM_TO_PRESERVE = 13;
-const STREET_ZOOM = 16.5;
-// iOS altitude equivalent for "too zoomed out" (> 8 km → reset to street level)
-const MAX_ALTITUDE_TO_PRESERVE = 8000;
-const STREET_ALTITUDE = 700;
+// The follow camera's pitch, distance, zoom and look-ahead live in
+// lib/navigationCamera.ts (NAV_CAMERA), shared by every way into follow mode.
 // Minimum speed (km/h) before GPS course is trusted for heading
 const MIN_SPEED_FOR_GPS_HEADING = 6;
 // Heading smoothing factor (lower = smoother but laggier)
@@ -75,15 +71,6 @@ const HEADING_UI_INTERVAL_MS = 100;
 const PROGRAMMATIC_GRACE_MS = 300;
 // Longest frame step honoured, so a stall (app backgrounded) doesn't lurch
 const MAX_FRAME_DT_MS = 100;
-// Camera tilt during an active drive, for the forward-looking 3D nav view.
-// Apple sits near 60 and Google near 45; 50 splits them.  Only ever applied
-// heading-up — a tilted north-up map is disorienting rather than useful.
-const DRIVE_PITCH = 50;
-// How long the tilt takes to come in at the start of a drive and drop at the end
-const PITCH_TRANSITION_MS = 800;
-// Camera altitude (metres) during a drive.  Tilt is only rendered by iOS below
-// a certain altitude — too high and it silently flattens the camera instead.
-const DRIVE_ALTITUDE = 450;
 // Max plausible implied speed (km/h) between two GPS readings
 const MAX_PLAUSIBLE_KMH = 300;
 // Max accuracy (metres) to accept a reading; >50 m shows warning
@@ -111,11 +98,6 @@ function haversineMeters(
       Math.cos(lat2 * (Math.PI / 180)) *
       Math.sin(dLon / 2) ** 2;
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-}
-
-/** Camera tilt for a given state — flat unless driving heading-up */
-function pitchFor(isDriving: boolean, headingMode: HeadingMode): number {
-  return isDriving && headingMode === "heading-up" ? DRIVE_PITCH : 0;
 }
 
 /** Smooth heading transition that correctly wraps across 0/360 */
@@ -419,6 +401,9 @@ export default function MapScreen() {
   const lastFrameAtRef = useRef(0);
   const lastHeadingUiAtRef = useRef(0);
   const seedingCameraRef = useRef(false);
+  // Speed (km/h) the look-ahead is sized from, eased from the GPS speed
+  const lookAheadSpeedRef = useRef(0);
+  const mapTypeRef = useRef<MapType>("standard");
   const markerDrawnAtRef = useRef<{
     latitude: number;
     longitude: number;
@@ -431,8 +416,6 @@ export default function MapScreen() {
       longitudeDelta: 0,
     }),
   );
-  // Distinguishes "a drive just ended" from "no drive has started yet"
-  const wasDrivingRef = useRef(false);
   const lastPositionRef = useRef<{
     lat: number;
     lon: number;
@@ -450,11 +433,15 @@ export default function MapScreen() {
   // one-shot boolean was consumed by the first of the several events a single
   // animation emits, so the rest looked like gestures and cancelled follow mode.
   const programmaticUntilRef = useRef(0);
-  // The zoom/altitude we intend to hold.  Asserted on every camera animation so
+  // The zoom/distance we intend to hold.  Asserted on every camera animation so
   // nothing can drift, and only ever re-read from the map after a user gesture,
   // never after our own animations (see lib/followCamera.ts).
   const [zoomTarget] = useState(
-    () => new FollowZoomTarget({ zoom: NAV_ZOOM, altitude: STREET_ALTITUDE }),
+    () =>
+      new FollowZoomTarget({
+        zoom: NAV_CAMERA.androidZoom,
+        distance: NAV_CAMERA.distanceM,
+      }),
   );
   const resumeButtonAnim = useRef(new Animated.Value(0)).current;
 
@@ -522,13 +509,14 @@ export default function MapScreen() {
       return {
         position,
         heading: isHeadingUp ? drawnHeadingRef.current : 0,
-        pitch: pitchFor(isDrivingRef.current, headingModeRef.current),
-        altitude: zoom.altitude,
+        pitch: navPitch(isHeadingUp, mapTypeRef.current),
+        distance: zoom.distance,
         zoom: zoom.zoom,
-        // Centre exactly on the vehicle, except driving heading-up, where the
-        // telemetry panel covers the lower screen and the car sits above it
-        lookAheadM:
-          isHeadingUp && isDrivingRef.current ? DRIVE_LOOK_AHEAD_M : 0,
+        // Heading-up, the centre sits ahead of the vehicle so the view is
+        // mostly road in front; north-up centres exactly on it
+        lookAheadM: isHeadingUp
+          ? lookAheadForSpeed(lookAheadSpeedRef.current)
+          : 0,
       };
     },
     [zoomTarget],
@@ -585,6 +573,17 @@ export default function MapScreen() {
       Math.abs(angleDelta(drawnHeadingRef.current, headingTargetRef.current)) <
       HEADING_SETTLED_DEG;
     if (headingSettled) drawnHeadingRef.current = headingTargetRef.current;
+
+    // ── Speed for look-ahead: smoothed slowly so it drifts, never nudges ──
+    lookAheadSpeedRef.current = approach(
+      lookAheadSpeedRef.current,
+      lastSpeedKmhRef.current,
+      dt,
+      NAV_CAMERA.lookAhead.speedTauMs,
+    );
+    const speedSettled =
+      Math.abs(lookAheadSpeedRef.current - lastSpeedKmhRef.current) < 0.1;
+    if (speedSettled) lookAheadSpeedRef.current = lastSpeedKmhRef.current;
 
     const position = locationSmoother.sample(now);
     let cameraSettled = true;
@@ -644,7 +643,10 @@ export default function MapScreen() {
     syncArrowRotation();
 
     const settled =
-      headingSettled && cameraSettled && locationSmoother.isSettled(now);
+      headingSettled &&
+      speedSettled &&
+      cameraSettled &&
+      locationSmoother.isSettled(now);
     // The readout is React state, so it's refreshed at a modest rate
     if (settled || now - lastHeadingUiAtRef.current >= HEADING_UI_INTERVAL_MS) {
       lastHeadingUiAtRef.current = now;
@@ -670,8 +672,8 @@ export default function MapScreen() {
       zoomTarget.clearGesture();
       if (resetZoom) {
         zoomTarget.set({
-          zoom: NAV_ZOOM,
-          altitude: isDrivingRef.current ? DRIVE_ALTITUDE : STREET_ALTITUDE,
+          zoom: NAV_CAMERA.androidZoom,
+          distance: NAV_CAMERA.distanceM,
         });
       }
       const wasFollowing = followModeRef.current === "following";
@@ -956,31 +958,20 @@ export default function MapScreen() {
   }, [wakeFrameLoop]);
 
   // When a drive starts, immediately enter follow mode; the frame loop eases
-  // in the nav zoom, tilt and look-ahead
+  // in the navigation camera.  The camera itself is the same in and out of a
+  // drive, so ending one leaves it as it is.
   useEffect(() => {
     if (isDriving) {
       setGpsAccuracy(lastAccuracyRef.current);
       startFollowing(true);
-    } else if (
-      wasDrivingRef.current &&
-      mapRef.current &&
-      Platform.OS !== "web"
-    ) {
-      // Drive over: drop the tilt back to flat, leaving position and zoom alone.
-      // Guarded so mounting flat doesn't fire a pointless camera animation.
-      if (followModeRef.current === "following") {
-        // The follow target is flat again now; the loop eases down to it
-        wakeFrameLoop();
-      } else {
-        programmaticUntilRef.current = Date.now() + PITCH_TRANSITION_MS + 300;
-        mapRef.current.animateCamera(
-          { pitch: 0 },
-          { duration: PITCH_TRANSITION_MS },
-        );
-      }
     }
-    wasDrivingRef.current = isDriving;
-  }, [isDriving, startFollowing, wakeFrameLoop]);
+  }, [isDriving, startFollowing]);
+
+  // Satellite and hybrid can't tilt, so a layer change can change the pitch
+  useEffect(() => {
+    mapTypeRef.current = mapType;
+    wakeFrameLoop();
+  }, [mapType, wakeFrameLoop]);
 
   // ── Drive timer ────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -1148,53 +1139,24 @@ export default function MapScreen() {
   }, [zoomTarget, wakeFrameLoop]);
 
   // ── Location button ──────────────────────────────────────────────────────
-  // Smoothly animates to the user's current position, restores follow mode,
-  // and centres the vehicle slightly above the vertical midpoint to leave room
-  // for the bottom navigation bar and Start Drive button.
-  // Zoom is preserved unless the user is too far out (< MIN_ZOOM_TO_PRESERVE).
+  // Same as Continue Following: back into follow mode with the navigation
+  // camera, eased over from wherever the map is now.
   const handleLocateButton = useCallback(async () => {
     const loc = userLocationRef.current;
     if (!loc) return;
 
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
 
-    // Restore follow mode regardless of platform
-    setFollowMode("following");
-
-    if (Platform.OS === "web" || !mapRef.current) return;
-
-    // Read the live camera so we can preserve the user's zoom level
-    let targetZoom = STREET_ZOOM;
-    let targetAlt = STREET_ALTITUDE;
-    let preserveZoom = false;
     let liveCamera: ReportedPose | undefined;
-
-    try {
-      const cam = await mapRef.current.getCamera();
-      liveCamera = cam;
-      // Android exposes `zoom`; iOS exposes `altitude` (and often both)
-      if (cam.zoom != null && cam.zoom >= MIN_ZOOM_TO_PRESERVE) {
-        targetZoom = cam.zoom;
-        preserveZoom = true;
+    if (Platform.OS !== "web" && mapRef.current) {
+      try {
+        liveCamera = await mapRef.current.getCamera();
+      } catch {
+        // No live camera: the loop fetches one, or starts from the target
       }
-      if (cam.altitude != null && cam.altitude < MAX_ALTITUDE_TO_PRESERVE) {
-        targetAlt = cam.altitude;
-        preserveZoom = true;
-      }
-      // A drive always uses the nav altitude, or iOS may refuse to tilt
-      if (isDrivingRef.current) {
-        targetZoom = NAV_ZOOM;
-        targetAlt = DRIVE_ALTITUDE;
-      }
-      zoomTarget.set({ zoom: targetZoom, altitude: targetAlt });
-    } catch {
-      // getCamera() unavailable — fall through to street defaults
     }
-
-    // Centre on the user (above the telemetry panel when driving heading-up),
-    // eased over from the live camera by the frame loop
-    startFollowing(false, liveCamera);
-  }, [zoomTarget, startFollowing]);
+    startFollowing(true, liveCamera);
+  }, [startFollowing]);
 
   // ── Formatters ────────────────────────────────────────────────────────────
   function formatDriveTime(sec: number) {

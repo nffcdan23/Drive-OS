@@ -958,7 +958,7 @@ test('provider check reads public settings and fails open', async () => {
 import { buildFollowCamera, FollowZoomTarget, GESTURE_SETTLE_MS } from '@/lib/followCamera';
 
 test('heading changes while following never change the camera zoom', () => {
-  const target = new FollowZoomTarget({ zoom: 17, altitude: 700 });
+  const target = new FollowZoomTarget({ zoom: 17, distance: 700 });
   const here = { latitude: 51.5, longitude: -0.12 };
   // Apple Maps hands back a slightly different altitude than it was given;
   // feeding that back in is what zoomed the map steadily outward.
@@ -972,19 +972,19 @@ test('heading changes while following never change the camera zoom', () => {
     assert.equal(target.settle(target.gestureActive(i * 300), { altitude: mapAltitude, zoom: 16.9 }), false);
   }
   assert.ok(sent.every((a) => a === 700), 'altitude drifted');
-  assert.deepEqual(target.current, { zoom: 17, altitude: 700 });
+  assert.deepEqual(target.current, { zoom: 17, distance: 700 });
   const android = buildFollowCamera(here, 90, 0, target.current, 'android');
   assert.equal(android.zoom, 17);
   assert.equal(android.altitude, undefined);
 });
 
 test('a user pinch sets the zoom that follow then holds', () => {
-  const target = new FollowZoomTarget({ zoom: 17, altitude: 700 });
+  const target = new FollowZoomTarget({ zoom: 17, distance: 700 });
   target.touchStart(1000);
   assert.equal(target.gestureActive(1500), true); // follow holds off mid-gesture
   target.touchEnd(2000);
   assert.equal(target.settle(target.gestureActive(2400), { altitude: 300, zoom: 18 }), true);
-  assert.deepEqual(target.current, { zoom: 18, altitude: 300 });
+  assert.deepEqual(target.current, { zoom: 18, distance: 300 });
   // Once the gesture window closes, our own animations can't move it again
   assert.equal(target.gestureActive(2000 + GESTURE_SETTLE_MS + 1), false);
   assert.equal(target.settle(target.gestureActive(5000), { altitude: 320 }), false);
@@ -992,12 +992,12 @@ test('a user pinch sets the zoom that follow then holds', () => {
   // A deliberate reset (resume following) overrides it and closes the window
   target.touchStart(6000);
   target.clearGesture();
-  target.set({ zoom: 17, altitude: 700 });
+  target.set({ zoom: 17, distance: 700 });
   assert.equal(target.gestureActive(6001), false);
-  assert.deepEqual(target.current, { zoom: 17, altitude: 700 });
+  assert.deepEqual(target.current, { zoom: 17, distance: 700 });
   // Junk readings are ignored
   target.set({ altitude: 0, zoom: Number.NaN });
-  assert.deepEqual(target.current, { zoom: 17, altitude: 700 });
+  assert.deepEqual(target.current, { zoom: 17, distance: 700 });
 });
 
 // ─── Drive map live-position smoothing ──────────────────────────────────────
@@ -1120,7 +1120,7 @@ test('heading easing turns the short way round north', () => {
 
 test('the follow camera adds no lag when following and eases in from a panned map', () => {
   const target = (position: LatLng, heading = 60) =>
-    ({ position, heading, pitch: 50, altitude: 450, zoom: 17, lookAheadM: 80 });
+    ({ position, heading, pitch: 50, distance: 700, zoom: 17, lookAheadM: 80 });
   const cam = new FollowCameraEaser();
   assert.equal(cam.step(target(START), 16), null); // unseeded: hands off
   // Resume from a map panned 400 m away, flat and zoomed out
@@ -1142,11 +1142,96 @@ test('the follow camera adds no lag when following and eases in from a panned ma
     const { pose } = cam.step(target(pos, 60 + i * 0.5), 16)!;
     assert.ok(distM(pose.center, lookAheadCenter(pos, 60 + i * 0.5, 80)) < 1e-6);
     assert.equal(pose.heading, 60 + i * 0.5);
-    assert.equal(pose.altitude, 450); // heading changes never touch zoom
+    assert.equal(pose.distance, 700); // heading changes never touch zoom
     assert.equal(pose.pitch, 50);
   }
   // A seed thousands of metres away jumps rather than smearing across the map
   const far = new FollowCameraEaser();
   far.seed({ center: offsetMeters(START, 50_000, 0) }, target(START));
   assert.ok(distM(far.step(target(START), 16)!.pose.center, lookAheadCenter(START, 60, 80)) < 1e-6);
+});
+
+// ─── Drive map navigation camera ────────────────────────────────────────────
+
+import { NAV_CAMERA, navPitch, lookAheadForSpeed } from '@/lib/navigationCamera';
+import { altitudeForDistance, distanceForAltitude } from '@/lib/followCamera';
+
+test('the navigation camera tilts heading-up only, and never on maps that cannot tilt', () => {
+  assert.equal(navPitch(true, 'standard'), NAV_CAMERA.pitchDeg);
+  assert.equal(navPitch(true, 'mutedStandard'), NAV_CAMERA.pitchDeg);
+  assert.equal(navPitch(false, 'standard'), 0);
+  assert.equal(navPitch(true, 'satellite'), 0);
+  assert.equal(navPitch(true, 'hybrid'), 0);
+  // MapKit flattens a 60° camera beyond roughly 800 m; keep tuning inside that
+  if (NAV_CAMERA.pitchDeg >= 60) assert.ok(NAV_CAMERA.distanceM <= 800);
+});
+
+test('look-ahead grows gently with speed between its limits', () => {
+  const { minM, maxM, slowKmh, fastKmh } = NAV_CAMERA.lookAhead;
+  assert.equal(lookAheadForSpeed(0), minM);
+  assert.equal(lookAheadForSpeed(slowKmh), minM);
+  assert.equal(lookAheadForSpeed(fastKmh), maxM);
+  assert.equal(lookAheadForSpeed(200), maxM);
+  let prev = minM, maxStep = 0;
+  for (let k = 0; k <= 200; k += 1) {
+    const l = lookAheadForSpeed(k);
+    assert.ok(l >= prev - 1e-9, 'look-ahead must not shrink as speed rises');
+    maxStep = Math.max(maxStep, l - prev);
+    prev = l;
+  }
+  // No jump anywhere: at most ~1 m per km/h
+  assert.ok(maxStep < 1, `look-ahead jumped ${maxStep.toFixed(2)} m for 1 km/h`);
+});
+
+test('the camera centre sits ahead of the vehicle, and the vehicle stays above the drive panel', () => {
+  const pos = START;
+  for (const heading of [0, 90, 213, 359]) {
+    const c = lookAheadCenter(pos, heading, 40);
+    const d = metersBetween(pos, c);
+    const bearing = (Math.atan2(d.x, d.y) * 180 / Math.PI + 360) % 360;
+    assert.ok(Math.abs(((bearing - heading + 540) % 360) - 180) < 0.01, `centre not ahead at ${heading}°`);
+    assert.ok(Math.abs(Math.hypot(d.x, d.y) - 40) < 0.01);
+  }
+  // Where the vehicle lands on screen: the angle below the centre of view,
+  // mapped through a field of view.  MapKit doesn't publish its FOV, so check a
+  // plausible 30–45° range against the panel (top ≈ 62% down an iPhone 17 Pro,
+  // 874 pt) with room for the 60 pt marker frame.
+  const pitch = NAV_CAMERA.pitchDeg * Math.PI / 180;
+  const alt = altitudeForDistance(NAV_CAMERA.distanceM, NAV_CAMERA.pitchDeg);
+  const toCentre = alt * Math.tan(pitch);
+  for (const lookAhead of [NAV_CAMERA.lookAhead.minM, NAV_CAMERA.lookAhead.maxM]) {
+    const below = pitch - Math.atan((toCentre - lookAhead) / alt);
+    assert.ok(below > 0, 'vehicle should draw below the centre');
+    for (const fovDeg of [30, 37, 45]) {
+      const y = 0.5 + Math.tan(below) / (2 * Math.tan((fovDeg / 2) * Math.PI / 180));
+      assert.ok(y + 30 / 874 < 0.62, `marker reaches the panel at fov ${fovDeg}° (y=${y.toFixed(3)})`);
+    }
+  }
+});
+
+test('tilting keeps the camera distance; altitude is derived from it', () => {
+  assert.ok(Math.abs(altitudeForDistance(800, 60) - 400) < 1e-9);
+  assert.ok(Math.abs(distanceForAltitude(400, 60) - 800) < 1e-9);
+  assert.equal(altitudeForDistance(700, 0), 700);
+  const cam = new FollowCameraEaser();
+  const target = { position: START, heading: 30, pitch: 60, distance: 800, zoom: 16.5, lookAheadM: 25 };
+  // Resume from a flat, panned map at 700 m altitude
+  cam.seed({ center: offsetMeters(START, 120, -80), heading: 0, pitch: 0, altitude: 700 }, target);
+  let pitchPrev = 0, settled = false;
+  for (let i = 0; i < 300 && !settled; i++) {
+    const s = cam.step(target, 16)!;
+    assert.ok(s.pose.pitch >= pitchPrev - 1e-9, 'tilt should only rise toward the target');
+    assert.ok(s.pose.pitch - pitchPrev < 5, 'tilt jumped');
+    pitchPrev = s.pose.pitch;
+    // The camera never sits farther out than the larger of start and target,
+    // so MapKit's distance-based pitch limit is never crossed on the way in
+    assert.ok(s.pose.distance <= 800 + 1e-6);
+    settled = s.settled;
+  }
+  assert.ok(settled);
+  const final = cam.step(target, 16)!.pose;
+  assert.equal(final.pitch, 60);
+  assert.equal(final.distance, 800);
+  assert.ok(distM(final.center, lookAheadCenter(START, 30, 25)) < 1e-6);
+  assert.equal(buildFollowCamera(final.center, final.heading, final.pitch, final, 'ios').altitude, altitudeForDistance(800, 60));
 });
