@@ -64,11 +64,19 @@ module.exports = ({ config }) => {
 
   // A staging or production build without its backend settings would install
   // but never connect; fail the build instead. (The values are public.)
+  // `eas build` first reads this file on your computer with .env files turned
+  // off (EXPO_NO_DOTENV) and without EAS variables of "Secret" visibility, so
+  // the values can be absent there. The EAS build server (EAS_BUILD) has all
+  // of them and enforces the check before the app is built.
   if (appEnv === 'staging' || appEnv === 'production') {
     const missing = ['EXPO_PUBLIC_SUPABASE_URL', 'EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY', 'EXPO_PUBLIC_API_URL']
       .filter((k) => !process.env[k]);
     if (missing.length) {
-      throw new Error(`${appEnv} build is missing ${missing.join(', ')} (set them in the EAS "${appEnv === 'staging' ? 'preview' : 'production'}" environment)`);
+      const message = `${appEnv} build is missing ${missing.join(', ')} (set them in the EAS "${appEnv === 'staging' ? 'preview' : 'production'}" environment)`;
+      const easCliLocalRead = process.env.EXPO_NO_DOTENV === '1' && !process.env.EAS_BUILD;
+      if (!easCliLocalRead) throw new Error(message);
+      // stderr only: EAS CLI parses this command's stdout as JSON.
+      console.warn(`${message}. Not visible to EAS CLI locally; the EAS build server checks again.`);
     }
   }
 
