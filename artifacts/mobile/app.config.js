@@ -25,6 +25,19 @@ function isServerSecret(value) {
   return false;
 }
 
+/**
+ * True while `eas build` reads this file on your computer before uploading.
+ * That read has no .env files and not the EAS environment's values, so the
+ * backend settings can legitimately be absent. EAS CLI evaluates the config
+ * either through `expo config` with EXPO_NO_DOTENV=1, or (when `expo` is a
+ * devDependency, as here) in its own process.
+ */
+function isEasCliConfigRead() {
+  if (process.env.EXPO_NO_DOTENV === '1') return true;
+  return [require.main && require.main.filename, process.argv[1]]
+    .some((entry) => /[\\/]eas-cli[\\/]/.test(String(entry || '')));
+}
+
 module.exports = ({ config }) => {
   const appEnv = process.env.EXPO_PUBLIC_APP_ENV || 'development';
   const id = identity(appEnv);
@@ -64,17 +77,12 @@ module.exports = ({ config }) => {
 
   // A staging or production build without its backend settings would install
   // but never connect; fail the build instead. (The values are public.)
-  // `eas build` first reads this file on your computer with .env files turned
-  // off (EXPO_NO_DOTENV) and without EAS variables of "Secret" visibility, so
-  // the values can be absent there. The EAS build server (EAS_BUILD) has all
-  // of them and enforces the check before the app is built.
   if (appEnv === 'staging' || appEnv === 'production') {
     const missing = ['EXPO_PUBLIC_SUPABASE_URL', 'EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY', 'EXPO_PUBLIC_API_URL']
       .filter((k) => !process.env[k]);
     if (missing.length) {
       const message = `${appEnv} build is missing ${missing.join(', ')} (set them in the EAS "${appEnv === 'staging' ? 'preview' : 'production'}" environment)`;
-      const easCliLocalRead = process.env.EXPO_NO_DOTENV === '1' && !process.env.EAS_BUILD;
-      if (!easCliLocalRead) throw new Error(message);
+      if (!isEasCliConfigRead()) throw new Error(message);
       // stderr only: EAS CLI parses this command's stdout as JSON.
       console.warn(`${message}. Not visible to EAS CLI locally; the EAS build server checks again.`);
     }
