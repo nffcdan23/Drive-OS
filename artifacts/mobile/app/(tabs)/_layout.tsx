@@ -1,8 +1,9 @@
 import React from "react";
 import { Platform, StyleSheet, Text, View } from "react-native";
 import { Tabs } from "expo-router";
+import { NativeTabs } from "expo-router/unstable-native-tabs";
 import { Ionicons } from "@expo/vector-icons";
-import { SymbolView } from "expo-symbols";
+import { SymbolView, type SFSymbol } from "expo-symbols";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { GlassSurface } from "@/components/Glass";
 import { sectionAccent } from "@/constants/colors";
@@ -46,9 +47,42 @@ const destinations = [
   },
 ] as const;
 
+// Selected-state SF Symbols for the native iOS tab bar.
+const selectedSymbol: Record<string, SFSymbol> = {
+  "(drive)": "road.lanes",
+  journeys: "clock.fill",
+  garage: "car.fill",
+  community: "person.2.fill",
+  profile: "person.crop.circle.fill",
+};
+
 export default function TabLayout() {
   const insets = useSafeAreaInsets();
   const { isDriving } = useApp();
+
+  // iOS: the system tab bar (a real UITabBarController). Built with the
+  // iOS 26 SDK it is Liquid Glass; the system handles material, selection,
+  // motion and Reduce Transparency. Screens already keep their own top and
+  // bottom spacing, so automatic content insets are off.
+  if (Platform.OS === "ios") {
+    return (
+      <NativeTabs hidden={isDriving} tintColor={sectionAccent.drive}>
+        {destinations.map(({ name, title, symbol }) => (
+          <NativeTabs.Trigger
+            key={name}
+            name={name}
+            disableAutomaticContentInsets
+          >
+            <NativeTabs.Trigger.Label>{title}</NativeTabs.Trigger.Label>
+            <NativeTabs.Trigger.Icon
+              sf={{ default: symbol, selected: selectedSymbol[name] }}
+            />
+          </NativeTabs.Trigger>
+        ))}
+      </NativeTabs>
+    );
+  }
+
   return (
     <Tabs
       screenOptions={{
