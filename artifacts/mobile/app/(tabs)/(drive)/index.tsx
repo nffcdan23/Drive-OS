@@ -31,6 +31,7 @@ import ActiveDriveOverlay, {
 } from "@/components/ActiveDriveOverlay";
 import * as Location from "expo-location";
 import { requestForegroundLocation } from "@/lib/locationPermission";
+import { buildFollowCamera, FollowZoomTarget } from "@/lib/followCamera";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const NAV_ZOOM = 17;
@@ -428,9 +429,11 @@ export default function MapScreen() {
   // animation emits, so the rest looked like gestures and cancelled follow mode.
   const programmaticUntilRef = useRef(0);
   // The zoom/altitude we intend to hold.  Asserted on every camera animation so
-  // nothing can drift, and re-read from the map after a real pinch gesture.
-  const desiredZoomRef = useRef(NAV_ZOOM);
-  const desiredAltitudeRef = useRef(STREET_ALTITUDE);
+  // nothing can drift, and only ever re-read from the map after a user gesture,
+  // never after our own animations (see lib/followCamera.ts).
+  const [zoomTarget] = useState(
+    () => new FollowZoomTarget({ zoom: NAV_ZOOM, altitude: STREET_ALTITUDE }),
+  );
   const resumeButtonAnim = useRef(new Animated.Value(0)).current;
 
   // Push the arrow's on-screen angle straight to the native view, bypassing
@@ -497,12 +500,15 @@ export default function MapScreen() {
     ) => {
       if (!mapRef.current || Platform.OS === "web") return;
       programmaticUntilRef.current = Date.now() + durationMs + 300;
+      // Automatic callers wait out the gesture window, so reaching here means
+      // any gesture is over; a deliberate action like resume overrides it.
+      zoomTarget.clearGesture();
 
       if (resetZoom) {
-        desiredZoomRef.current = NAV_ZOOM;
-        desiredAltitudeRef.current = isDrivingRef.current
-          ? DRIVE_ALTITUDE
-          : STREET_ALTITUDE;
+        zoomTarget.set({
+          zoom: NAV_ZOOM,
+          altitude: isDrivingRef.current ? DRIVE_ALTITUDE : STREET_ALTITUDE,
+        });
       }
 
       const isHeadingUp = headingModeRef.current === "heading-up";
@@ -514,21 +520,20 @@ export default function MapScreen() {
       mapHeadingRef.current = mapHeading;
       syncArrowRotation();
 
-      const camera: Partial<Camera> = {
+      // The zoom is always stated outright, from the held target.  Leaving it
+      // out let each call re-derive altitude from the previous (often still
+      // animating) camera, which ratcheted the map outward a little at a time.
+      const camera: Partial<Camera> = buildFollowCamera(
         center,
-        heading: mapHeading,
-        pitch: pitchFor(isDrivingRef.current, headingModeRef.current),
-      };
-      // The zoom is always stated outright.  Leaving it out let each call
-      // re-derive altitude from the previous (often still animating) camera,
-      // which ratcheted the map outward a little at a time.
-      // iOS reads altitude and Android reads zoom; setting both lets them fight.
-      if (Platform.OS === "ios") camera.altitude = desiredAltitudeRef.current;
-      else camera.zoom = desiredZoomRef.current;
+        mapHeading,
+        pitchFor(isDrivingRef.current, headingModeRef.current),
+        zoomTarget.current,
+        Platform.OS,
+      );
 
       mapRef.current.animateCamera(camera, { duration: durationMs });
     },
-    [syncArrowRotation],
+    [syncArrowRotation, zoomTarget],
   );
 
   // ── Process a new GPS position ────────────────────────────────────────────
@@ -645,13 +650,18 @@ export default function MapScreen() {
       syncArrowRotation();
 
       // ── Drive camera follow ──
-      if (followModeRef.current === "following") {
+      // Held off while the user's fingers are on the map, so follow never
+      // fights a pinch and the camera it settles at is unambiguously theirs.
+      if (
+        followModeRef.current === "following" &&
+        !zoomTarget.gestureActive(Date.now())
+      ) {
         const offset = isDrivingRef.current ? DRIVE_LOOK_AHEAD_M : 0;
         animateCameraToFollow(coord, newHeading, offset, animMs);
         lastCameraHeadingRef.current = newHeading;
       }
     },
-    [animateCameraToFollow, updateDriveCoordinate],
+    [animateCameraToFollow, updateDriveCoordinate, zoomTarget],
   );
 
   // ── Location watcher lifecycle ────────────────────────────────────────────
@@ -786,7 +796,8 @@ export default function MapScreen() {
             delta >= COMPASS_CAMERA_MIN_DELTA_DEG &&
             followModeRef.current === "following" &&
             headingModeRef.current === "heading-up" &&
-            userLocationRef.current
+            userLocationRef.current &&
+            !zoomTarget.gestureActive(Date.now())
           ) {
             lastCameraHeadingRef.current = newHeading;
             animateCameraToFollow(
@@ -816,7 +827,7 @@ export default function MapScreen() {
         headingSubRef.current = null;
       }
     };
-  }, [animateCameraToFollow]);
+  }, [animateCameraToFollow, zoomTarget]);
 
   // When a drive starts, immediately enter follow mode and animate to location
   useEffect(() => {
@@ -885,52 +896,48 @@ export default function MapScreen() {
     setHeadingMode(next);
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     if (followMode === "following" && userLocationRef.current) {
-      const mapHeading = next === "heading-up" ? smoothedHeadingRef.current : 0;
-      const center =
-        next === "heading-up" && isDrivingRef.current
-          ? getOffsetCenter(
-              userLocationRef.current.latitude,
-              userLocationRef.current.longitude,
-              smoothedHeadingRef.current,
-              DRIVE_LOOK_AHEAD_M,
-            )
-          : userLocationRef.current;
-      mapHeadingRef.current = mapHeading;
-      syncArrowRotation();
-      if (mapRef.current && Platform.OS !== "web") {
-        programmaticUntilRef.current = Date.now() + 900;
-        mapRef.current.animateCamera(
-          {
-            center,
-            heading: mapHeading,
-            zoom: NAV_ZOOM,
-            pitch: pitchFor(isDrivingRef.current, next),
-            altitude: 800,
-          },
-          { duration: 600 },
-        );
-      }
+      // The ref is normally synced by an effect after render; the camera needs
+      // the new mode now.  Zoom stays at the held target — switching modes
+      // only changes rotation and tilt.
+      headingModeRef.current = next;
+      animateCameraToFollow(
+        userLocationRef.current,
+        smoothedHeadingRef.current,
+        isDrivingRef.current ? DRIVE_LOOK_AHEAD_M : 0,
+        600,
+      );
     }
-  }, [headingMode, followMode]);
+  }, [headingMode, followMode, animateCameraToFollow]);
 
   // ── Map user-interaction detection ────────────────────────────────────────
   const handleMapPanDrag = useCallback(() => {
+    zoomTarget.gestureMoved(Date.now());
     if (followModeRef.current === "following") {
       setFollowMode("free");
       Haptics.selectionAsync();
     }
-  }, []);
+  }, [zoomTarget]);
+
+  const handleMapTouchStart = useCallback(() => {
+    zoomTarget.touchStart(Date.now());
+  }, [zoomTarget]);
+
+  const handleMapTouchEnd = useCallback(() => {
+    zoomTarget.touchEnd(Date.now());
+  }, [zoomTarget]);
 
   const handleRegionChangeComplete = useCallback(() => {
-    // Adopt whatever zoom the map settled at, so a pinch is respected on the
-    // next follow update instead of being overwritten by a stale target.
+    // Adopt the zoom the map settled at only when the user moved it, so a
+    // pinch is respected on the next follow update.  Settles after our own
+    // animations are ignored: Apple Maps reports back a slightly different
+    // (often mid-flight) altitude, and adopting it on every heading tick
+    // compounded into the map steadily zooming out.
+    const fromGesture = zoomTarget.gestureActive(Date.now());
     if (Platform.OS !== "web" && mapRef.current) {
       mapRef.current
         .getCamera()
         .then((cam) => {
-          if (cam.zoom != null) desiredZoomRef.current = cam.zoom;
-          if (cam.altitude != null && cam.altitude > 0)
-            desiredAltitudeRef.current = cam.altitude;
+          zoomTarget.settle(fromGesture, cam);
           if (cam.heading != null) {
             mapHeadingRef.current = cam.heading;
             syncArrowRotation();
@@ -945,7 +952,7 @@ export default function MapScreen() {
     if (followModeRef.current === "following") {
       setFollowMode("free");
     }
-  }, []);
+  }, [zoomTarget]);
 
   // ── Drive controls ────────────────────────────────────────────────────────
   function handleStartDrive() {
@@ -975,28 +982,28 @@ export default function MapScreen() {
     mapRef.current
       .getCamera()
       .then((cam) => {
+        const zoom = (cam.zoom ?? 15) + 1;
+        // An explicit zoom pick becomes the zoom follow mode holds
+        zoomTarget.set({ zoom });
         programmaticUntilRef.current = Date.now() + 500;
-        mapRef.current?.animateCamera(
-          { zoom: (cam.zoom ?? 15) + 1 },
-          { duration: 200 },
-        );
+        mapRef.current?.animateCamera({ zoom }, { duration: 200 });
       })
       .catch(() => {});
-  }, []);
+  }, [zoomTarget]);
 
   const handleZoomOut = useCallback(() => {
     if (!mapRef.current || Platform.OS === "web") return;
     mapRef.current
       .getCamera()
       .then((cam) => {
+        const zoom = (cam.zoom ?? 15) - 1;
+        // An explicit zoom pick becomes the zoom follow mode holds
+        zoomTarget.set({ zoom });
         programmaticUntilRef.current = Date.now() + 500;
-        mapRef.current?.animateCamera(
-          { zoom: (cam.zoom ?? 15) - 1 },
-          { duration: 200 },
-        );
+        mapRef.current?.animateCamera({ zoom }, { duration: 200 });
       })
       .catch(() => {});
-  }, []);
+  }, [zoomTarget]);
 
   // ── Location button ──────────────────────────────────────────────────────
   // Smoothly animates to the user's current position, restores follow mode,
@@ -1035,8 +1042,7 @@ export default function MapScreen() {
         targetZoom = NAV_ZOOM;
         targetAlt = DRIVE_ALTITUDE;
       }
-      desiredZoomRef.current = targetZoom;
-      desiredAltitudeRef.current = targetAlt;
+      zoomTarget.set({ zoom: targetZoom, altitude: targetAlt });
     } catch {
       // getCamera() unavailable — fall through to street defaults
     }
@@ -1059,6 +1065,7 @@ export default function MapScreen() {
 
     mapHeadingRef.current = isHeadingUp ? heading : 0;
     syncArrowRotation();
+    zoomTarget.clearGesture();
     programmaticUntilRef.current = Date.now() + 900;
     mapRef.current.animateCamera(
       {
@@ -1071,7 +1078,7 @@ export default function MapScreen() {
       { duration: 600 },
     );
     lastCameraHeadingRef.current = isHeadingUp ? heading : 0;
-  }, []);
+  }, [zoomTarget]);
 
   // ── Formatters ────────────────────────────────────────────────────────────
   function formatDriveTime(sec: number) {
@@ -1631,6 +1638,9 @@ export default function MapScreen() {
           zoomEnabled
           pitchEnabled
           onPanDrag={handleMapPanDrag}
+          onTouchStart={handleMapTouchStart}
+          onTouchEnd={handleMapTouchEnd}
+          onTouchCancel={handleMapTouchEnd}
           onRegionChangeComplete={handleRegionChangeComplete}
           initialRegion={
             userLocation

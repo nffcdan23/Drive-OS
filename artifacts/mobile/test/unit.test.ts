@@ -952,3 +952,50 @@ test('provider check reads public settings and fails open', async () => {
   assert.equal(await enabledProviders('https://ref.supabase.co', 'k', (async () => { throw new TypeError('offline'); }) as typeof fetch), null);
   assert.equal(await enabledProviders('https://ref.supabase.co', 'k', (async () => new Response('nope', { status: 500 })) as typeof fetch), null);
 });
+
+// ─── Drive map follow camera ────────────────────────────────────────────────
+
+import { buildFollowCamera, FollowZoomTarget, GESTURE_SETTLE_MS } from '@/lib/followCamera';
+
+test('heading changes while following never change the camera zoom', () => {
+  const target = new FollowZoomTarget({ zoom: 17, altitude: 700 });
+  const here = { latitude: 51.5, longitude: -0.12 };
+  // Apple Maps hands back a slightly different altitude than it was given;
+  // feeding that back in is what zoomed the map steadily outward.
+  let mapAltitude = 700;
+  const sent: number[] = [];
+  for (let i = 0; i < 200; i++) {
+    const cam = buildFollowCamera(here, (i * 7) % 360, 0, target.current, 'ios');
+    assert.equal(cam.zoom, undefined); // iOS states altitude only
+    sent.push(cam.altitude!);
+    mapAltitude = cam.altitude! * 1.03;
+    assert.equal(target.settle(target.gestureActive(i * 300), { altitude: mapAltitude, zoom: 16.9 }), false);
+  }
+  assert.ok(sent.every((a) => a === 700), 'altitude drifted');
+  assert.deepEqual(target.current, { zoom: 17, altitude: 700 });
+  const android = buildFollowCamera(here, 90, 0, target.current, 'android');
+  assert.equal(android.zoom, 17);
+  assert.equal(android.altitude, undefined);
+});
+
+test('a user pinch sets the zoom that follow then holds', () => {
+  const target = new FollowZoomTarget({ zoom: 17, altitude: 700 });
+  target.touchStart(1000);
+  assert.equal(target.gestureActive(1500), true); // follow holds off mid-gesture
+  target.touchEnd(2000);
+  assert.equal(target.settle(target.gestureActive(2400), { altitude: 300, zoom: 18 }), true);
+  assert.deepEqual(target.current, { zoom: 18, altitude: 300 });
+  // Once the gesture window closes, our own animations can't move it again
+  assert.equal(target.gestureActive(2000 + GESTURE_SETTLE_MS + 1), false);
+  assert.equal(target.settle(target.gestureActive(5000), { altitude: 320 }), false);
+  assert.equal(buildFollowCamera({ latitude: 0, longitude: 0 }, 45, 0, target.current, 'ios').altitude, 300);
+  // A deliberate reset (resume following) overrides it and closes the window
+  target.touchStart(6000);
+  target.clearGesture();
+  target.set({ zoom: 17, altitude: 700 });
+  assert.equal(target.gestureActive(6001), false);
+  assert.deepEqual(target.current, { zoom: 17, altitude: 700 });
+  // Junk readings are ignored
+  target.set({ altitude: 0, zoom: Number.NaN });
+  assert.deepEqual(target.current, { zoom: 17, altitude: 700 });
+});
