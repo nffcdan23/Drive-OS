@@ -195,6 +195,8 @@ class FakeServer {
   locations: ServerLocation[] = [];
   journeys: ServerJourney[] = [];
   points = new Map<string, number>();
+  deletedJourneys: string[] = [];
+  loseNextStartReply = false;
   private n = 0;
   private guard() { if (this.offline) throw new NetworkError(); }
   ep(): Endpoints {
@@ -230,7 +232,14 @@ class FakeServer {
         if (existing) return existing;
         const j = { id: `j${++self.n}`, clientRef: i.clientRef, status: 'active', startedAt: i.startedAt, name: 'Active Journey', route: null } as unknown as ServerJourney;
         self.journeys.push(j);
+        // The request arrived and was stored, but the reply is lost on the way back
+        if (self.loseNextStartReply) { self.loseNextStartReply = false; throw new NetworkError(); }
         return j;
+      },
+      deleteJourney: async (id: string) => {
+        self.guard();
+        self.deletedJourneys.push(id);
+        self.journeys = self.journeys.filter((j) => j.id !== id);
       },
       addRoutePoints: async (id: string, pts: unknown[]) => { self.guard(); self.points.set(id, (self.points.get(id) ?? 0) + pts.length); return { saved: pts.length, status: 'active' }; },
       completeJourney: async (id: string, i: { endedAt: string; distanceKm: number; name?: string }) => {
@@ -1419,4 +1428,243 @@ test('the location arrow lies flat on the map as it tilts, and is unchanged top-
   assert.ok(markerPerspective(500).scaleY >= Math.cos((MARKER_PERSPECTIVE.maxTiltDeg * Math.PI) / 180) - 1e-9);
   assert.deepEqual(markerPerspective(Number.NaN), flat);
   assert.deepEqual(markerPerspective(-20), flat);
+});
+
+// ─── Map rotation, heading smoothing, minimum drive length ──────────────────
+
+import { HeadingFilter, HEADING_FILTER, LatestReader, markerScreenRotation } from '@/lib/headingFilter';
+import { MIN_DRIVE_MS, isLongEnoughToSave } from '@/lib/backend/journeyRecorder';
+import { angleDelta } from '@/lib/locationSmoothing';
+
+test('the arrow stays locked to the map while the user rotates it', async () => {
+  // A drive heading 75°, the user spinning the map through a full turn.  The
+  // camera is read asynchronously (getCamera); each read lands a frame later.
+  const heading = 75;
+  let mapBearing = 0;            // what MapKit is showing right now
+  let arrowBearing = 0;          // the bearing the arrow was last drawn against
+  let reads = 0;
+  const reader = new LatestReader(
+    // Like getCamera: the camera is captured when the read runs, delivered later
+    () => { reads++; const b = mapBearing; return new Promise<number>((r) => setTimeout(() => r(b), 0)); },
+    (b) => { arrowBearing = b; },
+  );
+  const flush = async () => { for (let i = 0; i < 3; i++) await new Promise((r) => setTimeout(r, 1)); };
+  let prevRotation = markerScreenRotation(heading, 0);
+  for (let frame = 0; frame < 120; frame++) {
+    // The gesture turns the map 3° a frame, reported in two region changes
+    mapBearing = (mapBearing + 1.5) % 360;
+    reader.request();
+    mapBearing = (mapBearing + 1.5) % 360;
+    reader.request();                       // arrives while the first read is out
+    await flush();
+    const rotation = markerScreenRotation(heading, arrowBearing);
+    // Live: by the end of each frame the arrow is on the map's latest bearing
+    assert.equal(arrowBearing, mapBearing, `frame ${frame}: arrow drawn against a stale bearing`);
+    assert.ok(Math.abs(angleDelta(prevRotation, rotation)) <= 3.01, `arrow jumped at frame ${frame}`);
+    prevRotation = rotation;
+  }
+  assert.ok(reads <= 2 * 120, 'reads never pile up');
+  // Letting go: the settle read lands on what's already drawn — no correction
+  await flush(); await flush();
+  const before = markerScreenRotation(heading, arrowBearing);
+  reader.request();
+  await flush(); await flush();
+  assert.ok(Math.abs(angleDelta(before, markerScreenRotation(heading, arrowBearing))) < 1e-9);
+  assert.equal(arrowBearing, mapBearing);
+  // Correct relative to the map at any bearing
+  for (const [h, b, want] of [[0, 0, 0], [90, 0, 90], [90, 90, 0], [10, 350, 20], [350, 10, 340], [180, 270, 270], [0, 359, 1]]) {
+    assert.equal(markerScreenRotation(h!, b!), want, `heading ${h} on map ${b}`);
+  }
+});
+
+test('turning the phone gives one smooth, prompt arrow rotation', () => {
+  const f = new HeadingFilter();
+  let seed = 11;
+  const noise = () => ((seed = (seed * 16807) % 2147483647) / 2147483647 - 0.5) * 0.6; // ±0.3°
+  let truth = 10;
+  f.update(truth, 'compass');
+  let prev = f.value, maxStep = 0, maxLag = 0, backwards = 0, restMin = Infinity, restMax = -Infinity, restStep = 0;
+  for (let t = 0; t < 3500; t += 1000 / 60) {
+    truth = 10 + 90 * Math.min(t / 1000, 2); // turning at 90°/s for 2 s, then still
+    if (Math.round(t) % 20 < 17) f.update(truth + noise(), 'compass'); // ~50 Hz readings
+    const v = f.step(1000 / 60);
+    const d = angleDelta(prev, v);
+    if (t < 2000 && d < -1e-9) backwards++;
+    maxStep = Math.max(maxStep, Math.abs(d));
+    if (t > 200 && t < 2000) maxLag = Math.max(maxLag, Math.abs(angleDelta(v, truth)));
+    if (t > 2700) { restMin = Math.min(restMin, v); restMax = Math.max(restMax, v); restStep = Math.max(restStep, Math.abs(d)); }
+    prev = v;
+  }
+  assert.equal(backwards, 0, 'the arrow twitched backwards while turning');
+  assert.ok(maxStep < (90 / 60) * 2, `jumped ${maxStep.toFixed(2)}° in a frame`);
+  assert.ok(maxLag < 20, `trailed the phone by ${maxLag.toFixed(1)}°`);
+  // Once the phone stops, sensor noise can't make it visibly wobble or snap
+  assert.ok(restMax - restMin < 0.7, `wobbled ${(restMax - restMin).toFixed(2)}° at rest`);
+  assert.ok(restStep < 0.1, `snapped ${restStep.toFixed(3)}° at rest`);
+  // Held still: sensor noise doesn't move it, and it comes to rest
+  const rest = new HeadingFilter();
+  rest.update(120, 'compass');
+  for (let i = 0; i < 200; i++) {
+    rest.update(120 + noise(), 'compass');
+    rest.step(16);
+  }
+  assert.equal(rest.value, 120);
+  assert.ok(rest.settled);
+  assert.ok(HEADING_FILTER.compassNoiseDeg < 0.5, 'the noise gate must stay below what the eye can see');
+});
+
+test('heading wraps across north the short way, from either sensor', () => {
+  for (const source of ['compass', 'course'] as const) {
+    const f = new HeadingFilter();
+    f.update(355, source);
+    f.update(5, source);
+    for (let i = 0; i < 200; i++) {
+      const v = f.step(16);
+      assert.ok(v >= 354.999 || v <= 5.001, `${source} went the long way: ${v}`);
+    }
+    assert.equal(f.value, 5);
+  }
+  // GPS course arriving once a second becomes a continuous turn, not steps
+  const g = new HeadingFilter();
+  g.update(0, 'course');
+  let prev = 0, maxStep = 0;
+  for (let t = 0; t < 5000; t += 1000 / 60) {
+    if (Math.round(t) % 1000 < 17) g.update((t / 1000) * 12, 'course'); // 12°/s turn
+    const v = g.step(1000 / 60);
+    maxStep = Math.max(maxStep, Math.abs(angleDelta(prev, v)));
+    prev = v;
+  }
+  assert.ok(maxStep < 1, `course step drew a ${maxStep.toFixed(2)}° jump`);
+});
+
+test('map bearing and heading changing together give the right arrow rotation', () => {
+  const f = new HeadingFilter();
+  f.update(30, 'compass');
+  for (let i = 0; i < 60; i++) f.step(16);
+  // Heading-up following: the map's bearing is the drawn heading, so the arrow
+  // points straight up however the heading moves
+  for (const h of [30, 31, 45, 359, 2, 180]) {
+    f.update(h, 'compass');
+    for (let i = 0; i < 5; i++) {
+      const v = f.step(16);
+      assert.equal(markerScreenRotation(v, v), 0);
+    }
+  }
+  // Exploring: the user turns the map while the phone also turns
+  const g = new HeadingFilter();
+  g.update(100, 'compass');
+  let bearing = 0;
+  for (let i = 0; i < 100; i++) {
+    g.update(100 + i * 0.8, 'compass');
+    const v = g.step(16);
+    bearing = (bearing + 2) % 360;
+    const r = markerScreenRotation(v, bearing);
+    assert.ok(Math.abs(angleDelta(r, v - bearing)) < 1e-9);
+  }
+});
+
+// The Drive screen's End Drive: under 10 s it discards, otherwise it saves
+async function endLikeTheDriveScreen(app: CloudSync) {
+  const ms = app.activeDriveMs();
+  if (ms != null && !isLongEnoughToSave(ms)) {
+    await app.discardDrive();
+    return { saved: false as const };
+  }
+  return { saved: true as const, journey: await app.endDrive() };
+}
+
+async function driveFor(ms: number, opts: { offline?: boolean; loseReply?: boolean } = {}) {
+  const server = new FakeServer();
+  const store = new MemoryStore();
+  const clock = { t: Date.now() - 10 * 60_000 };
+  const app = makeSync(server, store, clock);
+  await app.start();
+  server.offline = !!opts.offline;
+  server.loseNextStartReply = !!opts.loseReply;
+  await app.startDrive(null);
+  await new Promise((r) => setTimeout(r, 5)); // the start-of-drive upload
+  const start = clock.t;
+  while (clock.t - start < ms) {
+    clock.t = Math.min(clock.t + 1000, start + ms);
+    app.addFix({ latitude: 51.5 + (clock.t - start) * 1e-7, longitude: -0.1, speedMs: 12, accuracyM: 5, timestamp: clock.t });
+  }
+  const result = await endLikeTheDriveScreen(app);
+  await app.outbox.flush();
+  return { server, store, app, clock, result };
+}
+
+async function assertNothingKept(d: Awaited<ReturnType<typeof driveFor>>) {
+  assert.equal(d.result.saved, false);
+  assert.equal(d.app.isDriving, false);
+  assert.equal(d.app.data.journeys.length, 0, 'not in drive history');
+  assert.equal(d.app.status.pendingJourneys, 0, 'nothing waiting to upload');
+  const active = await d.store.getItem('@driveos/u/u1/journey/active');
+  assert.ok(active == null || JSON.parse(active) == null, 'no drive left on the device');
+  assert.deepEqual(JSON.parse((await d.store.getItem('@driveos/u/u1/journey/pending')) ?? '[]'), []);
+  assert.equal(d.server.journeys.length, 0, 'no journey left on the server');
+}
+
+test('drives under 10 seconds are not saved anywhere', async () => {
+  assert.equal(MIN_DRIVE_MS, 10_000);
+  for (const ms of [5000, 9900]) {
+    const d = await driveFor(ms);
+    await assertNothingKept(d);
+    assert.equal(d.server.deletedJourneys.length, 1, 'the journey created at drive start is deleted');
+  }
+});
+
+test('drives of 10 seconds or more save as normal', async () => {
+  for (const ms of [10_000, 15_000]) {
+    const d = await driveFor(ms);
+    assert.equal(d.result.saved, true, `${ms} ms should save`);
+    assert.ok(d.result.saved && d.result.journey);
+    assert.equal(d.server.journeys.length, 1);
+    assert.equal(d.server.journeys[0]!.status, 'completed');
+    assert.equal(d.server.deletedJourneys.length, 0);
+  }
+});
+
+test('a short drive leaves nothing behind even offline, or after a lost server reply', async () => {
+  // Offline the whole time: nothing reached the server, nothing kept locally
+  const offline = await driveFor(4000, { offline: true });
+  offline.server.offline = false;
+  await offline.app.outbox.flush();
+  await assertNothingKept(offline);
+  // The server stored the journey but its reply never came back: still found and removed
+  const lost = await driveFor(6000, { loseReply: true });
+  await assertNothingKept(lost);
+  assert.equal(lost.server.deletedJourneys.length, 1);
+  // Ending a short drive any other way is refused too (backstop in endDrive)
+  const d = await driveFor(20_000);
+  const server = new FakeServer();
+  const clock = { t: Date.now() - 60_000 };
+  const app = makeSync(server, new MemoryStore(), clock);
+  await app.start();
+  await app.startDrive(null);
+  await new Promise((r) => setTimeout(r, 5));
+  clock.t += 3000;
+  assert.equal(await app.endDrive(), null);
+  await app.outbox.flush();
+  assert.equal(server.journeys.length, 0);
+  assert.equal(app.data.journeys.length, 0);
+  assert.equal(d.result.saved, true);
+});
+
+test('a short drive cut off by the app being killed is discarded on restart', async () => {
+  const server = new FakeServer();
+  const store = new MemoryStore();
+  const clock = { t: Date.now() - 60_000 };
+  const app = makeSync(server, store, clock);
+  await app.start();
+  await app.startDrive(null);
+  await new Promise((r) => setTimeout(r, 5));
+  for (let s = 0; s < 4; s++) { clock.t += 1000; app.addFix({ latitude: 51.5 + s * 1e-4, longitude: -0.1, speedMs: 12, accuracyM: 5, timestamp: clock.t }); }
+  await new Promise((r) => setTimeout(r, 5));
+  // Killed here.  On the next launch:
+  const again = makeSync(server, store, clock);
+  await again.start();
+  await again.outbox.flush();
+  assert.equal(again.status.pendingJourneys, 0);
+  assert.equal(again.data.journeys.length, 0);
+  assert.equal(server.journeys.length, 0);
 });

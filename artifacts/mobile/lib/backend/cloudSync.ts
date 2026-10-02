@@ -15,7 +15,8 @@
 import type { Endpoints, LocationKind, SpotCategory, Visibility } from './endpoints';
 import { ApiError, describeError, isRetryable, type ConnectionState } from './http';
 import {
-  JourneyStore, newJourneyRecord, recordFix, syncJourneyRecord, type GpsFix, type JourneyRecord,
+  JourneyStore, driveDurationMs, isLongEnoughToSave, newJourneyRecord, recordFix, syncJourneyRecord,
+  type GpsFix, type JourneyRecord,
 } from './journeyRecorder';
 import {
   toCategory, toConvoy, toEvent, toFriend, toFriendRequests, toGroup, toJourney, toNearbySpot, toNotification,
@@ -151,14 +152,20 @@ export class CloudSync {
     await this.outbox.load();
     this.active = await this.journeys.loadActive();
     this.pending = await this.journeys.loadPending();
-    // A drive that was still "active" when the app was killed is finished now.
+    // A drive that was still "active" when the app was killed is finished now
+    // (or thrown away, if it was too short to save).
     if (this.active) {
-      const last = this.active.points[this.active.points.length - 1];
-      this.active.endedAt = last?.recordedAt ?? this.active.startedAt;
-      this.pending.push(this.active);
+      const rec = this.active;
+      const last = rec.points[rec.points.length - 1];
+      rec.endedAt = last?.recordedAt ?? rec.startedAt;
       this.active = null;
       await this.journeys.saveActive(null);
-      await this.journeys.savePending(this.pending);
+      if (isLongEnoughToSave(driveDurationMs(rec, this.now()))) {
+        this.pending.push(rec);
+        await this.journeys.savePending(this.pending);
+      } else if (rec.serverId) {
+        await this.queue({ kind: 'journey.delete', id: rec.serverId });
+      }
     }
     this.data = this.withPendingJourneys(this.data);
     this.setStatus({ pendingJourneys: this.pending.length, lastSyncedAt: cached?.savedAt ?? null });
@@ -605,6 +612,40 @@ export class CloudSync {
   get isDriving() { return !!this.active; }
   get activeRecord() { return this.active; }
 
+  /** How long the drive in progress has run, as its journey would record it */
+  activeDriveMs(): number | null {
+    return this.active ? driveDurationMs(this.active, this.now()) : null;
+  }
+
+  /**
+   * Ends the drive in progress without saving it: nothing is added to the
+   * drive history, nothing is left on the device, and the journey created on
+   * the server when the drive started is deleted (queued, so it goes through
+   * once back online).
+   */
+  async discardDrive(): Promise<void> {
+    const rec = this.active;
+    if (!rec) return;
+    this.active = null;
+    await this.journeys.saveActive(null);
+    // The start-of-drive upload may still be creating the server journey
+    if (this.activePush) await this.activePush;
+    let serverId = rec.serverId;
+    if (!serverId) {
+      // Creating is idempotent on clientRef, so this finds the journey if the
+      // first request reached the server but its reply never arrived.  Offline,
+      // that first request can't have arrived either, so there's nothing to do.
+      try {
+        serverId = (await this.ep.startJourney({
+          clientRef: rec.clientRef, startedAt: rec.startedAt, timezone: rec.timezone, vehicleId: null,
+        })).id;
+      } catch {
+        serverId = null;
+      }
+    }
+    if (serverId) await this.queue({ kind: 'journey.delete', id: serverId });
+  }
+
   async startDrive(vehicle: Vehicle | null): Promise<void> {
     if (this.active) return;
     const snapshot = vehicle ? {
@@ -656,6 +697,11 @@ export class CloudSync {
   async endDrive(): Promise<Journey | null> {
     const rec = this.active;
     if (!rec) return null;
+    // Backstop for the Drive screen's own check: a too-short drive never saves
+    if (!isLongEnoughToSave(driveDurationMs(rec, this.now()))) {
+      await this.discardDrive();
+      return null;
+    }
     // Let an upload that's already running finish first (it shares the record).
     if (this.activePush) await this.activePush;
     rec.endedAt = new Date(this.now()).toISOString();

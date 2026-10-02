@@ -102,6 +102,24 @@ export interface JourneyRecord {
   rejected: boolean;
 }
 
+/**
+ * Drives shorter than this are never saved.  Measured the way a saved
+ * journey's duration is (start to end on the clock, paused time included),
+ * so a drive that is saved always shows at least this long.
+ */
+export const MIN_DRIVE_MS = 10_000;
+
+/** How long a drive has run at `endMs` (or ran, once ended) */
+export function driveDurationMs(rec: Pick<JourneyRecord, 'startedAt' | 'endedAt'>, endMs: number): number {
+  const end = rec.endedAt ? Date.parse(rec.endedAt) : endMs;
+  return Math.max(0, end - Date.parse(rec.startedAt));
+}
+
+/** Whether a drive of this length may be saved (10 s exactly is allowed) */
+export function isLongEnoughToSave(durationMs: number): boolean {
+  return durationMs >= MIN_DRIVE_MS;
+}
+
 export function newJourneyRecord(input: {
   clientRef: string; startedAt: Date; timezone: string; vehicleId: string | null; vehicleSnapshot: Record<string, unknown> | null;
 }): JourneyRecord {

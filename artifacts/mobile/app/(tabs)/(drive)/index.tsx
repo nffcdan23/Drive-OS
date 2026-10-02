@@ -7,6 +7,7 @@ import {
   TouchableOpacity,
   Platform,
   Animated,
+  Alert,
   type ViewProps,
 } from "react-native";
 import { useRouter } from "expo-router";
@@ -38,14 +39,18 @@ import {
 } from "@/lib/followController";
 import { MARKER_PERSPECTIVE, markerPerspective } from "@/lib/markerPerspective";
 import {
+  HeadingFilter,
+  LatestReader,
+  markerScreenRotation,
+} from "@/lib/headingFilter";
+import { isLongEnoughToSave } from "@/lib/backend/journeyRecorder";
+import {
   lookAheadForSpeed,
   NAV_CAMERA,
   navPitch,
 } from "@/lib/navigationCamera";
 import {
   approach,
-  approachAngle,
-  angleDelta,
   type ReportedPose,
   LocationSmoother,
 } from "@/lib/locationSmoothing";
@@ -91,21 +96,10 @@ function AboveTabBar({
 // ─── Constants ────────────────────────────────────────────────────────────────
 // The follow camera's pitch, distance, zoom and look-ahead live in
 // lib/navigationCamera.ts (NAV_CAMERA), shared by every way into follow mode.
-// Minimum speed (km/h) before GPS course is trusted for heading
+// Minimum speed (km/h) before GPS course is trusted for heading.  Below it the
+// compass is the only heading source; above it, the GPS course is.  The
+// smoothing for both lives in lib/headingFilter.ts.
 const MIN_SPEED_FOR_GPS_HEADING = 6;
-// Heading smoothing factor (lower = smoother but laggier)
-const HEADING_SMOOTH = 0.18;
-// Minimum heading change (degrees) before the compass moves the heading target.
-// Without this, magnetometer noise keeps the map turning constantly when still.
-const COMPASS_CAMERA_MIN_DELTA_DEG = 2;
-// Heading convergence per GPS fix.  Fixes arrive ~1/s, so a low factor would
-// take many seconds to come round a corner; the frame loop eases the visuals.
-const GPS_HEADING_SMOOTH = 0.5;
-// How quickly the drawn heading (arrow and heading-up map) follows its target,
-// eased every frame so a new fix or compass step turns smoothly, not in steps
-const HEADING_DISPLAY_TAU_MS = 250;
-// Below this the drawn heading has caught up and the frame loop can rest
-const HEADING_SETTLED_DEG = 0.05;
 // The heading readout and Android marker rotation are React state; refreshing
 // them on every compass tick re-rendered the whole screen many times a second
 const HEADING_UI_INTERVAL_MS = 100;
@@ -140,16 +134,6 @@ function haversineMeters(
       Math.cos(lat2 * (Math.PI / 180)) *
       Math.sin(dLon / 2) ** 2;
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-}
-
-/** Smooth heading transition that correctly wraps across 0/360 */
-function smoothHeading(
-  current: number,
-  target: number,
-  factor: number,
-): number {
-  const diff = ((target - current + 540) % 360) - 180; // [-180, 180]
-  return (((current + diff * factor) % 360) + 360) % 360;
 }
 
 // ─── Location Arrow ──────────────────────────────────────────────────────────
@@ -436,6 +420,8 @@ export default function MapScreen() {
     currentDrive,
     startDrive,
     endDrive,
+    discardDrive,
+    activeDriveMs,
     updateDriveCoordinate,
     resolvedUnitSystem,
     togglePassengerMode,
@@ -495,14 +481,11 @@ export default function MapScreen() {
   const webWatchIdRef = useRef<number | null>(null);
   const expoWatchRef = useRef<Location.LocationSubscription | null>(null);
   const headingSubRef = useRef<Location.LocationSubscription | null>(null);
-  const smoothedHeadingRef = useRef(0);
-  // Latest device-compass bearing, used whenever GPS course is untrustworthy
-  const compassHeadingRef = useRef<number | null>(null);
   const lastSpeedKmhRef = useRef(0);
-  // Heading the drawn arrow/map is easing toward.  GPS sets it every fix; the
-  // compass only moves it past COMPASS_CAMERA_MIN_DELTA_DEG, to ignore jitter.
-  const headingTargetRef = useRef(0);
-  // Heading actually drawn this frame, eased toward headingTargetRef
+  // The one heading that's drawn (arrow, and the map's bearing heading-up).
+  // Fed by exactly one source at a time: compass when stopped, GPS course
+  // when moving.  drawnHeadingRef mirrors its output each frame.
+  const [headingFilter] = useState(() => new HeadingFilter());
   const drawnHeadingRef = useRef(0);
   // ── Visual smoothing layer ──
   // Raw fixes still go to recording untouched; these only decide what's drawn.
@@ -565,9 +548,9 @@ export default function MapScreen() {
   // React entirely.  Apple Maps annotations stay upright as the map turns, so
   // the angle is where the phone points minus where the map is turned to.
   const syncArrowRotation = useCallback(() => {
-    const angle =
-      (((drawnHeadingRef.current - mapHeadingRef.current) % 360) + 360) % 360;
-    arrowRotation.setValue(angle);
+    arrowRotation.setValue(
+      markerScreenRotation(drawnHeadingRef.current, mapHeadingRef.current),
+    );
     // Lay it onto the tilted map; only pushed when the tilt actually moves
     const pitch = mapPitchRef.current;
     const last = arrowPitchRef.current;
@@ -681,16 +664,8 @@ export default function MapScreen() {
     lastFrameAtRef.current = now;
 
     // ── Heading: ease the drawn heading toward its target ──
-    drawnHeadingRef.current = approachAngle(
-      drawnHeadingRef.current,
-      headingTargetRef.current,
-      dt,
-      HEADING_DISPLAY_TAU_MS,
-    );
-    const headingSettled =
-      Math.abs(angleDelta(drawnHeadingRef.current, headingTargetRef.current)) <
-      HEADING_SETTLED_DEG;
-    if (headingSettled) drawnHeadingRef.current = headingTargetRef.current;
+    drawnHeadingRef.current = headingFilter.step(dt);
+    const headingSettled = headingFilter.settled;
 
     // ── Speed for look-ahead: smoothed slowly so it drifts, never nudges ──
     lookAheadSpeedRef.current = approach(
@@ -902,36 +877,24 @@ export default function MapScreen() {
         });
       }
 
-      // ── Smooth heading ──
+      // ── Heading ──
+      // Moving: the GPS course is the heading.  Stopped or crawling, the course
+      // is noise and the compass handler supplies the heading instead; this
+      // path no longer touches it, so the two never fight.
       const speedKmh = speedMs != null ? speedMs * 3.6 : 0;
       lastSpeedKmhRef.current = speedKmh;
-      let targetHeading = smoothedHeadingRef.current;
-
       if (
         gpsHeading != null &&
         gpsHeading >= 0 &&
         speedKmh >= MIN_SPEED_FOR_GPS_HEADING
       ) {
-        // Trust GPS course when moving fast enough
-        targetHeading = gpsHeading;
-      } else if (compassHeadingRef.current != null) {
-        // Stationary or crawling: GPS course is noise, so face where the phone faces
-        targetHeading = compassHeadingRef.current;
+        headingFilter.update(gpsHeading, "course");
       }
-      // Smooth toward target heading.  The frame loop eases the rotation on
-      // screen, so this only needs to damp GPS jitter.
-      const newHeading = smoothHeading(
-        smoothedHeadingRef.current,
-        targetHeading,
-        GPS_HEADING_SMOOTH,
-      );
-      smoothedHeadingRef.current = newHeading;
-      headingTargetRef.current = newHeading;
 
       // ── Draw: marker, heading and follow camera glide from here ──
       wakeFrameLoop();
     },
-    [locationSmoother, updateDriveCoordinate, wakeFrameLoop],
+    [locationSmoother, headingFilter, updateDriveCoordinate, wakeFrameLoop],
   );
 
   // ── Location watcher lifecycle ────────────────────────────────────────────
@@ -1045,27 +1008,14 @@ export default function MapScreen() {
               ? h.trueHeading
               : h.magHeading;
           if (raw == null || raw < 0) return;
-          compassHeadingRef.current = raw;
 
           // Once moving, GPS course is the better signal and processPosition drives
           if (lastSpeedKmhRef.current >= MIN_SPEED_FOR_GPS_HEADING) return;
 
-          const newHeading = smoothHeading(
-            smoothedHeadingRef.current,
-            raw,
-            HEADING_SMOOTH,
-          );
-          smoothedHeadingRef.current = newHeading;
-
-          // Magnetometer noise stays below the threshold; real turns of the
-          // phone move the target, and the frame loop turns arrow and map.
-          if (
-            Math.abs(angleDelta(headingTargetRef.current, newHeading)) >=
-            COMPASS_CAMERA_MIN_DELTA_DEG
-          ) {
-            headingTargetRef.current = newHeading;
-            wakeFrameLoop();
-          }
+          // Raw reading straight in: the filter drops sub-0.4° noise and the
+          // frame loop eases toward it, so turning the phone is one smooth
+          // motion rather than a run of small steps
+          if (headingFilter.update(raw, "compass")) wakeFrameLoop();
         });
         if (cancelled) {
           sub.remove();
@@ -1170,30 +1120,55 @@ export default function MapScreen() {
     zoomTarget.touchEnd(Date.now());
   }, [zoomTarget]);
 
+  // The map's bearing and tilt, read live for the arrow.  Apple Maps keeps
+  // annotations upright while the map turns, and react-native-maps' region
+  // events carry no bearing, so while the user rotates or tilts the map the
+  // camera is read on every region change (one read in flight, the latest
+  // always followed up).  Display only: nothing here reaches the camera.
+  const [bearingReader] = useState(
+    () =>
+      new LatestReader(
+        () =>
+          mapRef.current
+            ? mapRef.current.getCamera()
+            : Promise.reject(new Error("no map")),
+        (cam) => {
+          // While following outside a gesture the loop sets these itself
+          if (
+            followModeRef.current === "following" &&
+            !zoomTarget.gestureActive(Date.now())
+          ) {
+            return;
+          }
+          if (cam.heading != null) mapHeadingRef.current = cam.heading;
+          if (cam.pitch != null) mapPitchRef.current = cam.pitch;
+          syncArrowRotation();
+        },
+      ),
+  );
+  const readMapBearing = useCallback(() => {
+    if (Platform.OS !== "web") bearingReader.request();
+  }, [bearingReader]);
+
+  // Fires continuously while the map moves, including during a gesture
+  const handleRegionChange = useCallback(() => {
+    if (
+      followModeRef.current !== "following" ||
+      zoomTarget.gestureActive(Date.now())
+    ) {
+      readMapBearing();
+    }
+  }, [zoomTarget, readMapBearing]);
+
   const handleRegionChangeComplete = useCallback(() => {
     // While following, the frame loop writes the camera every frame, so this
     // fires every frame too.  Nothing here is fed back into the follow camera:
     // MapKit doesn't report a tilted camera's altitude back exactly (and
     // reports mid-flight values), and adopting it on each heading change is
     // what compounded into the map zooming out to a view of the country.
-    // After a user gesture the map's bearing is read for the arrow only.
     const now = Date.now();
-    if (
-      zoomTarget.gestureActive(now) &&
-      Platform.OS !== "web" &&
-      mapRef.current
-    ) {
-      mapRef.current
-        .getCamera()
-        .then((cam) => {
-          if (followModeRef.current !== "following" && cam.heading != null) {
-            mapHeadingRef.current = cam.heading;
-            if (cam.pitch != null) mapPitchRef.current = cam.pitch;
-            syncArrowRotation();
-          }
-        })
-        .catch(() => {});
-    }
+    // One last bearing read as a gesture settles
+    if (zoomTarget.gestureActive(now)) readMapBearing();
 
     if (now < programmaticUntilRef.current) return;
 
@@ -1204,7 +1179,7 @@ export default function MapScreen() {
       followCamera.leave();
       setFollowMode("free");
     }
-  }, [zoomTarget, followCamera]);
+  }, [zoomTarget, followCamera, readMapBearing]);
 
   // ── Drive controls ────────────────────────────────────────────────────────
   function handleStartDrive() {
@@ -1214,6 +1189,18 @@ export default function MapScreen() {
 
   function handleEndDrive() {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    // Under 10 s: thrown away, not saved.  The summary screen saves on open,
+    // so the check has to happen before going there.  Duration is the one the
+    // journey would be saved with (lib/backend/journeyRecorder.ts).
+    const ms = activeDriveMs();
+    if (ms != null && !isLongEnoughToSave(ms)) {
+      void discardDrive();
+      Alert.alert(
+        "Drive too short to save",
+        "Drives must be at least 10 seconds long.",
+      );
+      return;
+    }
     router.push("/drive-summary");
   }
 
@@ -1547,6 +1534,7 @@ export default function MapScreen() {
           onTouchStart={handleMapTouchStart}
           onTouchEnd={handleMapTouchEnd}
           onTouchCancel={handleMapTouchEnd}
+          onRegionChange={handleRegionChange}
           onRegionChangeComplete={handleRegionChangeComplete}
           initialRegion={
             userLocation

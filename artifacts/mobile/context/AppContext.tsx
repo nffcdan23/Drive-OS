@@ -73,6 +73,10 @@ interface AppContextValue {
   startDrive: () => void;
   updateDriveCoordinate: (coord: Coordinate & { speed: number; accuracy?: number | null; heading?: number | null; altitude?: number | null; timestamp?: number }) => void;
   endDrive: () => Promise<Journey | null>;
+  /** Ends the drive in progress without saving anything (see CloudSync.discardDrive) */
+  discardDrive: () => Promise<void>;
+  /** How long the drive in progress has run, as its journey would record it */
+  activeDriveMs: () => number | null;
   togglePassengerMode: () => void;
 
   updateProfile: (updates: Partial<UserProfile>) => void;
@@ -280,6 +284,17 @@ export function AppProvider({ userId, children }: { userId: string; children: Re
     }
   }, [cloud]);
 
+  const discardDrive = useCallback(async () => {
+    setCurrentDrive(null);
+    try {
+      await cloud.discardDrive();
+    } catch (err) {
+      reportFailure('Could not discard the drive', err);
+    }
+  }, [cloud]);
+
+  const activeDriveMs = useCallback(() => cloud.activeDriveMs(), [cloud]);
+
   const pendingJourney = data.journeys.find((j) => j.syncState && j.syncState !== 'synced') ?? null;
   const syncSummary: SyncStatusSummary =
     status.refreshing || (status.pendingJourneys > 0 && status.connection === 'online') ? 'syncing'
@@ -406,7 +421,7 @@ export function AppProvider({ userId, children }: { userId: string; children: Re
     sync: status,
     unsyncedJourneyId: pendingJourney?.id ?? null,
     categories: data.categories,
-    startDrive, updateDriveCoordinate, endDrive,
+    startDrive, updateDriveCoordinate, endDrive, discardDrive, activeDriveMs,
     places: data.places,
     friends: data.friends,
     friendRequests: data.friendRequests,
