@@ -17,11 +17,20 @@ export const MARKER_PERSPECTIVE = {
   tiltFactor: 0.8,
   // Steeper than this and the arrow becomes a sliver; MapKit rarely goes there
   maxTiltDeg: 60,
-  // Screen-space offsets (pt) of the side wall and shadow at full tilt
-  edgeLiftPt: 3.4,
-  // The shadow sits 2 pt down even when flat: the old artwork's offset
+  // ── Depth: tune these after a road test ──
+  // Screen-space drop (pt) of the side wall below the top face at full tilt
+  // (scaled by sin of the tilt, so ~3.9 pt on the 60° navigation camera)
+  edgeLiftPt: 5.2,
+  // The shadow sits 2 pt down even when flat (the old artwork's offset),
+  // plus this much more at full tilt
   shadowBasePt: 2,
-  shadowLiftPt: 2.5,
+  shadowLiftPt: 4,
+  shadowOpacity: 0.34,
+  // Side wall: a graphite band with its own dark edge, distinct from the top
+  // face's near-black outline so the two read as separate layers rather than
+  // merging into one thick outline
+  wallFill: "#454B55",
+  wallStroke: "#121316",
 } as const;
 
 export interface MarkerPerspective {

@@ -36,7 +36,7 @@ import {
   FollowCameraController,
   type FollowFrameTarget,
 } from "@/lib/followController";
-import { markerPerspective } from "@/lib/markerPerspective";
+import { MARKER_PERSPECTIVE, markerPerspective } from "@/lib/markerPerspective";
 import {
   lookAheadForSpeed,
   NAV_CAMERA,
@@ -220,7 +220,11 @@ const LocationArrow = React.memo(function LocationArrow({
         ]}
       >
         <Svg width={35} height={40} viewBox="0 0 34 40">
-          <Path d={ARROW_PATH} fill="#000000" opacity={0.26} />
+          <Path
+            d={ARROW_PATH}
+            fill="#000000"
+            opacity={MARKER_PERSPECTIVE.shadowOpacity}
+          />
         </Svg>
       </Animated.View>
       {/* Side wall: the arrow's thickness, seen as the map tilts */}
@@ -233,8 +237,8 @@ const LocationArrow = React.memo(function LocationArrow({
         <Svg width={35} height={40} viewBox="0 0 34 40">
           <Path
             d={ARROW_PATH}
-            fill="#1C1C1E"
-            stroke="#1C1C1E"
+            fill={MARKER_PERSPECTIVE.wallFill}
+            stroke={MARKER_PERSPECTIVE.wallStroke}
             strokeWidth={2.5}
             strokeLinejoin="round"
           />
