@@ -421,7 +421,7 @@ export default function MapScreen() {
     startDrive,
     endDrive,
     discardDrive,
-    activeDriveMs,
+    setDrivePaused,
     updateDriveCoordinate,
     resolvedUnitSystem,
     togglePassengerMode,
@@ -470,6 +470,9 @@ export default function MapScreen() {
 
   // ── Drive state ──
   const [driveSeconds, setDriveSeconds] = useState(0);
+  // The timer's latest value, for handlers that may run from a stale render
+  const driveSecondsRef = useRef(0);
+  driveSecondsRef.current = driveSeconds;
   const [isPaused, setIsPaused] = useState(false);
   const [gpsAccuracy, setGpsAccuracy] = useState<number | null>(null);
   const isPausedRef = useRef(false);
@@ -1189,11 +1192,12 @@ export default function MapScreen() {
 
   function handleEndDrive() {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    // Under 10 s: thrown away, not saved.  The summary screen saves on open,
-    // so the check has to happen before going there.  Duration is the one the
-    // journey would be saved with (lib/backend/journeyRecorder.ts).
-    const ms = activeDriveMs();
-    if (ms != null && !isLongEnoughToSave(ms)) {
+    // Under 10 s of active driving, by the on-screen drive timer (paused time
+    // doesn't count): thrown away, not saved.  The summary screen saves on
+    // open, so the check has to happen before going there.  Read through a
+    // ref: this runs from the End Drive confirmation, which may have been
+    // open for a while since the button was pressed.
+    if (!isLongEnoughToSave(driveSecondsRef.current * 1000)) {
       void discardDrive();
       Alert.alert(
         "Drive too short to save",
@@ -1206,9 +1210,11 @@ export default function MapScreen() {
 
   function handlePause() {
     setIsPaused(true);
+    setDrivePaused(true);
   }
   function handleResume() {
     setIsPaused(false);
+    setDrivePaused(false);
   }
 
   function handleSavePoint() {

@@ -100,22 +100,48 @@ export interface JourneyRecord {
   lastError: string | null;
   /** Set when the server rejected the journey; kept until the user discards it. */
   rejected: boolean;
+  /**
+   * Time spent paused so far (ms), and when the current pause began.  Only
+   * used to tell how long the drive has actually been driven; the saved
+   * journey's own duration is unchanged.  Optional so records saved by older
+   * builds still load.
+   */
+  pausedMs?: number;
+  pausedAt?: string | null;
 }
 
 /**
- * Drives shorter than this are never saved.  Measured the way a saved
- * journey's duration is (start to end on the clock, paused time included),
- * so a drive that is saved always shows at least this long.
+ * Drives with less active time than this are never saved.  Active time is
+ * what the Drive screen's timer counts: time paused doesn't count.
  */
 export const MIN_DRIVE_MS = 10_000;
 
-/** How long a drive has run at `endMs` (or ran, once ended) */
-export function driveDurationMs(rec: Pick<JourneyRecord, 'startedAt' | 'endedAt'>, endMs: number): number {
+/**
+ * How long a drive has been actively driven at `endMs` (or was, once ended):
+ * start to end, minus the time spent paused, including a pause still open.
+ * The same rule as the on-screen drive timer, computed from timestamps so it
+ * survives the app being killed.
+ */
+export function activeDriveMs(
+  rec: Pick<JourneyRecord, 'startedAt' | 'endedAt' | 'pausedMs' | 'pausedAt'>,
+  endMs: number,
+): number {
   const end = rec.endedAt ? Date.parse(rec.endedAt) : endMs;
-  return Math.max(0, end - Date.parse(rec.startedAt));
+  const openPause = rec.pausedAt ? Math.max(0, end - Date.parse(rec.pausedAt)) : 0;
+  return Math.max(0, end - Date.parse(rec.startedAt) - (rec.pausedMs ?? 0) - openPause);
 }
 
-/** Whether a drive of this length may be saved (10 s exactly is allowed) */
+/** Records a pause starting or ending on a drive record */
+export function setRecordPaused(rec: JourneyRecord, paused: boolean, atMs: number): void {
+  if (paused && !rec.pausedAt) {
+    rec.pausedAt = new Date(atMs).toISOString();
+  } else if (!paused && rec.pausedAt) {
+    rec.pausedMs = (rec.pausedMs ?? 0) + Math.max(0, atMs - Date.parse(rec.pausedAt));
+    rec.pausedAt = null;
+  }
+}
+
+/** Whether a drive with this much active time may be saved (10 s exactly is allowed) */
 export function isLongEnoughToSave(durationMs: number): boolean {
   return durationMs >= MIN_DRIVE_MS;
 }
@@ -127,6 +153,7 @@ export function newJourneyRecord(input: {
     clientRef: input.clientRef, startedAt: input.startedAt.toISOString(), endedAt: null, timezone: input.timezone,
     vehicleId: input.vehicleId, vehicleSnapshot: input.vehicleSnapshot, name: null, points: [], uploadedCount: 0,
     serverId: null, clientDistanceKm: 0, topSpeedKmh: 0, attempts: 0, lastError: null, rejected: false,
+    pausedMs: 0, pausedAt: null,
   };
 }
 

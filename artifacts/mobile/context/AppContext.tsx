@@ -75,8 +75,8 @@ interface AppContextValue {
   endDrive: () => Promise<Journey | null>;
   /** Ends the drive in progress without saving anything (see CloudSync.discardDrive) */
   discardDrive: () => Promise<void>;
-  /** How long the drive in progress has run, as its journey would record it */
-  activeDriveMs: () => number | null;
+  /** Notes a pause starting or ending on the drive record (see CloudSync.setDrivePaused) */
+  setDrivePaused: (paused: boolean) => void;
   togglePassengerMode: () => void;
 
   updateProfile: (updates: Partial<UserProfile>) => void;
@@ -293,7 +293,7 @@ export function AppProvider({ userId, children }: { userId: string; children: Re
     }
   }, [cloud]);
 
-  const activeDriveMs = useCallback(() => cloud.activeDriveMs(), [cloud]);
+  const setDrivePaused = useCallback((paused: boolean) => cloud.setDrivePaused(paused), [cloud]);
 
   const pendingJourney = data.journeys.find((j) => j.syncState && j.syncState !== 'synced') ?? null;
   const syncSummary: SyncStatusSummary =
@@ -421,7 +421,7 @@ export function AppProvider({ userId, children }: { userId: string; children: Re
     sync: status,
     unsyncedJourneyId: pendingJourney?.id ?? null,
     categories: data.categories,
-    startDrive, updateDriveCoordinate, endDrive, discardDrive, activeDriveMs,
+    startDrive, updateDriveCoordinate, endDrive, discardDrive, setDrivePaused,
     places: data.places,
     friends: data.friends,
     friendRequests: data.friendRequests,

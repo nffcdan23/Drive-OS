@@ -15,7 +15,7 @@
 import type { Endpoints, LocationKind, SpotCategory, Visibility } from './endpoints';
 import { ApiError, describeError, isRetryable, type ConnectionState } from './http';
 import {
-  JourneyStore, driveDurationMs, isLongEnoughToSave, newJourneyRecord, recordFix, syncJourneyRecord,
+  JourneyStore, activeDriveMs, isLongEnoughToSave, newJourneyRecord, recordFix, setRecordPaused, syncJourneyRecord,
   type GpsFix, type JourneyRecord,
 } from './journeyRecorder';
 import {
@@ -153,14 +153,14 @@ export class CloudSync {
     this.active = await this.journeys.loadActive();
     this.pending = await this.journeys.loadPending();
     // A drive that was still "active" when the app was killed is finished now
-    // (or thrown away, if it was too short to save).
+    // (or thrown away, if it had under 10 s of active, unpaused driving).
     if (this.active) {
       const rec = this.active;
       const last = rec.points[rec.points.length - 1];
       rec.endedAt = last?.recordedAt ?? rec.startedAt;
       this.active = null;
       await this.journeys.saveActive(null);
-      if (isLongEnoughToSave(driveDurationMs(rec, this.now()))) {
+      if (isLongEnoughToSave(activeDriveMs(rec, this.now()))) {
         this.pending.push(rec);
         await this.journeys.savePending(this.pending);
       } else if (rec.serverId) {
@@ -612,9 +612,17 @@ export class CloudSync {
   get isDriving() { return !!this.active; }
   get activeRecord() { return this.active; }
 
-  /** How long the drive in progress has run, as its journey would record it */
+  /** Active (unpaused) time of the drive in progress, as the drive timer counts it */
   activeDriveMs(): number | null {
-    return this.active ? driveDurationMs(this.active, this.now()) : null;
+    return this.active ? activeDriveMs(this.active, this.now()) : null;
+  }
+
+  /** The drive was paused or resumed: noted on the record so it survives a restart */
+  setDrivePaused(paused: boolean): void {
+    const rec = this.active;
+    if (!rec) return;
+    setRecordPaused(rec, paused, this.now());
+    void this.journeys.saveActive(rec);
   }
 
   /**
@@ -697,8 +705,9 @@ export class CloudSync {
   async endDrive(): Promise<Journey | null> {
     const rec = this.active;
     if (!rec) return null;
-    // Backstop for the Drive screen's own check: a too-short drive never saves
-    if (!isLongEnoughToSave(driveDurationMs(rec, this.now()))) {
+    // Backstop for the Drive screen's own check: under 10 s of active driving
+    // never saves
+    if (!isLongEnoughToSave(activeDriveMs(rec, this.now()))) {
       await this.discardDrive();
       return null;
     }

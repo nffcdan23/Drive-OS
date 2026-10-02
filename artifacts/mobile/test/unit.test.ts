@@ -1563,17 +1563,12 @@ test('map bearing and heading changing together give the right arrow rotation', 
   }
 });
 
-// The Drive screen's End Drive: under 10 s it discards, otherwise it saves
-async function endLikeTheDriveScreen(app: CloudSync) {
-  const ms = app.activeDriveMs();
-  if (ms != null && !isLongEnoughToSave(ms)) {
-    await app.discardDrive();
-    return { saved: false as const };
-  }
-  return { saved: true as const, journey: await app.endDrive() };
-}
+// A drive as the Drive screen runs it: driving and paused segments, the
+// on-screen timer counting whole seconds of driving only, Pause/Resume noted on
+// the record, and End Drive gated on that timer (under 10 s: discard).
+type Segment = { drive: number } | { pause: number };
 
-async function driveFor(ms: number, opts: { offline?: boolean; loseReply?: boolean } = {}) {
+async function driveSegments(segments: Segment[], opts: { offline?: boolean; loseReply?: boolean } = {}) {
   const server = new FakeServer();
   const store = new MemoryStore();
   const clock = { t: Date.now() - 10 * 60_000 };
@@ -1584,14 +1579,31 @@ async function driveFor(ms: number, opts: { offline?: boolean; loseReply?: boole
   await app.startDrive(null);
   await new Promise((r) => setTimeout(r, 5)); // the start-of-drive upload
   const start = clock.t;
-  while (clock.t - start < ms) {
-    clock.t = Math.min(clock.t + 1000, start + ms);
-    app.addFix({ latitude: 51.5 + (clock.t - start) * 1e-7, longitude: -0.1, speedMs: 12, accuracyM: 5, timestamp: clock.t });
+  let activeMs = 0;
+  for (const seg of segments) {
+    if ('pause' in seg) {
+      app.setDrivePaused(true);
+      clock.t += seg.pause; // paused: no fixes are recorded, the timer stops
+      app.setDrivePaused(false);
+      continue;
+    }
+    const until = clock.t + seg.drive;
+    while (clock.t < until) {
+      const step = Math.min(1000, until - clock.t);
+      clock.t += step;
+      activeMs += step;
+      app.addFix({ latitude: 51.5 + (clock.t - start) * 1e-7, longitude: -0.1, speedMs: 12, accuracyM: 5, timestamp: clock.t });
+    }
   }
-  const result = await endLikeTheDriveScreen(app);
+  const timerSeconds = Math.floor(activeMs / 1000); // what the drive timer shows
+  const result = isLongEnoughToSave(timerSeconds * 1000)
+    ? { saved: true as const, journey: await app.endDrive() }
+    : (await app.discardDrive(), { saved: false as const });
   await app.outbox.flush();
-  return { server, store, app, clock, result };
+  return { server, store, app, clock, result, wallMs: clock.t - start, timerSeconds };
 }
+
+const driveFor = (ms: number, opts?: { offline?: boolean; loseReply?: boolean }) => driveSegments([{ drive: ms }], opts);
 
 async function assertNothingKept(d: Awaited<ReturnType<typeof driveFor>>) {
   assert.equal(d.result.saved, false);
@@ -1667,4 +1679,77 @@ test('a short drive cut off by the app being killed is discarded on restart', as
   assert.equal(again.status.pendingJourneys, 0);
   assert.equal(again.data.journeys.length, 0);
   assert.equal(server.journeys.length, 0);
+});
+
+test('paused time does not count toward the 10-second minimum', async () => {
+  // Drive 4 s, pause 20 s, drive 3 s: 27 s on the clock, 7 s driven
+  const d = await driveSegments([{ drive: 4000 }, { pause: 20_000 }, { drive: 3000 }]);
+  assert.equal(d.wallMs, 27_000);
+  assert.equal(d.timerSeconds, 7);
+  await assertNothingKept(d);
+  // Long pauses either side of a short drive change nothing
+  const e = await driveSegments([{ pause: 60_000 }, { drive: 9000 }, { pause: 60_000 }]);
+  assert.equal(e.wallMs, 129_000);
+  await assertNothingKept(e);
+});
+
+test('exactly 10 seconds of active driving saves, however long the pauses', async () => {
+  const d = await driveSegments([{ drive: 4000 }, { pause: 20_000 }, { drive: 6000 }]);
+  assert.equal(d.timerSeconds, 10);
+  assert.equal(d.result.saved, true);
+  assert.ok(d.result.saved && d.result.journey);
+  assert.equal(d.server.journeys[0]!.status, 'completed');
+  assert.equal(d.server.deletedJourneys.length, 0);
+});
+
+test('the save backstop and crash recovery also count only active time', async () => {
+  const server = new FakeServer();
+  const clock = { t: Date.now() - 60 * 60_000 };
+  let step = 0;
+  const drive = (app: CloudSync, ms: number) => {
+    for (let s = 0; s < ms; s += 1000) { clock.t += 1000; app.addFix({ latitude: 51.5 + ++step * 1e-4, longitude: -0.1, speedMs: 12, accuracyM: 5, timestamp: clock.t }); }
+  };
+  // endDrive itself refuses 7 s of driving spread over 27 s
+  const a = makeSync(server, new MemoryStore(), clock);
+  await a.start();
+  await a.startDrive(null);
+  await new Promise((r) => setTimeout(r, 5));
+  drive(a, 4000); a.setDrivePaused(true); clock.t += 20_000; a.setDrivePaused(false); drive(a, 3000);
+  assert.equal(a.activeDriveMs(), 7000);
+  assert.equal(await a.endDrive(), null);
+  await a.outbox.flush();
+  assert.equal(server.journeys.length, 0);
+  // Ending while still paused: the open pause doesn't count either
+  const b = makeSync(server, new MemoryStore(), clock);
+  await b.start();
+  await b.startDrive(null);
+  drive(b, 6000); b.setDrivePaused(true); clock.t += 30_000;
+  assert.equal(b.activeDriveMs(), 6000);
+  assert.equal(await b.endDrive(), null);
+  // The app killed during a pause after 7 s of driving: discarded on restart,
+  // because the pause was saved on the device with the drive
+  const store = new MemoryStore();
+  const c = makeSync(server, store, clock);
+  await c.start();
+  await c.startDrive(null);
+  await new Promise((r) => setTimeout(r, 5));
+  drive(c, 4000); c.setDrivePaused(true); clock.t += 20_000; c.setDrivePaused(false); drive(c, 3000);
+  await new Promise((r) => setTimeout(r, 5));
+  const restarted = makeSync(server, store, clock);
+  await restarted.start();
+  await restarted.outbox.flush();
+  assert.equal(restarted.status.pendingJourneys, 0);
+  assert.equal(server.journeys.length, 0);
+  // ...while 14 s of driving with the same pause is kept.  (Recovery can only
+  // count up to the last point saved on the device, every 5 s while driving.)
+  const store2 = new MemoryStore();
+  const e = makeSync(server, store2, clock);
+  await e.start();
+  await e.startDrive(null);
+  await new Promise((r) => setTimeout(r, 5));
+  drive(e, 6000); e.setDrivePaused(true); clock.t += 20_000; e.setDrivePaused(false); drive(e, 8000);
+  await new Promise((r) => setTimeout(r, 5));
+  const restarted2 = makeSync(server, store2, clock);
+  await restarted2.start();
+  assert.equal(restarted2.status.pendingJourneys, 1);
 });
