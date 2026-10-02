@@ -1393,3 +1393,30 @@ test('a camera read from an earlier entry into follow mode is never applied', ()
   assert.equal(ctl.completeSeed(fresh, { center: START, pitch: 0, altitude: 900 }, target), true);
   assert.equal(ctl.completeSeed(fresh, { center: START, pitch: 0, altitude: 9_000_000 }, target), false);
 });
+
+// ─── Drive map location arrow perspective ───────────────────────────────────
+
+import { markerPerspective, MARKER_PERSPECTIVE } from '@/lib/markerPerspective';
+
+test('the location arrow lies flat on the map as it tilts, and is unchanged top-down', () => {
+  const flat = markerPerspective(0);
+  assert.deepEqual(flat, { scaleY: 1, edgeLift: 0, shadowLift: MARKER_PERSPECTIVE.shadowBasePt });
+  // The navigation camera's tilt: foreshortened, with a visible side wall
+  const nav = markerPerspective(NAV_CAMERA.pitchDeg);
+  const tilt = NAV_CAMERA.pitchDeg * MARKER_PERSPECTIVE.tiltFactor;
+  assert.ok(Math.abs(nav.scaleY - Math.cos((tilt * Math.PI) / 180)) < 1e-9);
+  assert.ok(nav.scaleY > 0.6 && nav.scaleY < 0.75, `scaleY ${nav.scaleY} would read poorly`);
+  assert.ok(nav.edgeLift > 1 && nav.shadowLift > flat.shadowLift);
+  // Steeper always means flatter on screen, never a jump
+  let prev = flat;
+  for (let p = 1; p <= 90; p++) {
+    const v = markerPerspective(p);
+    assert.ok(v.scaleY <= prev.scaleY && v.edgeLift >= prev.edgeLift);
+    assert.ok(prev.scaleY - v.scaleY < 0.03);
+    prev = v;
+  }
+  // Out-of-range or junk pitch never produces a broken marker
+  assert.ok(markerPerspective(500).scaleY >= Math.cos((MARKER_PERSPECTIVE.maxTiltDeg * Math.PI) / 180) - 1e-9);
+  assert.deepEqual(markerPerspective(Number.NaN), flat);
+  assert.deepEqual(markerPerspective(-20), flat);
+});

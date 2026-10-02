@@ -36,6 +36,7 @@ import {
   FollowCameraController,
   type FollowFrameTarget,
 } from "@/lib/followController";
+import { markerPerspective } from "@/lib/markerPerspective";
 import {
   lookAheadForSpeed,
   NAV_CAMERA,
@@ -168,48 +169,90 @@ function smoothHeading(
 // so turning the arrow is a pure transform on a view MapKit never sees move.
 // collapsable={false} keeps the new architecture from flattening it away,
 // which would put the rotating view back in its place.
+//
+// On the tilted map the arrow is also laid onto the road (lib/
+// markerPerspective.ts): the rotation is followed by a vertical squash, and a
+// dark side wall and a ground shadow sit just below it in screen space.  All
+// three layers live inside the same fixed frame and are driven by Animated
+// values pushed straight to the native views, exactly like the rotation, so
+// the flicker fix above still holds: nothing re-renders or resizes.
 const ARROW_FRAME = 60;
+const ARROW_W = 40;
+const ARROW_H = 44;
+const ARROW_PATH = "M17 3 L31 35 L17 27 L3 35 Z";
+const arrowLayer = {
+  position: "absolute",
+  left: (ARROW_FRAME - ARROW_W) / 2,
+  top: (ARROW_FRAME - ARROW_H) / 2,
+  width: ARROW_W,
+  height: ARROW_H,
+  alignItems: "center",
+  justifyContent: "center",
+} as const;
 const LocationArrow = React.memo(function LocationArrow({
   rotation,
+  scaleY,
+  edgeLift,
+  shadowLift,
 }: {
   rotation: Animated.Value;
+  scaleY: Animated.Value;
+  edgeLift: Animated.Value;
+  shadowLift: Animated.Value;
 }) {
   const spin = rotation.interpolate({
     inputRange: [0, 360],
     outputRange: ["0deg", "360deg"],
   });
+  // Listed outermost first: rotate to the heading, squash onto the tilted
+  // ground, then (for the lower layers) drop down the screen toward the viewer
+  const onGround = [{ scaleY }, { rotate: spin }];
   return (
     <View
       collapsable={false}
-      style={{
-        width: ARROW_FRAME,
-        height: ARROW_FRAME,
-        alignItems: "center",
-        justifyContent: "center",
-      }}
+      style={{ width: ARROW_FRAME, height: ARROW_FRAME }}
     >
+      {/* Ground shadow */}
       <Animated.View
-        style={{
-          width: 40,
-          height: 44,
-          alignItems: "center",
-          justifyContent: "center",
-          transform: [{ rotate: spin }],
-        }}
+        style={[
+          arrowLayer,
+          { transform: [{ translateY: shadowLift }, ...onGround] },
+        ]}
       >
         <Svg width={35} height={40} viewBox="0 0 34 40">
-          {/* Soft ground shadow, offset down a touch to lift the arrow off the map */}
-          <Path d="M17 5 L31 37 L17 29 L3 37 Z" fill="#000000" opacity={0.18} />
+          <Path d={ARROW_PATH} fill="#000000" opacity={0.26} />
+        </Svg>
+      </Animated.View>
+      {/* Side wall: the arrow's thickness, seen as the map tilts */}
+      <Animated.View
+        style={[
+          arrowLayer,
+          { transform: [{ translateY: edgeLift }, ...onGround] },
+        ]}
+      >
+        <Svg width={35} height={40} viewBox="0 0 34 40">
           <Path
-            d="M17 3 L31 35 L17 27 L3 35 Z"
+            d={ARROW_PATH}
+            fill="#1C1C1E"
+            stroke="#1C1C1E"
+            strokeWidth={2.5}
+            strokeLinejoin="round"
+          />
+        </Svg>
+      </Animated.View>
+      {/* Top face */}
+      <Animated.View style={[arrowLayer, { transform: onGround }]}>
+        <Svg width={35} height={40} viewBox="0 0 34 40">
+          <Path
+            d={ARROW_PATH}
             fill="#FFFFFF"
             stroke="#1C1C1E"
             strokeWidth={2.5}
             strokeLinejoin="round"
             strokeLinecap="round"
           />
-          {/* Fold shading on the trailing half */}
-          <Path d="M17 3 L31 35 L17 27 Z" fill="#1C1C1E" opacity={0.13} />
+          {/* Fold shading on the trailing half: two lit facets, not one */}
+          <Path d="M17 3 L31 35 L17 27 Z" fill="#1C1C1E" opacity={0.16} />
         </Svg>
       </Animated.View>
     </View>
@@ -224,10 +267,16 @@ const LocationArrow = React.memo(function LocationArrow({
 const UserMarker = React.memo(function UserMarker({
   coordinate,
   rotationValue,
+  perspective,
   nativeRotation,
 }: {
   coordinate: AnimatedRegion;
   rotationValue: Animated.Value;
+  perspective: {
+    scaleY: Animated.Value;
+    edgeLift: Animated.Value;
+    shadowLift: Animated.Value;
+  };
   nativeRotation: number;
 }) {
   return (
@@ -239,7 +288,12 @@ const UserMarker = React.memo(function UserMarker({
       rotation={nativeRotation}
       tracksViewChanges={false}
     >
-      <LocationArrow rotation={rotationValue} />
+      <LocationArrow
+        rotation={rotationValue}
+        scaleY={perspective.scaleY}
+        edgeLift={perspective.edgeLift}
+        shadowLift={perspective.shadowLift}
+      />
     </MarkerAnimated>
   );
 });
@@ -408,6 +462,21 @@ export default function MapScreen() {
   // re-rendering the screen at that rate is what made the marker blink.
   const mapHeadingRef = useRef(0);
   const arrowRotation = useRef(new Animated.Value(0)).current;
+  // Pitch the map is tilted to, for laying the arrow onto the road.  Like the
+  // heading, it's what we last set while following, or what the user left it
+  // at, and it's display-only: nothing camera-related reads it.
+  const mapPitchRef = useRef(0);
+  const arrowPitchRef = useRef<number | null>(null);
+  const arrowPerspective = useRef(
+    (() => {
+      const flat = markerPerspective(0);
+      return {
+        scaleY: new Animated.Value(flat.scaleY),
+        edgeLift: new Animated.Value(flat.edgeLift),
+        shadowLift: new Animated.Value(flat.shadowLift),
+      };
+    })(),
+  ).current;
 
   // ── Drive state ──
   const [driveSeconds, setDriveSeconds] = useState(0);
@@ -495,7 +564,17 @@ export default function MapScreen() {
     const angle =
       (((drawnHeadingRef.current - mapHeadingRef.current) % 360) + 360) % 360;
     arrowRotation.setValue(angle);
-  }, [arrowRotation]);
+    // Lay it onto the tilted map; only pushed when the tilt actually moves
+    const pitch = mapPitchRef.current;
+    const last = arrowPitchRef.current;
+    if (last == null || Math.abs(pitch - last) > 0.05) {
+      arrowPitchRef.current = pitch;
+      const view = markerPerspective(pitch);
+      arrowPerspective.scaleY.setValue(view.scaleY);
+      arrowPerspective.edgeLift.setValue(view.edgeLift);
+      arrowPerspective.shadowLift.setValue(view.shadowLift);
+    }
+  }, [arrowRotation, arrowPerspective]);
 
   // Keep refs in sync
   useEffect(() => {
@@ -660,6 +739,7 @@ export default function MapScreen() {
           const { pose } = frame;
           programmaticUntilRef.current = now + PROGRAMMATIC_GRACE_MS;
           mapHeadingRef.current = pose.heading;
+          mapPitchRef.current = pose.pitch;
           // A plain (unanimated) set: the motion comes from this loop.  A
           // native animation per fix is what produced hop-pause-hop.
           mapRef.current.setCamera(
@@ -1104,6 +1184,7 @@ export default function MapScreen() {
         .then((cam) => {
           if (followModeRef.current !== "following" && cam.heading != null) {
             mapHeadingRef.current = cam.heading;
+            if (cam.pitch != null) mapPitchRef.current = cam.pitch;
             syncArrowRotation();
           }
         })
@@ -1477,6 +1558,7 @@ export default function MapScreen() {
             <UserMarker
               coordinate={markerCoordRef.current}
               rotationValue={arrowRotation}
+              perspective={arrowPerspective}
               nativeRotation={markerRotation}
             />
           )}
