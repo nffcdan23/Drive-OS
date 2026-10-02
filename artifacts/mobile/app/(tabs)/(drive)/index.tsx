@@ -11,12 +11,12 @@ import {
 } from "react-native";
 import { useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
-import { SymbolView, type SFSymbol } from "expo-symbols";
 import { SafeAreaView as SystemSafeAreaView } from "react-native-screens/experimental";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { LinearGradient } from "expo-linear-gradient";
 import Svg, { Path, Ellipse, Circle } from "react-native-svg";
 import * as Haptics from "expo-haptics";
+import { Glyph } from "@/components/Glyph";
 import { useColors } from "@/hooks/useColors";
 import { useApp } from "@/context/AppContext";
 import { CONFIG } from "@/constants/config";
@@ -32,30 +32,6 @@ import ActiveDriveOverlay, {
 } from "@/components/ActiveDriveOverlay";
 import * as Location from "expo-location";
 import { requestForegroundLocation } from "@/lib/locationPermission";
-
-// SF Symbols on iOS, Ionicons elsewhere.
-function Glyph({
-  sf,
-  ion,
-  size,
-  color,
-}: {
-  sf: SFSymbol;
-  ion: React.ComponentProps<typeof Ionicons>["name"];
-  size: number;
-  color: string;
-}) {
-  if (Platform.OS !== "ios")
-    return <Ionicons name={ion} size={size} color={color} />;
-  return (
-    <SymbolView
-      name={sf}
-      tintColor={color}
-      style={{ width: size, height: size }}
-      fallback={<Ionicons name={ion} size={size} color={color} />}
-    />
-  );
-}
 
 // Keeps the drive actions just above the tab bar. On iOS this pads by
 // UIKit's own safe area, which includes the system tab bar.
@@ -387,6 +363,7 @@ export default function MapScreen() {
     updateDriveCoordinate,
     resolvedUnitSystem,
     togglePassengerMode,
+    addPlace,
   } = useApp();
 
   // ── Map state ──
@@ -1004,10 +981,23 @@ export default function MapScreen() {
     setIsPaused(false);
   }
 
-  function handleSavePoint() {
-    // Store current location as a named marker — no-op if no location yet
-    // Haptic feedback is handled inside the overlay
-  }
+  // Add Marker: the current position goes to Saved Places (private), so it
+  // can be found, renamed or removed there. False when there's no fix yet.
+  const handleSavePoint = useCallback(async () => {
+    const coordinate = userLocationRef.current;
+    if (!coordinate) return false;
+    const time = new Date().toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+    await addPlace({
+      kind: "poi",
+      name: `Drive marker ${time}`,
+      coordinate,
+      visibility: "private",
+    });
+    return true;
+  }, [addPlace]);
 
   const handleZoomIn = useCallback(() => {
     if (!mapRef.current || Platform.OS === "web") return;
@@ -1405,8 +1395,8 @@ export default function MapScreen() {
         <DemoMapBackground mapType={mapType} />
       )}
 
-      {/* ── Passenger banner ── */}
-      {isPassengerMode && (
+      {/* ── Passenger banner (the drive overlay shows its own) ── */}
+      {isPassengerMode && !isDriving && (
         <View style={[styles.passengerBanner, { top: headerTop }]}>
           <Ionicons name="walk-outline" size={14} color="#fff" />
           <Text style={styles.passengerBannerText}>
@@ -1430,8 +1420,8 @@ export default function MapScreen() {
         </View>
       )}
 
-      {/* ── GPS accuracy warning ── */}
-      {accuracyWarning && (
+      {/* ── GPS accuracy warning (the drive overlay shows its own) ── */}
+      {accuracyWarning && !isDriving && (
         <View
           style={[
             styles.accuracyWarning,
@@ -1715,6 +1705,7 @@ export default function MapScreen() {
           gpsAccuracy={gpsAccuracy}
           accuracyWarning={accuracyWarning}
           followMode={followMode}
+          headingMode={headingMode}
           resolvedUnitSystem={resolvedUnitSystem}
           isPassengerMode={isPassengerMode}
           insets={insets}
@@ -1724,6 +1715,7 @@ export default function MapScreen() {
           onSavePoint={handleSavePoint}
           onLocateButton={handleLocateButton}
           onResumeFollowing={handleResumeFollowing}
+          onToggleHeading={handleToggleHeadingMode}
           onZoomIn={handleZoomIn}
           onZoomOut={handleZoomOut}
         />

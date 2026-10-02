@@ -66,6 +66,11 @@ export function MaterialProvider({ children }: { children: React.ReactNode }) {
   );
 }
 
+/** The system Reduce Motion setting, from the shared listener above. */
+export function useReducedMotion() {
+  return useContext(Preferences).reduceMotion;
+}
+
 type Corners = Pick<
   ViewStyle,
   | "borderRadius"
