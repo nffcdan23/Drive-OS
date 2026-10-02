@@ -957,47 +957,44 @@ test('provider check reads public settings and fails open', async () => {
 
 import { buildFollowCamera, FollowZoomTarget, GESTURE_SETTLE_MS } from '@/lib/followCamera';
 
-test('heading changes while following never change the camera zoom', () => {
+test('the follow target is only ever set explicitly, never from the map', () => {
   const target = new FollowZoomTarget({ zoom: 17, distance: 700 });
   const here = { latitude: 51.5, longitude: -0.12 };
-  // Apple Maps hands back a slightly different altitude than it was given;
-  // feeding that back in is what zoomed the map steadily outward.
-  let mapAltitude = 700;
   const sent: number[] = [];
   for (let i = 0; i < 200; i++) {
     const cam = buildFollowCamera(here, (i * 7) % 360, 0, target.current, 'ios');
     assert.equal(cam.zoom, undefined); // iOS states altitude only
     sent.push(cam.altitude!);
-    mapAltitude = cam.altitude! * 1.03;
-    assert.equal(target.settle(target.gestureActive(i * 300), { altitude: mapAltitude, zoom: 16.9 }), false);
   }
   assert.ok(sent.every((a) => a === 700), 'altitude drifted');
-  assert.deepEqual(target.current, { zoom: 17, distance: 700 });
+  // There is no longer any way to write a reported camera into the target
+  assert.equal((target as unknown as { settle?: unknown }).settle, undefined);
   const android = buildFollowCamera(here, 90, 0, target.current, 'android');
   assert.equal(android.zoom, 17);
   assert.equal(android.altitude, undefined);
 });
 
-test('a user pinch sets the zoom that follow then holds', () => {
+test('the gesture window holds follow off, and resets clear it', () => {
   const target = new FollowZoomTarget({ zoom: 17, distance: 700 });
   target.touchStart(1000);
   assert.equal(target.gestureActive(1500), true); // follow holds off mid-gesture
   target.touchEnd(2000);
-  assert.equal(target.settle(target.gestureActive(2400), { altitude: 300, zoom: 18 }), true);
-  assert.deepEqual(target.current, { zoom: 18, distance: 300 });
-  // Once the gesture window closes, our own animations can't move it again
+  assert.equal(target.gestureActive(2000 + GESTURE_SETTLE_MS), true);
   assert.equal(target.gestureActive(2000 + GESTURE_SETTLE_MS + 1), false);
-  assert.equal(target.settle(target.gestureActive(5000), { altitude: 320 }), false);
-  assert.equal(buildFollowCamera({ latitude: 0, longitude: 0 }, 45, 0, target.current, 'ios').altitude, 300);
-  // A deliberate reset (resume following) overrides it and closes the window
+  // A deliberate reset (resume following) closes the window
   target.touchStart(6000);
   target.clearGesture();
   target.set({ zoom: 17, distance: 700 });
   assert.equal(target.gestureActive(6001), false);
   assert.deepEqual(target.current, { zoom: 17, distance: 700 });
-  // Junk readings are ignored
-  target.set({ altitude: 0, zoom: Number.NaN });
+  // Junk is ignored, and the backstop limits hold whatever is asked for
+  target.set({ distance: 0, zoom: Number.NaN });
   assert.deepEqual(target.current, { zoom: 17, distance: 700 });
+  const bounded = new FollowZoomTarget({ zoom: 17, distance: 800 }, { min: 150, max: 5000 });
+  bounded.set({ distance: 12_000_000 });
+  assert.equal(bounded.current.distance, 5000);
+  bounded.set({ distance: 1 });
+  assert.equal(bounded.current.distance, 150);
 });
 
 // ─── Drive map live-position smoothing ──────────────────────────────────────
@@ -1234,4 +1231,165 @@ test('tilting keeps the camera distance; altitude is derived from it', () => {
   assert.equal(final.distance, 800);
   assert.ok(distM(final.center, lookAheadCenter(START, 30, 25)) < 1e-6);
   assert.equal(buildFollowCamera(final.center, final.heading, final.pitch, final, 'ios').altitude, altitudeForDistance(800, 60));
+});
+
+// ─── Follow camera: runaway zoom regression ─────────────────────────────────
+// The device bug: during and after Continue Following, every heading change
+// zoomed the map out a little more, until a whole country was in view.  These
+// drive the follow controller exactly as the Drive screen does, against a fake
+// MapKit that reports a tilted camera's altitude back *wrong* (as its distance,
+// i.e. doubled at 60°).  Any read-back into follow state would show as drift.
+
+import { FollowCameraController, type FollowFrameTarget } from '@/lib/followController';
+
+class FakeMapKit {
+  camera = { center: START, heading: 0, pitch: 0, altitude: 0 };
+  reads = 0;
+  writes = 0;
+  setCamera(c: { center: LatLng; heading: number; pitch: number; altitude?: number }) {
+    this.writes++;
+    this.camera = { center: c.center, heading: c.heading, pitch: c.pitch, altitude: c.altitude! };
+  }
+  /** Reports altitude as if it were the centre distance: wrong when tilted */
+  getCamera() {
+    this.reads++;
+    const c = this.camera;
+    return { ...c, altitude: c.altitude / Math.cos((c.pitch * Math.PI) / 180) };
+  }
+}
+
+const NAV = { distance: NAV_CAMERA.distanceM, pitch: NAV_CAMERA.pitchDeg };
+const navTarget = (position: LatLng, heading: number): FollowFrameTarget =>
+  ({ position, heading, pitch: NAV.pitch, lookAheadM: NAV_CAMERA.lookAhead.minM });
+
+/** One frame, the way the Drive screen's loop runs it */
+function followFrame(ctl: FollowCameraController, map: FakeMapKit, target: FollowFrameTarget, gesture = false) {
+  const f = ctl.frame(target, 16, gesture);
+  if (f.kind === 'needsSeed') {
+    const token = ctl.beginSeed();
+    if (token != null) ctl.completeSeed(token, map.getCamera(), target);
+    return null;
+  }
+  if (f.kind === 'paused') return null;
+  map.setCamera(buildFollowCamera(f.pose.center, f.pose.heading, f.pose.pitch, f.pose, 'ios'));
+  return f;
+}
+
+function newController() {
+  return new FollowCameraController(
+    { zoom: NAV_CAMERA.androidZoom, distance: NAV_CAMERA.distanceM },
+    { min: NAV_CAMERA.minDistanceM, max: NAV_CAMERA.maxDistanceM },
+  );
+}
+
+/** Following and fully settled at the navigation camera */
+function settledFollowing() {
+  const ctl = newController();
+  const map = new FakeMapKit();
+  map.camera = { center: START, heading: 0, pitch: NAV.pitch, altitude: altitudeForDistance(NAV.distance, NAV.pitch) };
+  ctl.enter(false);
+  for (let i = 0; i < 400; i++) followFrame(ctl, map, navTarget(START, 0));
+  const f = ctl.frame(navTarget(START, 0), 16, false);
+  assert.ok(f.kind === 'camera' && f.settled);
+  return { ctl, map };
+}
+
+const NAV_ALTITUDE = altitudeForDistance(NAV_CAMERA.distanceM, NAV_CAMERA.pitchDeg);
+
+test('heading changes while following change only the heading', () => {
+  const { ctl, map } = settledFollowing();
+  const readsBefore = map.reads;
+  for (const heading of [0, 45, 90, 180, 270, 359, 1, 120, 300]) {
+    for (let i = 0; i < 30; i++) {
+      const f = followFrame(ctl, map, navTarget(START, heading))!;
+      assert.equal(f.pose.distance, NAV.distance, `distance moved at ${heading}°`);
+      assert.equal(f.pose.pitch, NAV.pitch, `pitch moved at ${heading}°`);
+      assert.equal(f.pose.heading, heading);
+      assert.equal(map.camera.altitude, NAV_ALTITUDE, `altitude sent moved at ${heading}°`);
+    }
+  }
+  assert.equal(map.reads, readsBefore, 'following must never read the map camera back');
+});
+
+test('heading changes during Continue Following do not interrupt or undo the zoom-in', () => {
+  const ctl = newController();
+  const map = new FakeMapKit();
+  // The user zoomed right out and panned away: most of the Earth in view
+  map.camera = { center: offsetMeters(START, 900_000, 400_000), heading: 37, pitch: 0, altitude: 12_000_000 };
+  ctl.enter(false); // Continue Following from free mode
+  followFrame(ctl, map, navTarget(START, 0)); // the one camera read
+  assert.equal(map.reads, 1);
+  let prev = Infinity, prevPitch = -Infinity, frames = 0, settled = false;
+  for (let i = 0; i < 2000 && !settled; i++) {
+    // Rapid, erratic heading changes the whole way in
+    const heading = (i * 73 + (i % 3) * 140) % 360;
+    // Continue Following pressed again part-way, and a drive starting: both
+    // re-assert follow mode, and must carry on rather than restart
+    if (i === 10 || i === 20) ctl.enter(true);
+    const f = followFrame(ctl, map, navTarget(START, heading))!;
+    assert.ok(f.pose.distance <= prev + 1e-6, `zoomed back out at frame ${i}: ${prev} → ${f.pose.distance}`);
+    assert.ok(f.pose.pitch >= prevPitch - 1e-9, `tilt went backwards at frame ${i}`);
+    prev = f.pose.distance;
+    prevPitch = f.pose.pitch;
+    settled = f.settled;
+    frames = i;
+  }
+  assert.ok(settled, 'transition never finished');
+  assert.ok(frames * 16 < 6000, `took ${frames * 16} ms`);
+  assert.equal(prev, NAV.distance);
+  assert.equal(prevPitch, NAV.pitch);
+  assert.equal(map.camera.altitude, NAV_ALTITUDE);
+  assert.equal(map.reads, 1, 'the transition must not re-read the map camera');
+});
+
+test('hundreds of alternating heading changes and taps never drift the scale', () => {
+  const { ctl, map } = settledFollowing();
+  const readsBefore = map.reads;
+  const headings = [0, 180, 359, 1, 90, 270];
+  for (let i = 0; i < 3000; i++) {
+    // A tap on the map every so often: follow pauses, then resumes
+    const tapping = i % 250 >= 200 && i % 250 < 210;
+    const f = followFrame(ctl, map, navTarget(START, headings[i % headings.length]!), tapping);
+    if (!f) continue;
+    assert.equal(f.pose.distance, NAV.distance, `distance drifted at frame ${i}`);
+    assert.equal(f.pose.pitch, NAV.pitch);
+    assert.equal(map.camera.altitude, NAV_ALTITUDE, `altitude drifted at frame ${i}`);
+  }
+  assert.equal(map.reads, readsBefore);
+});
+
+test('moving and turning together keep the navigation distance', () => {
+  const { ctl, map } = settledFollowing();
+  const sm = new LocationSmoother();
+  const speed = 18;
+  let course = 10;
+  for (let t = 0; t <= 60_000; t += 1000 / 60) {
+    if (Math.round(t) % 1000 < 17) {
+      course = (course + 23) % 360; // a winding road
+      sm.addFix({ ...truthAt(t, speed, course), speed, course, accuracy: 5, time: t }, t);
+    }
+    const p = sm.sample(t)!;
+    const f = followFrame(ctl, map, navTarget(p, course))!;
+    assert.equal(f.pose.distance, NAV.distance);
+    assert.equal(f.pose.pitch, NAV.pitch);
+    assert.equal(map.camera.altitude, NAV_ALTITUDE);
+  }
+});
+
+test('a camera read from an earlier entry into follow mode is never applied', () => {
+  const ctl = newController();
+  const target = navTarget(START, 0);
+  ctl.enter(false);
+  assert.equal(ctl.frame(target, 16, false).kind, 'needsSeed');
+  const stale = ctl.beginSeed()!;
+  assert.equal(ctl.beginSeed(), null, 'one read per entry');
+  // The user pans away (follow ends) and presses Continue Following again
+  ctl.leave();
+  ctl.enter(false);
+  // The first read lands late, carrying a zoomed-out camera: dropped
+  assert.equal(ctl.completeSeed(stale, { center: START, pitch: 0, altitude: 9_000_000 }, target), false);
+  assert.equal(ctl.isSeeded, false);
+  const fresh = ctl.beginSeed()!;
+  assert.equal(ctl.completeSeed(fresh, { center: START, pitch: 0, altitude: 900 }, target), true);
+  assert.equal(ctl.completeSeed(fresh, { center: START, pitch: 0, altitude: 9_000_000 }, target), false);
 });

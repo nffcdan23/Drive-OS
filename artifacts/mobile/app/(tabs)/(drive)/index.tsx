@@ -31,7 +31,11 @@ import ActiveDriveOverlay, {
 } from "@/components/ActiveDriveOverlay";
 import * as Location from "expo-location";
 import { requestForegroundLocation } from "@/lib/locationPermission";
-import { buildFollowCamera, FollowZoomTarget } from "@/lib/followCamera";
+import { buildFollowCamera } from "@/lib/followCamera";
+import {
+  FollowCameraController,
+  type FollowFrameTarget,
+} from "@/lib/followController";
 import {
   lookAheadForSpeed,
   NAV_CAMERA,
@@ -41,8 +45,6 @@ import {
   approach,
   approachAngle,
   angleDelta,
-  FollowCameraEaser,
-  type FollowCameraTarget,
   type ReportedPose,
   LocationSmoother,
 } from "@/lib/locationSmoothing";
@@ -434,7 +436,6 @@ export default function MapScreen() {
   // The marker and follow camera are both written every frame from the same
   // smoothed position, so the car stays put on screen while the map glides.
   const [locationSmoother] = useState(() => new LocationSmoother());
-  const [cameraEaser] = useState(() => new FollowCameraEaser());
   const frameIdRef = useRef<number | null>(null);
   const lastFrameAtRef = useRef(0);
   const lastHeadingUiAtRef = useRef(0);
@@ -474,13 +475,17 @@ export default function MapScreen() {
   // The zoom/distance we intend to hold.  Asserted on every camera animation so
   // nothing can drift, and only ever re-read from the map after a user gesture,
   // never after our own animations (see lib/followCamera.ts).
-  const [zoomTarget] = useState(
+  // The follow camera: the single authoritative follow distance/zoom (only
+  // ever set from NAV_CAMERA), the eased camera state, and the one-read-per-
+  // entry rule for MapKit's camera (see lib/followController.ts).
+  const [followCamera] = useState(
     () =>
-      new FollowZoomTarget({
-        zoom: NAV_CAMERA.androidZoom,
-        distance: NAV_CAMERA.distanceM,
-      }),
+      new FollowCameraController(
+        { zoom: NAV_CAMERA.androidZoom, distance: NAV_CAMERA.distanceM },
+        { min: NAV_CAMERA.minDistanceM, max: NAV_CAMERA.maxDistanceM },
+      ),
   );
+  const zoomTarget = followCamera.zoom;
   const resumeButtonAnim = useRef(new Animated.Value(0)).current;
 
   // Push the arrow's on-screen angle straight to the native view, bypassing
@@ -542,15 +547,13 @@ export default function MapScreen() {
   // smoothed position in the same frame, so the vehicle holds still on screen
   // while the map glides, and it stops itself once nothing is moving.
   const followTargetFor = useCallback(
-    (position: { latitude: number; longitude: number }): FollowCameraTarget => {
+    (position: { latitude: number; longitude: number }): FollowFrameTarget => {
       const isHeadingUp = headingModeRef.current === "heading-up";
-      const zoom = zoomTarget.current;
+      // No distance or zoom here: those are the controller's alone
       return {
         position,
         heading: isHeadingUp ? drawnHeadingRef.current : 0,
         pitch: navPitch(isHeadingUp, mapTypeRef.current),
-        distance: zoom.distance,
-        zoom: zoom.zoom,
         // Heading-up, the centre sits ahead of the vehicle so the view is
         // mostly road in front; north-up centres exactly on it
         lookAheadM: isHeadingUp
@@ -558,17 +561,7 @@ export default function MapScreen() {
           : 0,
       };
     },
-    [zoomTarget],
-  );
-
-  // Start the follow camera from wherever the map is now, so entering follow
-  // (resume, locate, after a pinch) eases over rather than jumping
-  const seedFollowCamera = useCallback(
-    (current: ReportedPose) => {
-      const position = locationSmoother.sample(Date.now());
-      if (position) cameraEaser.seed(current, followTargetFor(position));
-    },
-    [locationSmoother, cameraEaser, followTargetFor],
+    [],
   );
 
   const frameLoopRef = useRef<() => void>(() => {});
@@ -578,19 +571,22 @@ export default function MapScreen() {
     frameIdRef.current = requestAnimationFrame(() => frameLoopRef.current());
   }, []);
 
+  // Entering follow from a map the user moved: read its camera once, so the
+  // ease-in starts from what's on screen.  The only time follow reads MapKit.
   const requestCameraSeed = useCallback(() => {
-    if (seedingCameraRef.current || !mapRef.current) return;
-    seedingCameraRef.current = true;
+    const token = followCamera.beginSeed();
+    if (token == null || !mapRef.current) return;
+    const targetNow = () => {
+      const position = locationSmoother.sample(Date.now());
+      return position ? followTargetFor(position) : null;
+    };
     mapRef.current
       .getCamera()
-      .then((cam) => seedFollowCamera(cam))
+      .then((cam) => followCamera.completeSeed(token, cam, targetNow()))
       // No live camera to start from: start from the target itself
-      .catch(() => seedFollowCamera({}))
-      .finally(() => {
-        seedingCameraRef.current = false;
-        wakeFrameLoop();
-      });
-  }, [seedFollowCamera, wakeFrameLoop]);
+      .catch(() => followCamera.completeSeed(token, {}, targetNow()))
+      .finally(wakeFrameLoop);
+  }, [followCamera, locationSmoother, followTargetFor, wakeFrameLoop]);
 
   frameLoopRef.current = () => {
     frameIdRef.current = null;
@@ -649,33 +645,33 @@ export default function MapScreen() {
         mapRef.current &&
         Platform.OS !== "web"
       ) {
-        if (zoomTarget.gestureActive(now)) {
-          // Hands off while the user touches the map.  Afterwards, start again
-          // from wherever they left it, or the map would jump to catch up.
-          cameraEaser.reset();
+        const frame = followCamera.frame(
+          followTargetFor(position),
+          dt,
+          zoomTarget.gestureActive(now),
+        );
+        if (frame.kind === "paused") {
+          // Hands off while the user touches the map
           cameraSettled = false;
-        } else if (!cameraEaser.isSeeded) {
+        } else if (frame.kind === "needsSeed") {
           requestCameraSeed();
           cameraSettled = false;
         } else {
-          const step = cameraEaser.step(followTargetFor(position), dt);
-          if (step) {
-            const { pose } = step;
-            programmaticUntilRef.current = now + PROGRAMMATIC_GRACE_MS;
-            mapHeadingRef.current = pose.heading;
-            // A plain (unanimated) set: the motion comes from this loop.  A
-            // native animation per fix is what produced hop-pause-hop.
-            mapRef.current.setCamera(
-              buildFollowCamera(
-                pose.center,
-                pose.heading,
-                pose.pitch,
-                pose,
-                Platform.OS,
-              ),
-            );
-            cameraSettled = step.settled;
-          }
+          const { pose } = frame;
+          programmaticUntilRef.current = now + PROGRAMMATIC_GRACE_MS;
+          mapHeadingRef.current = pose.heading;
+          // A plain (unanimated) set: the motion comes from this loop.  A
+          // native animation per fix is what produced hop-pause-hop.
+          mapRef.current.setCamera(
+            buildFollowCamera(
+              pose.center,
+              pose.heading,
+              pose.pitch,
+              pose,
+              Platform.OS,
+            ),
+          );
+          cameraSettled = frame.settled;
         }
       }
     }
@@ -718,11 +714,23 @@ export default function MapScreen() {
       const wasFollowing = followModeRef.current === "following";
       followModeRef.current = "following";
       setFollowMode("following");
-      if (current) seedFollowCamera(current);
-      else if (!wasFollowing) cameraEaser.reset();
+      // Already following (mid-transition included): carry on untouched.
+      // From free: start over, from `current` or a one-off camera read.
+      const position = locationSmoother.sample(Date.now());
+      followCamera.enter(
+        wasFollowing,
+        current,
+        position ? followTargetFor(position) : undefined,
+      );
       wakeFrameLoop();
     },
-    [zoomTarget, cameraEaser, seedFollowCamera, wakeFrameLoop],
+    [
+      zoomTarget,
+      followCamera,
+      locationSmoother,
+      followTargetFor,
+      wakeFrameLoop,
+    ],
   );
 
   // ── Process a new GPS position ────────────────────────────────────────────
@@ -1047,14 +1055,14 @@ export default function MapScreen() {
     headingModeRef.current = next;
     const position = locationSmoother.sample(Date.now());
     if (followMode === "following" && position) {
-      cameraEaser.retarget(followTargetFor(position));
+      followCamera.retarget(followTargetFor(position));
     }
     wakeFrameLoop();
   }, [
     headingMode,
     followMode,
     locationSmoother,
-    cameraEaser,
+    followCamera,
     followTargetFor,
     wakeFrameLoop,
   ]);
@@ -1064,11 +1072,11 @@ export default function MapScreen() {
     zoomTarget.gestureMoved(Date.now());
     if (followModeRef.current === "following") {
       followModeRef.current = "free";
-      cameraEaser.reset();
+      followCamera.leave();
       setFollowMode("free");
       Haptics.selectionAsync();
     }
-  }, [zoomTarget, cameraEaser]);
+  }, [zoomTarget, followCamera]);
 
   const handleMapTouchStart = useCallback(() => {
     zoomTarget.touchStart(Date.now());
@@ -1079,28 +1087,24 @@ export default function MapScreen() {
   }, [zoomTarget]);
 
   const handleRegionChangeComplete = useCallback(() => {
-    // Adopt the zoom the map settled at only when the user moved it, so a
-    // pinch is respected on the next follow update.  Settles after our own
-    // camera writes are ignored: Apple Maps reports back a slightly different
-    // (often mid-flight) altitude, and adopting it on every heading tick
-    // compounded into the map steadily zooming out.  While following, the
-    // frame loop writes the camera every frame, so this fires every frame
-    // too; only the user's moves are worth reading back.
+    // While following, the frame loop writes the camera every frame, so this
+    // fires every frame too.  Nothing here is fed back into the follow camera:
+    // MapKit doesn't report a tilted camera's altitude back exactly (and
+    // reports mid-flight values), and adopting it on each heading change is
+    // what compounded into the map zooming out to a view of the country.
+    // After a user gesture the map's bearing is read for the arrow only.
     const now = Date.now();
-    const fromGesture = zoomTarget.gestureActive(now);
-    if (fromGesture && Platform.OS !== "web" && mapRef.current) {
+    if (
+      zoomTarget.gestureActive(now) &&
+      Platform.OS !== "web" &&
+      mapRef.current
+    ) {
       mapRef.current
         .getCamera()
         .then((cam) => {
-          zoomTarget.settle(fromGesture, cam);
-          if (cam.heading != null) {
+          if (followModeRef.current !== "following" && cam.heading != null) {
             mapHeadingRef.current = cam.heading;
             syncArrowRotation();
-          }
-          // Still following (a pinch): carry on from where they left it
-          if (followModeRef.current === "following") {
-            seedFollowCamera(cam);
-            wakeFrameLoop();
           }
         })
         .catch(() => {});
@@ -1108,13 +1112,14 @@ export default function MapScreen() {
 
     if (now < programmaticUntilRef.current) return;
 
-    // User triggered this change
+    // The user moved the map (pan, pinch or rotate): follow mode ends, and
+    // Continue Following brings the navigation camera back
     if (followModeRef.current === "following") {
       followModeRef.current = "free";
-      cameraEaser.reset();
+      followCamera.leave();
       setFollowMode("free");
     }
-  }, [zoomTarget, cameraEaser, seedFollowCamera, wakeFrameLoop]);
+  }, [zoomTarget, followCamera]);
 
   // ── Drive controls ────────────────────────────────────────────────────────
   function handleStartDrive() {
@@ -1186,8 +1191,14 @@ export default function MapScreen() {
 
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
 
+    // Already following: nothing to read; the camera carries on as it is.
+    // From a moved map, its camera is where the ease-in starts.
     let liveCamera: ReportedPose | undefined;
-    if (Platform.OS !== "web" && mapRef.current) {
+    if (
+      followModeRef.current !== "following" &&
+      Platform.OS !== "web" &&
+      mapRef.current
+    ) {
       try {
         liveCamera = await mapRef.current.getCamera();
       } catch {

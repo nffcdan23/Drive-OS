@@ -20,6 +20,12 @@ export const NAV_CAMERA = {
   // sits a little further out than the old flat 700 m street view.
   distanceM: 800,
 
+  // Backstop on the follow distance.  The distance only ever comes from this
+  // file, so these never bind in normal use; they exist so that no future
+  // bug can send the follow camera out to a view of the whole country.
+  minDistanceM: 150,
+  maxDistanceM: 5000,
+
   // Android (Google Maps) states zoom rather than distance
   androidZoom: 16.5,
 

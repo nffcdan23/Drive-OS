@@ -52,13 +52,6 @@ export interface FollowCamera {
   altitude?: number;
 }
 
-/** The camera as the map reports it after settling (react-native-maps getCamera) */
-export interface ReportedCamera {
-  zoom?: number;
-  altitude?: number;
-  pitch?: number;
-}
-
 /**
  * Builds a follow camera.  Position and heading come from the caller; the zoom
  * comes only from the held target.  iOS reads altitude (derived here from the
@@ -84,42 +77,51 @@ export function buildFollowCamera(
 export const GESTURE_SETTLE_MS = 1000;
 
 /**
- * Holds the zoom the follow camera keeps.  Only a user gesture can move it
- * (besides explicit resets), so the app's own camera animations, which happen
- * on every location fix and compass tick, can never feed back into it.
+ * Holds the zoom the follow camera keeps: the single authoritative follow
+ * distance.  Only explicit resets (from NAV_CAMERA) and zoom picks set it.
+ * Nothing the map reports back is ever written into it, so the app's own
+ * camera updates, which happen every frame, can never feed back into it.
  *
- * The gesture window doubles as the rule for when automatic follow updates may
- * animate: never while it is open, which both stops follow from fighting the
- * user's fingers and guarantees any camera that settles inside it is theirs.
+ * It also tracks the user's touches: automatic follow updates never write the
+ * camera while a gesture window is open, so follow doesn't fight the fingers.
  */
 export class FollowZoomTarget {
   private target: FollowZoom;
   private touching = false;
   private lastGestureAt = -Infinity;
+  private readonly limits: { min: number; max: number };
 
-  constructor(initial: FollowZoom) {
-    this.target = { ...initial };
+  /**
+   * `limits` bound the distance as a backstop: whatever a bug might try to
+   * set, the follow camera can't be sent to a view of the whole country.
+   */
+  constructor(
+    initial: FollowZoom,
+    limits: { min: number; max: number } = { min: 0, max: Infinity },
+  ) {
+    this.limits = limits;
+    this.target = {
+      zoom: initial.zoom,
+      distance: this.clamp(initial.distance),
+    };
+  }
+
+  private clamp(distance: number): number {
+    return Math.min(Math.max(distance, this.limits.min), this.limits.max);
   }
 
   get current(): FollowZoom {
     return { ...this.target };
   }
 
-  /**
-   * Sets the target outright, for deliberate resets and explicit zoom picks.
-   * Takes a distance directly, or the altitude and pitch the map reported.
-   */
-  set(next: Partial<FollowZoom> & ReportedCamera): void {
+  /** Sets the target outright, for deliberate resets and explicit zoom picks */
+  set(next: Partial<FollowZoom>): void {
     if (next.zoom != null && Number.isFinite(next.zoom)) {
       this.target.zoom = next.zoom;
     }
-    const distance =
-      next.distance ??
-      (next.altitude != null
-        ? distanceForAltitude(next.altitude, next.pitch ?? 0)
-        : undefined);
+    const distance = next.distance;
     if (distance != null && Number.isFinite(distance) && distance > 0) {
-      this.target.distance = distance;
+      this.target.distance = this.clamp(distance);
     }
   }
 
@@ -149,16 +151,5 @@ export class FollowZoomTarget {
   /** Whether the camera is currently the user's to move */
   gestureActive(now: number): boolean {
     return this.touching || now - this.lastGestureAt <= GESTURE_SETTLE_MS;
-  }
-
-  /**
-   * Called when the map settles, with whether a gesture was active at that
-   * moment and the camera it settled at.  Adopts the zoom only for a user
-   * gesture; returns whether it did.
-   */
-  settle(fromGesture: boolean, reported: ReportedCamera): boolean {
-    if (!fromGesture) return false;
-    this.set(reported);
-    return true;
   }
 }
