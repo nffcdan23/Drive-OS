@@ -21,6 +21,17 @@ This file lists every value the app, the API and CI need, and where each is set.
   - staging and production builds require HTTPS;
   - CI fails if a secret value appears in the app's files.
 
+### Drive map (Mapbox)
+
+| Variable | Kind | Value |
+|---|---|---|
+| `EXPO_PUBLIC_MAPBOX_TOKEN` | public | Mapbox **public** token (`pk.…`): mapbox.com → Account → Tokens → Default public token |
+| `EXPO_PUBLIC_MAPBOX_STYLE_URL` | public | The published Derwent style (`mapbox://styles/<account>/<style id>`): Studio → the style → Share → Style URL |
+
+- With both set, and an app build that includes Mapbox, the Drive map uses Mapbox. Without them it uses the previous map (Apple Maps on iOS, Google Maps on Android), so removing them switches back.
+- No Mapbox secret or downloads token is needed. The build refuses a secret token (`sk.…`) in any `EXPO_PUBLIC_*` value.
+- Adding Mapbox changed native code: it needs a new development or TestFlight build, not just an update.
+
 ## 2. Mobile app: identity (placeholders until the name is chosen)
 
 These are read by `app.identity.js`. The EAS project id is recorded only there, per variant.

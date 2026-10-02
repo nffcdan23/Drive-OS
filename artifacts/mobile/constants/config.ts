@@ -5,8 +5,13 @@ export const CONFIG = {
   // hide anything that would present invented data as real.
   DEMO_MODE: __DEV__,
 
-  // Map API Keys — set in .env as EXPO_PUBLIC_MAPBOX_TOKEN
+  // Mapbox (Drive map) — public values, set in .env / EAS environment.
+  // EXPO_PUBLIC_MAPBOX_TOKEN: the public token (pk.…); never a secret sk.… token.
+  // EXPO_PUBLIC_MAPBOX_STYLE_URL: the published Derwent style
+  // (mapbox://styles/<account>/<style id>).  Without both, the Drive map
+  // stays on react-native-maps.
   MAPBOX_TOKEN: process.env.EXPO_PUBLIC_MAPBOX_TOKEN ?? null,
+  MAPBOX_STYLE_URL: process.env.EXPO_PUBLIC_MAPBOX_STYLE_URL ?? null,
 
   // Weather API — set in .env as EXPO_PUBLIC_WEATHER_API_KEY
   WEATHER_API_KEY: process.env.EXPO_PUBLIC_WEATHER_API_KEY ?? null,

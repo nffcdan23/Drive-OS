@@ -14,6 +14,8 @@ const { identity } = require('./app.identity');
 function isServerSecret(value) {
   const v = String(value ?? '');
   if (v.includes('sb_secret_')) return true;
+  // A Mapbox secret token (sk.…): only the public pk.… token belongs in the app
+  if (/(^|[^A-Za-z0-9])sk\.eyJ/.test(v)) return true;
   if (/postgres(?:ql)?:\/\/[^\s:@/]+:[^\s@/]+@/i.test(v)) return true;
   for (const jwt of v.match(/eyJ[\w-]+\.[\w-]+\.[\w-]*/g) || []) {
     try {
@@ -55,7 +57,7 @@ module.exports = ({ config }) => {
   // project URL and the publishable key may be public.
   const secrets = publicNames.filter((k) => isServerSecret(process.env[k]));
   if (secrets.length) {
-    throw new Error(`Refusing to build: ${secrets.join(', ')} holds a server secret (a Supabase secret or service-role key, or a database URL with a password). Only public values may be EXPO_PUBLIC_*.`);
+    throw new Error(`Refusing to build: ${secrets.join(', ')} holds a server secret (a Supabase secret or service-role key, a database URL with a password, or a Mapbox secret token). Only public values may be EXPO_PUBLIC_*.`);
   }
 
   // Store builds use the committed identity only. An APP_* override (e.g. a
@@ -124,6 +126,8 @@ module.exports = ({ config }) => {
       ...config.plugins,
       'expo-apple-authentication',
       ['expo-secure-store', { faceIDPermission: false }],
+      // Mapbox Maps SDK for the Drive map (no download token needed)
+      '@rnmapbox/maps',
     ],
     extra: {
       ...(config.extra || {}),

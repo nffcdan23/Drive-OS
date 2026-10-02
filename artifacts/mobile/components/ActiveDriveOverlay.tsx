@@ -55,6 +55,8 @@ interface Props {
   onResumeFollowing: () => void;
   onZoomIn: () => void;
   onZoomOut: () => void;
+  /** Height of the open map area above the drive panel (layout only) */
+  onMapAreaLayout?: (height: number) => void;
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -288,6 +290,7 @@ export default function ActiveDriveOverlay({
   onResumeFollowing,
   onZoomIn,
   onZoomOut,
+  onMapAreaLayout,
 }: Props) {
   const [saveConfirm, setSaveConfirm] = useState(false);
   const [showTelemetry, setShowTelemetry] = useState(false);
@@ -328,7 +331,14 @@ export default function ActiveDriveOverlay({
       style={[StyleSheet.absoluteFill, { pointerEvents: "box-none" as any }]}
     >
       {/* ── Transparent map area ── */}
-      <View style={[styles.mapArea, { pointerEvents: "box-none" as any }]}>
+      <View
+        style={[styles.mapArea, { pointerEvents: "box-none" as any }]}
+        onLayout={
+          onMapAreaLayout
+            ? (e) => onMapAreaLayout(e.nativeEvent.layout.height)
+            : undefined
+        }
+      >
         {/* Top status row */}
         <View
           style={[

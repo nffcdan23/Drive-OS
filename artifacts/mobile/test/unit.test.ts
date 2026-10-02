@@ -1753,3 +1753,115 @@ test('the save backstop and crash recovery also count only active time', async (
   await restarted2.start();
   assert.equal(restarted2.status.pendingJourneys, 1);
 });
+
+// ─── Mapbox Drive map ───────────────────────────────────────────────────────
+// The same follow controller drives Mapbox, which states zoom (not altitude).
+// A fake Mapbox map reports its camera back with a small error on every
+// change, as a real map can mid-animation; nothing may feed it back.
+
+import {
+  mapboxSettings, mapboxStyleFor, mapboxFollowCamera, reportedPoseFromMapbox,
+  trailFeatureCollection, clampMapboxZoom, MAPBOX_PUBLIC_STYLES, type MapboxCameraStop,
+} from '@/lib/mapbox';
+
+class FakeMapbox {
+  camera = { center: [START.longitude, START.latitude], zoom: 15, heading: 0, pitch: 0 };
+  reads = 0;
+  writes: MapboxCameraStop[] = [];
+  setCamera(c: MapboxCameraStop) {
+    this.writes.push(c);
+    // Reported back slightly off, which follow must never adopt
+    this.camera = { center: c.centerCoordinate, zoom: c.zoomLevel - 0.013, heading: c.heading, pitch: c.pitch };
+  }
+  getCamera() { this.reads++; return reportedPoseFromMapbox(this.camera); }
+}
+
+function mapboxFrame(ctl: FollowCameraController, map: FakeMapbox, target: FollowFrameTarget) {
+  const f = ctl.frame(target, 16, false);
+  if (f.kind === 'needsSeed') {
+    const token = ctl.beginSeed();
+    if (token != null) ctl.completeSeed(token, map.getCamera(), target);
+    return null;
+  }
+  if (f.kind === 'paused') return null;
+  map.setCamera(mapboxFollowCamera(f.pose));
+  return f;
+}
+
+test('Mapbox follow: heading changes move only the bearing; zoom and pitch hold exactly', () => {
+  const ctl = new FollowCameraController(
+    { zoom: NAV_CAMERA.mapboxZoom, distance: NAV_CAMERA.distanceM },
+    { min: NAV_CAMERA.minDistanceM, max: NAV_CAMERA.maxDistanceM },
+  );
+  const map = new FakeMapbox();
+  map.camera = { center: [START.longitude + 0.01, START.latitude], zoom: 11, heading: 200, pitch: 0 };
+  ctl.enter(false);
+  for (let i = 0; i < 400; i++) mapboxFrame(ctl, map, navTarget(START, 0)); // ease in from the user's map
+  assert.equal(map.reads, 1, 'exactly one camera read on entering follow');
+  const readsBefore = map.reads;
+  for (let lap = 0; lap < 20; lap++) {
+    for (const heading of [0, 45, 90, 180, 270, 359, 1, 120, 300]) {
+      for (let i = 0; i < 30; i++) {
+        const f = mapboxFrame(ctl, map, navTarget(START, heading))!;
+        const sent = map.writes.at(-1)!;
+        assert.equal(sent.zoomLevel, NAV_CAMERA.mapboxZoom, `zoom moved at ${heading}°`);
+        assert.equal(sent.pitch, NAV_CAMERA.pitchDeg, `pitch moved at ${heading}°`);
+        assert.equal(sent.heading, f.pose.heading);
+        assert.equal(sent.animationDuration, 0);
+      }
+    }
+  }
+  assert.equal(map.reads, readsBefore, 'following must never read the map camera back');
+  // Only a deliberate zoom pick changes it
+  ctl.zoom.set({ zoom: clampMapboxZoom(ctl.zoom.current.zoom + 1) });
+  for (let i = 0; i < 200; i++) mapboxFrame(ctl, map, navTarget(START, 90));
+  assert.equal(map.writes.at(-1)!.zoomLevel, NAV_CAMERA.mapboxZoom + 1);
+  assert.equal(clampMapboxZoom(99), 20);
+  assert.equal(clampMapboxZoom(-4), 3);
+});
+
+test('Mapbox settings need a public token and a style URL; a secret token is never used', () => {
+  const pk = 'pk.' + 'eyJ1' + 'x'.repeat(8) + '.sig';
+  const style = 'mapbox://styles/derwent/abc123';
+  assert.deepEqual(mapboxSettings(` ${pk} `, ` ${style} `), { token: pk, styleUrl: style });
+  assert.equal(mapboxSettings(pk, null), null);
+  assert.equal(mapboxSettings(null, style), null);
+  assert.equal(mapboxSettings('sk.' + 'eyJ1' + 'x'.repeat(8) + '.sig', style), null);
+  assert.equal(mapboxSettings(pk, 'mapbox://styles/only-account'), null);
+  assert.equal(mapboxSettings(pk, 'http://example.com/style.json'), null);
+  assert.equal(mapboxStyleFor('standard', style), style);
+  assert.equal(mapboxStyleFor('terrain', style), MAPBOX_PUBLIC_STYLES.outdoors);
+  assert.equal(mapboxStyleFor('satellite', style), MAPBOX_PUBLIC_STYLES.satelliteStreets);
+});
+
+test('the recorded drive becomes one trail line, and nothing under two points', () => {
+  assert.deepEqual(trailFeatureCollection(null).features, []);
+  assert.deepEqual(trailFeatureCollection([START]).features, []);
+  const b = offsetMeters(START, 100, 0);
+  const fc = trailFeatureCollection([START, { latitude: Number.NaN, longitude: 0 }, b]);
+  assert.equal(fc.features.length, 1);
+  assert.deepEqual(fc.features[0]!.geometry.coordinates, [[START.longitude, START.latitude], [b.longitude, b.latitude]]);
+});
+
+test('the app build includes Mapbox and refuses a Mapbox secret token', () => {
+  const appConfig = createRequire(import.meta.url)('../app.config.js') as (a: { config: object }) => { plugins: unknown[] };
+  const base = { config: { ios: { infoPlist: {} }, android: {}, plugins: [], extra: {} } };
+  const saved = { ...process.env };
+  try {
+    for (const k of Object.keys(process.env)) if (k.startsWith('EXPO_PUBLIC_')) delete process.env[k];
+    Object.assign(process.env, {
+      EXPO_PUBLIC_APP_ENV: 'staging',
+      EXPO_PUBLIC_SUPABASE_URL: 'https://example.supabase.co',
+      EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY: 'sb_publishable_' + 'abc',
+      EXPO_PUBLIC_API_URL: 'https://api.example.invalid',
+      EXPO_PUBLIC_MAPBOX_TOKEN: 'pk.' + 'eyJ1' + 'x'.repeat(8) + '.sig',
+      EXPO_PUBLIC_MAPBOX_STYLE_URL: 'mapbox://styles/derwent/abc123',
+    });
+    assert.ok(appConfig(base).plugins.includes('@rnmapbox/maps'));
+    process.env.EXPO_PUBLIC_MAPBOX_TOKEN = 'sk.' + 'eyJ1' + 'x'.repeat(8) + '.sig';
+    assert.throws(() => appConfig(base), /EXPO_PUBLIC_MAPBOX_TOKEN holds a server secret/);
+  } finally {
+    for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];
+    Object.assign(process.env, saved);
+  }
+});
