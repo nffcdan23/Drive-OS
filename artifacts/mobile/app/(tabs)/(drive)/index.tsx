@@ -22,8 +22,8 @@ import { useColors } from "@/hooks/useColors";
 import { useApp } from "@/context/AppContext";
 import { CONFIG } from "@/constants/config";
 import MapView, {
-  MarkerAnimated,
-  AnimatedRegion,
+  Marker,
+  type MapMarker,
   MapType,
   Polyline,
 } from "react-native-maps";
@@ -43,6 +43,7 @@ import {
   LatestReader,
   markerScreenRotation,
 } from "@/lib/headingFilter";
+import { LIVE_TRAIL, LiveTrailHead } from "@/lib/liveTrail";
 import { isLongEnoughToSave } from "@/lib/backend/journeyRecorder";
 import {
   lookAheadForSpeed,
@@ -161,6 +162,8 @@ function haversineMeters(
 // values pushed straight to the native views, exactly like the rotation, so
 // the flicker fix above still holds: nothing re-renders or resizes.
 const ARROW_FRAME = 60;
+// The arrow's Animated values run on the native driver wherever there is one
+const NATIVE_ARROW = Platform.OS !== "web";
 const ARROW_W = 40;
 const ARROW_H = 44;
 const ARROW_PATH = "M17 3 L31 35 L17 27 L3 35 Z";
@@ -252,13 +255,26 @@ const LocationArrow = React.memo(function LocationArrow({
 // view directly; re-rendering the annotation instead made it blink.  Android's
 // Google provider rasterises marker content, so it uses the native map-relative
 // rotation prop and leaves the content still.
+//
+// Nothing about the marker is ever changed behind React's back in a way React
+// can undo.  Its `coordinate` prop is fixed at the first fix and the live
+// position is sent with the marker's native setCoordinates command each frame,
+// which leaves the props React holds untouched.  (It used to be an
+// AnimatedRegion pushed with setNativeProps, which React never heard about:
+// during a drive every GPS fix re-renders the trail, React re-sends the map's
+// children as it last knew them, and the marker snapped back to where it was
+// first placed, off at the start of the drive.)  The arrow's Animated values
+// are native-driven for the same reason: React's commits skip transforms that
+// Animated manages natively.
 const UserMarker = React.memo(function UserMarker({
-  coordinate,
+  markerRef,
+  initialCoordinate,
   rotationValue,
   perspective,
   nativeRotation,
 }: {
-  coordinate: AnimatedRegion;
+  markerRef: React.RefObject<MapMarker | null>;
+  initialCoordinate: { latitude: number; longitude: number };
   rotationValue: Animated.Value;
   perspective: {
     scaleY: Animated.Value;
@@ -268,10 +284,9 @@ const UserMarker = React.memo(function UserMarker({
   nativeRotation: number;
 }) {
   return (
-    <MarkerAnimated
-      // react-native-maps types coordinate as a plain LatLng even on the
-      // animated marker, which is the one thing an AnimatedRegion cannot be
-      coordinate={coordinate as never}
+    <Marker
+      ref={markerRef}
+      coordinate={initialCoordinate}
       anchor={{ x: 0.5, y: 0.5 }}
       rotation={nativeRotation}
       tracksViewChanges={false}
@@ -282,9 +297,44 @@ const UserMarker = React.memo(function UserMarker({
         edgeLift={perspective.edgeLift}
         shadowLift={perspective.shadowLift}
       />
-    </MarkerAnimated>
+    </Marker>
   );
 });
+
+// The live end of the drive trail (lib/liveTrail.ts): from the last recorded
+// fix to the arrow, redrawn many times a second.  Its own small component with
+// its own state, so a redraw re-renders only these two lines.  Styled to match
+// the recorded trail it continues.
+const LiveTrailHeadLines = React.memo(function LiveTrailHeadLines({
+  subscribe,
+  color,
+}: {
+  subscribe: (draw: (coords: LatLngPoint[] | null) => void) => () => void;
+  color: string;
+}) {
+  const [coords, setCoords] = useState<LatLngPoint[] | null>(null);
+  useEffect(() => subscribe(setCoords), [subscribe]);
+  if (!coords || coords.length < 2) return null;
+  return (
+    <>
+      <Polyline
+        coordinates={coords}
+        strokeColor="rgba(0,207,232,0.28)"
+        strokeWidth={12}
+        lineCap="round"
+        lineJoin="round"
+      />
+      <Polyline
+        coordinates={coords}
+        strokeColor={color}
+        strokeWidth={4}
+        lineCap="round"
+        lineJoin="round"
+      />
+    </>
+  );
+});
+type LatLngPoint = { latitude: number; longitude: number };
 
 // ─── Demo map background (web only) ─────────────────────────────────────────
 function DemoMapBackground({ mapType }: { mapType: MapType }) {
@@ -451,7 +501,10 @@ export default function MapScreen() {
   // Kept in a ref, not state: it changes as often as the compass reports, and
   // re-rendering the screen at that rate is what made the marker blink.
   const mapHeadingRef = useRef(0);
-  const arrowRotation = useRef(new Animated.Value(0)).current;
+  // Native-driven, so React commits can't undo them (see UserMarker)
+  const arrowRotation = useRef(
+    new Animated.Value(0, { useNativeDriver: NATIVE_ARROW }),
+  ).current;
   // Pitch the map is tilted to, for laying the arrow onto the road.  Like the
   // heading, it's what we last set while following, or what the user left it
   // at, and it's display-only: nothing camera-related reads it.
@@ -461,9 +514,15 @@ export default function MapScreen() {
     (() => {
       const flat = markerPerspective(0);
       return {
-        scaleY: new Animated.Value(flat.scaleY),
-        edgeLift: new Animated.Value(flat.edgeLift),
-        shadowLift: new Animated.Value(flat.shadowLift),
+        scaleY: new Animated.Value(flat.scaleY, {
+          useNativeDriver: NATIVE_ARROW,
+        }),
+        edgeLift: new Animated.Value(flat.edgeLift, {
+          useNativeDriver: NATIVE_ARROW,
+        }),
+        shadowLift: new Animated.Value(flat.shadowLift, {
+          useNativeDriver: NATIVE_ARROW,
+        }),
       };
     })(),
   ).current;
@@ -506,13 +565,23 @@ export default function MapScreen() {
     latitude: number;
     longitude: number;
   } | null>(null);
-  const markerCoordRef = useRef(
-    new AnimatedRegion({
-      latitude: CONFIG.DEMO_REGION.latitude,
-      longitude: CONFIG.DEMO_REGION.longitude,
-      latitudeDelta: 0,
-      longitudeDelta: 0,
-    }),
+  // The marker, moved by native command; and where it first appears
+  const markerRef = useRef<MapMarker>(null);
+  const markerInitialCoordRef = useRef<LatLngPoint>(CONFIG.DEMO_REGION);
+  // ── Live trail head (display only; never recorded) ──
+  const [liveTrail] = useState(() => new LiveTrailHead());
+  const liveTrailDrawRef = useRef<((c: LatLngPoint[] | null) => void) | null>(
+    null,
+  );
+  const liveTrailDrawnAtRef = useRef(0);
+  const subscribeLiveTrail = useCallback(
+    (draw: (coords: LatLngPoint[] | null) => void) => {
+      liveTrailDrawRef.current = draw;
+      return () => {
+        if (liveTrailDrawRef.current === draw) liveTrailDrawRef.current = null;
+      };
+    },
+    [],
   );
   const lastPositionRef = useRef<{
     lat: number;
@@ -569,7 +638,10 @@ export default function MapScreen() {
   // Keep refs in sync
   useEffect(() => {
     isDrivingRef.current = isDriving;
-  }, [isDriving]);
+    // Display-only head: never carried from one drive into the next
+    liveTrail.reset();
+    liveTrailDrawRef.current?.(null);
+  }, [isDriving, liveTrail]);
   useEffect(() => {
     isPassengerModeRef.current = isPassengerMode;
   }, [isPassengerMode]);
@@ -692,12 +764,17 @@ export default function MapScreen() {
         drawn.longitude !== position.longitude
       ) {
         markerDrawnAtRef.current = position;
-        markerCoordRef.current.setValue({
-          latitude: position.latitude,
-          longitude: position.longitude,
-          latitudeDelta: 0,
-          longitudeDelta: 0,
-        });
+        markerRef.current?.setCoordinates(position);
+
+        // ── Live trail head ── ending exactly where the arrow is drawn
+        if (
+          isDrivingRef.current &&
+          !isPausedRef.current &&
+          now - liveTrailDrawnAtRef.current >= LIVE_TRAIL.redrawIntervalMs
+        ) {
+          liveTrailDrawnAtRef.current = now;
+          liveTrailDrawRef.current?.(liveTrail.frame(position));
+        }
       }
 
       // ── Follow camera ──
@@ -854,11 +931,7 @@ export default function MapScreen() {
       // it never flashes at the placeholder coordinate
       if (firstFix) {
         markerDrawnAtRef.current = coord;
-        markerCoordRef.current.setValue({
-          ...coord,
-          latitudeDelta: 0,
-          longitudeDelta: 0,
-        });
+        markerInitialCoordRef.current = coord;
       }
 
       // ── Record to active drive ──
@@ -868,6 +941,8 @@ export default function MapScreen() {
         !isPausedRef.current
       ) {
         const speedKmh = speedMs != null ? speedMs * 3.6 : 0;
+        // The raw fix is the trail's new end; the live head restarts from it
+        liveTrail.recordedPoint(coord);
         // Plausibility-checked speed before updating stats
         updateDriveCoordinate({
           latitude: lat,
@@ -897,7 +972,13 @@ export default function MapScreen() {
       // ── Draw: marker, heading and follow camera glide from here ──
       wakeFrameLoop();
     },
-    [locationSmoother, headingFilter, updateDriveCoordinate, wakeFrameLoop],
+    [
+      locationSmoother,
+      headingFilter,
+      liveTrail,
+      updateDriveCoordinate,
+      wakeFrameLoop,
+    ],
   );
 
   // ── Location watcher lifecycle ────────────────────────────────────────────
@@ -1211,6 +1292,10 @@ export default function MapScreen() {
   function handlePause() {
     setIsPaused(true);
     setDrivePaused(true);
+    // Nothing is recorded while paused, so the live head mustn't grow either;
+    // it starts again from the first fix recorded after Resume
+    liveTrail.reset();
+    liveTrailDrawRef.current?.(null);
   }
   function handleResume() {
     setIsPaused(false);
@@ -1554,10 +1639,18 @@ export default function MapScreen() {
         >
           {userLocation && (
             <UserMarker
-              coordinate={markerCoordRef.current}
+              markerRef={markerRef}
+              initialCoordinate={markerInitialCoordRef.current}
               rotationValue={arrowRotation}
               perspective={arrowPerspective}
               nativeRotation={markerRotation}
+            />
+          )}
+          {/* The trail's live end, from the last recorded fix to the arrow */}
+          {isDriving && (
+            <LiveTrailHeadLines
+              subscribe={subscribeLiveTrail}
+              color={colors.primary}
             />
           )}
           {/* Recorded route: a soft glow under the cyan line */}

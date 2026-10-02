@@ -1753,3 +1753,143 @@ test('the save backstop and crash recovery also count only active time', async (
   await restarted2.start();
   assert.equal(restarted2.status.pendingJourneys, 1);
 });
+
+// ─── Drive marker and live trail ────────────────────────────────────────────
+
+import { LiveTrailHead, LIVE_TRAIL } from '@/lib/liveTrail';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath as toPath } from 'node:url';
+
+/**
+ * A drive as the Drive screen's frame loop runs it: each frame the smoothed
+ * position goes to the marker and to the live trail head; each GPS fix is
+ * recorded raw (the trail and the saved journey) and restarts the head.
+ */
+function liveDrive(seconds: number, speed = 15, onFrame?: (f: { t: number; marker: LatLng; head: LatLng[] | null; recorded: LatLng[] }) => void) {
+  const sm = new LocationSmoother();
+  const trail = new LiveTrailHead();
+  const recorded: LatLng[] = [];
+  let course = 40;
+  let pos = START;
+  let marker: LatLng | null = null;
+  let head: LatLng[] | null = null;
+  for (let t = 0; t <= seconds * 1000; t += 1000 / 60) {
+    if (Math.round(t) % 1000 < 17) {
+      // A gentle bend: a second's travel along the course, then turn 9°
+      if (t > 0) pos = offsetMeters(pos, speed * Math.sin((course * Math.PI) / 180), speed * Math.cos((course * Math.PI) / 180));
+      course = (course + 9) % 360;
+      const raw = pos;
+      sm.addFix({ ...raw, speed, course, accuracy: 5, time: t }, t);
+      recorded.push(raw);
+      trail.recordedPoint(raw);
+    }
+    const p = sm.sample(t)!;
+    marker = p;
+    head = trail.frame(p);
+    onFrame?.({ t, marker, head, recorded });
+  }
+  return { sm, trail, recorded, marker: marker!, head };
+}
+
+test('the live trail head runs from the last recorded fix to exactly where the marker is', () => {
+  let frames = 0;
+  liveDrive(10, 15, ({ marker, head, recorded }) => {
+    frames++;
+    assert.ok(head && head.length >= 2 || (head && head.length === 1 && distM(head[0]!, marker) === 0));
+    // Same source: the trail meets the marker, no gap
+    assert.deepEqual(head!.at(-1), { latitude: marker.latitude, longitude: marker.longitude });
+    // ...and starts on the trail's last recorded point
+    assert.deepEqual(head![0], recorded.at(-1));
+  });
+  assert.ok(frames > 500);
+});
+
+test('between fixes the head moves smoothly; each fix restarts it cleanly', () => {
+  const speed = 20;
+  let prevEnd: LatLng | null = null;
+  let prevAnchor: LatLng | null = null;
+  let maxStep = 0, restarts = 0;
+  liveDrive(12, speed, ({ head }) => {
+    const end = head!.at(-1)!;
+    if (prevEnd) maxStep = Math.max(maxStep, distM(prevEnd, end));
+    if (prevAnchor && distM(prevAnchor, head![0]!) > 0) {
+      restarts++;
+      // The new head starts at the new fix and carries no trace from before it
+      assert.ok(head!.length <= 3, `stale trace kept: ${head!.length} points`);
+    }
+    prevEnd = end;
+    prevAnchor = head![0]!;
+  });
+  assert.ok(maxStep < (speed / 60) * 1.6, `head end jumped ${maxStep.toFixed(2)} m in a frame`);
+  assert.ok(restarts >= 10, 'every fix should restart the head');
+});
+
+test('the head follows bends rather than cutting a straight line to the marker', () => {
+  const trail = new LiveTrailHead();
+  trail.recordedPoint(START);
+  // The marker drives a quarter circle (radius 40 m) after the fix
+  let head: LatLng[] | null = null;
+  for (let i = 1; i <= 30; i++) {
+    const a = (i / 30) * (Math.PI / 2);
+    head = trail.frame(offsetMeters(START, 40 * (1 - Math.cos(a)), 40 * Math.sin(a)));
+  }
+  assert.ok(head!.length > 8, 'the bend is traced');
+  for (const p of head!) assert.ok(Math.abs(distM(p, offsetMeters(START, 40, 0)) - 40) < 0.5, 'off the curve');
+  // A lost signal can't grow it without limit
+  for (let i = 0; i < 1000; i++) trail.frame(offsetMeters(START, 50 + i * 5, 0));
+  assert.ok(trail.frame(offsetMeters(START, 6000, 0))!.length <= LIVE_TRAIL.maxTracePoints + 2);
+});
+
+test('the live head never reaches recorded or saved drive data', async () => {
+  // Raw fixes recorded during a drive with the live head running alongside
+  const { recorded } = liveDrive(15);
+  const copy = recorded.map((p) => ({ ...p }));
+  assert.deepEqual(recorded, copy, 'recorded points untouched');
+  // Through CloudSync: the saved journey's points are exactly the raw fixes kept
+  const server = new FakeServer();
+  const clock = { t: Date.now() - 60_000 };
+  const app = makeSync(server, new MemoryStore(), clock);
+  await app.start();
+  await app.startDrive(null);
+  const trail = new LiveTrailHead();
+  const sm = new LocationSmoother();
+  const fixes: LatLng[] = [];
+  for (let s = 0; s < 20; s++) {
+    clock.t += 1000;
+    const raw = offsetMeters(START, 0, s * 15);
+    fixes.push(raw);
+    app.addFix({ ...raw, speedMs: 15, accuracyM: 5, timestamp: clock.t });
+    sm.addFix({ ...raw, speed: 15, course: 0, accuracy: 5, time: clock.t }, clock.t);
+    trail.recordedPoint(raw);
+    for (let f = 0; f < 60; f++) trail.frame(sm.sample(clock.t + f * 16)!);
+  }
+  const rec = app.activeRecord!;
+  for (const p of rec.points) {
+    assert.ok(fixes.some((f) => Math.abs(f.latitude - p.latitude) < 1e-12 && Math.abs(f.longitude - p.longitude) < 1e-12), 'a saved point that was never a GPS fix');
+  }
+  const journey = await app.endDrive();
+  assert.ok(journey);
+  assert.equal(server.points.get(server.journeys[0]!.id), rec.points.length, 'only raw points uploaded');
+  // Ending (or pausing) the drive clears the head entirely
+  trail.reset();
+  assert.equal(trail.frame(START), null);
+});
+
+test('the Drive screen keeps its marker mounted and positions it by native command', () => {
+  const src = readFileSync(toPath(new URL('../app/(tabs)/(drive)/index.tsx', import.meta.url)), 'utf8');
+  // Mounted on the first fix, not on drive state
+  const mount = src.match(/\{([^{}]*)&&\s*\(\s*<UserMarker/);
+  assert.ok(mount, 'UserMarker render not found');
+  assert.equal(mount![1]!.trim(), 'userLocation');
+  // No longer an AnimatedRegion pushed with setNativeProps (React reverted it
+  // on every trail update during a drive)
+  assert.ok(!/MarkerAnimated|AnimatedRegion\(/.test(src.replace(/\/\/.*$/gm, '')));
+  assert.ok(/markerRef\.current\?\.setCoordinates\(position\)/.test(src));
+  // The live head is drawn from the same per-frame position as the marker
+  assert.ok(/liveTrail\.frame\(position\)/.test(src));
+  // The marker comes first among the map's children; annotation views sit
+  // above every overlay in MapKit, so the trail can't cover it
+  const children = src.slice(src.indexOf('<MapView'), src.indexOf('</MapView>'));
+  assert.ok(children.indexOf('<UserMarker') < children.indexOf('<Polyline'));
+  assert.ok(children.indexOf('<UserMarker') < children.indexOf('<LiveTrailHeadLines'));
+});
