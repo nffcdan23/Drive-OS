@@ -25,6 +25,19 @@ function isServerSecret(value) {
   return false;
 }
 
+/**
+ * True while `eas build` reads this file on your computer before uploading.
+ * That read has no .env files and not the EAS environment's values, so the
+ * backend settings can legitimately be absent. EAS CLI evaluates the config
+ * either through `expo config` with EXPO_NO_DOTENV=1, or (when `expo` is a
+ * devDependency, as here) in its own process.
+ */
+function isEasCliConfigRead() {
+  if (process.env.EXPO_NO_DOTENV === '1') return true;
+  return [require.main && require.main.filename, process.argv[1]]
+    .some((entry) => /[\\/]eas-cli[\\/]/.test(String(entry || '')));
+}
+
 module.exports = ({ config }) => {
   const appEnv = process.env.EXPO_PUBLIC_APP_ENV || 'development';
   const id = identity(appEnv);
@@ -68,7 +81,10 @@ module.exports = ({ config }) => {
     const missing = ['EXPO_PUBLIC_SUPABASE_URL', 'EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY', 'EXPO_PUBLIC_API_URL']
       .filter((k) => !process.env[k]);
     if (missing.length) {
-      throw new Error(`${appEnv} build is missing ${missing.join(', ')} (set them in the EAS "${appEnv === 'staging' ? 'preview' : 'production'}" environment)`);
+      const message = `${appEnv} build is missing ${missing.join(', ')} (set them in the EAS "${appEnv === 'staging' ? 'preview' : 'production'}" environment)`;
+      if (!isEasCliConfigRead()) throw new Error(message);
+      // stderr only: EAS CLI parses this command's stdout as JSON.
+      console.warn(`${message}. Not visible to EAS CLI locally; the EAS build server checks again.`);
     }
   }
 

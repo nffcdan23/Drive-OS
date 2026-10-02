@@ -1,5 +1,4 @@
 import { GlassSurface, GlassButton } from "@/components/Glass";
-import palette from "@/constants/colors";
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import {
   View,
@@ -7,11 +6,13 @@ import {
   StyleSheet,
   TouchableOpacity,
   Platform,
-  ScrollView,
   Animated,
+  type ViewProps,
 } from "react-native";
 import { useRouter } from "expo-router";
-import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
+import { Ionicons } from "@expo/vector-icons";
+import { SymbolView, type SFSymbol } from "expo-symbols";
+import { SafeAreaView as SystemSafeAreaView } from "react-native-screens/experimental";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { LinearGradient } from "expo-linear-gradient";
 import Svg, { Path, Ellipse, Circle } from "react-native-svg";
@@ -45,6 +46,44 @@ import {
   type ReportedPose,
   LocationSmoother,
 } from "@/lib/locationSmoothing";
+
+// SF Symbols on iOS, Ionicons elsewhere.
+function Glyph({
+  sf,
+  ion,
+  size,
+  color,
+}: {
+  sf: SFSymbol;
+  ion: React.ComponentProps<typeof Ionicons>["name"];
+  size: number;
+  color: string;
+}) {
+  if (Platform.OS !== "ios")
+    return <Ionicons name={ion} size={size} color={color} />;
+  return (
+    <SymbolView
+      name={sf}
+      tintColor={color}
+      style={{ width: size, height: size }}
+      fallback={<Ionicons name={ion} size={size} color={color} />}
+    />
+  );
+}
+
+// Keeps the drive actions just above the tab bar. On iOS this pads by
+// UIKit's own safe area, which includes the system tab bar.
+function AboveTabBar({
+  fallbackInset,
+  style,
+  ...props
+}: ViewProps & { fallbackInset: number }) {
+  return Platform.OS === "ios" ? (
+    <SystemSafeAreaView {...props} style={style} edges={{ bottom: true }} />
+  ) : (
+    <View {...props} style={[style, { paddingBottom: fallbackInset }]} />
+  );
+}
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 // The follow camera's pitch, distance, zoom and look-ahead live in
@@ -339,14 +378,13 @@ export default function MapScreen() {
     endDrive,
     updateDriveCoordinate,
     resolvedUnitSystem,
+    togglePassengerMode,
   } = useApp();
 
   // ── Map state ──
   const [mapType, setMapType] = useState<MapType>("standard");
-  const [showQuickPlaces, setShowQuickPlaces] = useState(false);
-  const [welcomeHeight, setWelcomeHeight] = useState(74);
   const [showLayerPicker, setShowLayerPicker] = useState(false);
-  const [showFriends, setShowFriends] = useState(false);
+  const [showMore, setShowMore] = useState(false);
 
   // ── Location state ──
   const [locationMode, setLocationMode] = useState<"live" | "simulated">(
@@ -477,15 +515,16 @@ export default function MapScreen() {
     }
   }, [isDriving]);
 
-  // Layout constants
-  // Floating glass tab bar and safe-area clearance.
-  const tabBarOffset = 72 + Math.max(insets.bottom, 12);
-  const headerTop = insets.top + 12;
+  // Layout (points), measured from the approved Drive screen: search,
+  // greeting and map controls float over the map; the drive actions sit just
+  // above the tab bar.
+  const headerTop = insets.top + 6;
   const SEARCH_TOP = headerTop;
-  const QUICK_TOP = SEARCH_TOP + 72 + welcomeHeight + 12;
-  const MAP_CONTROLS_TOP = QUICK_TOP + (showQuickPlaces ? 60 : 4);
-  // Bottom card sits above the floating tab bar with an 8 px gap
-  const BOTTOM_CARD_BOTTOM = tabBarOffset + 8;
+  const SEARCH_HEIGHT = 52;
+  const WELCOME_TOP = SEARCH_TOP + SEARCH_HEIGHT + 16;
+  const CONTROLS_TOP = SEARCH_TOP + 144;
+  // Non-iOS: the existing floating tab bar's footprint.
+  const TAB_BAR_FOOTPRINT = 72 + Math.max(insets.bottom, 12);
 
   // ── Animate the resume-follow button in/out ──────────────────────────────
   useEffect(() => {
@@ -1168,20 +1207,7 @@ export default function MapScreen() {
     return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
   }
 
-  // Compass rose display (N / NE / E …)
-  function headingLabel(deg: number): string {
-    const dirs = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
-    return dirs[Math.round(deg / 45) % 8];
-  }
-
   // ─── Styles ────────────────────────────────────────────────────────────────
-  const CARD_SHADOW = {
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.24,
-    shadowRadius: 20,
-    elevation: 8,
-  };
 
   const styles = StyleSheet.create({
     container: { flex: 1, backgroundColor: "#1a3d2a" },
@@ -1225,459 +1251,160 @@ export default function MapScreen() {
     },
 
     // ── Header ──
-    header: {
-      position: "absolute",
-      left: 12,
-      right: 12,
-      zIndex: 20,
-      flexDirection: "row",
-      alignItems: "center",
-      gap: 10,
-    },
-    menuBtn: {
-      width: 44,
-      height: 44,
-      borderRadius: 16,
-      backgroundColor: colors.card,
-      alignItems: "center",
-      justifyContent: "center",
-      borderWidth: StyleSheet.hairlineWidth,
-      borderColor: colors.border,
-      ...CARD_SHADOW,
-    },
-    wordmarkWrap: {
-      flex: 1,
-      alignItems: "flex-start",
-      justifyContent: "center",
-    },
-    // Wordmark uses Archivo; falls back to Inter if not yet loaded
-    wordmark: {
-      fontSize: 14,
-      fontWeight: "700",
-      color: colors.foreground,
-
-      letterSpacing: 2.4,
-      textTransform: "uppercase",
-    },
-    wordmarkAccent: { color: colors.primary },
-    headerRight: { flexDirection: "row", gap: 8 },
-    notifBtn: {
-      width: 44,
-      height: 44,
-      borderRadius: 22,
-      backgroundColor: colors.card,
-      alignItems: "center",
-      justifyContent: "center",
-      borderWidth: StyleSheet.hairlineWidth,
-      borderColor: colors.border,
-      ...CARD_SHADOW,
-    },
-    avatarBtn: {
-      width: 44,
-      height: 44,
-      borderRadius: 22,
-      backgroundColor: colors.secondary,
-      alignItems: "center",
-      justifyContent: "center",
-      ...CARD_SHADOW,
-    },
-    notifBadge: {
-      position: "absolute",
-      top: 6,
-      right: 6,
-      width: 16,
-      height: 16,
-      borderRadius: 8,
-      backgroundColor: colors.destructive,
-      alignItems: "center",
-      justifyContent: "center",
-    },
-    notifBadgeText: { fontSize: 9, color: "#fff", fontWeight: "700" },
-    avatarText: {
-      fontSize: 15,
-      fontWeight: "700",
-      color: "#fff",
-    },
-
-    // ── Search bar ──
-    searchBarWrap: { position: "absolute", left: 12, right: 12, zIndex: 15 },
+    scrim: { position: "absolute", left: 0, right: 0, zIndex: 10 },
+    searchBarWrap: { position: "absolute", left: 16, right: 16, zIndex: 15 },
     searchBar: {
-      backgroundColor: colors.card,
+      height: 52,
       borderRadius: 20,
-      height: 58,
-      paddingRight: 16,
+      paddingHorizontal: 18,
       flexDirection: "row",
       alignItems: "center",
-      gap: 0,
-      borderWidth: StyleSheet.hairlineWidth,
-      borderColor: colors.border,
-      ...CARD_SHADOW,
-      overflow: "hidden",
-    },
-    searchIconBox: {
-      width: 46,
-      height: 58,
-      alignItems: "center",
-      justifyContent: "center",
-      backgroundColor: "transparent",
-      borderTopLeftRadius: 20,
-      borderBottomLeftRadius: 20,
+      gap: 12,
     },
     searchPlaceholder: {
       flex: 1,
-      fontSize: 15,
-      color: colors.mutedForeground,
-
-      marginLeft: 12,
+      fontSize: 16,
+      color: "rgba(243,245,247,0.82)",
     },
-
-    // ── Quick-destination pills ──
-    quickButtonsWrap: { position: "absolute", left: 0, right: 0, zIndex: 14 },
-    quickButtonsScroll: { paddingHorizontal: 12, gap: 8 },
-    quickBtn: {
+    welcomeRow: {
+      position: "absolute",
+      left: 18,
+      right: 16,
+      zIndex: 14,
       flexDirection: "row",
       alignItems: "center",
-      gap: 6,
-      backgroundColor: colors.card,
-      borderRadius: 999,
-      paddingHorizontal: 14,
-      paddingVertical: 10,
-      borderWidth: StyleSheet.hairlineWidth,
-      borderColor: colors.border,
-      ...CARD_SHADOW,
+      gap: 12,
     },
-    quickBtnScenic: {
-      backgroundColor: "#1F4D3A",
-      borderColor: "transparent",
-    },
-    quickBtnActive: {
-      backgroundColor: colors.primary,
-      borderColor: "transparent",
-    },
-    quickBtnText: {
-      fontSize: 13,
+    welcomeTitle: {
+      color: "#FFFFFF",
+      fontSize: 23,
       fontWeight: "600",
-      color: colors.foreground,
+      letterSpacing: -0.4,
+      textShadowColor: "rgba(0,0,0,0.5)",
+      textShadowRadius: 10,
     },
-    quickBtnTextScenic: { color: "#fff" },
-    quickBtnTextActive: { color: colors.primaryForeground },
-
-    // ── Right-side map control pill card ──
-    mapControls: {
-      position: "absolute",
-      right: 12,
-      zIndex: 15,
+    welcomeSubtitle: {
+      color: "rgba(243,245,247,0.82)",
+      fontSize: 15,
+      marginTop: 3,
+      textShadowColor: "rgba(0,0,0,0.5)",
+      textShadowRadius: 8,
+    },
+    weather: {
+      height: 62,
+      minWidth: 132,
+      maxWidth: 164,
+      borderRadius: 20,
+      paddingHorizontal: 14,
+      flexDirection: "row",
       alignItems: "center",
       gap: 10,
     },
-    mapControlPill: {
-      backgroundColor: colors.card,
-      borderRadius: 24,
-      borderWidth: StyleSheet.hairlineWidth,
-      borderColor: colors.border,
-      alignItems: "center",
-      overflow: "hidden",
-      ...CARD_SHADOW,
+    weatherTemp: { color: "#FFFFFF", fontSize: 18, fontWeight: "600" },
+    weatherCondition: {
+      color: "rgba(243,245,247,0.78)",
+      fontSize: 12,
+      marginTop: 1,
     },
-    mapControlPillBtn: {
+    mapControls: { position: "absolute", right: 16, zIndex: 15, gap: 14 },
+    mapControl: {
       width: 46,
       height: 46,
-      alignItems: "center",
-      justifyContent: "center",
-    },
-    mapControlDivider: {
-      height: StyleSheet.hairlineWidth,
-      width: 26,
-      backgroundColor: colors.border,
-    },
-    mapControlNavigate: {
-      width: 46,
-      height: 46,
-      borderRadius: 23,
-      backgroundColor: colors.primary,
-      alignItems: "center",
-      justifyContent: "center",
-      ...CARD_SHADOW,
-    },
-    // Legacy (still used by layer picker positioning)
-    mapControlBtn: {
-      width: 46,
-      height: 46,
-      borderRadius: 23,
-      backgroundColor: colors.card,
-      alignItems: "center",
-      justifyContent: "center",
-      ...CARD_SHADOW,
-    },
-    mapControlBtnActive: { backgroundColor: colors.primary },
-    compassNorthLabel: {
-      fontSize: 8,
-      fontWeight: "700",
-      color: colors.destructive,
-
-      lineHeight: 10,
-    },
-    compassDirLabel: {
-      fontSize: 10,
-      fontWeight: "600",
-      color: colors.foreground,
-
-      lineHeight: 12,
-    },
-
-    // ── Resume following button ──
-    resumeBtn: {
-      position: "absolute",
-      zIndex: 25,
-      backgroundColor: colors.card,
-      borderRadius: 24,
-      paddingHorizontal: 18,
-      paddingVertical: 12,
-      flexDirection: "row",
-      alignItems: "center",
-      gap: 8,
-      borderWidth: StyleSheet.hairlineWidth,
-      borderColor: colors.border,
-      ...CARD_SHADOW,
-    },
-    resumeBtnText: {
-      fontSize: 14,
-      fontWeight: "700",
-      color: colors.foreground,
-    },
-
-    // ── Layer picker ──
-    layerPicker: {
-      position: "absolute",
-      right: 66,
-      zIndex: 20,
-      backgroundColor: colors.card,
       borderRadius: 14,
-      overflow: "hidden",
-      ...CARD_SHADOW,
+      alignItems: "center",
+      justifyContent: "center",
     },
-    layerOption: {
+    menu: {
+      position: "absolute",
+      right: 74,
+      zIndex: 20,
+      minWidth: 220,
+      borderRadius: 18,
       paddingHorizontal: 14,
-      paddingVertical: 10,
+    },
+    menuRow: {
+      minHeight: 48,
       flexDirection: "row",
       alignItems: "center",
-      gap: 8,
+      gap: 12,
       borderBottomWidth: StyleSheet.hairlineWidth,
       borderBottomColor: colors.border,
     },
-    layerOptionLast: { borderBottomWidth: 0 },
-    layerOptionText: {
-      fontSize: 14,
-      color: colors.foreground,
+    menuRowLast: { borderBottomWidth: 0 },
+    menuText: { color: colors.foreground, fontSize: 15 },
+    menuValue: {
+      marginLeft: "auto",
+      color: colors.mutedForeground,
+      fontSize: 15,
     },
-    layerOptionTextActive: {
-      fontWeight: "600",
-      color: colors.primary,
-    },
-
-    // ── Unified bottom card ──
-    bottomCard: {
+    bottomArea: {
       position: "absolute",
-      left: 16,
-      right: 16,
+      left: 0,
+      right: 0,
+      bottom: 0,
       zIndex: 15,
-      backgroundColor: colors.card,
-      borderRadius: 26,
-      padding: 16,
-      borderWidth: StyleSheet.hairlineWidth,
-      borderColor: colors.border,
-      ...CARD_SHADOW,
     },
-    weatherRow: {
-      flexDirection: "row",
-      alignItems: "center",
-      gap: 6,
-      marginBottom: 12,
-    },
-    weatherTemp: {
-      fontSize: 20,
-      fontWeight: "700",
-      color: colors.foreground,
-    },
-    weatherCondition: {
-      fontSize: 12,
-      color: colors.foreground,
-      fontWeight: "500",
-    },
-    weatherGreeting: {
-      fontSize: 11,
-      color: colors.mutedForeground,
-    },
-    cardDivider: {
-      height: StyleSheet.hairlineWidth,
-      backgroundColor: colors.border,
-      marginBottom: 12,
-    },
-    vehicleRow: { flexDirection: "row", alignItems: "center", gap: 10 },
-    vehicleThumb: { width: 48, height: 48 },
-    vehicleName: {
-      fontSize: 13,
-      fontWeight: "700",
-      color: colors.foreground,
-    },
-    vehicleMeta: {
-      flexDirection: "row",
-      alignItems: "center",
-      gap: 4,
-      marginTop: 2,
-    },
-    vehicleMetaText: {
-      fontSize: 11,
-      color: colors.mutedForeground,
-    },
-    demoTag: {
-      backgroundColor: "rgba(244,99,26,0.12)",
-      borderRadius: 6,
-      paddingHorizontal: 6,
-      paddingVertical: 2,
-      marginTop: 4,
-      alignSelf: "flex-start",
-    },
-    demoTagText: {
-      fontSize: 9,
-      color: colors.primary,
-      fontWeight: "500",
-    },
-    startDriveBtn: {
-      backgroundColor: colors.primary,
-      borderRadius: 12,
-      minHeight: 50,
-      justifyContent: "center",
+    resumeBtn: { alignSelf: "center", marginBottom: 14 },
+    resumeInner: {
+      height: 44,
+      borderRadius: 22,
       paddingHorizontal: 18,
-      paddingVertical: 11,
       flexDirection: "row",
       alignItems: "center",
-      gap: 7,
-      marginTop: 12,
+      gap: 8,
     },
-    startDriveBtnText: {
-      fontSize: 13,
-      fontWeight: "700",
-      color: colors.primaryForeground,
-
-      letterSpacing: 0.4,
-    },
-
-    // ── Retained for drive HUD layout (legacy, unused visually but keeps TS happy) ──
-    driveHUD: { position: "absolute", left: 12, right: 12, zIndex: 20 },
-    driveHUDTitle: {
-      flexDirection: "row",
-      alignItems: "center",
-      gap: 6,
-      marginBottom: 12,
-    },
-    driveIndicator: {
-      width: 8,
-      height: 8,
-      borderRadius: 4,
-      backgroundColor: "#22c55e",
-    },
-    driveHUDTitleText: {
-      fontSize: 14,
+    resumeBtnText: {
+      fontSize: 15,
       fontWeight: "600",
       color: colors.foreground,
-
-      flex: 1,
     },
-    driveTimer: {
-      fontSize: 22,
-      fontWeight: "700",
-      color: colors.foreground,
+    actions: { marginHorizontal: 14, marginBottom: 14 },
+    startGlow: {
+      borderRadius: 24,
+      shadowColor: "#08B4EA",
+      shadowOpacity: 0.6,
+      shadowRadius: 20,
+      shadowOffset: { width: 0, height: 4 },
+      elevation: 10,
     },
-    driveStats: {
+    startDrive: {
+      height: 64,
+      borderRadius: 24,
+      overflow: "hidden",
       flexDirection: "row",
-      justifyContent: "space-between",
-      marginTop: 10,
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 14,
+      borderWidth: 1,
+      borderColor: "rgba(190,246,255,0.75)",
     },
-    driveStatItem: { alignItems: "center" },
-    driveStatValue: {
+    startDriveText: {
+      color: "#04121B",
+      fontSize: 22,
+      fontWeight: "600",
+      letterSpacing: -0.3,
+    },
+    secondaryRow: { flexDirection: "row", gap: 10, marginTop: 11 },
+    secondaryBtn: {
+      flex: 1,
+      height: 66,
+      borderRadius: 20,
+      paddingLeft: 18,
+      paddingRight: 14,
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 12,
+    },
+    secondaryText: {
+      flex: 1,
+      color: "#FFFFFF",
       fontSize: 16,
       fontWeight: "600",
-      color: colors.foreground,
-    },
-    driveStatLabel: {
-      fontSize: 10,
-      color: colors.mutedForeground,
-
-      marginTop: 1,
-    },
-    endDriveBtn: { marginTop: 12, borderRadius: 12, overflow: "hidden" },
-    endDriveBtnInner: {
-      paddingVertical: 11,
-      alignItems: "center",
-      justifyContent: "center",
-      backgroundColor: colors.foreground,
-    },
-    endDriveBtnText: {
-      fontSize: 14,
-      fontWeight: "600",
-      color: "#fff",
-    },
-    passengerNote: {
-      fontSize: 10,
-      color: colors.primary,
-
-      textAlign: "center",
-      marginTop: 6,
-    },
-    locationTag: {
-      position: "absolute",
-      zIndex: 20,
-      right: 66,
-      backgroundColor: "rgba(0,0,0,0.5)",
-      borderRadius: 8,
-      paddingHorizontal: 8,
-      paddingVertical: 4,
-      flexDirection: "row",
-      alignItems: "center",
-      gap: 4,
-    },
-    locationTagText: {
-      fontSize: 10,
-      color: "rgba(255,255,255,0.8)",
-      fontWeight: "500",
+      lineHeight: 20,
     },
   });
 
   const passengerOffset = isPassengerMode ? 34 : 0;
-
-  const quickButtons = [
-    {
-      id: "home",
-      label: "Home",
-      icon: "home-outline" as const,
-      isActive: false,
-    },
-    {
-      id: "work",
-      label: "Work",
-      icon: "briefcase-outline" as const,
-      isActive: false,
-    },
-    {
-      id: "favs",
-      label: "Favourites",
-      icon: "star-outline" as const,
-      isActive: false,
-    },
-    {
-      id: "recent",
-      label: "Recent",
-      icon: "time-outline" as const,
-      isActive: false,
-    },
-    {
-      id: "scenic",
-      label: "Scenic",
-      icon: "triangle-outline" as const,
-      isActive: false,
-    },
-  ];
 
   const mapLayers: Array<{ type: MapType; label: string; icon: string }> = [
     { type: "standard", label: "Standard", icon: "map-outline" },
@@ -1706,7 +1433,12 @@ export default function MapScreen() {
           userInterfaceStyle="dark"
           ref={mapRef}
           style={styles.mapFull}
-          mapType={mapType}
+          // Muted standard keeps the map calm and premium on iOS.
+          mapType={
+            mapType === "standard" && Platform.OS === "ios"
+              ? "mutedStandard"
+              : mapType
+          }
           showsCompass={false}
           showsScale={false}
           showsUserLocation={false}
@@ -1737,7 +1469,16 @@ export default function MapScreen() {
               nativeRotation={markerRotation}
             />
           )}
-          {/* Orange trail for free-drive tracking mode */}
+          {/* Recorded route: a soft glow under the cyan line */}
+          {isDriving && currentDrive && currentDrive.coordinates.length > 1 && (
+            <Polyline
+              coordinates={currentDrive.coordinates}
+              strokeColor="rgba(0,207,232,0.28)"
+              strokeWidth={12}
+              lineCap="round"
+              lineJoin="round"
+            />
+          )}
           {isDriving && currentDrive && currentDrive.coordinates.length > 1 && (
             <Polyline
               coordinates={currentDrive.coordinates}
@@ -1782,7 +1523,7 @@ export default function MapScreen() {
         <View
           style={[
             styles.accuracyWarning,
-            { top: QUICK_TOP + (showQuickPlaces ? 60 : 0) + passengerOffset },
+            { top: CONTROLS_TOP + passengerOffset },
           ]}
         >
           <Ionicons
@@ -1794,298 +1535,159 @@ export default function MapScreen() {
         </View>
       )}
 
+      {/* ── Scrims keep the floating UI legible over any map ── */}
+      {!isDriving && (
+        <LinearGradient
+          pointerEvents="none"
+          colors={["rgba(5,8,12,0.85)", "rgba(5,8,12,0.45)", "rgba(5,8,12,0)"]}
+          locations={[0, 0.6, 1]}
+          style={[styles.scrim, { top: 0, height: insets.top + 210 }]}
+        />
+      )}
+      {!isDriving && (
+        <LinearGradient
+          pointerEvents="none"
+          colors={["rgba(5,8,12,0)", "rgba(5,8,12,0.8)"]}
+          style={[styles.scrim, { bottom: 0, height: 360 }]}
+        />
+      )}
+
+      {/* ── Search: the navigation entry point ── */}
       {!isDriving && (
         <View
-          onLayout={(event) =>
-            setWelcomeHeight(event.nativeEvent.layout.height)
-          }
-          style={{
-            position: "absolute",
-            top: SEARCH_TOP + 72 + passengerOffset,
-            left: 18,
-            right: 18,
-            zIndex: 14,
-            flexDirection: "row",
-            alignItems: "center",
-            gap: 12,
-          }}
+          style={[styles.searchBarWrap, { top: SEARCH_TOP + passengerOffset }]}
         >
-          <GlassSurface
-            material="dense"
-            style={{ flex: 1, borderRadius: 20, padding: 14 }}
+          <GlassButton
+            accessibilityLabel="Where are we going? Search destinations"
+            onPress={() => router.push("/search")}
+            style={styles.searchBar}
           >
+            <Glyph
+              sf="magnifyingglass"
+              ion="search"
+              size={20}
+              color="#F3F5F7"
+            />
+            <Text style={styles.searchPlaceholder}>Where are we going?</Text>
+            <Glyph sf="mic" ion="mic-outline" size={20} color="#F3F5F7" />
+          </GlassButton>
+        </View>
+      )}
+
+      {/* ── Greeting and weather ── */}
+      {!isDriving && (
+        <View
+          style={[styles.welcomeRow, { top: WELCOME_TOP + passengerOffset }]}
+        >
+          <View style={{ flex: 1 }}>
             <Text
-              style={{
-                color: colors.foreground,
-                fontSize: 20,
-                fontWeight: "600",
-              }}
+              numberOfLines={1}
+              adjustsFontSizeToFit
+              minimumFontScale={0.8}
+              style={styles.welcomeTitle}
             >
-              Welcome back, {userProfile.name.split(" ")[0]}
+              Welcome back
+              {userProfile.name ? `, ${userProfile.name.split(" ")[0]}` : ""}
             </Text>
-            <Text
-              style={{
-                color: colors.mutedForeground,
-                fontSize: 14,
-                marginTop: 4,
-              }}
-            >
+            <Text numberOfLines={1} style={styles.welcomeSubtitle}>
               Great roads are calling.
             </Text>
-          </GlassSurface>
+          </View>
           {CONFIG.DEMO_MODE && (
             <GlassSurface
-              style={{ borderRadius: 20, padding: 12, alignItems: "center" }}
+              accessible
+              accessibilityLabel={`Demo weather: ${CONFIG.DEMO_WEATHER.temperature} degrees, ${CONFIG.DEMO_WEATHER.condition}`}
+              style={styles.weather}
             >
-              <Ionicons
-                name="cloud-outline"
-                size={22}
-                color={colors.foreground}
+              <Glyph sf="cloud.fill" ion="cloud" size={30} color="#EEF2F6" />
+              <View style={{ flexShrink: 1 }}>
+                <Text style={styles.weatherTemp}>
+                  {CONFIG.DEMO_WEATHER.temperature}°C
+                </Text>
+                <Text numberOfLines={1} style={styles.weatherCondition}>
+                  {CONFIG.DEMO_WEATHER.condition}
+                </Text>
+              </View>
+              <Glyph
+                sf="chevron.right"
+                ion="chevron-forward"
+                size={14}
+                color={colors.mutedForeground}
               />
-              <Text
-                style={{
-                  color: colors.foreground,
-                  fontWeight: "600",
-                  fontSize: 16,
-                }}
-              >
-                {CONFIG.DEMO_WEATHER.temperature}°C
-              </Text>
-              <Text style={{ color: colors.mutedForeground, fontSize: 11 }}>
-                {CONFIG.DEMO_WEATHER.condition} · Demo
-              </Text>
             </GlassSurface>
           )}
         </View>
       )}
 
-      {/* ── Search bar ── */}
+      {/* ── Map controls: style, recenter, more ── */}
       {!isDriving && (
         <View
-          style={[styles.searchBarWrap, { top: SEARCH_TOP + passengerOffset }]}
+          style={[styles.mapControls, { top: CONTROLS_TOP + passengerOffset }]}
         >
-          <GlassSurface style={styles.searchBar}>
-            <TouchableOpacity
-              accessibilityRole="button"
-              accessibilityLabel="Search destinations"
-              onPress={() => router.push("/search")}
-              activeOpacity={0.8}
-              style={{
-                flex: 1,
-                height: 58,
-                flexDirection: "row",
-                alignItems: "center",
-              }}
-            >
-              <View style={styles.searchIconBox}>
-                <Ionicons name="search" size={20} color={colors.primary} />
-              </View>
-              <Text style={styles.searchPlaceholder}>Where are we going?</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              accessibilityRole="button"
-              accessibilityLabel="Saved and recent destinations"
-              accessibilityState={{ expanded: showQuickPlaces }}
-              onPress={(event) => {
-                event.stopPropagation();
-                setShowQuickPlaces(!showQuickPlaces);
-              }}
-              style={{
-                width: 48,
-                height: 48,
-                alignItems: "center",
-                justifyContent: "center",
-              }}
-            >
-              <Ionicons
-                name={showQuickPlaces ? "chevron-up" : "bookmark-outline"}
-                size={20}
-                color={colors.mutedForeground}
-              />
-            </TouchableOpacity>
-          </GlassSurface>
-        </View>
-      )}
-
-      {/* ── Quick destination buttons ── */}
-      {!isDriving && showQuickPlaces && (
-        <View
-          style={[
-            styles.quickButtonsWrap,
-            { top: QUICK_TOP + passengerOffset },
-          ]}
-        >
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={styles.quickButtonsScroll}
+          <GlassButton
+            accessibilityLabel="Map style"
+            accessibilityState={{ expanded: showLayerPicker }}
+            style={styles.mapControl}
+            onPress={() => {
+              setShowMore(false);
+              setShowLayerPicker(!showLayerPicker);
+              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+            }}
           >
-            {quickButtons.map((btn) => {
-              const isScenic = btn.id === "scenic";
-              return (
-                <GlassButton
-                  key={btn.id}
-                  style={[
-                    styles.quickBtn,
-                    isScenic && styles.quickBtnScenic,
-                    btn.isActive && styles.quickBtnActive,
-                  ]}
-                  onPress={() =>
-                    router.push(
-                      isScenic
-                        ? { pathname: "/search", params: { section: "spots" } }
-                        : "/search",
-                    )
-                  }
-                  activeOpacity={0.8}
-                >
-                  <Ionicons
-                    name={btn.icon}
-                    size={15}
-                    color={
-                      isScenic || btn.isActive ? "#fff" : colors.foreground
-                    }
-                  />
-                  <Text
-                    style={[
-                      styles.quickBtnText,
-                      isScenic && styles.quickBtnTextScenic,
-                      btn.isActive && styles.quickBtnTextActive,
-                    ]}
-                  >
-                    {btn.label}
-                  </Text>
-                </GlassButton>
-              );
-            })}
-          </ScrollView>
-        </View>
-      )}
-
-      {/* ── Map controls (right side, hidden during drive — overlay has its own) ── */}
-      {!isDriving && (
-        <View
-          style={[
-            styles.mapControls,
-            { top: MAP_CONTROLS_TOP + passengerOffset },
-          ]}
-        >
-          {/* Grouped pill: compass + layers + friends */}
-          <GlassSurface style={styles.mapControlPill}>
-            {/* Compass / north-up toggle */}
-            <TouchableOpacity
-              style={[
-                styles.mapControlPillBtn,
-                headingMode === "north-up" && {
-                  backgroundColor: "rgba(0,207,232,0.12)",
-                },
-              ]}
-              onPress={handleToggleHeadingMode}
-            >
-              <View
-                style={{
-                  transform: [
-                    {
-                      rotate:
-                        headingMode === "heading-up"
-                          ? `${-displayHeading}deg`
-                          : "0deg",
-                    },
-                  ],
-                  alignItems: "center",
-                }}
-              >
-                <Text style={styles.compassNorthLabel}>N</Text>
-              </View>
-              <Text
-                style={[
-                  styles.compassDirLabel,
-                  {
-                    color:
-                      headingMode === "north-up"
-                        ? colors.primary
-                        : colors.foreground,
-                  },
-                ]}
-              >
-                {headingMode === "north-up"
-                  ? "N↑"
-                  : headingLabel(displayHeading)}
-              </Text>
-            </TouchableOpacity>
-
-            <View style={styles.mapControlDivider} />
-
-            {/* Layer picker toggle */}
-            <TouchableOpacity
-              style={[
-                styles.mapControlPillBtn,
-                showLayerPicker && { backgroundColor: "rgba(0,207,232,0.12)" },
-              ]}
-              onPress={() => {
-                setShowLayerPicker(!showLayerPicker);
-                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-              }}
-            >
-              <Ionicons
-                name="layers-outline"
-                size={20}
-                color={showLayerPicker ? colors.primary : colors.foreground}
-              />
-            </TouchableOpacity>
-
-            <View style={styles.mapControlDivider} />
-
-            {/* Friends toggle */}
-            <TouchableOpacity
-              style={[
-                styles.mapControlPillBtn,
-                showFriends && { backgroundColor: "rgba(0,207,232,0.12)" },
-              ]}
-              onPress={() => {
-                setShowFriends(!showFriends);
-                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-              }}
-            >
-              <Ionicons
-                name="people-outline"
-                size={20}
-                color={showFriends ? colors.primary : colors.foreground}
-              />
-            </TouchableOpacity>
-          </GlassSurface>
-
-          {/* Separate orange navigate / locate circle */}
+            <Glyph
+              sf="square.3.layers.3d"
+              ion="layers-outline"
+              size={22}
+              color={showLayerPicker ? colors.primary : "#F3F5F7"}
+            />
+          </GlassButton>
           <GlassButton
             accessibilityLabel="Recenter map"
-            style={styles.mapControlNavigate}
+            accessibilityState={{ selected: followMode === "following" }}
+            style={styles.mapControl}
             onPress={handleLocateButton}
           >
-            <Ionicons
-              name={
-                followMode === "following" ? "navigate" : "navigate-outline"
-              }
+            <Glyph
+              sf={followMode === "following" ? "location.fill" : "location"}
+              ion={followMode === "following" ? "navigate" : "navigate-outline"}
               size={20}
-              color="#fff"
+              color="#F3F5F7"
+            />
+          </GlassButton>
+          <GlassButton
+            accessibilityLabel="More map options"
+            accessibilityState={{ expanded: showMore }}
+            style={styles.mapControl}
+            onPress={() => {
+              setShowLayerPicker(false);
+              setShowMore(!showMore);
+              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+            }}
+          >
+            <Glyph
+              sf="ellipsis"
+              ion="ellipsis-horizontal"
+              size={22}
+              color={showMore ? colors.primary : "#F3F5F7"}
             />
           </GlassButton>
         </View>
       )}
 
-      {/* ── Layer picker (hidden during drive) ── */}
+      {/* ── Map style menu ── */}
       {!isDriving && showLayerPicker && (
         <GlassSurface
-          style={[
-            styles.layerPicker,
-            { top: MAP_CONTROLS_TOP + passengerOffset + 130 },
-          ]}
+          material="dense"
+          style={[styles.menu, { top: CONTROLS_TOP + passengerOffset }]}
         >
           {mapLayers.map((layer, i) => (
             <TouchableOpacity
               key={layer.type}
+              accessibilityRole="button"
+              accessibilityState={{ selected: mapType === layer.type }}
               style={[
-                styles.layerOption,
-                i === mapLayers.length - 1 && styles.layerOptionLast,
+                styles.menuRow,
+                i === mapLayers.length - 1 && styles.menuRowLast,
               ]}
               onPress={() => {
                 setMapType(layer.type);
@@ -2095,7 +1697,7 @@ export default function MapScreen() {
             >
               <Ionicons
                 name={layer.icon as any}
-                size={16}
+                size={18}
                 color={
                   mapType === layer.type
                     ? colors.primary
@@ -2104,8 +1706,8 @@ export default function MapScreen() {
               />
               <Text
                 style={[
-                  styles.layerOptionText,
-                  mapType === layer.type && styles.layerOptionTextActive,
+                  styles.menuText,
+                  mapType === layer.type && { color: colors.primary },
                 ]}
               >
                 {layer.label}
@@ -2113,9 +1715,9 @@ export default function MapScreen() {
               {mapType === layer.type && (
                 <Ionicons
                   name="checkmark"
-                  size={14}
+                  size={16}
                   color={colors.primary}
-                  style={{ marginLeft: "auto" as any }}
+                  style={{ marginLeft: "auto" }}
                 />
               )}
             </TouchableOpacity>
@@ -2123,37 +1725,71 @@ export default function MapScreen() {
         </GlassSurface>
       )}
 
-      {/* ── Resume Following button (non-drive mode only; overlay handles it during drives) ── */}
-      {!isDriving && (
-        <Animated.View
-          style={[
-            styles.resumeBtn,
-            {
-              bottom: BOTTOM_CARD_BOTTOM + 150,
-              alignSelf: "center",
-              left: undefined,
-              right: undefined,
-              opacity: resumeButtonAnim,
-              transform: [
-                {
-                  translateY: resumeButtonAnim.interpolate({
-                    inputRange: [0, 1],
-                    outputRange: [20, 0],
-                  }),
-                },
-              ],
-              pointerEvents: followMode === "free" ? "auto" : "none",
-            },
-          ]}
+      {/* ── More: orientation, saved places, passenger mode ── */}
+      {!isDriving && showMore && (
+        <GlassSurface
+          material="dense"
+          style={[styles.menu, { top: CONTROLS_TOP + 120 + passengerOffset }]}
         >
           <TouchableOpacity
-            onPress={handleResumeFollowing}
-            style={{ flexDirection: "row", alignItems: "center", gap: 8 }}
+            accessibilityRole="button"
+            style={styles.menuRow}
+            onPress={() => {
+              handleToggleHeadingMode();
+              setShowMore(false);
+            }}
           >
-            <Ionicons name="navigate" size={18} color={colors.primary} />
-            <Text style={styles.resumeBtnText}>Resume following</Text>
+            <Ionicons
+              name="compass-outline"
+              size={18}
+              color={colors.mutedForeground}
+            />
+            <Text style={styles.menuText}>
+              {headingMode === "heading-up"
+                ? "Switch to North Up"
+                : "Switch to Heading Up"}
+            </Text>
           </TouchableOpacity>
-        </Animated.View>
+          <TouchableOpacity
+            accessibilityRole="button"
+            style={styles.menuRow}
+            onPress={() => {
+              setShowMore(false);
+              router.push("/search");
+            }}
+          >
+            <Ionicons
+              name="bookmark-outline"
+              size={18}
+              color={colors.mutedForeground}
+            />
+            <Text style={styles.menuText}>Saved Places</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            accessibilityRole="switch"
+            accessibilityState={{ checked: isPassengerMode }}
+            style={[styles.menuRow, styles.menuRowLast]}
+            onPress={() => {
+              togglePassengerMode();
+              setShowMore(false);
+            }}
+          >
+            <Ionicons
+              name="walk-outline"
+              size={18}
+              color={colors.mutedForeground}
+            />
+            <Text style={styles.menuText}>Passenger Mode</Text>
+            <Text
+              style={[
+                styles.menuValue,
+                isPassengerMode && { color: colors.primary },
+              ]}
+            >
+              {isPassengerMode ? "On" : "Off"}
+            </Text>
+          </TouchableOpacity>
+        </GlassSurface>
       )}
 
       {/* ── Active Drive Overlay ── */}
@@ -2181,99 +1817,118 @@ export default function MapScreen() {
         />
       )}
 
+      {/* ── Drive actions, just above the tab bar ── */}
       {!isDriving && (
-        <View
-          style={[
-            styles.bottomCard,
-            {
-              bottom: BOTTOM_CARD_BOTTOM + 4,
-              backgroundColor: "transparent",
-              borderWidth: 0,
-              padding: 0,
-            },
-          ]}
+        <AboveTabBar
+          pointerEvents="box-none"
+          fallbackInset={TAB_BAR_FOOTPRINT}
+          style={styles.bottomArea}
         >
-          <GlassButton
-            material="accent"
+          {/* Resume following (the drive overlay has its own) */}
+          <Animated.View
             style={[
-              styles.startDriveBtn,
+              styles.resumeBtn,
               {
-                borderRadius: 26,
-                minHeight: 64,
-                marginTop: 0,
-                justifyContent: "center",
+                opacity: resumeButtonAnim,
+                transform: [
+                  {
+                    translateY: resumeButtonAnim.interpolate({
+                      inputRange: [0, 1],
+                      outputRange: [20, 0],
+                    }),
+                  },
+                ],
+                pointerEvents: followMode === "free" ? "auto" : "none",
               },
             ]}
-            onPress={handleStartDrive}
-            accessibilityLabel="Start Drive"
           >
-            <Ionicons name="play" size={23} color={colors.primaryForeground} />
-            <Text style={[styles.startDriveBtnText, { fontSize: 21 }]}>
-              Start Drive
-            </Text>
-          </GlassButton>
-          <View style={{ flexDirection: "row", gap: 12, marginTop: 12 }}>
             <GlassButton
-              style={{
-                flex: 1,
-                minHeight: 58,
-                borderRadius: 22,
-                flexDirection: "row",
-                alignItems: "center",
-                justifyContent: "center",
-                gap: 8,
-              }}
-              onPress={() =>
-                router.push({
-                  pathname: "/(tabs)/community",
-                  params: { section: "convoys" },
-                })
-              }
+              onPress={handleResumeFollowing}
+              style={styles.resumeInner}
             >
-              <Ionicons
-                name="people-outline"
-                size={22}
-                color={colors.foreground}
-              />
-              <Text
-                style={{
-                  color: colors.foreground,
-                  fontSize: 16,
-                  fontWeight: "600",
-                }}
-              >
-                Convoys
-              </Text>
+              <Ionicons name="navigate" size={17} color={colors.primary} />
+              <Text style={styles.resumeBtnText}>Resume following</Text>
             </GlassButton>
-            <GlassButton
-              style={{
-                flex: 1,
-                minHeight: 58,
-                borderRadius: 22,
-                flexDirection: "row",
-                alignItems: "center",
-                justifyContent: "center",
-                gap: 8,
-              }}
-              onPress={() => router.push("/(tabs)/(drive)/explore")}
-            >
-              <Ionicons
-                name="compass-outline"
-                size={22}
-                color={colors.foreground}
-              />
-              <Text
-                style={{
-                  color: colors.foreground,
-                  fontSize: 16,
-                  fontWeight: "600",
-                }}
+          </Animated.View>
+          <View style={styles.actions}>
+            <View style={styles.startGlow}>
+              <TouchableOpacity
+                accessibilityRole="button"
+                accessibilityLabel="Start Drive"
+                accessibilityHint={
+                  isPassengerMode
+                    ? "Passenger Mode is on, so this drive will not be recorded"
+                    : "Starts recording your drive"
+                }
+                activeOpacity={0.85}
+                onPress={handleStartDrive}
+                style={styles.startDrive}
               >
-                Explore
-              </Text>
-            </GlassButton>
+                <LinearGradient
+                  colors={["#5BE8FF", "#13C8F2", "#08AEE6"]}
+                  locations={[0, 0.55, 1]}
+                  style={StyleSheet.absoluteFill}
+                />
+                <LinearGradient
+                  colors={["rgba(255,255,255,0.5)", "rgba(255,255,255,0)"]}
+                  end={{ x: 0, y: 0.5 }}
+                  style={[StyleSheet.absoluteFill, { opacity: 0.55 }]}
+                />
+                <Glyph sf="play.fill" ion="play" size={26} color="#04121B" />
+                <Text style={styles.startDriveText}>Start Drive</Text>
+              </TouchableOpacity>
+            </View>
+            <View style={styles.secondaryRow}>
+              <GlassButton
+                accessibilityLabel="Convoys"
+                style={styles.secondaryBtn}
+                onPress={() =>
+                  router.push({
+                    pathname: "/(tabs)/community",
+                    params: { section: "convoys" },
+                  })
+                }
+              >
+                <Glyph
+                  sf="person.3.fill"
+                  ion="people"
+                  size={26}
+                  color="#F3F5F7"
+                />
+                <Text numberOfLines={1} style={styles.secondaryText}>
+                  Convoys
+                </Text>
+                <Glyph
+                  sf="chevron.right"
+                  ion="chevron-forward"
+                  size={15}
+                  color="#F3F5F7"
+                />
+              </GlassButton>
+              <GlassButton
+                accessibilityLabel="Discover Route"
+                style={styles.secondaryBtn}
+                onPress={() => router.push("/(tabs)/(drive)/explore")}
+              >
+                <Glyph
+                  sf="point.bottomleft.forward.to.point.topright.scurvepath"
+                  ion="git-commit-outline"
+                  size={26}
+                  color="#F3F5F7"
+                />
+                <Text numberOfLines={2} style={styles.secondaryText}>
+                  Discover Route
+                </Text>
+                <Glyph
+                  sf="chevron.right"
+                  ion="chevron-forward"
+                  size={15}
+                  color="#F3F5F7"
+                />
+              </GlassButton>
+            </View>
           </View>
-        </View>
+        </AboveTabBar>
       )}
     </View>
   );
