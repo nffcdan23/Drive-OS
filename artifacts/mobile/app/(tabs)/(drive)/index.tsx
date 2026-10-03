@@ -8,6 +8,7 @@ import {
   Platform,
   Animated,
   Alert,
+  AppState,
   type ViewProps,
 } from "react-native";
 import { useRouter } from "expo-router";
@@ -473,6 +474,8 @@ export default function MapScreen() {
     endDrive,
     discardDrive,
     setDrivePaused,
+    isDrivePaused,
+    activeDriveMs,
     updateDriveCoordinate,
     resolvedUnitSystem,
     togglePassengerMode,
@@ -655,12 +658,11 @@ export default function MapScreen() {
   useEffect(() => {
     isPausedRef.current = isPaused;
   }, [isPaused]);
-  // Reset pause state when a drive ends
+  // Pause state follows the drive: reset when it ends, and restored when a
+  // drive still recording in the background is picked up after a relaunch
   useEffect(() => {
-    if (!isDriving) {
-      setIsPaused(false);
-    }
-  }, [isDriving]);
+    setIsPaused(isDriving && isDrivePaused());
+  }, [isDriving, isDrivePaused]);
 
   // Layout (points), measured from the approved Drive screen: search,
   // greeting and map controls float over the map; the drive actions sit just
@@ -1140,20 +1142,25 @@ export default function MapScreen() {
   }, [mapType, wakeFrameLoop]);
 
   // ── Drive timer ────────────────────────────────────────────────────────────
+  // Read from the drive's own timestamps (start, pauses) rather than counted
+  // up: timers stop while the app is in the background, but the drive goes
+  // on, so counting would fall behind every time the user switched apps.
   useEffect(() => {
+    const tick = () => setDriveSeconds(Math.floor((activeDriveMs() ?? 0) / 1000));
+    tick();
     if (isDriving && !isPaused) {
-      driveTimerRef.current = setInterval(
-        () => setDriveSeconds((s) => s + 1),
-        1000,
-      );
-    } else {
-      if (driveTimerRef.current) clearInterval(driveTimerRef.current);
-      if (!isDriving) setDriveSeconds(0);
+      driveTimerRef.current = setInterval(tick, 1000);
     }
+    // Catch up at once on returning to the app
+    const sub = AppState.addEventListener("change", (state) => {
+      if (state === "active") tick();
+    });
     return () => {
       if (driveTimerRef.current) clearInterval(driveTimerRef.current);
+      driveTimerRef.current = null;
+      sub.remove();
     };
-  }, [isDriving, isPaused]);
+  }, [isDriving, isPaused, activeDriveMs]);
 
   // ── Follow mode resume ────────────────────────────────────────────────────
   const handleResumeFollowing = useCallback(() => {

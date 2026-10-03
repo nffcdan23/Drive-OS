@@ -9,7 +9,7 @@ iPhone (TestFlight) ──▶ API https://api-production-1dafc.up.railway.app �
 | | TestFlight app (now) | App Store app (at launch, later) |
 |---|---|---|
 | Build profile | `testflight` | `production` |
-| Home-screen name | `StarScale Drive` | not chosen |
+| Home-screen name | `Derwent` | not chosen |
 | Bundle id | `uk.co.starscale.drive.staging` | not chosen; nothing registered |
 | URL scheme | `starscale-drive-staging` | not chosen |
 | Sign-in return link | `starscale-drive-staging://auth/callback` | not chosen |
@@ -22,6 +22,8 @@ Nothing here creates production infrastructure or publishes anything on the App 
 ## 1. Identity (chosen)
 
 These values are in `CHOSEN.staging` in `app.identity.js`, and they are used exactly as written. `CHOSEN.production` stays empty until the App Store identity is decided.
+
+The bundle id, scheme and EAS slug keep the app's earlier name ("StarScale Drive"); they are permanent technical identifiers users never see. Everything users see says **Derwent**.
 
 When App Store Connect asks, you still choose the record's **name** (unique on the App Store; it can change later), **SKU** (permanent, private, e.g. `starscale-drive-staging-ios`) and **primary language**.
 

@@ -355,7 +355,7 @@ test('the staging (TestFlight) identity is chosen; the App Store identity is not
   const { identity } = createRequire(import.meta.url)('../app.identity.js');
   const tf = identity('staging', {});
   assert.deepEqual([tf.appName, tf.slug, tf.scheme, tf.bundleId, tf.usingPlaceholders],
-    ['StarScale Drive', 'starscale-drive-staging', 'starscale-drive-staging', 'uk.co.starscale.drive.staging', false]);
+    ['Derwent', 'starscale-drive-staging', 'starscale-drive-staging', 'uk.co.starscale.drive.staging', false]);
   assert.equal(`${tf.scheme}://auth/callback`, 'starscale-drive-staging://auth/callback');
   assert.deepEqual(identity('development', {}).bundleId, 'uk.co.starscale.drive.staging', 'local builds are the staging app');
   const store = identity('production', {});
@@ -1992,4 +1992,417 @@ test('the Drive screen judges gestures by what they did, not by the pan callback
   // Exploring leaves follow mode; a tilt sets the follow pitch
   assert.ok(/classifyFollowGesture\(start, cam\)/.test(src));
   assert.ok(/followCamera\.setUserPitch\(cam\.pitch\)/.test(src));
+});
+
+// ─── Background recording during a drive ───────────────────────────────────
+import {
+  ALWAYS_PROMPT_SHOWN_KEY, BackgroundDriveRecorder, DRIVE_SESSION_KEY, ensureBackgroundAccess,
+  type BackgroundTracking, type LocationPermissions, type LocationUpdates,
+} from '@/lib/backend/driveTracking';
+import { RESUME_DRIVE_WITHIN_MS } from '@/lib/backend/cloudSync';
+import { appendLiveFix, liveDriveFromRecord, newLiveDrive } from '@/lib/backend/liveDrive';
+import type { ActiveDrive } from '@/lib/backend/model';
+
+/** The platform's background location updates, as the OS would run them. */
+class FakeUpdates implements LocationUpdates {
+  running = false;
+  starts = 0;
+  stops = 0;
+  answer: Exclude<BackgroundTracking, 'off'> | 'throw' = 'on';
+  async start() {
+    this.starts++;
+    if (this.answer === 'throw') throw new Error('Background location has not been configured');
+    if (this.answer === 'on') this.running = true;
+    return this.answer;
+  }
+  async stop() { this.stops++; this.running = false; }
+  async isRunning() { return this.running; }
+}
+
+function backgroundApp(store = new MemoryStore(), clock = { t: Date.now() - 60 * 60_000 }, updates = new FakeUpdates(), server = new FakeServer()) {
+  const tracker = new BackgroundDriveRecorder({ store, updates, now: () => clock.t });
+  let id = 0;
+  const app = new CloudSync({
+    ep: server.ep(), store, userId: 'u1', publishableKey: 'sb_publishable_x', newId: () => `id-${++id}-${Math.random()}`,
+    timezone: () => 'UTC', now: () => clock.t, tracker,
+    prepareFile: async () => ({ body: new Uint8Array([1]), size: 1, mimeType: 'image/jpeg' }),
+  });
+  // The live route the Drive screen draws (AppContext builds it the same way)
+  const live = { drive: null as ActiveDrive | null };
+  app.onDriveFix((fix) => { if (live.drive) live.drive = appendLiveFix(live.drive, fix); });
+  return { app, tracker, updates, store, clock, server, live };
+}
+
+/** One fix a second along a road heading north at 15 m/s (54 km/h). */
+function roadFix(clock: { t: number }, s: number): GpsFix {
+  return { latitude: 51.5 + (s * 15) / 111_320, longitude: -0.1, speedMs: 15, accuracyM: 5, timestamp: clock.t };
+}
+const settle = () => new Promise((r) => setTimeout(r, 5));
+
+test('starting a drive starts background updates for that drive; ending it stops them', async () => {
+  const b = backgroundApp();
+  await b.app.start();
+  assert.equal(b.updates.running, false, 'nothing runs before a drive');
+  await b.app.startDrive(null);
+  await settle();
+  assert.equal(b.updates.running, true);
+  assert.equal(b.app.status.backgroundTracking, 'on');
+  const session = JSON.parse((await b.store.getItem(DRIVE_SESSION_KEY))!);
+  assert.deepEqual(session, { userId: 'u1', clientRef: b.app.activeRecord!.clientRef });
+  for (let s = 0; s < 30; s++) { b.clock.t += 1000; b.app.addFix(roadFix(b.clock, s)); }
+  await b.app.endDrive();
+  assert.equal(b.updates.running, false, 'stopped when the drive ends');
+  assert.equal(b.app.status.backgroundTracking, 'off');
+  assert.equal(await b.store.getItem(DRIVE_SESSION_KEY), null, 'background session cleared');
+  // A late batch from the OS after the end records nothing (and stops updates)
+  b.clock.t += 1000;
+  await b.tracker.deliver([roadFix(b.clock, 31)]);
+  assert.equal(b.app.isDriving, false);
+  assert.equal(b.server.journeys[0]!.status, 'completed');
+});
+
+test('discarding a drive, or one too short to save, also stops background updates', async () => {
+  const b = backgroundApp();
+  await b.app.start();
+  await b.app.startDrive(null);
+  await settle();
+  await b.app.discardDrive();
+  assert.equal(b.updates.running, false);
+  await b.app.startDrive(null);
+  await settle();
+  b.clock.t += 3000;
+  assert.equal(await b.app.endDrive(), null, 'too short');
+  assert.equal(b.updates.running, false);
+});
+
+test('ending a drive while background updates are still starting leaves nothing running', async () => {
+  const b = backgroundApp();
+  await b.app.start();
+  await b.app.startDrive(null); // start() of the updates is still in flight
+  await b.app.discardDrive();
+  await settle();
+  assert.equal(b.updates.running, false);
+});
+
+test('background fixes enter the same recorder as the screen, with no gap in the route', async () => {
+  const b = backgroundApp();
+  await b.app.start();
+  await b.app.startDrive(null);
+  b.live.drive = newLiveDrive(b.clock.t);
+  await settle();
+  // 60 s on screen, then 5 minutes in another app, then back on screen.
+  let s = 0;
+  for (; s < 60; s++) { b.clock.t += 1000; b.app.addFix(roadFix(b.clock, s)); }
+  for (; s < 360; s += 5) {
+    // The OS batches background fixes every few seconds
+    const batch = [];
+    for (let k = 0; k < 5; k++) { b.clock.t += 1000; batch.push(roadFix(b.clock, s + k)); }
+    await b.tracker.deliver(batch);
+  }
+  for (; s < 420; s++) { b.clock.t += 1000; b.app.addFix(roadFix(b.clock, s)); }
+  const rec = b.app.activeRecord!;
+  // Every stored point is within ~3 s / 45 m of the last: no straight-line jump
+  for (let i = 1; i < rec.points.length; i++) {
+    const gap = distanceM(rec.points[i - 1]!, rec.points[i]!);
+    assert.ok(gap < 100, `point ${i} jumps ${gap.toFixed(0)} m`);
+  }
+  const expectedKm = (419 * 15) / 1000;
+  assert.ok(Math.abs(rec.clientDistanceKm - expectedKm) < 0.1, `recorded ${rec.clientDistanceKm} km`);
+  assert.equal(b.live.drive!.coordinates.length, 420, 'the live route has every fix, background ones included');
+  assert.ok(Math.abs(b.live.drive!.estimatedDistance - expectedKm) < 0.05, `live ${b.live.drive!.estimatedDistance} km`);
+  // Drive time is from timestamps, so it counts the time in the background too
+  assert.equal(b.app.activeDriveMs(), 420_000);
+});
+
+test('the same fix from the screen and the background is counted once', async () => {
+  const b = backgroundApp();
+  await b.app.start();
+  await b.app.startDrive(null);
+  b.live.drive = newLiveDrive(b.clock.t);
+  await settle();
+  // On screen both location sources report every fix (background slightly later)
+  for (let s = 0; s < 120; s++) {
+    b.clock.t += 1000;
+    const fix = roadFix(b.clock, s);
+    b.app.addFix(fix);
+    await b.tracker.deliver([{ ...fix }]);
+    // A copy stamped a fraction of a second apart is the same fix too
+    b.app.addFix({ ...fix, timestamp: fix.timestamp + 200 });
+  }
+  // A late background batch with fixes the screen already delivered
+  await b.tracker.deliver([roadFix({ t: b.clock.t - 3000 }, 117), roadFix({ t: b.clock.t - 2000 }, 118)]);
+  const rec = b.app.activeRecord!;
+  const expectedKm = (119 * 15) / 1000;
+  assert.ok(Math.abs(rec.clientDistanceKm - expectedKm) < 0.05, `recorded ${rec.clientDistanceKm} km, expected ${expectedKm}`);
+  assert.equal(b.live.drive!.coordinates.length, 120);
+  assert.ok(Math.abs(b.live.drive!.estimatedDistance - expectedKm) < 0.01);
+  const times = rec.points.map((p) => p.recordedAt);
+  assert.equal(new Set(times).size, times.length, 'no point stored twice');
+  // ...and uploaded once
+  await b.app.endDrive();
+  assert.equal(b.server.points.get(b.server.journeys[0]!.id), rec.points.length);
+});
+
+test('a paused drive records no points from either source', async () => {
+  const b = backgroundApp();
+  await b.app.start();
+  await b.app.startDrive(null);
+  b.live.drive = newLiveDrive(b.clock.t);
+  await settle();
+  let s = 0;
+  for (; s < 30; s++) { b.clock.t += 1000; b.app.addFix(roadFix(b.clock, s)); }
+  const before = b.app.activeRecord!.points.length;
+  const liveBefore = b.live.drive!.coordinates.length;
+  b.app.setDrivePaused(true);
+  assert.equal(b.updates.running, true, 'updates keep running while paused (resuming needs no restart)');
+  for (; s < 90; s++) {
+    b.clock.t += 1000;
+    b.app.addFix(roadFix(b.clock, s));
+    await b.tracker.deliver([roadFix(b.clock, s)]);
+  }
+  assert.equal(b.app.activeRecord!.points.length, before, 'nothing stored while paused');
+  assert.equal(b.live.drive!.coordinates.length, liveBefore, 'nothing added to the route while paused');
+  b.app.setDrivePaused(false);
+  for (; s < 100; s++) { b.clock.t += 1000; await b.tracker.deliver([roadFix(b.clock, s)]); }
+  assert.ok(b.app.activeRecord!.points.length > before, 'recording resumes');
+  assert.equal(b.app.activeDriveMs(), 40_000, 'paused time not counted');
+});
+
+test('passenger mode records nothing from the background either', async () => {
+  const b = backgroundApp();
+  await b.app.start();
+  await b.app.startDrive(null);
+  await settle();
+  b.app.setPassengerMode(true);
+  for (let s = 0; s < 30; s++) { b.clock.t += 1000; await b.tracker.deliver([roadFix(b.clock, s)]); }
+  assert.equal(b.app.activeRecord!.points.length, 0);
+});
+
+test('fixes recorded with the app relaunched in the background are kept, and the drive carries on once', async () => {
+  const store = new MemoryStore();
+  const clock = { t: Date.now() - 60 * 60_000 };
+  const updates = new FakeUpdates();
+  const server = new FakeServer();
+  const first = backgroundApp(store, clock, updates, server);
+  await first.app.start();
+  await first.app.startDrive(null);
+  await settle();
+  let s = 0;
+  for (; s < 60; s++) { clock.t += 1000; first.app.addFix(roadFix(clock, s)); }
+  await first.app.saveActiveNow(); // the app went to the background
+  const clientRef = first.app.activeRecord!.clientRef;
+  // iOS ends the app; later it relaunches it in the background to deliver
+  // locations.  No screens: a fresh recorder with no CloudSync.
+  const headless = new BackgroundDriveRecorder({ store, updates, now: () => clock.t });
+  for (; s < 300; s += 5) {
+    const batch = [];
+    for (let k = 0; k < 5; k++) { clock.t += 1000; batch.push(roadFix(clock, s + k)); }
+    await headless.deliver(batch);
+  }
+  // The user opens the app (same process): the drive is picked up, not ended
+  const tracker = headless;
+  const app = new CloudSync({
+    ep: server.ep(), store, userId: 'u1', publishableKey: 'sb_publishable_x', newId: () => `id-${Math.random()}`,
+    timezone: () => 'UTC', now: () => clock.t, tracker,
+    prepareFile: async () => ({ body: new Uint8Array([1]), size: 1, mimeType: 'image/jpeg' }),
+  });
+  await app.start();
+  assert.equal(app.isDriving, true, 'still driving');
+  assert.equal(app.activeRecord!.clientRef, clientRef, 'the same drive, not a new one');
+  assert.equal(app.status.pendingJourneys, 0, 'not finished as an interrupted drive');
+  assert.equal(app.status.backgroundTracking, 'on');
+  const rec = app.activeRecord!;
+  const lastPointS = Math.round((rec.points.at(-1)!.latitude - 51.5) * 111_320 / 15);
+  assert.ok(lastPointS >= 295, `background fixes up to the relaunch are in the drive (last at ${lastPointS} s)`);
+  for (let i = 1; i < rec.points.length; i++) assert.ok(distanceM(rec.points[i - 1]!, rec.points[i]!) < 100, 'no gap');
+  // The screen rebuilds the live route from the stored points
+  const live = liveDriveFromRecord(rec);
+  assert.equal(live.coordinates.length, rec.points.length);
+  assert.ok(Math.abs(live.estimatedDistance - (lastPointS * 15) / 1000) < 0.1);
+  // Fixes the background delivered before the hand-over aren't counted again
+  const kmBefore = rec.clientDistanceKm;
+  app.addFix(roadFix({ t: clock.t - 2000 }, 298));
+  assert.equal(rec.clientDistanceKm, kmBefore);
+  for (; s < 330; s++) { clock.t += 1000; await tracker.deliver([roadFix(clock, s)]); }
+  await app.endDrive();
+  assert.equal(server.journeys.length, 1, 'one journey on the server');
+  assert.equal(server.journeys[0]!.status, 'completed');
+  assert.equal(updates.running, false);
+});
+
+test('a relaunch with no background updates running finishes the drive as before', async () => {
+  const store = new MemoryStore();
+  const clock = { t: Date.now() - 60 * 60_000 };
+  const updates = new FakeUpdates();
+  const server = new FakeServer();
+  const first = backgroundApp(store, clock, updates, server);
+  await first.app.start();
+  await first.app.startDrive(null);
+  await settle();
+  for (let s = 0; s < 60; s++) { clock.t += 1000; first.app.addFix(roadFix(clock, s)); }
+  await first.app.saveActiveNow();
+  updates.running = false; // e.g. location access turned off, or the OS stopped them
+  const again = backgroundApp(store, clock, updates, server);
+  await again.app.start();
+  assert.equal(again.app.isDriving, false);
+  assert.equal(again.app.status.pendingJourneys, 1, 'saved as an interrupted drive');
+  assert.equal(await store.getItem(DRIVE_SESSION_KEY), null);
+});
+
+test('a relaunch long after the drive went quiet finishes it and stops the updates', async () => {
+  const store = new MemoryStore();
+  const clock = { t: Date.now() - 3 * 60 * 60_000 };
+  const updates = new FakeUpdates();
+  const first = backgroundApp(store, clock, updates);
+  await first.app.start();
+  await first.app.startDrive(null);
+  await settle();
+  for (let s = 0; s < 60; s++) { clock.t += 1000; first.app.addFix(roadFix(clock, s)); }
+  await first.app.saveActiveNow();
+  // Force-quit: no fixes for an hour, then the app is opened
+  clock.t += RESUME_DRIVE_WITHIN_MS + 60_000;
+  const again = backgroundApp(store, clock, updates);
+  await again.app.start();
+  assert.equal(again.app.isDriving, false);
+  assert.equal(again.app.status.pendingJourneys, 1);
+  assert.equal(updates.running, false, 'no background tracking left running');
+});
+
+test('background updates found running with no drive in progress are stopped', async () => {
+  const store = new MemoryStore();
+  const updates = new FakeUpdates();
+  updates.running = true; // left over from a crash
+  const b = backgroundApp(store, undefined, updates);
+  await b.app.start();
+  assert.equal(updates.running, false);
+  // ...and a stray background batch with no drive stops them too
+  updates.running = true;
+  await b.tracker.deliver([roadFix(b.clock, 0)]);
+  assert.equal(updates.running, false);
+});
+
+test('without background access the drive still records on screen', async () => {
+  for (const answer of ['denied', 'always-declined', 'always-off', 'unavailable', 'throw'] as const) {
+    const updates = new FakeUpdates();
+    updates.answer = answer;
+    const b = backgroundApp(undefined, undefined, updates);
+    await b.app.start();
+    await b.app.startDrive(null);
+    await settle();
+    assert.equal(b.app.status.backgroundTracking, answer === 'throw' ? 'unavailable' : answer);
+    assert.equal(b.updates.running, false, `${answer}: no background updates`);
+    assert.equal(await b.store.getItem(DRIVE_SESSION_KEY), null);
+    for (let s = 0; s < 30; s++) { b.clock.t += 1000; b.app.addFix(roadFix(b.clock, s)); }
+    assert.ok(b.app.activeRecord!.points.length > 5, `${answer}: foreground recording unaffected`);
+    assert.ok(await b.app.endDrive());
+  }
+});
+
+test('the background task is defined at the app entry, before any screen loads', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const root = fileURLToPath(new URL('..', import.meta.url));
+  const pkg = JSON.parse(await readFile(`${root}/package.json`, 'utf8'));
+  assert.equal(pkg.main, 'index.js');
+  const entry = await readFile(`${root}/index.js`, 'utf8');
+  const lines = entry.split('\n').filter((l) => l.startsWith('import '));
+  assert.deepEqual(lines, ["import './lib/driveBackgroundLocation';", "import 'expo-router/entry';"]);
+  const task = await readFile(`${root}/lib/driveBackgroundLocation.ts`, 'utf8');
+  assert.match(task, /^\s*TaskManager\.defineTask/m, 'defineTask at module scope');
+  assert.match(task, /pausesUpdatesAutomatically: false/);
+  // The background location mode is in the build, with the "Always" purpose strings
+  const app = JSON.parse(await readFile(`${root}/app.json`, 'utf8'));
+  const [, opts] = app.expo.plugins.find((p: unknown) => Array.isArray(p) && p[0] === 'expo-location');
+  assert.equal(opts.isIosBackgroundLocationEnabled, true);
+  assert.notEqual(opts.locationAlwaysAndWhenInUsePermission, false, 'the plugin must not delete the Always string');
+  const appConfig = createRequire(import.meta.url)('../app.config.js') as (a: { config: object }) => { ios: { infoPlist: Record<string, string> } };
+  const plist = appConfig({ config: { ios: { infoPlist: {} }, android: {}, plugins: [], extra: {} } }).ios.infoPlist;
+  assert.match(plist.NSLocationAlwaysAndWhenInUseUsageDescription, /drive you've started/);
+  assert.match(plist.NSLocationAlwaysUsageDescription, /drive you've started/);
+  assert.ok(plist.NSLocationWhenInUseUsageDescription);
+});
+
+test('"Always" is asked for only through the shared helper', async () => {
+  const { readdir, readFile } = await import('node:fs/promises');
+  const { join } = await import('node:path');
+  const root = fileURLToPath(new URL('..', import.meta.url));
+  const offenders: string[] = [];
+  const walk = async (dir: string): Promise<void> => {
+    for (const e of await readdir(dir, { withFileTypes: true })) {
+      const path = join(dir, e.name);
+      if (e.isDirectory()) await walk(path);
+      else if (/\.(ts|tsx|js)$/.test(e.name) && path !== join(root, 'lib/locationPermission.ts')
+        && /\.requestBackgroundPermissionsAsync\(/.test(await readFile(path, 'utf8'))) offenders.push(path.slice(root.length));
+    }
+  };
+  for (const dir of ['app', 'components', 'context', 'hooks', 'lib', 'constants']) await walk(join(root, dir));
+  assert.deepEqual(offenders, [], 'use requestBackgroundLocation() from lib/locationPermission');
+});
+
+/** expo-location's permissions as iOS answers them. */
+class FakePermissions implements LocationPermissions {
+  foreground: 'undetermined' | 'granted' | 'denied' = 'granted';
+  always = false;
+  /** What the user picks if the "Always" prompt appears; null = iOS shows none (e.g. Allow Once) */
+  pick: 'always' | 'keep-while-using' | null = 'keep-while-using';
+  foregroundPrompts = 0;
+  backgroundPrompts = 0;
+  calls: string[] = [];
+  async requestForeground() {
+    this.calls.push('foreground');
+    if (this.foreground === 'undetermined') { this.foregroundPrompts++; this.foreground = 'granted'; }
+    return this.foreground === 'granted';
+  }
+  async hasBackground() { return this.always; }
+  async requestBackground() {
+    this.calls.push('background');
+    if (this.pick === null) return { granted: false, promptShown: false };
+    this.backgroundPrompts++;
+    this.always = this.pick === 'always';
+    this.pick = null; // iOS shows it once per install
+    return { granted: this.always, promptShown: true };
+  }
+}
+
+test('first drive: foreground is asked first, then "Always" once', async () => {
+  const store = new MemoryStore();
+  const p = new FakePermissions();
+  p.foreground = 'undetermined';
+  p.pick = 'always';
+  assert.equal(await ensureBackgroundAccess(p, store), 'granted');
+  assert.deepEqual(p.calls, ['foreground', 'background'], 'foreground before background');
+  assert.equal(p.backgroundPrompts, 1);
+  // Later drives: already Always, no prompt
+  assert.equal(await ensureBackgroundAccess(p, store), 'granted');
+  assert.equal(p.backgroundPrompts, 1);
+});
+
+test('declining "Always" asks once, then never again (Settings can still turn it on)', async () => {
+  const store = new MemoryStore();
+  const p = new FakePermissions();
+  assert.equal(await ensureBackgroundAccess(p, store), 'always-declined');
+  // Every later drive, even after a relaunch (expo-location forgets it asked): no request at all
+  for (let i = 0; i < 5; i++) assert.equal(await ensureBackgroundAccess(p, store), 'always-off');
+  assert.deepEqual(p.calls.filter((c) => c === 'background'), ['background'], 'requested once');
+  // The user turns on Always in Settings
+  p.always = true;
+  assert.equal(await ensureBackgroundAccess(p, store), 'granted');
+});
+
+test('no foreground access: nothing asked for in the background', async () => {
+  const p = new FakePermissions();
+  p.foreground = 'denied';
+  assert.equal(await ensureBackgroundAccess(p, new MemoryStore()), 'denied');
+  assert.deepEqual(p.calls, ['foreground']);
+});
+
+test('"Allow Once": iOS shows no Always prompt, so it is asked again on a later drive', async () => {
+  const store = new MemoryStore();
+  const p = new FakePermissions();
+  p.pick = null; // temporary access: iOS ignores the Always request
+  assert.equal(await ensureBackgroundAccess(p, store), 'always-off');
+  assert.equal(await store.getItem(ALWAYS_PROMPT_SHOWN_KEY), null);
+  // Next launch the user picks "While Using the App": the first drive asks
+  p.pick = 'always';
+  assert.equal(await ensureBackgroundAccess(p, store), 'granted');
+  assert.equal(p.backgroundPrompts, 1);
 });

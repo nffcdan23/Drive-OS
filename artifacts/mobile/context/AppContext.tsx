@@ -10,11 +10,12 @@
  * accounts can never show the previous account's data.
  */
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import { Alert, AppState } from 'react-native';
+import { Alert, AppState, Linking } from 'react-native';
 import * as ImageManipulator from 'expo-image-manipulator';
 import { CloudSync, type SyncStatus } from '@/lib/backend/cloudSync';
 import { describeError } from '@/lib/backend/http';
 import type { GpsFix } from '@/lib/backend/journeyRecorder';
+import { appendLiveFix, liveDriveFromRecord, newLiveDrive } from '@/lib/backend/liveDrive';
 import type { LocationKind, SpotCategory, Visibility } from '@/lib/backend/endpoints';
 import type {
   ActiveDrive, BlockedUser, Conversation, Convoy, Coordinate, DriveOSEvent, Friend, FriendRequest, Group, Journey,
@@ -26,6 +27,8 @@ import { initials } from '@/lib/backend/mappers';
 import { UnitSystem, ResolvedUnitSystem, resolveUnitSystem } from '@/lib/units';
 import { api, backendEnv, ep, newId, onConnectionStatus } from '@/lib/backendClient';
 import { deviceStorage } from '@/lib/secureStorage';
+import { driveTracker } from '@/lib/driveBackgroundLocation';
+import { APP_NAME } from '@/constants/brand';
 
 export type {
   Vehicle, VehicleSnapshot, Coordinate, JourneyCategory, Journey, Achievement, UserProfile, Friend, FriendRequest,
@@ -77,6 +80,10 @@ interface AppContextValue {
   discardDrive: () => Promise<void>;
   /** Notes a pause starting or ending on the drive record (see CloudSync.setDrivePaused) */
   setDrivePaused: (paused: boolean) => void;
+  /** Whether the drive in progress is paused (as saved on the record, so it survives a relaunch) */
+  isDrivePaused: () => boolean;
+  /** Active (unpaused) time of the drive in progress, from its timestamps; null with no drive */
+  activeDriveMs: () => number | null;
   togglePassengerMode: () => void;
 
   updateProfile: (updates: Partial<UserProfile>) => void;
@@ -149,6 +156,8 @@ interface AppContextValue {
 }
 
 const AppContext = createContext<AppContextValue | null>(null);
+/** Set once the "recording only while open" explanation has been shown (never repeated). */
+const BACKGROUND_NOTICE_KEY = '@driveos/drive/background-notice-shown';
 const NO_CONVERSATIONS: Conversation[] = [];
 const NO_MESSAGES: Message[] = [];
 
@@ -179,7 +188,7 @@ export function AppProvider({ userId, children }: { userId: string; children: Re
   const cloud = useMemo(() => {
     if (!ep || !backendEnv) throw new Error('Backend is not configured');
     const c = new CloudSync({
-      ep, store: deviceStorage, userId, publishableKey: backendEnv.supabasePublishableKey, newId, timezone,
+      ep, store: deviceStorage, userId, publishableKey: backendEnv.supabasePublishableKey, newId, timezone, tracker: driveTracker,
       prepareFile: (uri, purpose) => (purpose === 'avatar' ? prepareAvatar(uri) : prepareImage(uri)),
     });
     return c;
@@ -206,12 +215,20 @@ export function AppProvider({ userId, children }: { userId: string; children: Re
     cloud.resume();
     const unsubscribe = onConnectionStatus((state, detail) => cloud.reportConnection(state, detail));
     let cancelled = false;
+    // The live route: every fix the drive accepts, from the screen or the
+    // background (each once), so it continues while the app is out of view.
+    const unsubscribeFixes = cloud.onDriveFix((fix) => setCurrentDrive((prev) => (prev ? appendLiveFix(prev, fix) : prev)));
     (async () => {
       await cloud.start();
-      if (!cancelled) setIsLoading(false);
+      if (cancelled) return;
+      // A drive still recording in the background when the app was relaunched
+      // carries on, from the points recorded so far.
+      const rec = cloud.activeRecord;
+      setCurrentDrive((prev) => (rec ? prev ?? liveDriveFromRecord(rec) : null));
+      setIsLoading(false);
       await cloud.sync().catch(() => {});
     })();
-    return () => { cancelled = true; unsubscribe(); cloud.dispose(); };
+    return () => { cancelled = true; unsubscribe(); unsubscribeFixes(); cloud.dispose(); };
   }, [cloud]);
 
   // Keep retrying while something is waiting or the server was unreachable,
@@ -229,7 +246,11 @@ export function AppProvider({ userId, children }: { userId: string; children: Re
       }
     };
     const timer = setInterval(tick, 30_000);
-    const sub = AppState.addEventListener('change', (state) => { if (state === 'active') void cloud.sync().catch(() => {}); });
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state === 'active') void cloud.sync().catch(() => {});
+      // The system may end the app at any point once it's out of view.
+      else if (state === 'background') void cloud.saveActiveNow().catch(() => {});
+    });
     return () => { clearInterval(timer); sub.remove(); };
   }, [cloud]);
 
@@ -240,39 +261,60 @@ export function AppProvider({ userId, children }: { userId: string; children: Re
   // ── Drives ──
   const startDrive = useCallback(() => {
     if (cloud.isDriving) return;
-    setCurrentDrive({ startTime: Date.now(), coordinates: [], speedSamples: [], topSpeed: 0, estimatedDistance: 0, currentSpeed: 0 });
+    setCurrentDrive(newLiveDrive(Date.now()));
     cloud.startDrive(activeVehicleRef.current).catch((err) => reportFailure('Could not start recording', err));
   }, [cloud]);
 
-  const passengerRef = useRef(isPassengerMode);
-  passengerRef.current = isPassengerMode;
+  // Passenger mode records nothing, from the screen or the background.
+  useEffect(() => { cloud.setPassengerMode(isPassengerMode); }, [cloud, isPassengerMode]);
+
+  // The screen's fixes; the route on screen is updated from onDriveFix above.
   const updateDriveCoordinate = useCallback((p: Coordinate & { speed: number; accuracy?: number | null; heading?: number | null; altitude?: number | null; timestamp?: number }) => {
-    if (!cloud.isDriving || passengerRef.current) return;
+    if (!cloud.isDriving) return;
     const fix: GpsFix = {
       latitude: p.latitude, longitude: p.longitude, speedMs: p.speed, headingDeg: p.heading ?? null,
       accuracyM: p.accuracy ?? null, altitudeM: p.altitude ?? null, timestamp: p.timestamp ?? Date.now(),
     };
     cloud.addFix(fix);
-    const speedKmh = Math.max(0, p.speed) * 3.6;
-    setCurrentDrive((prev) => {
-      if (!prev) return prev;
-      const last = prev.coordinates[prev.coordinates.length - 1];
-      let added = 0;
-      if (last) {
-        const dLat = (p.latitude - last.latitude) * 111;
-        const dLon = (p.longitude - last.longitude) * 111 * Math.cos(p.latitude * (Math.PI / 180));
-        added = Math.sqrt(dLat * dLat + dLon * dLon);
-      }
-      return {
-        ...prev,
-        coordinates: [...prev.coordinates, { latitude: p.latitude, longitude: p.longitude }],
-        speedSamples: [...prev.speedSamples, speedKmh],
-        topSpeed: Math.max(prev.topSpeed, speedKmh),
-        estimatedDistance: prev.estimatedDistance + added,
-        currentSpeed: speedKmh,
-      };
-    });
   }, [cloud]);
+
+  // Background recording couldn't start for this drive: say so (once per app
+  // run, or once ever when "Always" was declined, so it never nags).  The
+  // drive still records while the app is open.
+  const trackingNotice = useRef(false);
+  useEffect(() => {
+    const t = status.backgroundTracking;
+    if (!isDriving || trackingNotice.current || t === 'off' || t === 'on') return;
+    trackingNotice.current = true;
+    if (t === 'always-declined' || t === 'always-off') {
+      void (async () => {
+        if (await deviceStorage.getItem(BACKGROUND_NOTICE_KEY).catch(() => null)) return;
+        await deviceStorage.setItem(BACKGROUND_NOTICE_KEY, '1').catch(() => {});
+        const message = `This drive is recorded while ${APP_NAME} is on screen. If you switch apps or lock your phone, that part of the drive won't be recorded.`;
+        if (t === 'always-declined') {
+          // Just answered the prompt: no need to send them to Settings now.
+          Alert.alert('Recording only while open', `${message} You can turn on background recording later in Settings: Location → Always.`);
+        } else {
+          Alert.alert(
+            'Recording only while open',
+            `${message} To record in the background, set Location to "Always" in Settings.`,
+            [{ text: 'Not now', style: 'cancel' }, { text: 'Open Settings', onPress: () => { void Linking.openSettings(); } }],
+          );
+        }
+      })();
+    } else if (t === 'denied') {
+      Alert.alert(
+        'Location access needed',
+        'Drives are recorded from your location. Allow location access in Settings.',
+        [{ text: 'Not now', style: 'cancel' }, { text: 'Open Settings', onPress: () => { void Linking.openSettings(); } }],
+      );
+    } else {
+      Alert.alert(
+        'Recording only while open',
+        'This drive will be recorded while the app is on screen. Recording in the background isn\'t available in this version of the app.',
+      );
+    }
+  }, [isDriving, status.backgroundTracking]);
 
   const endDrive = useCallback(async () => {
     setCurrentDrive(null);
@@ -294,6 +336,8 @@ export function AppProvider({ userId, children }: { userId: string; children: Re
   }, [cloud]);
 
   const setDrivePaused = useCallback((paused: boolean) => cloud.setDrivePaused(paused), [cloud]);
+  const isDrivePaused = useCallback(() => cloud.isDrivePaused, [cloud]);
+  const activeDriveMs = useCallback(() => cloud.activeDriveMs(), [cloud]);
 
   const pendingJourney = data.journeys.find((j) => j.syncState && j.syncState !== 'synced') ?? null;
   const syncSummary: SyncStatusSummary =
@@ -421,7 +465,7 @@ export function AppProvider({ userId, children }: { userId: string; children: Re
     sync: status,
     unsyncedJourneyId: pendingJourney?.id ?? null,
     categories: data.categories,
-    startDrive, updateDriveCoordinate, endDrive, discardDrive, setDrivePaused,
+    startDrive, updateDriveCoordinate, endDrive, discardDrive, setDrivePaused, isDrivePaused, activeDriveMs,
     places: data.places,
     friends: data.friends,
     friendRequests: data.friendRequests,

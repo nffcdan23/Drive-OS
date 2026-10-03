@@ -1,6 +1,6 @@
 # What depends on the final app name and bundle identifier
 
-**Staging/TestFlight identity (chosen):** `StarScale Drive`, bundle id `uk.co.starscale.drive.staging`, scheme `starscale-drive-staging`, EAS slug `starscale-drive-staging` (in `CHOSEN.staging`, `app.identity.js`). The public App Store identity is **not decided**. For production builds the values (`DriveOS`, `driveos`, and candidate `com.driveos.app`) are still placeholders, and no bundle id is applied, so nothing can be registered for the App Store app by accident.
+**Staging/TestFlight identity (chosen):** display name `Derwent` (the public brand); bundle id `uk.co.starscale.drive.staging`, scheme `starscale-drive-staging`, EAS slug `starscale-drive-staging` (in `CHOSEN.staging`, `app.identity.js`). The technical identifiers keep the earlier "StarScale Drive" name on purpose: changing them would mean a new App ID / EAS project and would break sign-in links. The public App Store identity is **not decided**. For production builds the values (`DriveOS`, `driveos`, and candidate `com.driveos.app`) are still placeholders, and no bundle id is applied, so nothing can be registered for the App Store app by accident.
 
 ## Decide before the first TestFlight build
 

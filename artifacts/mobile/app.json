@@ -36,8 +36,8 @@
       [
         "expo-location",
         {
-          "locationAlwaysAndWhenInUsePermission": false,
-          "locationAlwaysPermission": false
+          "isIosBackgroundLocationEnabled": true,
+          "isAndroidForegroundServiceEnabled": true
         }
       ],
       [

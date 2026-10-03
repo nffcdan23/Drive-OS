@@ -20,7 +20,7 @@ This checklist is for what only a phone can show: Keychain, the camera roll, GPS
     - Run `npx expo start` with `artifacts/mobile/.env` pointing at staging.
     - Add `exp://<your-LAN-IP>:8081/--/auth/callback` to the Supabase redirect URLs.
     - Sign in with Apple can't be tested in Expo Go against your own App ID. Email and Google can.
-  - **Option B: a TestFlight build** of StarScale Drive (`uk.co.starscale.drive.staging`), following `TESTFLIGHT.md`.
+  - **Option B: a TestFlight build** of Derwent (`uk.co.starscale.drive.staging`), following `TESTFLIGHT.md`.
     - Use `staging-simulator` for an iOS Simulator build, which needs no Apple registration at all.
 
 ## Accounts
@@ -62,7 +62,18 @@ This checklist is for what only a phone can show: Keychain, the camera roll, GPS
     - The journey appears with a route.
     - XP increases.
 18. [ ] ★ Force-quit → the journey's **route still displays** in Journeys and on the journey's detail screen.
-18a. [ ] ★ **Lock the phone during a drive.** Recording currently needs the screen on (there is no background location yet). Note what happens so we can decide on background recording.
+18a. [ ] ★ **Background recording** (needs a new native build: TestFlight or a development build made after this was added; Expo Go can't do it). On a fresh install:
+    - Opening the map asks for location → choose "Allow While Using App" (Precise Location on).
+    - The first Start Drive asks to change to "Always Allow" → choose it. Later drives don't ask.
+    - Start Drive → the blue location pill appears in the status bar once you leave the app.
+    - Drive 2+ minutes, switch to Music (or lock the phone) for 5+ minutes while still driving, then return → the live route follows the roads you drove, with **no straight line** across the time away; distance and drive time include it.
+    - Pause → switch apps for a minute while moving → resume → nothing was recorded during the pause.
+    - End Drive → the blue pill disappears within a few seconds (no tracking after the drive), and the saved route has no gap.
+    - Reinstall and choose "Keep Only While Using" at the Always prompt → one explanation (no Settings button); the drive records while the app is open only; the next drives show nothing more and never prompt again. Setting Location to "Always" in Settings turns background recording on for the next drive.
+    - Choose "Allow Once" at the first prompt → no Always prompt appears; one explanation with "Open Settings"; the drive records while the app is open.
+    - With "Never" location access, starting a drive shows an explanation with an "Open Settings" button, and nothing crashes.
+    - Optional: during a drive, open many heavy apps so iOS ends the app in the background, keep driving, then reopen it → the same drive continues (no second drive), with the route recorded meanwhile.
+    - Force-quit (swipe away) during a drive → recording stops (iOS does this); reopen within 15 minutes → the drive continues, with a straight line across the force-quit gap; after 15 minutes → it's saved as a finished drive.
 18b. [ ] Deny location permission → the Drive and Map screens explain this, and nothing crashes.
 
 ## Second person and second device

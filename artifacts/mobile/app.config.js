@@ -101,7 +101,12 @@ module.exports = ({ config }) => {
       usesAppleSignIn: true,
       infoPlist: {
         ...config.ios.infoPlist,
-        NSLocationWhenInUseUsageDescription: `${name} uses your location to show your position on the map and record your drives while the app is open.`,
+        NSLocationWhenInUseUsageDescription: `${name} uses your location to show your position on the map and to record your drives.`,
+        // "Always": asked for when the first drive starts, so a drive keeps
+        // recording while you use other apps or lock your phone. Only used
+        // between Start Drive and End Drive.
+        NSLocationAlwaysAndWhenInUseUsageDescription: `${name} records the route of a drive you've started while you use other apps or your phone is locked. Location is only used in the background until you end the drive.`,
+        NSLocationAlwaysUsageDescription: `${name} records the route of a drive you've started while you use other apps or your phone is locked. Location is only used in the background until you end the drive.`,
         NSPhotoLibraryUsageDescription: `${name} needs access to your photos to set your vehicle and profile pictures.`,
         NSPhotoLibraryAddUsageDescription: `${name} needs to save journey photos to your library.`,
         // Required, but never shown: expo-location compiles Core Motion
@@ -117,9 +122,12 @@ module.exports = ({ config }) => {
       ...config.android,
       ...(id.bundleId ? { package: id.bundleId.replace(/-/g, '_') } : {}),
     },
-    // Permission prompts: only the ones above. app.json turns off the camera,
-    // microphone and "Always" location prompts the plugins would add by
-    // default (nothing in the app uses them); Face ID is turned off here.
+    // Permission prompts: only the ones above. app.json turns off the camera
+    // and microphone prompts the plugins would add by default (nothing in the
+    // app uses them); Face ID is turned off here. app.json's expo-location
+    // options add the background location mode (UIBackgroundModes: location);
+    // lib/driveBackgroundLocation asks for "Always" on the first drive and
+    // runs background updates only while a drive is in progress.
     plugins: [
       ...config.plugins,
       'expo-apple-authentication',
