@@ -101,7 +101,7 @@ module.exports = ({ config }) => {
       usesAppleSignIn: true,
       infoPlist: {
         ...config.ios.infoPlist,
-        NSLocationWhenInUseUsageDescription: `${name} uses your location to show your position on the map and record your drives while the app is open.`,
+        NSLocationWhenInUseUsageDescription: `${name} uses your location to show your position on the map and to record your drives, including while you use other apps or lock your phone during a drive you started.`,
         NSPhotoLibraryUsageDescription: `${name} needs access to your photos to set your vehicle and profile pictures.`,
         NSPhotoLibraryAddUsageDescription: `${name} needs to save journey photos to your library.`,
         // Required, but never shown: expo-location compiles Core Motion
@@ -120,6 +120,10 @@ module.exports = ({ config }) => {
     // Permission prompts: only the ones above. app.json turns off the camera,
     // microphone and "Always" location prompts the plugins would add by
     // default (nothing in the app uses them); Face ID is turned off here.
+    // Drives keep recording in the background with "While Using" access:
+    // app.json's expo-location options add the background location mode
+    // (UIBackgroundModes: location), and lib/driveBackgroundLocation starts
+    // the updates only while a drive is in progress.
     plugins: [
       ...config.plugins,
       'expo-apple-authentication',

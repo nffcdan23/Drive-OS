@@ -7,6 +7,8 @@
  *   3. applies edits immediately and queues them in the outbox when the
  *      server can't be reached, replaying them later in order,
  *   4. records drives on the device and uploads them (see journeyRecorder),
+ *      from the Drive screen and, while a drive is in progress, from
+ *      background location updates (see driveTracking),
  *   5. reports connection and sync status so the app can show it.
  *
  * It has no React Native dependencies, so the same code runs in the app and
@@ -15,9 +17,10 @@
 import type { Endpoints, LocationKind, SpotCategory, Visibility } from './endpoints';
 import { ApiError, describeError, isRetryable, type ConnectionState } from './http';
 import {
-  JourneyStore, activeDriveMs, isLongEnoughToSave, newJourneyRecord, recordFix, setRecordPaused, syncJourneyRecord,
-  type GpsFix, type JourneyRecord,
+  JourneyStore, acceptDriveFix, activeDriveMs, isLongEnoughToSave, lastRecordedFix, newJourneyRecord, noteFixTime, recordFix,
+  setRecordPaused, syncJourneyRecord, type FixRef, type GpsFix, type JourneyRecord,
 } from './journeyRecorder';
+import type { BackgroundTracking, DriveTracker } from './driveTracking';
 import {
   toCategory, toConvoy, toEvent, toFriend, toFriendRequests, toGroup, toJourney, toNearbySpot, toNotification,
   toPlace, toProfile, toStats, toVehicle, vehicleFields,
@@ -40,6 +43,8 @@ export interface SyncStatus {
   lastError: string | null;
   /** Changes the server refused; shown to the user until dismissed. */
   rejected: Rejection[];
+  /** Whether the drive in progress is also recorded in the background. */
+  backgroundTracking: BackgroundTracking;
 }
 
 export interface CloudSyncDeps {
@@ -54,6 +59,8 @@ export interface CloudSyncDeps {
   fetchImpl?: typeof fetch;
   /** Clock (injectable for tests). */
   now?: () => number;
+  /** Background location recording during drives (none in the Node tests against staging). */
+  tracker?: DriveTracker;
 }
 
 export function emptyData(): CachedData {
@@ -68,12 +75,20 @@ export function emptyData(): CachedData {
 
 const PERSIST_POINTS_EVERY_MS = 5_000;
 const FLUSH_POINTS_EVERY_MS = 30_000;
+/** Parked or paused, the drive is still saved this often (it records when the last fix came). */
+const PERSIST_HEARTBEAT_EVERY_MS = 60_000;
+/**
+ * On a relaunch, a drive whose background updates are still running is
+ * carried on if a fix arrived within this long; otherwise it is finished as
+ * an interrupted drive.
+ */
+export const RESUME_DRIVE_WITHIN_MS = 15 * 60_000;
 
 export class CloudSync {
   data: CachedData = emptyData();
   status: SyncStatus = {
     connection: 'unknown', pendingChanges: 0, pendingJourneys: 0, refreshing: false,
-    lastSyncedAt: null, lastError: null, rejected: [],
+    lastSyncedAt: null, lastError: null, rejected: [], backgroundTracking: 'off',
   };
   readonly outbox: Outbox;
   private readonly journeys: JourneyStore;
@@ -83,6 +98,11 @@ export class CloudSync {
   private journeyIds = new Map<string, string>();
   private lastPointPersist = 0;
   private lastPointFlush = 0;
+  /** The newest fix accepted for the drive in progress (for de-duplication). */
+  private lastFix: FixRef | null = null;
+  private passenger = false;
+  private fixListeners = new Set<(fix: GpsFix) => void>();
+  private detachTracker: (() => void) | null = null;
   private journeySync: Promise<void> | null = null;
   private activePush: Promise<void> | null = null;
   private listeners = new Set<() => void>();
@@ -150,22 +170,41 @@ export class CloudSync {
     const cached = await readJson<CachedData | null>(this.deps.store, this.cacheKey, null);
     if (cached?.version === 1) this.data = cached;
     await this.outbox.load();
+    // Background fixes come here from now on; any recorded while the app had
+    // no screens are saved to the device first, so loading below includes them.
+    const tracker = this.deps.tracker;
+    this.detachTracker?.();
+    this.detachTracker = tracker ? await tracker.attach(this.deps.userId, (fixes) => { for (const f of fixes) this.addFix(f); }) : null;
     this.active = await this.journeys.loadActive();
     this.pending = await this.journeys.loadPending();
-    // A drive that was still "active" when the app was killed is finished now
-    // (or thrown away, if it had under 10 s of active, unpaused driving).
+    const session = tracker ? await tracker.running().catch(() => null) : null;
     if (this.active) {
       const rec = this.active;
-      const last = rec.points[rec.points.length - 1];
-      rec.endedAt = last?.recordedAt ?? rec.startedAt;
-      this.active = null;
-      await this.journeys.saveActive(null);
-      if (isLongEnoughToSave(activeDriveMs(rec, this.now()))) {
-        this.pending.push(rec);
-        await this.journeys.savePending(this.pending);
-      } else if (rec.serverId) {
-        await this.queue({ kind: 'journey.delete', id: rec.serverId });
+      if (session && session.userId === this.deps.userId && session.clientRef === rec.clientRef && this.isRecent(rec)) {
+        // Still being recorded in the background (the system relaunched the
+        // app, or it was reopened moments after closing): carry on with it.
+        this.lastFix = lastRecordedFix(rec);
+        this.lastPointFlush = this.now();
+        this.status = { ...this.status, backgroundTracking: 'on' };
+        void this.pushActive();
+      } else {
+        // A drive that was still "active" when the app was killed is finished
+        // now (or thrown away, if it had under 10 s of active, unpaused driving).
+        await tracker?.stop().catch(() => {});
+        const last = rec.points[rec.points.length - 1];
+        rec.endedAt = last?.recordedAt ?? rec.startedAt;
+        this.active = null;
+        await this.journeys.saveActive(null);
+        if (isLongEnoughToSave(activeDriveMs(rec, this.now()))) {
+          this.pending.push(rec);
+          await this.journeys.savePending(this.pending);
+        } else if (rec.serverId) {
+          await this.queue({ kind: 'journey.delete', id: rec.serverId });
+        }
       }
+    } else {
+      // Background updates with no drive to record: never leave them running.
+      await tracker?.stop().catch(() => {});
     }
     this.data = this.withPendingJourneys(this.data);
     this.setStatus({ pendingJourneys: this.pending.length, lastSyncedAt: cached?.savedAt ?? null });
@@ -611,6 +650,36 @@ export class CloudSync {
 
   get isDriving() { return !!this.active; }
   get activeRecord() { return this.active; }
+  get isDrivePaused() { return !!this.active?.pausedAt; }
+
+  /** Whether a drive's last sign of life is recent enough to carry it on after a relaunch */
+  private isRecent(rec: JourneyRecord): boolean {
+    const times = [rec.startedAt, rec.lastFixAt, rec.pausedAt, rec.points[rec.points.length - 1]?.recordedAt]
+      .filter((t): t is string => !!t).map((t) => Date.parse(t));
+    return this.now() - Math.max(...times) <= RESUME_DRIVE_WITHIN_MS;
+  }
+
+  /**
+   * Called with every fix accepted for the drive in progress, from either the
+   * Drive screen or the background, in order and without duplicates: the
+   * live route on screen is built from these.
+   */
+  onDriveFix(fn: (fix: GpsFix) => void): () => void {
+    this.fixListeners.add(fn);
+    return () => { this.fixListeners.delete(fn); };
+  }
+
+  /** Passenger mode: nothing is recorded while it's on (it isn't saved, like the setting itself). */
+  setPassengerMode(on: boolean): void {
+    this.passenger = on;
+  }
+
+  /** Saves the drive in progress now (the app is going to the background). */
+  async saveActiveNow(): Promise<void> {
+    if (!this.active) return;
+    this.lastPointPersist = this.now();
+    await this.journeys.saveActive(this.active);
+  }
 
   /** Active (unpaused) time of the drive in progress, as the drive timer counts it */
   activeDriveMs(): number | null {
@@ -635,6 +704,7 @@ export class CloudSync {
     const rec = this.active;
     if (!rec) return;
     this.active = null;
+    await this.stopTracking();
     await this.journeys.saveActive(null);
     // The start-of-drive upload may still be creating the server journey
     if (this.activePush) await this.activePush;
@@ -665,21 +735,57 @@ export class CloudSync {
       vehicleId: vehicle?.id ?? null, vehicleSnapshot: snapshot,
     });
     this.lastPointFlush = this.now();
-    await this.journeys.saveActive(this.active);
+    this.lastFix = null;
+    const rec = this.active;
+    await this.journeys.saveActive(rec);
+    // Record in the background too, for as long as the drive lasts.
+    void this.startTracking(rec);
     // Create the journey on the server straight away when online.
     void this.pushActive();
   }
 
-  /** Feeds a GPS fix; returns true when it was kept after thinning. */
+  private async startTracking(rec: JourneyRecord) {
+    const tracker = this.deps.tracker;
+    if (!tracker) return;
+    const result = await tracker.start({ userId: this.deps.userId, clientRef: rec.clientRef }).catch(() => 'unavailable' as const);
+    if (this.active !== rec) {
+      // The drive ended while the updates were starting.
+      await tracker.stop().catch(() => {});
+      return;
+    }
+    this.setStatus({ backgroundTracking: result });
+  }
+
+  private async stopTracking() {
+    if (this.status.backgroundTracking !== 'off') this.setStatus({ backgroundTracking: 'off' });
+    await this.deps.tracker?.stop().catch(() => {});
+  }
+
+  /**
+   * Feeds a GPS fix, from the Drive screen or the background; returns true
+   * when it was kept after thinning.  A fix already delivered by the other
+   * source, an older one, or one arriving while paused or in passenger mode
+   * is ignored.
+   */
   addFix(fix: GpsFix): boolean {
     const rec = this.active;
     if (!rec) return false;
-    const kept = recordFix(rec, fix);
     const now = this.now();
-    if (kept && now - this.lastPointPersist >= PERSIST_POINTS_EVERY_MS) {
+    noteFixTime(rec, fix);
+    if (this.passenger || !acceptDriveFix(rec, this.lastFix, fix)) {
+      if (now - this.lastPointPersist >= PERSIST_HEARTBEAT_EVERY_MS) {
+        this.lastPointPersist = now;
+        void this.journeys.saveActive(rec);
+      }
+      return false;
+    }
+    this.lastFix = fix;
+    const kept = recordFix(rec, fix);
+    if (now - this.lastPointPersist >= (kept ? PERSIST_POINTS_EVERY_MS : PERSIST_HEARTBEAT_EVERY_MS)) {
       this.lastPointPersist = now;
       void this.journeys.saveActive(rec);
     }
+    for (const fn of this.fixListeners) fn(fix);
     if (now - this.lastPointFlush >= FLUSH_POINTS_EVERY_MS) {
       this.lastPointFlush = now;
       void this.pushActive();
@@ -711,6 +817,8 @@ export class CloudSync {
       await this.discardDrive();
       return null;
     }
+    // No more fixes from here on.
+    await this.stopTracking();
     // Let an upload that's already running finish first (it shares the record).
     if (this.activePush) await this.activePush;
     rec.endedAt = new Date(this.now()).toISOString();
@@ -832,6 +940,11 @@ export class CloudSync {
     this.wiped = true;
     this.disposed = true;
     if (this.cacheTimer) clearTimeout(this.cacheTimer);
+    // Signing out mid-drive: the drive is deleted below, so stop recording it.
+    this.active = null;
+    this.detachTracker?.();
+    this.detachTracker = null;
+    await this.deps.tracker?.stop().catch(() => {});
     await this.outbox.clear();
     await this.journeys.clearAll();
     await this.deps.store.removeItem(this.cacheKey);
@@ -845,6 +958,10 @@ export class CloudSync {
   dispose() {
     this.disposed = true;
     if (this.cacheTimer) clearTimeout(this.cacheTimer);
+    // Background updates keep running (the drive goes on); with no listener,
+    // their fixes are saved to the device for the next start().
+    this.detachTracker?.();
+    this.detachTracker = null;
   }
 
   resume() {

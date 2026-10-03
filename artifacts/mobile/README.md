@@ -11,6 +11,7 @@ Expo (SDK 57) app for tracking journeys, managing a vehicle garage, saving place
 - **Failures are always shown:** a banner reports when the phone is offline, when the server fails, when the session has expired, when changes are waiting to upload, and when the server refuses a change.
 - **Journeys:**
   - Recording keeps a GPS point at most every 3 s, and only after the car has moved 25 m or turned more than 15°. Fixes worse than 100 m accuracy are dropped.
+  - A drive keeps recording when the user switches apps or locks the phone: background location updates run from Start Drive to End Drive only, and feed the same recorder as the Drive screen (`lib/backend/driveTracking.ts`, `lib/driveBackgroundLocation.ts`). Fixes delivered by both are counted once. This needs "While Using the App" access only, and a native build with the background location mode (not Expo Go).
   - Drives are saved on the phone and uploaded idempotently, so a drive recorded offline uploads later without duplicates.
   - Distance, XP and the stored route are computed by the server.
 

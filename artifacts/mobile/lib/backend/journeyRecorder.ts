@@ -108,6 +108,13 @@ export interface JourneyRecord {
    */
   pausedMs?: number;
   pausedAt?: string | null;
+  /**
+   * When the last GPS fix for this drive arrived (kept or not), saved now and
+   * then.  Tells a relaunch whether the drive was still being tracked moments
+   * ago (resume it) or went quiet long ago (finish it).  Optional for older
+   * records.
+   */
+  lastFixAt?: string | null;
 }
 
 /**
@@ -155,6 +162,43 @@ export function newJourneyRecord(input: {
     serverId: null, clientDistanceKm: 0, topSpeedKmh: 0, attempts: 0, lastError: null, rejected: false,
     pausedMs: 0, pausedAt: null,
   };
+}
+
+// ─── One gate for every fix source ──────────────────────────────────────────
+//
+// During a drive the same GPS fixes can arrive twice: from the Drive screen's
+// foreground watcher and from the background location task (two location
+// managers fed by the same GPS).  Both go through acceptDriveFix, so a fix is
+// counted once whichever source delivers it first.
+
+/** Fixes this close together in time are the same fix delivered twice. */
+export const DUPLICATE_FIX_MS = 500;
+/** Fixes vaguer than this don't extend the live route (the Drive screen's limit). */
+export const LIVE_MAX_ACCURACY_M = 120;
+
+export type FixRef = Pick<GpsFix, 'latitude' | 'longitude' | 'timestamp'>;
+
+/** The newest fix a record already has, as the starting point for acceptDriveFix. */
+export function lastRecordedFix(rec: JourneyRecord): FixRef | null {
+  const p = rec.points[rec.points.length - 1];
+  return p ? { latitude: p.latitude, longitude: p.longitude, timestamp: Date.parse(p.recordedAt) } : null;
+}
+
+/** Notes that the drive's location updates are alive (see JourneyRecord.lastFixAt). */
+export function noteFixTime(rec: JourneyRecord, fix: GpsFix): void {
+  if (!Number.isFinite(fix.timestamp)) return;
+  if (!rec.lastFixAt || fix.timestamp > Date.parse(rec.lastFixAt)) rec.lastFixAt = new Date(fix.timestamp).toISOString();
+}
+
+/**
+ * Whether a fix belongs on the drive: not a repeat or an older fix than the
+ * last one accepted (`last`), not while paused, and not hopelessly vague.
+ */
+export function acceptDriveFix(rec: JourneyRecord, last: FixRef | null, fix: GpsFix): boolean {
+  if (rec.endedAt || rec.pausedAt) return false;
+  if (!Number.isFinite(fix.latitude) || !Number.isFinite(fix.longitude) || !Number.isFinite(fix.timestamp)) return false;
+  if (last && fix.timestamp <= last.timestamp + DUPLICATE_FIX_MS) return false;
+  return fix.accuracyM == null || fix.accuracyM <= LIVE_MAX_ACCURACY_M;
 }
 
 /** Adds a fix to a record if it passes thinning; returns true when stored. */
