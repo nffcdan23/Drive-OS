@@ -1,7 +1,8 @@
 // The Drive screen's map on Mapbox: the published Derwent style, the follow
 // camera written by the Drive screen's frame loop, Mapbox's own location
 // puck (fed Derwent's smoothed position and heading), and the recorded drive
-// trail as line layers.
+// trail as line layers, continued to the puck by the live trail head
+// (lib/liveTrail.ts) drawn from the same smoothed position.
 //
 // Loaded only when lib/mapProvider.ts selects Mapbox, so a binary without the
 // Mapbox native module never imports @rnmapbox/maps.
@@ -52,6 +53,11 @@ export interface MapboxDriveMapHandle {
   setPuck(position: LatLng, heading: number): void;
 }
 
+/** Hands the map a function that draws the live trail head (null: none) */
+export type TrailHeadSubscribe = (
+  draw: (head: LatLng[] | null) => void,
+) => () => void;
+
 export interface MapboxDriveMapProps {
   accessToken: string;
   styleURL: string;
@@ -61,6 +67,11 @@ export interface MapboxDriveMapProps {
   /** The recorded drive, drawn as the cyan trail; null when not driving */
   trail: readonly LatLng[] | null;
   trailColor: string;
+  /**
+   * The trail's live end, from its last recorded point to the puck: drawn
+   * whenever the Drive screen's frame loop says, without re-rendering the map
+   */
+  trailHead?: TrailHeadSubscribe;
   /** Logo and attribution sit this far above the bottom edge */
   ornamentBottom: number;
   ornamentLeft: number;
@@ -130,6 +141,49 @@ const PuckFeeder = memo(
   }),
 );
 
+/**
+ * The live trail head.  Its own small component with its own state, so a
+ * redraw (many times a second while driving) re-renders only this source and
+ * replaces its few points, never the recorded trail or the map.  Always
+ * mounted, empty when there's no head, so its layers keep their place in the
+ * stack.  Styled to match the recorded trail it continues.
+ */
+const TrailHeadLayers = memo(function TrailHeadLayers({
+  subscribe,
+  color,
+}: {
+  subscribe: TrailHeadSubscribe;
+  color: string;
+}) {
+  const [head, setHead] = useState<LatLng[] | null>(null);
+  useEffect(() => subscribe(setHead), [subscribe]);
+  const shape = useMemo(() => trailFeatureCollection(head), [head]);
+  return (
+    <ShapeSource id="derwent-drive-trail-head" shape={shape}>
+      <LineLayer
+        id="derwent-drive-trail-head-glow"
+        style={{
+          lineColor: TRAIL_GLOW,
+          lineWidth: 12,
+          lineCap: "round",
+          lineJoin: "round",
+          lineEmissiveStrength: 1,
+        }}
+      />
+      <LineLayer
+        id="derwent-drive-trail-head-line"
+        style={{
+          lineColor: color,
+          lineWidth: 4,
+          lineCap: "round",
+          lineJoin: "round",
+          lineEmissiveStrength: 1,
+        }}
+      />
+    </ShapeSource>
+  );
+});
+
 const MapboxDriveMap = forwardRef<MapboxDriveMapHandle, MapboxDriveMapProps>(
   function MapboxDriveMap(
     {
@@ -139,6 +193,7 @@ const MapboxDriveMap = forwardRef<MapboxDriveMapHandle, MapboxDriveMapProps>(
       showPuck,
       trail,
       trailColor,
+      trailHead,
       ornamentBottom,
       ornamentLeft,
       onUserGesture,
@@ -234,6 +289,10 @@ const MapboxDriveMap = forwardRef<MapboxDriveMapHandle, MapboxDriveMapProps>(
         >
           <Camera ref={cameraRef} defaultSettings={initialCamera} />
           <Images images={PUCK_IMAGES} />
+          {/* Mounted before the trail and puck: the head draws beneath both */}
+          {trailHead && (
+            <TrailHeadLayers subscribe={trailHead} color={trailColor} />
+          )}
           {/* Mounted before the puck so the trail always draws beneath it */}
           <ShapeSource id="derwent-drive-trail" shape={trailShape}>
             <LineLayer

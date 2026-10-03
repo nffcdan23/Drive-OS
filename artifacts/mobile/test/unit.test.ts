@@ -1886,7 +1886,7 @@ test('the Drive screen keeps its marker mounted and positions it by native comma
   assert.ok(!/MarkerAnimated|AnimatedRegion\(/.test(src.replace(/\/\/.*$/gm, '')));
   assert.ok(/markerRef\.current\?\.setCoordinates\(position\)/.test(src));
   // The live head is drawn from the same per-frame position as the marker
-  assert.ok(/liveTrail\.frame\(position\)/.test(src));
+  assert.ok(/liveTrail\.update\(\s*position,/.test(src));
   // The marker comes first among the map's children; annotation views sit
   // above every overlay in MapKit, so the trail can't cover it
   const children = src.slice(src.indexOf('<MapView'), src.indexOf('</MapView>'));
@@ -2530,4 +2530,315 @@ test('on the Mapbox map (zoom, no altitude) a tilt still keeps following and a p
   assert.equal(classifyFollowGesture(mb(60), mb(60, 16.6, offsetMeters(START, 40, 0))), 'explore', 'pan');
   assert.equal(classifyFollowGesture(mb(60), mb(60, 16.6, START, 50)), 'explore', 'rotate');
   assert.equal(classifyFollowGesture(mb(60), mb(60.1, 16.65)), 'none');
+});
+
+// ─── Live trail on the Mapbox Drive map ─────────────────────────────────────
+// The Drive screen on Mapbox, wired as index.tsx wires it: CloudSync accepts
+// fixes into the live route (AppContext's onDriveFix → appendLiveFix); the
+// route's newest point is where the live head starts (the driveTrail effect);
+// each frame the smoothed position goes to the puck (setPuck) and to
+// liveTrail.update, whose draws reach MapboxDriveMap's head source as
+// trailFeatureCollection(head).
+
+import type { TrailFeatureCollection } from '@/lib/mapbox';
+
+const lngLat = (p: LatLng): [number, number] => [p.longitude, p.latitude];
+const headLine = (shape: TrailFeatureCollection) => shape.features[0]?.geometry.coordinates ?? null;
+
+class FakeMapboxDriveMap {
+  puck: LatLng | null = null;
+  head: TrailFeatureCollection = trailFeatureCollection(null);
+  draws: { t: number; puck: LatLng | null; shape: TrailFeatureCollection }[] = [];
+  setPuck(position: LatLng) { this.puck = position; }
+  drawHead(head: LatLng[] | null, t: number) {
+    this.head = trailFeatureCollection(head);
+    this.draws.push({ t, puck: this.puck, shape: this.head });
+  }
+}
+
+async function mapboxDriveScreen() {
+  const server = new FakeServer();
+  const clock = { t: Date.now() - 60 * 60_000 };
+  const app = makeSync(server, new MemoryStore(), clock);
+  await app.start();
+  const map = new FakeMapboxDriveMap();
+  const liveTrail = new LiveTrailHead();
+  const sm = new LocationSmoother();
+  const s = {
+    app, server, clock, map, liveTrail, sm,
+    driving: false, paused: false,
+    drive: null as ActiveDrive | null,
+    fixes: [] as LatLng[],
+    async start() {
+      await app.startDrive(null);
+      s.drive = newLiveDrive(clock.t);
+      s.driving = true;
+      liveTrail.reset();
+      map.drawHead(null, clock.t);
+    },
+    pause() {
+      s.paused = true;
+      app.setDrivePaused(true);
+      liveTrail.reset();
+      map.drawHead(null, clock.t);
+    },
+    resume() {
+      s.paused = false;
+      app.setDrivePaused(false);
+    },
+    async end() {
+      s.driving = false;
+      s.drive = null;
+      liveTrail.reset();
+      map.drawHead(null, clock.t);
+      return app.endDrive();
+    },
+    /** A GPS fix: the screen's (smoothed for the puck, and recorded), or one only background tracking delivered */
+    fix(raw: LatLng, speed: number, course: number, from: 'screen' | 'background' = 'screen') {
+      s.fixes.push(raw);
+      const fix = { ...raw, speedMs: speed, headingDeg: course, accuracyM: 5, timestamp: clock.t };
+      if (from === 'background') { app.addFix(fix); return; }
+      sm.addFix({ ...raw, speed, course, accuracy: 5, time: clock.t }, clock.t);
+      if (s.driving && !s.paused) app.addFix(fix);
+    },
+    frame() {
+      const position = sm.sample(clock.t);
+      if (position) map.setPuck(position);
+      const u = liveTrail.update(position, s.driving && !s.paused, clock.t);
+      if (u.kind === 'draw') map.drawHead(u.head, clock.t);
+      return u;
+    },
+  };
+  app.onDriveFix((fix) => {
+    if (!s.drive) return;
+    s.drive = appendLiveFix(s.drive, fix);
+    if (!s.paused) liveTrail.followTrail(s.drive.coordinates);
+  });
+  return s;
+}
+
+/** Drives `seconds` along a gentle bend at 60 fps, one fix a second; `each` can deliver a fix differently */
+function driveMapbox(s: Awaited<ReturnType<typeof mapboxDriveScreen>>, seconds: number, opts: {
+  speed?: number; from?: (second: number) => 'screen' | 'background' | 'both';
+  onFrame?: (u: ReturnType<typeof s.frame>) => void;
+} = {}) {
+  const speed = opts.speed ?? 15;
+  let pos = s.sm.sample(s.clock.t) ?? START;
+  let course = 40;
+  for (let second = 0; second < seconds; second++) {
+    pos = offsetMeters(pos, speed * Math.sin((course * Math.PI) / 180), speed * Math.cos((course * Math.PI) / 180));
+    course = (course + 9) % 360;
+    const from = opts.from?.(second) ?? 'screen';
+    // Background tracking got this fix to CloudSync first: the screen's copy is a duplicate
+    if (from === 'background' || from === 'both') s.fix(pos, speed, course, 'background');
+    if (from !== 'background') s.fix(pos, speed, course);
+    for (let f = 0; f < 60; f++) {
+      const u = s.frame();
+      opts.onFrame?.(u);
+      s.clock.t += 1000 / 60;
+    }
+  }
+}
+
+test('Mapbox: the live trail reaches the puck every frame, from the trail\'s newest point', async () => {
+  const s = await mapboxDriveScreen();
+  s.fix(START, 0, 40);
+  s.frame();
+  await s.start();
+  const speed = 15;
+  let frames = 0, maxLag = 0, puckTravel = 0;
+  let prevPuck: LatLng | null = null;
+  let prevDraw: { t: number; end: [number, number] } | null = null;
+  const gaps: number[] = [];
+  driveMapbox(s, 20, {
+    speed,
+    // Background tracking delivers some fixes first, and some the screen never sees
+    from: (sec) => (sec % 4 === 3 ? 'both' : sec % 7 === 5 ? 'background' : 'screen'),
+    onFrame: (u) => {
+      frames++;
+      const trail = s.drive!.coordinates;
+      if (prevPuck) puckTravel += distM(prevPuck, s.map.puck!);
+      prevPuck = s.map.puck;
+      const line = headLine(s.map.head);
+      if (u.kind === 'draw' && u.head) {
+        // Drawn this frame: the head ends exactly on the puck...
+        assert.deepEqual(line!.at(-1), lngLat(s.map.puck!));
+        // ...and starts exactly on the trail's newest point: no gap
+        assert.deepEqual(line![0], lngLat(trail.at(-1)!));
+        const end = line!.at(-1)!;
+        if (prevDraw) {
+          assert.ok(s.clock.t - prevDraw.t >= LIVE_TRAIL.redrawIntervalMs - 1e-6, 'redrawn faster than the interval');
+          gaps.push(s.clock.t - prevDraw.t);
+          const step = distM({ latitude: prevDraw.end[1], longitude: prevDraw.end[0] }, { latitude: end[1], longitude: end[0] });
+          // The head's end moves exactly as the puck does: never further
+          assert.ok(step <= puckTravel + 1e-6, `the head end moved ${step.toFixed(2)} m; the puck ${puckTravel.toFixed(2)} m`);
+        }
+        puckTravel = 0;
+        prevDraw = { t: s.clock.t, end };
+      }
+      if (trail.length >= 2 && line) {
+        // Between redraws it's at most a redraw interval behind the puck
+        const end = line.at(-1)!;
+        maxLag = Math.max(maxLag, distM({ latitude: end[1], longitude: end[0] }, s.map.puck!));
+        // It always starts on the trail (its newest point, or the one before
+        // for the moment between a fix and the next redraw): never a gap
+        assert.ok(
+          [trail.at(-1), trail.at(-2)].some((p) => p && line[0]![0] === p.longitude && line[0]![1] === p.latitude),
+          'the head is detached from the trail',
+        );
+      }
+    },
+  });
+  assert.ok(frames >= 1200);
+  assert.ok(maxLag < speed * 0.05, `the head end trails the puck by ${maxLag.toFixed(2)} m`);
+  // Continuous between fixes: ~30 redraws a second
+  const avgGap = gaps.reduce((a, b) => a + b, 0) / gaps.length;
+  assert.ok(avgGap < 40, `redrawn only every ${avgGap.toFixed(0)} ms`);
+
+  // Saved and uploaded points are raw fixes only: nothing from the head
+  const rec = s.app.activeRecord!;
+  const isFix = (p: { latitude: number; longitude: number }) => s.fixes.some((f) => f.latitude === p.latitude && f.longitude === p.longitude);
+  for (const p of rec.points) assert.ok(isFix(p), 'a saved point that was never a GPS fix');
+  for (const p of s.drive!.coordinates) assert.ok(isFix(p), 'a trail point that was never a GPS fix');
+  const journey = await s.end();
+  assert.ok(journey);
+  assert.equal(s.server.points.get(s.server.journeys[0]!.id), rec.points.length, 'only raw points uploaded');
+});
+
+test('Mapbox: pause, resume, end and a new drive clear and restart the live trail', async () => {
+  const s = await mapboxDriveScreen();
+  s.fix(START, 0, 40);
+  s.frame();
+  await s.start();
+  // Each redraw moves the head's end a small step: smooth, not a jump a fix
+  const startedAt = s.clock.t;
+  let prevEnd: number[] | null = null, maxStep = 0, draws = 0;
+  driveMapbox(s, 4, {
+    onFrame: (u) => {
+      if (u.kind !== 'draw' || !u.head) return;
+      const end = headLine(s.map.head)!.at(-1)!;
+      // (from the second second: the puck first eases up to speed from rest)
+      if (prevEnd && s.clock.t > startedAt + 1500) {
+        maxStep = Math.max(maxStep, distM({ latitude: prevEnd[1]!, longitude: prevEnd[0]! }, { latitude: end[1]!, longitude: end[0]! }));
+      }
+      prevEnd = end;
+      draws++;
+    },
+  });
+  assert.ok(draws > 100, `only ${draws} redraws in 4 s`);
+  assert.ok(maxStep < 15 * 0.05 * 1.6, `the head end jumped ${maxStep.toFixed(2)} m`);
+  assert.equal(s.map.head.features.length, 1, 'a head while driving');
+
+  // Pause: cleared at once, and nothing drawn or recorded while paused
+  s.pause();
+  assert.equal(s.map.head.features.length, 0, 'cleared on pause');
+  const trailAtPause = s.drive!.coordinates.length;
+  const drawsAtPause = s.map.draws.length;
+  driveMapbox(s, 3);
+  assert.equal(s.map.draws.length, drawsAtPause, 'drawn while paused');
+  assert.equal(s.drive!.coordinates.length, trailAtPause, 'recorded while paused');
+
+  // Resume: no head until a fix is recorded, then it starts from that fix
+  // (never a line from where the drive was paused)
+  s.resume();
+  s.frame();
+  assert.equal(s.map.head.features.length, 0);
+  driveMapbox(s, 2);
+  const firstAfterResume = s.drive!.coordinates[trailAtPause]!;
+  assert.ok(firstAfterResume, 'recording resumed');
+  const line = headLine(s.map.head)!;
+  assert.deepEqual(line[0], lngLat(s.drive!.coordinates.at(-1)!));
+  assert.deepEqual(line.at(-1), lngLat(s.map.draws.at(-1)!.puck!));
+
+  // End: cleared, and stays clear
+  await s.end();
+  assert.equal(s.map.head.features.length, 0, 'cleared on end');
+  const drawsAtEnd = s.map.draws.length;
+  driveMapbox(s, 2);
+  assert.equal(s.map.draws.length, drawsAtEnd, 'drawn after the drive ended');
+
+  // A new drive: nothing carried over; the head starts at its own first point
+  await s.start();
+  for (let f = 0; f < 10; f++) { s.frame(); s.clock.t += 1000 / 60; }
+  assert.equal(s.map.head.features.length, 0, 'a head from the last drive');
+  driveMapbox(s, 2);
+  assert.deepEqual(headLine(s.map.head)![0], lngLat(s.drive!.coordinates.at(-1)!));
+  assert.equal(s.drive!.coordinates.length, 2);
+});
+
+test('the live head catches up with the puck where it comes to rest, then goes idle', () => {
+  const trail = new LiveTrailHead();
+  assert.equal(trail.followTrail([]), false);
+  assert.equal(trail.followTrail([offsetMeters(START, 0, -20), START]), true);
+  assert.equal(trail.followTrail([START]), false, 'same newest point: the trace is kept');
+  let t = 0, last: LatLng | null = null, drawn: LatLng[] | null = null;
+  for (let i = 1; i <= 50; i++) {
+    last = offsetMeters(START, 0, i * 0.25);
+    const u = trail.update(last, true, t);
+    if (u.kind === 'draw') drawn = u.head;
+    t += 1000 / 60;
+  }
+  // The puck stops just after a redraw, so the redraw to its resting place is
+  // held back: until it's drawn the frame loop is told to keep running
+  // ("wait", never "idle", or it could stop with the head short of the puck)
+  assert.equal(trail.update(offsetMeters(START, 0, 13), true, t).kind, 'draw');
+  t += 1000 / 60;
+  last = offsetMeters(START, 0, 13.25);
+  const kinds: string[] = [];
+  for (let i = 0; i < 10; i++) {
+    const u = trail.update(last, true, t);
+    kinds.push(u.kind);
+    if (u.kind === 'draw') drawn = u.head;
+    else if (drawn!.at(-1)!.latitude !== last.latitude) assert.equal(u.kind, 'wait', 'idle while the head is short of the puck');
+    t += 1000 / 60;
+  }
+  assert.equal(kinds[0], 'wait');
+  assert.deepEqual(drawn!.at(-1), last, 'the head stopped short of the puck');
+  assert.equal(kinds.at(-1), 'idle', 'the frame loop could never settle');
+  assert.ok(!kinds.slice(kinds.indexOf('idle')).includes('wait'));
+  // Not driving (paused, passenger, ended): cleared once, then idle
+  assert.deepEqual(trail.update(last, false, t), { kind: 'draw', head: null });
+  assert.deepEqual(trail.update(last, false, t + 100), { kind: 'idle' });
+  // No recorded point yet: nothing to draw, and nothing owed
+  const fresh = new LiveTrailHead();
+  assert.deepEqual(fresh.update(START, true, 0), { kind: 'idle' });
+  assert.deepEqual(fresh.update(START, true, 100), { kind: 'idle' });
+});
+
+test('the Mapbox Drive map draws the live head from the same position as its puck', () => {
+  const read = (rel: string) => readFileSync(toPath(new URL(rel, import.meta.url)), 'utf8');
+  const screen = read('../app/(tabs)/(drive)/index.tsx');
+  const map = read('../components/MapboxDriveMap.tsx');
+  // One head update per frame, for either map, from the very `position`
+  // handed to the puck (and the Apple marker), after both
+  const loop = screen.slice(screen.indexOf('const position = locationSmoother.sample(now);'));
+  const puck = loop.indexOf('mapboxRef.current?.setPuck(position, ');
+  const marker = loop.indexOf('markerRef.current?.setCoordinates(position)');
+  const update = loop.search(/liveTrail\.update\(\s*position,/);
+  assert.ok(puck > 0 && marker > puck && update > marker, 'head not updated from the puck position');
+  assert.equal(screen.match(/liveTrail\.update\(/g)?.length, 1);
+  assert.ok(/liveTrailDrawRef\.current\?\.\(head\.head\)/.test(loop));
+  // A redraw held back keeps the loop running until the head reaches the puck
+  assert.ok(/head\.kind !== "wait"/.test(loop.slice(0, loop.indexOf('const settled'))) || /settled =[^;]*head\.kind !== "wait"/.test(loop));
+  // Anchored on the trail as drawn, not on the screen's own fixes
+  assert.ok(!/liveTrail\.recordedPoint\(/.test(screen));
+  assert.ok(/liveTrail\.followTrail\(driveTrail\)/.test(screen));
+  // Both maps get the same head: Mapbox through its trailHead prop
+  const mapbox = screen.slice(screen.indexOf('<MapboxDriveMap'), screen.indexOf('/>', screen.indexOf('<MapboxDriveMap')));
+  assert.ok(/trailHead=\{subscribeLiveTrail\}/.test(mapbox));
+  assert.ok(/trail=\{driveTrail\}/.test(mapbox));
+  assert.ok(/<LiveTrailHeadLines\s+subscribe=\{subscribeLiveTrail\}/.test(screen));
+  // Pause, passenger mode and drive start/end clear it
+  for (const where of ['function handlePause()', 'isPassengerModeRef.current = isPassengerMode;', 'isDrivingRef.current = isDriving;']) {
+    const body = screen.slice(screen.indexOf(where), screen.indexOf(where) + 400);
+    assert.ok(/liveTrail\.reset\(\);\s*liveTrailDrawRef\.current\?\.\(null\);/.test(body), `not cleared at ${where}`);
+  }
+  // The map: its own head source, beneath the recorded trail and the puck,
+  // styled like the trail, and built with the trail's own feature function
+  const head = map.indexOf('<TrailHeadLayers');
+  assert.ok(head > 0 && head < map.indexOf('id="derwent-drive-trail"') && head < map.indexOf('<LocationPuck'));
+  assert.ok(/trailFeatureCollection\(head\)/.test(map));
+  assert.ok(/id="derwent-drive-trail-head"/.test(map));
+  const layers = map.slice(map.indexOf('const TrailHeadLayers'), map.indexOf('const MapboxDriveMap'));
+  assert.ok(/lineColor: TRAIL_GLOW,\s*lineWidth: 12/.test(layers) && /lineColor: color,\s*lineWidth: 4/.test(layers));
 });

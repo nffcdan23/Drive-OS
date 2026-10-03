@@ -48,7 +48,7 @@ import {
   LatestReader,
   markerScreenRotation,
 } from "@/lib/headingFilter";
-import { LIVE_TRAIL, LiveTrailHead } from "@/lib/liveTrail";
+import { LiveTrailHead } from "@/lib/liveTrail";
 import { isLongEnoughToSave } from "@/lib/backend/journeyRecorder";
 import {
   lookAheadForSpeed,
@@ -617,7 +617,6 @@ export default function MapScreen() {
   const liveTrailDrawRef = useRef<((c: LatLngPoint[] | null) => void) | null>(
     null,
   );
-  const liveTrailDrawnAtRef = useRef(0);
   const subscribeLiveTrail = useCallback(
     (draw: (coords: LatLngPoint[] | null) => void) => {
       liveTrailDrawRef.current = draw;
@@ -688,7 +687,10 @@ export default function MapScreen() {
   }, [isDriving, liveTrail]);
   useEffect(() => {
     isPassengerModeRef.current = isPassengerMode;
-  }, [isPassengerMode]);
+    // Nothing is recorded as a passenger, so the head doesn't grow either
+    liveTrail.reset();
+    liveTrailDrawRef.current?.(null);
+  }, [isPassengerMode, liveTrail]);
   useEffect(() => {
     followModeRef.current = followMode;
   }, [followMode]);
@@ -834,18 +836,18 @@ export default function MapScreen() {
       ) {
         markerDrawnAtRef.current = position;
         markerRef.current?.setCoordinates(position);
-
-        // ── Live trail head ── ending exactly where the arrow is drawn
-        if (
-          isDrivingRef.current &&
-          !isPausedRef.current &&
-          now - liveTrailDrawnAtRef.current >= LIVE_TRAIL.redrawIntervalMs
-        ) {
-          liveTrailDrawnAtRef.current = now;
-          liveTrailDrawRef.current?.(liveTrail.frame(position));
-        }
       }
     }
+    // ── Live trail head ── on either map, ending exactly where the marker or
+    // puck is drawn this frame (the same `position`)
+    const head = liveTrail.update(
+      position,
+      isDrivingRef.current &&
+        !isPausedRef.current &&
+        !isPassengerModeRef.current,
+      now,
+    );
+    if (head.kind === "draw") liveTrailDrawRef.current?.(head.head);
     if (position) {
       // ── Follow camera ──
       if (
@@ -896,6 +898,7 @@ export default function MapScreen() {
       headingSettled &&
       speedSettled &&
       cameraSettled &&
+      head.kind !== "wait" &&
       locationSmoother.isSettled(now);
     // The readout is React state, so it's refreshed at a modest rate
     if (settled || now - lastHeadingUiAtRef.current >= HEADING_UI_INTERVAL_MS) {
@@ -1018,8 +1021,6 @@ export default function MapScreen() {
         !isPausedRef.current
       ) {
         const speedKmh = speedMs != null ? speedMs * 3.6 : 0;
-        // The raw fix is the trail's new end; the live head restarts from it
-        liveTrail.recordedPoint(coord);
         // Plausibility-checked speed before updating stats
         updateDriveCoordinate({
           latitude: lat,
@@ -1049,14 +1050,19 @@ export default function MapScreen() {
       // ── Draw: marker, heading and follow camera glide from here ──
       wakeFrameLoop();
     },
-    [
-      locationSmoother,
-      headingFilter,
-      liveTrail,
-      updateDriveCoordinate,
-      wakeFrameLoop,
-    ],
+    [locationSmoother, headingFilter, updateDriveCoordinate, wakeFrameLoop],
   );
+
+  // The live head starts from the recorded trail's newest point, as drawn: a
+  // fix the recorder thinned away, or one background tracking delivered
+  // first, can't leave a gap between the two
+  const driveTrail =
+    isDriving && currentDrive ? currentDrive.coordinates : null;
+  useEffect(() => {
+    if (!driveTrail || isPausedRef.current || isPassengerModeRef.current)
+      return;
+    if (liveTrail.followTrail(driveTrail)) wakeFrameLoop();
+  }, [driveTrail, liveTrail, wakeFrameLoop]);
 
   // ── Location watcher lifecycle ────────────────────────────────────────────
   useEffect(() => {
@@ -1762,8 +1768,9 @@ export default function MapScreen() {
           styleURL={mapboxStyleFor(mapType, DRIVE_MAPBOX.styleUrl)}
           initialCenter={userLocation ?? CONFIG.DEMO_REGION}
           showPuck={userLocation != null}
-          trail={isDriving && currentDrive ? currentDrive.coordinates : null}
+          trail={driveTrail}
           trailColor={colors.primary}
+          trailHead={subscribeLiveTrail}
           ornamentBottom={
             (isDriving && driveMapAreaHeight > 0
               ? Math.max(screenHeight - driveMapAreaHeight, 0)
