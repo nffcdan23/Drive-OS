@@ -1893,3 +1893,103 @@ test('the Drive screen keeps its marker mounted and positions it by native comma
   assert.ok(children.indexOf('<UserMarker') < children.indexOf('<Polyline'));
   assert.ok(children.indexOf('<UserMarker') < children.indexOf('<LiveTrailHeadLines'));
 });
+
+// ─── Tilting the map while following ────────────────────────────────────────
+
+import { classifyFollowGesture, FOLLOW_GESTURE } from '@/lib/followController';
+
+// The camera as MapKit might report it, either way it might report a tilted
+// camera's altitude: as eye height, or as the distance itself
+const reported = (pitch: number, opts: { center?: LatLng; heading?: number; distance?: number; altitudeIsDistance?: boolean } = {}) => {
+  const distance = opts.distance ?? NAV_CAMERA.distanceM;
+  return {
+    center: opts.center ?? START,
+    heading: opts.heading ?? 30,
+    pitch,
+    altitude: opts.altitudeIsDistance ? distance : altitudeForDistance(distance, pitch),
+  };
+};
+
+test('a tilt is told apart from panning, rotating and pinching', () => {
+  for (const altitudeIsDistance of [false, true]) {
+    const start = reported(60, { altitudeIsDistance });
+    // Tilting only, either way, by a little or a lot
+    for (const p of [50, 45, 70, 30]) {
+      assert.equal(classifyFollowGesture(start, reported(p, { altitudeIsDistance })), 'pitch', `tilt to ${p}°`);
+    }
+    // Sensor-level noise isn't a gesture
+    assert.equal(classifyFollowGesture(start, reported(60.2, { altitudeIsDistance, heading: 31 })), 'none');
+    // Panning away
+    assert.equal(classifyFollowGesture(start, reported(60, { altitudeIsDistance, center: offsetMeters(START, 60, 0) })), 'explore');
+    // Rotating the map
+    assert.equal(classifyFollowGesture(start, reported(60, { altitudeIsDistance, heading: 45 })), 'explore');
+    // Pinch-zooming in or out (current design: leaves follow mode)
+    assert.equal(classifyFollowGesture(start, reported(60, { altitudeIsDistance, distance: 1300 })), 'explore');
+    assert.equal(classifyFollowGesture(start, reported(60, { altitudeIsDistance, distance: 450 })), 'explore');
+    // Tilting while panning is still exploring
+    assert.equal(classifyFollowGesture(start, reported(50, { altitudeIsDistance, center: offsetMeters(START, 0, 80) })), 'explore');
+  }
+});
+
+test('a tilt while following keeps following at the new tilt, at the same distance', () => {
+  const { ctl, map } = settledFollowing();
+  ctl.setUserPitch(50);
+  assert.equal(ctl.followPitch, 50);
+  let prev: { pitch: number } | null = null;
+  for (let i = 0; i < 120; i++) {
+    const f = followFrame(ctl, map, navTarget(offsetMeters(START, 0, i * 0.3), (i * 2) % 360))!;
+    assert.equal(f.pose.pitch, 50, 'the chosen tilt is kept, with no ease back to 60°');
+    assert.equal(f.pose.distance, NAV_CAMERA.distanceM);
+    assert.equal(map.camera.altitude, altitudeForDistance(NAV_CAMERA.distanceM, 50));
+    prev = f.pose;
+  }
+  assert.ok(prev);
+  // Out-of-range picks are held to what the camera supports
+  ctl.setUserPitch(89);
+  assert.equal(ctl.followPitch, FOLLOW_GESTURE.maxPitchDeg);
+});
+
+test('repeated tilts never move the follow distance', () => {
+  const { ctl, map } = settledFollowing();
+  for (let i = 0; i < 300; i++) {
+    ctl.setUserPitch(i % 2 ? 72 : 41);
+    for (let f = 0; f < 3; f++) {
+      const frame = followFrame(ctl, map, navTarget(START, (i * 7) % 360))!;
+      assert.equal(frame.pose.distance, NAV_CAMERA.distanceM, `distance moved at tilt ${i}`);
+    }
+  }
+  assert.equal(ctl.zoom.current.distance, NAV_CAMERA.distanceM);
+});
+
+test('Continue Following comes back at the tilt the user picked; flat views stay flat', () => {
+  const { ctl, map } = settledFollowing();
+  ctl.setUserPitch(48);
+  // The user pans away (follow ends), then presses Continue Following
+  ctl.leave();
+  map.camera = { center: offsetMeters(START, 500, 200), heading: 0, pitch: 20, altitude: 3000 };
+  ctl.enter(false);
+  let last = null as null | { pitch: number; distance: number };
+  for (let i = 0; i < 400; i++) last = followFrame(ctl, map, navTarget(START, 0))?.pose ?? last;
+  assert.equal(last!.pitch, 48);
+  assert.equal(last!.distance, NAV_CAMERA.distanceM);
+  // North-up (or satellite) asks for a flat camera, which the chosen tilt doesn't override
+  const flat = followFrame(ctl, map, { ...navTarget(START, 0), pitch: 0 })!;
+  for (let i = 0; i < 200; i++) followFrame(ctl, map, { ...navTarget(START, 0), pitch: 0 });
+  assert.equal(followFrame(ctl, map, { ...navTarget(START, 0), pitch: 0 })!.pose.pitch, 0);
+  assert.ok(flat);
+});
+
+test('the Drive screen judges gestures by what they did, not by the pan callback alone', () => {
+  const src = readFileSync(toPath(new URL('../app/(tabs)/(drive)/index.tsx', import.meta.url)), 'utf8');
+  const body = (name: string) => {
+    const i = src.indexOf(`const ${name} = useCallback(`);
+    return src.slice(i, src.indexOf('\n  }, [', i));
+  };
+  // MapKit's tilt fires onPanDrag, so it can't leave follow mode by itself
+  assert.ok(!/leave\(|setFollowMode\("free"\)/.test(body('handleMapPanDrag')));
+  // A settling gesture defers to the camera reads instead of always leaving
+  assert.ok(/gestureActive\(now\)\)\s*\{\s*readMapBearing\(\);\s*return;/.test(body('handleRegionChangeComplete')));
+  // Exploring leaves follow mode; a tilt sets the follow pitch
+  assert.ok(/classifyFollowGesture\(start, cam\)/.test(src));
+  assert.ok(/followCamera\.setUserPitch\(cam\.pitch\)/.test(src));
+});

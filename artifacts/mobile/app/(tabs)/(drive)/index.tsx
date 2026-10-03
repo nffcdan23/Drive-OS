@@ -34,6 +34,7 @@ import * as Location from "expo-location";
 import { requestForegroundLocation } from "@/lib/locationPermission";
 import { buildFollowCamera } from "@/lib/followCamera";
 import {
+  classifyFollowGesture,
   FollowCameraController,
   type FollowFrameTarget,
 } from "@/lib/followController";
@@ -1185,25 +1186,6 @@ export default function MapScreen() {
     wakeFrameLoop,
   ]);
 
-  // ── Map user-interaction detection ────────────────────────────────────────
-  const handleMapPanDrag = useCallback(() => {
-    zoomTarget.gestureMoved(Date.now());
-    if (followModeRef.current === "following") {
-      followModeRef.current = "free";
-      followCamera.leave();
-      setFollowMode("free");
-      Haptics.selectionAsync();
-    }
-  }, [zoomTarget, followCamera]);
-
-  const handleMapTouchStart = useCallback(() => {
-    zoomTarget.touchStart(Date.now());
-  }, [zoomTarget]);
-
-  const handleMapTouchEnd = useCallback(() => {
-    zoomTarget.touchEnd(Date.now());
-  }, [zoomTarget]);
-
   // The map's bearing and tilt, read live for the arrow.  Apple Maps keeps
   // annotations upright while the map turns, and react-native-maps' region
   // events carry no bearing, so while the user rotates or tilts the map the
@@ -1217,22 +1199,73 @@ export default function MapScreen() {
             ? mapRef.current.getCamera()
             : Promise.reject(new Error("no map")),
         (cam) => {
+          const following = followModeRef.current === "following";
+          const gesture = zoomTarget.gestureActive(Date.now());
           // While following outside a gesture the loop sets these itself
-          if (
-            followModeRef.current === "following" &&
-            !zoomTarget.gestureActive(Date.now())
-          ) {
-            return;
-          }
+          if (following && !gesture) return;
           if (cam.heading != null) mapHeadingRef.current = cam.heading;
           if (cam.pitch != null) mapPitchRef.current = cam.pitch;
           syncArrowRotation();
+          if (following) judgeFollowGestureRef.current(cam);
         },
       ),
   );
   const readMapBearing = useCallback(() => {
     if (Platform.OS !== "web") bearingReader.request();
   }, [bearingReader]);
+
+  // ── Gestures while following ──
+  // Tilting the map keeps following, at the new tilt; panning, rotating or
+  // pinching leaves follow mode.  The map doesn't say which gesture moved it
+  // (MapKit's two-finger tilt even fires the pan callback), so each camera
+  // read during the gesture is compared with the camera as it began
+  // (lib/followController.ts).  North-up follow is deliberately flat, so a
+  // tilt there still leaves follow mode, as before.
+  const followGestureStartRef = useRef<ReportedPose | null>(null);
+  const leaveFollow = useCallback(() => {
+    if (followModeRef.current !== "following") return;
+    followModeRef.current = "free";
+    followCamera.leave();
+    setFollowMode("free");
+    Haptics.selectionAsync();
+  }, [followCamera]);
+  const judgeFollowGestureRef = useRef<(cam: ReportedPose) => void>(() => {});
+  judgeFollowGestureRef.current = (cam) => {
+    const start = followGestureStartRef.current;
+    if (!start) {
+      followGestureStartRef.current = cam;
+      return;
+    }
+    const verdict = classifyFollowGesture(start, cam);
+    if (
+      verdict === "explore" ||
+      (verdict === "pitch" && headingModeRef.current !== "heading-up")
+    ) {
+      leaveFollow();
+    } else if (verdict === "pitch" && cam.pitch != null) {
+      followCamera.setUserPitch(cam.pitch);
+    }
+  };
+
+  // ── Map user-interaction detection ────────────────────────────────────────
+  const handleMapPanDrag = useCallback(() => {
+    zoomTarget.gestureMoved(Date.now());
+    // Not an exit by itself: a tilt fires this too.  The camera read decides.
+    if (followModeRef.current === "following") readMapBearing();
+  }, [zoomTarget, readMapBearing]);
+
+  const handleMapTouchStart = useCallback(() => {
+    zoomTarget.touchStart(Date.now());
+    // A new gesture: its first camera read is what it's judged against
+    if (followModeRef.current === "following") {
+      followGestureStartRef.current = null;
+      readMapBearing();
+    }
+  }, [zoomTarget, readMapBearing]);
+
+  const handleMapTouchEnd = useCallback(() => {
+    zoomTarget.touchEnd(Date.now());
+  }, [zoomTarget]);
 
   // Fires continuously while the map moves, including during a gesture
   const handleRegionChange = useCallback(() => {
@@ -1251,13 +1284,17 @@ export default function MapScreen() {
     // reports mid-flight values), and adopting it on each heading change is
     // what compounded into the map zooming out to a view of the country.
     const now = Date.now();
-    // One last bearing read as a gesture settles
-    if (zoomTarget.gestureActive(now)) readMapBearing();
+    // During a gesture the camera reads decide (a tilt keeps following);
+    // one last read as it settles
+    if (zoomTarget.gestureActive(now)) {
+      readMapBearing();
+      return;
+    }
 
     if (now < programmaticUntilRef.current) return;
 
-    // The user moved the map (pan, pinch or rotate): follow mode ends, and
-    // Continue Following brings the navigation camera back
+    // The map moved with no gesture of ours or the user's in progress: follow
+    // mode ends, and Continue Following brings the navigation camera back
     if (followModeRef.current === "following") {
       followModeRef.current = "free";
       followCamera.leave();

@@ -402,6 +402,16 @@ export class FollowCameraEaser {
     if (this.seeded && this.last) this.seed(this.last, target);
   }
 
+  /**
+   * The user tilted the map themselves: carry on from that tilt as it is,
+   * with no ease back to the old one
+   */
+  setPitch(pitch: number): void {
+    if (!this.seeded) return;
+    this.pitch = pitch;
+    if (this.last) this.last = { ...this.last, pitch };
+  }
+
   /** Advances by dtMs and returns the camera to show, or null if unseeded */
   step(
     target: FollowCameraTarget,
