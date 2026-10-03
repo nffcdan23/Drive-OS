@@ -31,7 +31,7 @@ import ActiveDriveOverlay, {
   ActiveDriveMode,
 } from "@/components/ActiveDriveOverlay";
 import type { MapboxDriveMapHandle } from "@/components/MapboxDriveMap";
-import { DRIVE_MAPBOX } from "@/lib/mapProvider";
+import { DRIVE_MAPBOX, MAP_PROVIDER_DIAGNOSTICS } from "@/lib/mapProvider";
 import { clampMapboxZoom, mapboxStyleFor } from "@/lib/mapbox";
 import * as Location from "expo-location";
 import { requestForegroundLocation } from "@/lib/locationPermission";
@@ -108,6 +108,23 @@ const MapboxDriveMap: typeof import("@/components/MapboxDriveMap").default | nul
 const FOLLOW_ZOOM = USING_MAPBOX ? NAV_CAMERA.mapboxZoom : NAV_CAMERA.androidZoom;
 // Space between the Mapbox logo/attribution and the controls below them
 const ORNAMENT_GAP = 8;
+
+// TEMPORARY (development builds only): the map-provider diagnostics panel,
+// mid-left so it covers none of the Drive controls
+const devMapDiagnosticsStyle = {
+  position: "absolute",
+  left: 6,
+  top: "42%",
+  zIndex: 100,
+  padding: 6,
+  borderRadius: 6,
+  backgroundColor: "rgba(0,0,0,0.7)",
+} as const;
+const devMapDiagnosticsText = {
+  color: "#7CFFB2",
+  fontSize: 10,
+  fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace",
+} as const;
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 // The follow camera's pitch, distance, zoom and look-ahead live in
@@ -1694,6 +1711,17 @@ export default function MapScreen() {
         </MapView>
       ) : (
         <DemoMapBackground mapType={mapType} />
+      )}
+
+      {/* TEMPORARY (development builds only): which map was chosen, and why */}
+      {__DEV__ && Platform.OS !== "web" && (
+        <View pointerEvents="none" style={devMapDiagnosticsStyle}>
+          {Object.entries(MAP_PROVIDER_DIAGNOSTICS).map(([key, value]) => (
+            <Text key={key} style={devMapDiagnosticsText}>
+              {key}: {String(value)}
+            </Text>
+          ))}
+        </View>
       )}
 
       {/* ── Passenger banner ── */}

@@ -1828,6 +1828,8 @@ test('Mapbox settings need a public token and a style URL; a secret token is nev
   assert.equal(mapboxSettings(null, style), null);
   assert.equal(mapboxSettings('sk.' + 'eyJ1' + 'x'.repeat(8) + '.sig', style), null);
   assert.equal(mapboxSettings(pk, 'mapbox://styles/only-account'), null);
+  assert.equal(mapboxSettings(pk, style + '/draft')?.styleUrl, style + '/draft');
+  assert.equal(mapboxSettings(pk, style + '/other'), null);
   assert.equal(mapboxSettings(pk, 'http://example.com/style.json'), null);
   assert.equal(mapboxStyleFor('standard', style), style);
   assert.equal(mapboxStyleFor('terrain', style), MAPBOX_PUBLIC_STYLES.outdoors);

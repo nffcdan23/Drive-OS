@@ -33,7 +33,11 @@ export function mapboxSettings(
   const t = (token ?? "").trim();
   const s = (styleUrl ?? "").trim();
   if (!t.startsWith("pk.")) return null;
-  if (!/^mapbox:\/\/styles\/[^/\s]+\/[^/\s]+$/.test(s) && !/^https:\/\/\S+$/.test(s)) {
+  // mapbox://styles/<account>/<style id>, optionally Studio's /draft copy
+  if (
+    !/^mapbox:\/\/styles\/[^/\s]+\/[^/\s]+(\/draft)?$/.test(s) &&
+    !/^https:\/\/\S+$/.test(s)
+  ) {
     return null;
   }
   return { token: t, styleUrl: s };

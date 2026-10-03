@@ -22,15 +22,31 @@ const settings =
     ? null
     : mapboxSettings(CONFIG.MAPBOX_TOKEN, CONFIG.MAPBOX_STYLE_URL);
 
-const nativeAvailable = settings != null && mapboxNativeModuleAvailable();
-
-if (__DEV__ && settings && !nativeAvailable) {
-  console.warn(
-    "Mapbox is configured but this app build doesn't include it; the Drive map is using react-native-maps. Make a new development build.",
-  );
-}
+const nativeAvailable = mapboxNativeModuleAvailable();
 
 /** Mapbox settings when the Drive map runs on Mapbox, else null */
-export const DRIVE_MAPBOX: MapboxSettings | null = nativeAvailable
-  ? settings
-  : null;
+export const DRIVE_MAPBOX: MapboxSettings | null =
+  settings && nativeAvailable ? settings : null;
+
+/**
+ * TEMPORARY (development builds only): why the Drive map chose its provider.
+ * Never contains the token itself.
+ */
+export const MAP_PROVIDER_DIAGNOSTICS = {
+  platform: Platform.OS,
+  tokenPresent: !!(CONFIG.MAPBOX_TOKEN ?? "").trim(),
+  tokenIsPublic: (CONFIG.MAPBOX_TOKEN ?? "").trim().startsWith("pk."),
+  styleUrlPresent: !!(CONFIG.MAPBOX_STYLE_URL ?? "").trim(),
+  styleUrlAccepted: settings != null,
+  mapboxNativeModulePresent: nativeAvailable,
+  selectedMapProvider: DRIVE_MAPBOX ? "mapbox" : "react-native-maps",
+} as const;
+
+if (__DEV__ && Platform.OS !== "web") {
+  console.log("[Drive map]", JSON.stringify(MAP_PROVIDER_DIAGNOSTICS));
+  if (settings && !nativeAvailable) {
+    console.warn(
+      "Mapbox is configured but this app build doesn't include it; the Drive map is using react-native-maps. Make a new development build.",
+    );
+  }
+}
