@@ -5,4 +5,4 @@
  */
 import Constants from 'expo-constants';
 
-export const APP_NAME: string = (Constants.expoConfig?.extra?.displayName as string | undefined) ?? 'DriveOS';
+export const APP_NAME: string = (Constants.expoConfig?.extra?.displayName as string | undefined) ?? 'Derwent';

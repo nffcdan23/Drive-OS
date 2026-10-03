@@ -355,7 +355,7 @@ test('the staging (TestFlight) identity is chosen; the App Store identity is not
   const { identity } = createRequire(import.meta.url)('../app.identity.js');
   const tf = identity('staging', {});
   assert.deepEqual([tf.appName, tf.slug, tf.scheme, tf.bundleId, tf.usingPlaceholders],
-    ['StarScale Drive', 'starscale-drive-staging', 'starscale-drive-staging', 'uk.co.starscale.drive.staging', false]);
+    ['Derwent', 'starscale-drive-staging', 'starscale-drive-staging', 'uk.co.starscale.drive.staging', false]);
   assert.equal(`${tf.scheme}://auth/callback`, 'starscale-drive-staging://auth/callback');
   assert.deepEqual(identity('development', {}).bundleId, 'uk.co.starscale.drive.staging', 'local builds are the staging app');
   const store = identity('production', {});

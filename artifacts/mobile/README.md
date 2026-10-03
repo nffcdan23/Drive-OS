@@ -1,4 +1,4 @@
-# DriveOS — Driving Companion App
+# Derwent — Driving Companion App
 
 Expo (SDK 57) app for tracking journeys, managing a vehicle garage, saving places and Beauty Spots, and driving with friends in convoys, groups and events.
 

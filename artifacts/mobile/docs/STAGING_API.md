@@ -84,7 +84,7 @@ From `artifacts/mobile`:
 ```sh
 npx eas-cli@latest login
 # The EAS project and the app identity are already set up and committed
-# (StarScale Drive, uk.co.starscale.drive.staging): see TESTFLIGHT.md.
+# (Derwent, uk.co.starscale.drive.staging): see TESTFLIGHT.md.
 
 # Staging build settings (EAS "preview" environment). All of them are public values.
 npx eas-cli@latest env:create --environment preview --visibility plaintext --name EXPO_PUBLIC_SUPABASE_URL --value "https://<staging-ref>.supabase.co"

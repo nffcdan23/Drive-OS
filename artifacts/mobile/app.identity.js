@@ -38,7 +38,13 @@ const PLACEHOLDER = {
  */
 const CHOSEN = {
   staging: {
-    displayName: 'StarScale Drive',
+    /**
+     * The public brand. The slug, scheme, bundle id and EAS project below
+     * keep the earlier "StarScale Drive" name: they are technical identity
+     * (changing them would create a new EAS project / App ID and break
+     * sign-in links), and users never see them.
+     */
+    displayName: 'Derwent',
     slug: 'starscale-drive-staging',
     scheme: 'starscale-drive-staging',
     bundleId: 'uk.co.starscale.drive.staging',
