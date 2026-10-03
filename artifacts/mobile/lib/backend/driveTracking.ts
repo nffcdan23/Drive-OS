@@ -38,12 +38,54 @@ export interface DriveSession {
 /**
  * Whether the drive in progress is also recorded in the background:
  *  - on: background updates are running;
- *  - denied: location access doesn't allow it (recorded only while open);
+ *  - denied: no location access at all (nothing can be recorded);
+ *  - always-declined: the user just answered the "Always" prompt with
+ *    something other than Always (recorded only while open);
+ *  - always-off: "Always" isn't allowed and won't be asked for again (asked
+ *    on an earlier drive, or changed in Settings); recorded only while open;
  *  - unavailable: this build or device can't (e.g. no background location
  *    capability in the build, or Expo Go);
  *  - off: no drive, or not started yet.
  */
-export type BackgroundTracking = 'off' | 'on' | 'denied' | 'unavailable';
+export type BackgroundTracking = 'off' | 'on' | 'denied' | 'always-declined' | 'always-off' | 'unavailable';
+
+// ─── Permission ─────────────────────────────────────────────────────────────
+//
+// Expo's background location updates need background permission, which is
+// iOS "Always".  It is asked for once, when the first drive starts (the map
+// asks for foreground, "While Using", when it opens).  iOS shows the
+// "Always" prompt only once per install, and expo-location can't tell after a
+// relaunch whether it was shown, so whether it was is remembered here; after
+// that, drives record in the background only if the user chose Always (or
+// turns it on in Settings later), and never prompt again.
+
+/** The platform's location permissions (expo-location in the app). */
+export interface LocationPermissions {
+  /** Asks for foreground ("While Using") access if not yet answered; true when granted. */
+  requestForeground(): Promise<boolean>;
+  /** Background ("Always") access, without asking. */
+  hasBackground(): Promise<boolean>;
+  /** Asks for background access; whether it was granted, and whether a prompt appeared. */
+  requestBackground(): Promise<{ granted: boolean; promptShown: boolean }>;
+}
+
+export const ALWAYS_PROMPT_SHOWN_KEY = '@driveos/drive/always-prompt-shown';
+
+/** Gets the location access a background drive recording needs, asking at most once. */
+export async function ensureBackgroundAccess(
+  permissions: LocationPermissions,
+  store: KeyValueStore,
+): Promise<'granted' | 'denied' | 'always-declined' | 'always-off'> {
+  if (!(await permissions.requestForeground())) return 'denied';
+  if (await permissions.hasBackground()) return 'granted';
+  if (await store.getItem(ALWAYS_PROMPT_SHOWN_KEY)) return 'always-off';
+  const answer = await permissions.requestBackground();
+  if (answer.promptShown) await store.setItem(ALWAYS_PROMPT_SHOWN_KEY, '1');
+  if (answer.granted) return 'granted';
+  // No prompt appeared (e.g. "Allow Once" access, where iOS won't offer
+  // Always): try again on a later drive.
+  return answer.promptShown ? 'always-declined' : 'always-off';
+}
 
 /** The platform's background location updates (expo-location in the app). */
 export interface LocationUpdates {

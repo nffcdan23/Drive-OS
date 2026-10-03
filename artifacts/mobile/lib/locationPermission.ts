@@ -13,3 +13,9 @@ import { shareInFlight } from './shareInFlight';
  * answer.
  */
 export const requestForegroundLocation = shareInFlight(() => Location.requestForegroundPermissionsAsync());
+
+/**
+ * Asks for background ("Always" on iOS) location access, for recording a
+ * drive in the background.  Shared the same way, and the only place it's asked.
+ */
+export const requestBackgroundLocation = shareInFlight(() => Location.requestBackgroundPermissionsAsync());

@@ -1755,7 +1755,10 @@ test('the save backstop and crash recovery also count only active time', async (
 });
 
 // ─── Background recording during a drive ───────────────────────────────────
-import { BackgroundDriveRecorder, DRIVE_SESSION_KEY, type BackgroundTracking, type LocationUpdates } from '@/lib/backend/driveTracking';
+import {
+  ALWAYS_PROMPT_SHOWN_KEY, BackgroundDriveRecorder, DRIVE_SESSION_KEY, ensureBackgroundAccess,
+  type BackgroundTracking, type LocationPermissions, type LocationUpdates,
+} from '@/lib/backend/driveTracking';
 import { RESUME_DRIVE_WITHIN_MS } from '@/lib/backend/cloudSync';
 import { appendLiveFix, liveDriveFromRecord, newLiveDrive } from '@/lib/backend/liveDrive';
 import type { ActiveDrive } from '@/lib/backend/model';
@@ -2039,14 +2042,15 @@ test('background updates found running with no drive in progress are stopped', a
 });
 
 test('without background access the drive still records on screen', async () => {
-  for (const answer of ['denied', 'unavailable', 'throw'] as const) {
+  for (const answer of ['denied', 'always-declined', 'always-off', 'unavailable', 'throw'] as const) {
     const updates = new FakeUpdates();
     updates.answer = answer;
     const b = backgroundApp(undefined, undefined, updates);
     await b.app.start();
     await b.app.startDrive(null);
     await settle();
-    assert.equal(b.app.status.backgroundTracking, answer === 'denied' ? 'denied' : 'unavailable');
+    assert.equal(b.app.status.backgroundTracking, answer === 'throw' ? 'unavailable' : answer);
+    assert.equal(b.updates.running, false, `${answer}: no background updates`);
     assert.equal(await b.store.getItem(DRIVE_SESSION_KEY), null);
     for (let s = 0; s < 30; s++) { b.clock.t += 1000; b.app.addFix(roadFix(b.clock, s)); }
     assert.ok(b.app.activeRecord!.points.length > 5, `${answer}: foreground recording unaffected`);
@@ -2065,10 +2069,100 @@ test('the background task is defined at the app entry, before any screen loads',
   const task = await readFile(`${root}/lib/driveBackgroundLocation.ts`, 'utf8');
   assert.match(task, /^\s*TaskManager\.defineTask/m, 'defineTask at module scope');
   assert.match(task, /pausesUpdatesAutomatically: false/);
-  // The background location mode is in the build; "Always" is not requested
+  // The background location mode is in the build, with the "Always" purpose strings
   const app = JSON.parse(await readFile(`${root}/app.json`, 'utf8'));
   const [, opts] = app.expo.plugins.find((p: unknown) => Array.isArray(p) && p[0] === 'expo-location');
   assert.equal(opts.isIosBackgroundLocationEnabled, true);
-  assert.equal(opts.locationAlwaysAndWhenInUsePermission, false);
-  assert.doesNotMatch(task, /requestBackgroundPermissionsAsync/);
+  assert.notEqual(opts.locationAlwaysAndWhenInUsePermission, false, 'the plugin must not delete the Always string');
+  const appConfig = createRequire(import.meta.url)('../app.config.js') as (a: { config: object }) => { ios: { infoPlist: Record<string, string> } };
+  const plist = appConfig({ config: { ios: { infoPlist: {} }, android: {}, plugins: [], extra: {} } }).ios.infoPlist;
+  assert.match(plist.NSLocationAlwaysAndWhenInUseUsageDescription, /drive you've started/);
+  assert.match(plist.NSLocationAlwaysUsageDescription, /drive you've started/);
+  assert.ok(plist.NSLocationWhenInUseUsageDescription);
+});
+
+test('"Always" is asked for only through the shared helper', async () => {
+  const { readdir, readFile } = await import('node:fs/promises');
+  const { join } = await import('node:path');
+  const root = fileURLToPath(new URL('..', import.meta.url));
+  const offenders: string[] = [];
+  const walk = async (dir: string): Promise<void> => {
+    for (const e of await readdir(dir, { withFileTypes: true })) {
+      const path = join(dir, e.name);
+      if (e.isDirectory()) await walk(path);
+      else if (/\.(ts|tsx|js)$/.test(e.name) && path !== join(root, 'lib/locationPermission.ts')
+        && /\.requestBackgroundPermissionsAsync\(/.test(await readFile(path, 'utf8'))) offenders.push(path.slice(root.length));
+    }
+  };
+  for (const dir of ['app', 'components', 'context', 'hooks', 'lib', 'constants']) await walk(join(root, dir));
+  assert.deepEqual(offenders, [], 'use requestBackgroundLocation() from lib/locationPermission');
+});
+
+/** expo-location's permissions as iOS answers them. */
+class FakePermissions implements LocationPermissions {
+  foreground: 'undetermined' | 'granted' | 'denied' = 'granted';
+  always = false;
+  /** What the user picks if the "Always" prompt appears; null = iOS shows none (e.g. Allow Once) */
+  pick: 'always' | 'keep-while-using' | null = 'keep-while-using';
+  foregroundPrompts = 0;
+  backgroundPrompts = 0;
+  calls: string[] = [];
+  async requestForeground() {
+    this.calls.push('foreground');
+    if (this.foreground === 'undetermined') { this.foregroundPrompts++; this.foreground = 'granted'; }
+    return this.foreground === 'granted';
+  }
+  async hasBackground() { return this.always; }
+  async requestBackground() {
+    this.calls.push('background');
+    if (this.pick === null) return { granted: false, promptShown: false };
+    this.backgroundPrompts++;
+    this.always = this.pick === 'always';
+    this.pick = null; // iOS shows it once per install
+    return { granted: this.always, promptShown: true };
+  }
+}
+
+test('first drive: foreground is asked first, then "Always" once', async () => {
+  const store = new MemoryStore();
+  const p = new FakePermissions();
+  p.foreground = 'undetermined';
+  p.pick = 'always';
+  assert.equal(await ensureBackgroundAccess(p, store), 'granted');
+  assert.deepEqual(p.calls, ['foreground', 'background'], 'foreground before background');
+  assert.equal(p.backgroundPrompts, 1);
+  // Later drives: already Always, no prompt
+  assert.equal(await ensureBackgroundAccess(p, store), 'granted');
+  assert.equal(p.backgroundPrompts, 1);
+});
+
+test('declining "Always" asks once, then never again (Settings can still turn it on)', async () => {
+  const store = new MemoryStore();
+  const p = new FakePermissions();
+  assert.equal(await ensureBackgroundAccess(p, store), 'always-declined');
+  // Every later drive, even after a relaunch (expo-location forgets it asked): no request at all
+  for (let i = 0; i < 5; i++) assert.equal(await ensureBackgroundAccess(p, store), 'always-off');
+  assert.deepEqual(p.calls.filter((c) => c === 'background'), ['background'], 'requested once');
+  // The user turns on Always in Settings
+  p.always = true;
+  assert.equal(await ensureBackgroundAccess(p, store), 'granted');
+});
+
+test('no foreground access: nothing asked for in the background', async () => {
+  const p = new FakePermissions();
+  p.foreground = 'denied';
+  assert.equal(await ensureBackgroundAccess(p, new MemoryStore()), 'denied');
+  assert.deepEqual(p.calls, ['foreground']);
+});
+
+test('"Allow Once": iOS shows no Always prompt, so it is asked again on a later drive', async () => {
+  const store = new MemoryStore();
+  const p = new FakePermissions();
+  p.pick = null; // temporary access: iOS ignores the Always request
+  assert.equal(await ensureBackgroundAccess(p, store), 'always-off');
+  assert.equal(await store.getItem(ALWAYS_PROMPT_SHOWN_KEY), null);
+  // Next launch the user picks "While Using the App": the first drive asks
+  p.pick = 'always';
+  assert.equal(await ensureBackgroundAccess(p, store), 'granted');
+  assert.equal(p.backgroundPrompts, 1);
 });

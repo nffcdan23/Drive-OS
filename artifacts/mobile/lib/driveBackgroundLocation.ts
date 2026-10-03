@@ -9,17 +9,20 @@
  * the same recorder the Drive screen feeds.
  *
  * Updates are started only when a drive starts (in the foreground, by the
- * user) and stopped when it ends; see CloudSync.  Starting them from the
- * foreground needs only "While Using the App" location access: iOS keeps a
- * session started in the foreground running in the background (with the blue
- * location indicator), given the background location capability, which
- * app.json turns on.  "Always" access is not asked for.
+ * user) and stopped when it ends; see CloudSync.  As Expo requires for
+ * background location, they need background permission (iOS "Always"),
+ * asked for when the first drive starts (see ensureBackgroundAccess).
+ * Without it the drive is recorded by the Drive screen while the app is open.
+ * The background location capability is turned on in app.json.
  */
-import { Platform } from 'react-native';
+import { AppState, Platform } from 'react-native';
 import * as Location from 'expo-location';
 import * as TaskManager from 'expo-task-manager';
-import { BackgroundDriveRecorder, type LocationUpdates } from '@/lib/backend/driveTracking';
+import {
+  BackgroundDriveRecorder, ensureBackgroundAccess, type LocationPermissions, type LocationUpdates,
+} from '@/lib/backend/driveTracking';
 import type { GpsFix } from '@/lib/backend/journeyRecorder';
+import { requestBackgroundLocation, requestForegroundLocation } from '@/lib/locationPermission';
 import { deviceStorage } from '@/lib/secureStorage';
 
 export const DRIVE_LOCATION_TASK = 'drive-location-recording';
@@ -39,8 +42,8 @@ const OPTIONS: Location.LocationTaskOptions = {
   // drive would be lost.
   pausesUpdatesAutomatically: false,
   // The blue location pill in the status bar while recording in the
-  // background, so the user can see it (iOS shows it anyway with "While
-  // Using" access; this keeps it with "Always" too).
+  // background, so the user can see the drive is being recorded (with
+  // "Always" access iOS doesn't show it otherwise).
   showsBackgroundLocationIndicator: true,
   // In the background, deliver fixes in batches every few seconds rather than
   // waking JavaScript for each one (on screen they arrive at once).
@@ -53,14 +56,38 @@ const OPTIONS: Location.LocationTaskOptions = {
   },
 };
 
+const permissions: LocationPermissions = {
+  async requestForeground() {
+    return (await requestForegroundLocation()).status === 'granted';
+  },
+  async hasBackground() {
+    return (await Location.getBackgroundPermissionsAsync()).status === 'granted';
+  },
+  async requestBackground() {
+    // A system prompt makes the app inactive while it's on screen; that's how
+    // we know iOS showed it (it shows it only once per install).
+    let promptShown = false;
+    const sub = AppState.addEventListener('change', (state) => { if (state === 'inactive') promptShown = true; });
+    try {
+      const { status } = await requestBackgroundLocation();
+      return { granted: status === 'granted', promptShown };
+    } finally {
+      sub.remove();
+    }
+  },
+};
+
 const updates: LocationUpdates = {
   async start() {
     if (Platform.OS === 'web') return 'unavailable';
-    const permission = await Location.getForegroundPermissionsAsync();
-    if (permission.status !== 'granted') return 'denied';
-    if (!TaskManager.isTaskDefined(DRIVE_LOCATION_TASK)) return 'unavailable';
     // Expo Go, or a build made without the background location capability.
-    if (!(await TaskManager.isAvailableAsync())) return 'unavailable';
+    if (!TaskManager.isTaskDefined(DRIVE_LOCATION_TASK) || !(await TaskManager.isAvailableAsync())) return 'unavailable';
+    // Android runs the updates as a foreground service started from the
+    // screen, which needs only foreground access.
+    const access = Platform.OS === 'ios'
+      ? await ensureBackgroundAccess(permissions, deviceStorage)
+      : (await permissions.requestForeground()) ? 'granted' : 'denied';
+    if (access !== 'granted') return access;
     await Location.startLocationUpdatesAsync(DRIVE_LOCATION_TASK, OPTIONS);
     return 'on';
   },

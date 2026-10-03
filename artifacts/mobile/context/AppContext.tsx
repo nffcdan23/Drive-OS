@@ -28,6 +28,7 @@ import { UnitSystem, ResolvedUnitSystem, resolveUnitSystem } from '@/lib/units';
 import { api, backendEnv, ep, newId, onConnectionStatus } from '@/lib/backendClient';
 import { deviceStorage } from '@/lib/secureStorage';
 import { driveTracker } from '@/lib/driveBackgroundLocation';
+import { APP_NAME } from '@/constants/brand';
 
 export type {
   Vehicle, VehicleSnapshot, Coordinate, JourneyCategory, Journey, Achievement, UserProfile, Friend, FriendRequest,
@@ -155,6 +156,8 @@ interface AppContextValue {
 }
 
 const AppContext = createContext<AppContextValue | null>(null);
+/** Set once the "recording only while open" explanation has been shown (never repeated). */
+const BACKGROUND_NOTICE_KEY = '@driveos/drive/background-notice-shown';
 const NO_CONVERSATIONS: Conversation[] = [];
 const NO_MESSAGES: Message[] = [];
 
@@ -275,17 +278,34 @@ export function AppProvider({ userId, children }: { userId: string; children: Re
     cloud.addFix(fix);
   }, [cloud]);
 
-  // Background recording couldn't start for this drive: say so once per app
-  // run.  The drive still records while the app is open.
+  // Background recording couldn't start for this drive: say so (once per app
+  // run, or once ever when "Always" was declined, so it never nags).  The
+  // drive still records while the app is open.
   const trackingNotice = useRef(false);
   useEffect(() => {
     const t = status.backgroundTracking;
-    if (!isDriving || trackingNotice.current || (t !== 'denied' && t !== 'unavailable')) return;
+    if (!isDriving || trackingNotice.current || t === 'off' || t === 'on') return;
     trackingNotice.current = true;
-    if (t === 'denied') {
+    if (t === 'always-declined' || t === 'always-off') {
+      void (async () => {
+        if (await deviceStorage.getItem(BACKGROUND_NOTICE_KEY).catch(() => null)) return;
+        await deviceStorage.setItem(BACKGROUND_NOTICE_KEY, '1').catch(() => {});
+        const message = `This drive is recorded while ${APP_NAME} is on screen. If you switch apps or lock your phone, that part of the drive won't be recorded.`;
+        if (t === 'always-declined') {
+          // Just answered the prompt: no need to send them to Settings now.
+          Alert.alert('Recording only while open', `${message} You can turn on background recording later in Settings: Location → Always.`);
+        } else {
+          Alert.alert(
+            'Recording only while open',
+            `${message} To record in the background, set Location to "Always" in Settings.`,
+            [{ text: 'Not now', style: 'cancel' }, { text: 'Open Settings', onPress: () => { void Linking.openSettings(); } }],
+          );
+        }
+      })();
+    } else if (t === 'denied') {
       Alert.alert(
         'Location access needed',
-        'Drives are recorded from your location, including when you switch apps or lock your phone during a drive. Allow location access "While Using the App" (with Precise Location on) in Settings.',
+        'Drives are recorded from your location. Allow location access in Settings.',
         [{ text: 'Not now', style: 'cancel' }, { text: 'Open Settings', onPress: () => { void Linking.openSettings(); } }],
       );
     } else {

@@ -62,11 +62,15 @@ This checklist is for what only a phone can show: Keychain, the camera roll, GPS
     - The journey appears with a route.
     - XP increases.
 18. [ ] ★ Force-quit → the journey's **route still displays** in Journeys and on the journey's detail screen.
-18a. [ ] ★ **Background recording** (needs a new native build: TestFlight or a development build made after this was added; Expo Go can't do it). With "While Using the App" location access and Precise Location on:
+18a. [ ] ★ **Background recording** (needs a new native build: TestFlight or a development build made after this was added; Expo Go can't do it). On a fresh install:
+    - Opening the map asks for location → choose "Allow While Using App" (Precise Location on).
+    - The first Start Drive asks to change to "Always Allow" → choose it. Later drives don't ask.
     - Start Drive → the blue location pill appears in the status bar once you leave the app.
     - Drive 2+ minutes, switch to Music (or lock the phone) for 5+ minutes while still driving, then return → the live route follows the roads you drove, with **no straight line** across the time away; distance and drive time include it.
     - Pause → switch apps for a minute while moving → resume → nothing was recorded during the pause.
     - End Drive → the blue pill disappears within a few seconds (no tracking after the drive), and the saved route has no gap.
+    - Reinstall and choose "Keep Only While Using" at the Always prompt → one explanation (no Settings button); the drive records while the app is open only; the next drives show nothing more and never prompt again. Setting Location to "Always" in Settings turns background recording on for the next drive.
+    - Choose "Allow Once" at the first prompt → no Always prompt appears; one explanation with "Open Settings"; the drive records while the app is open.
     - With "Never" location access, starting a drive shows an explanation with an "Open Settings" button, and nothing crashes.
     - Optional: during a drive, open many heavy apps so iOS ends the app in the background, keep driving, then reopen it → the same drive continues (no second drive), with the route recorded meanwhile.
     - Force-quit (swipe away) during a drive → recording stops (iOS does this); reopen within 15 minutes → the drive continues, with a straight line across the force-quit gap; after 15 minutes → it's saved as a finished drive.
