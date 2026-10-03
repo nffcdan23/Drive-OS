@@ -29,6 +29,13 @@ export const NAV_CAMERA = {
   // Android (Google Maps) states zoom rather than distance
   androidZoom: 16.5,
 
+  // Mapbox states zoom on both platforms.  Its zoom doesn't depend on pitch
+  // or bearing, so heading changes can never move it.  16 shows about what
+  // the 800 m Apple Maps camera above shows on an iPhone held upright (eye
+  // distance ≈ 1.5 × screen height × metres per point at zoom 16, UK
+  // latitudes).
+  mapboxZoom: 16,
+
   // How far ahead of the vehicle the map centre sits, along its heading, so
   // the vehicle draws below the centre and the screen fills with road ahead.
   // It grows gently with speed: shorter in town, longer on fast roads.  The

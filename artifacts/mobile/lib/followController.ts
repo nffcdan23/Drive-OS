@@ -86,6 +86,15 @@ export function classifyFollowGesture(
     if (Math.abs(raw - 1) > g.zoomRatio && Math.abs(dist - 1) > g.zoomRatio)
       return "explore";
   }
+  // Mapbox reports zoom rather than altitude; its zoom doesn't change with
+  // tilt, so any change past the same 10% scale is a pinch
+  if (
+    start.zoom != null &&
+    now.zoom != null &&
+    Math.abs(now.zoom - start.zoom) > Math.log2(1 + g.zoomRatio)
+  ) {
+    return "explore";
+  }
   return Math.abs(p1 - p0) > g.pitchDeg ? "pitch" : "none";
 }
 

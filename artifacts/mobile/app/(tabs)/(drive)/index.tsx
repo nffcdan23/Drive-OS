@@ -31,6 +31,9 @@ import MapView, {
 import ActiveDriveOverlay, {
   ActiveDriveMode,
 } from "@/components/ActiveDriveOverlay";
+import type { MapboxDriveMapHandle } from "@/components/MapboxDriveMap";
+import { DRIVE_MAPBOX, MAP_PROVIDER_DIAGNOSTICS } from "@/lib/mapProvider";
+import { clampMapboxZoom, mapboxStyleFor } from "@/lib/mapbox";
 import * as Location from "expo-location";
 import { requestForegroundLocation } from "@/lib/locationPermission";
 import { buildFollowCamera } from "@/lib/followCamera";
@@ -95,6 +98,36 @@ function AboveTabBar({
     <View {...props} style={[style, { paddingBottom: fallbackInset }]} />
   );
 }
+
+// ─── Map provider ─────────────────────────────────────────────────────────────
+// Mapbox when it's configured and built in (lib/mapProvider.ts); otherwise
+// react-native-maps, unchanged.  The Mapbox map is only loaded when chosen,
+// so a binary without its native module never imports it.
+const USING_MAPBOX = DRIVE_MAPBOX != null;
+const MapboxDriveMap: typeof import("@/components/MapboxDriveMap").default | null =
+  USING_MAPBOX ? require("@/components/MapboxDriveMap").default : null;
+// The follow zoom each map states: Mapbox zoom, or Google zoom on Android
+// (iOS Apple Maps holds a camera distance instead)
+const FOLLOW_ZOOM = USING_MAPBOX ? NAV_CAMERA.mapboxZoom : NAV_CAMERA.androidZoom;
+// Space between the Mapbox logo/attribution and the controls below them
+const ORNAMENT_GAP = 8;
+
+// TEMPORARY (development builds only): the map-provider diagnostics panel,
+// mid-left so it covers none of the Drive controls
+const devMapDiagnosticsStyle = {
+  position: "absolute",
+  left: 6,
+  top: "42%",
+  zIndex: 100,
+  padding: 6,
+  borderRadius: 6,
+  backgroundColor: "rgba(0,0,0,0.7)",
+} as const;
+const devMapDiagnosticsText = {
+  color: "#7CFFB2",
+  fontSize: 10,
+  fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace",
+} as const;
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 // The follow camera's pitch, distance, zoom and look-ahead live in
@@ -485,6 +518,12 @@ export default function MapScreen() {
   const [mapType, setMapType] = useState<MapType>("standard");
   const [showLayerPicker, setShowLayerPicker] = useState(false);
   const [showMore, setShowMore] = useState(false);
+  // Mapbox's logo and attribution must stay visible, so they sit just above
+  // whatever covers the bottom of the map: the drive actions (and, on iOS,
+  // the tab bar beneath them), or the drive panel while driving
+  const [screenHeight, setScreenHeight] = useState(0);
+  const [idleBottomHeight, setIdleBottomHeight] = useState(0);
+  const [driveMapAreaHeight, setDriveMapAreaHeight] = useState(0);
 
   // ── Location state ──
   const [locationMode, setLocationMode] = useState<"live" | "simulated">(
@@ -543,6 +582,7 @@ export default function MapScreen() {
 
   // ── Refs (avoid stale closures in callbacks) ──
   const mapRef = useRef<MapView>(null);
+  const mapboxRef = useRef<MapboxDriveMapHandle>(null);
   const driveTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const webWatchIdRef = useRef<number | null>(null);
   const expoWatchRef = useRef<Location.LocationSubscription | null>(null);
@@ -613,7 +653,7 @@ export default function MapScreen() {
   const [followCamera] = useState(
     () =>
       new FollowCameraController(
-        { zoom: NAV_CAMERA.androidZoom, distance: NAV_CAMERA.distanceM },
+        { zoom: FOLLOW_ZOOM, distance: NAV_CAMERA.distanceM },
         { min: NAV_CAMERA.minDistanceM, max: NAV_CAMERA.maxDistanceM },
       ),
   );
@@ -697,7 +737,11 @@ export default function MapScreen() {
       return {
         position,
         heading: isHeadingUp ? drawnHeadingRef.current : 0,
-        pitch: navPitch(isHeadingUp, mapTypeRef.current),
+        // Mapbox tilts every style, satellite included
+        pitch: navPitch(
+          isHeadingUp,
+          USING_MAPBOX ? "standard" : mapTypeRef.current,
+        ),
         // Heading-up, the centre sits ahead of the vehicle so the view is
         // mostly road in front; north-up centres exactly on it
         lookAheadM: isHeadingUp
@@ -715,22 +759,40 @@ export default function MapScreen() {
     frameIdRef.current = requestAnimationFrame(() => frameLoopRef.current());
   }, []);
 
+  // The map's camera as last shown, from whichever map is in use
+  const readMapCamera = useCallback((): Promise<ReportedPose> => {
+    if (USING_MAPBOX) {
+      return mapboxRef.current
+        ? mapboxRef.current.getCamera()
+        : Promise.reject(new Error("no map"));
+    }
+    return mapRef.current
+      ? mapRef.current.getCamera()
+      : Promise.reject(new Error("no map"));
+  }, []);
+  const hasMap = () => (USING_MAPBOX ? mapboxRef.current : mapRef.current) != null;
+
   // Entering follow from a map the user moved: read its camera once, so the
-  // ease-in starts from what's on screen.  The only time follow reads MapKit.
+  // ease-in starts from what's on screen.  The only time follow reads the map.
   const requestCameraSeed = useCallback(() => {
     const token = followCamera.beginSeed();
-    if (token == null || !mapRef.current) return;
+    if (token == null || !hasMap()) return;
     const targetNow = () => {
       const position = locationSmoother.sample(Date.now());
       return position ? followTargetFor(position) : null;
     };
-    mapRef.current
-      .getCamera()
+    readMapCamera()
       .then((cam) => followCamera.completeSeed(token, cam, targetNow()))
       // No live camera to start from: start from the target itself
       .catch(() => followCamera.completeSeed(token, {}, targetNow()))
       .finally(wakeFrameLoop);
-  }, [followCamera, locationSmoother, followTargetFor, wakeFrameLoop]);
+  }, [
+    followCamera,
+    locationSmoother,
+    followTargetFor,
+    wakeFrameLoop,
+    readMapCamera,
+  ]);
 
   frameLoopRef.current = () => {
     frameIdRef.current = null;
@@ -758,7 +820,11 @@ export default function MapScreen() {
 
     const position = locationSmoother.sample(now);
     let cameraSettled = true;
-    if (position) {
+    if (position && USING_MAPBOX) {
+      // ── Puck ── Mapbox draws it on the map, turned to the heading and
+      // laid onto the tilted ground itself
+      mapboxRef.current?.setPuck(position, drawnHeadingRef.current);
+    } else if (position) {
       // ── Marker ── (skipped when only the heading is moving)
       const drawn = markerDrawnAtRef.current;
       if (
@@ -779,11 +845,12 @@ export default function MapScreen() {
           liveTrailDrawRef.current?.(liveTrail.frame(position));
         }
       }
-
+    }
+    if (position) {
       // ── Follow camera ──
       if (
         followModeRef.current === "following" &&
-        mapRef.current &&
+        hasMap() &&
         Platform.OS !== "web"
       ) {
         const frame = followCamera.frame(
@@ -804,20 +871,26 @@ export default function MapScreen() {
           mapPitchRef.current = pose.pitch;
           // A plain (unanimated) set: the motion comes from this loop.  A
           // native animation per fix is what produced hop-pause-hop.
-          mapRef.current.setCamera(
-            buildFollowCamera(
-              pose.center,
-              pose.heading,
-              pose.pitch,
-              pose,
-              Platform.OS,
-            ),
-          );
+          if (USING_MAPBOX) {
+            mapboxRef.current?.setFollowCamera(pose);
+          } else {
+            mapRef.current?.setCamera(
+              buildFollowCamera(
+                pose.center,
+                pose.heading,
+                pose.pitch,
+                pose,
+                Platform.OS,
+              ),
+            );
+          }
           cameraSettled = frame.settled;
         }
       }
     }
-    syncArrowRotation();
+    // Only the react-native-maps marker needs its turn and tilt pushed;
+    // Mapbox's puck does both itself
+    if (!USING_MAPBOX) syncArrowRotation();
 
     const settled =
       headingSettled &&
@@ -849,7 +922,7 @@ export default function MapScreen() {
       zoomTarget.clearGesture();
       if (resetZoom) {
         zoomTarget.set({
-          zoom: NAV_CAMERA.androidZoom,
+          zoom: FOLLOW_ZOOM,
           distance: NAV_CAMERA.distanceM,
         });
       }
@@ -933,6 +1006,7 @@ export default function MapScreen() {
       // The first fix lands as-is; place the marker before it first renders so
       // it never flashes at the placeholder coordinate
       if (firstFix) {
+        mapboxRef.current?.setPuck(coord, drawnHeadingRef.current);
         markerDrawnAtRef.current = coord;
         markerInitialCoordRef.current = coord;
       }
@@ -1351,7 +1425,33 @@ export default function MapScreen() {
     // Haptic feedback is handled inside the overlay
   }
 
+  // Mapbox zoom buttons.  While following, the held zoom target itself moves
+  // (never a value read back from the map) and the frame loop eases to it;
+  // otherwise the map animates to the new zoom.
+  const zoomMapboxBy = useCallback(
+    (delta: number) => {
+      const map = mapboxRef.current;
+      if (!map) return;
+      if (followModeRef.current === "following") {
+        zoomTarget.set({ zoom: clampMapboxZoom(zoomTarget.current.zoom + delta) });
+        wakeFrameLoop();
+        return;
+      }
+      map
+        .getZoom()
+        .then((current) => {
+          const zoom = clampMapboxZoom(current + delta);
+          // An explicit zoom pick becomes the zoom follow mode holds
+          zoomTarget.set({ zoom });
+          map.easeToZoom(zoom);
+        })
+        .catch(() => {});
+    },
+    [zoomTarget, wakeFrameLoop],
+  );
+
   const handleZoomIn = useCallback(() => {
+    if (USING_MAPBOX) return zoomMapboxBy(1);
     if (!mapRef.current || Platform.OS === "web") return;
     mapRef.current
       .getCamera()
@@ -1368,9 +1468,10 @@ export default function MapScreen() {
         mapRef.current?.animateCamera({ zoom }, { duration: 200 });
       })
       .catch(() => {});
-  }, [zoomTarget, wakeFrameLoop]);
+  }, [zoomTarget, wakeFrameLoop, zoomMapboxBy]);
 
   const handleZoomOut = useCallback(() => {
+    if (USING_MAPBOX) return zoomMapboxBy(-1);
     if (!mapRef.current || Platform.OS === "web") return;
     mapRef.current
       .getCamera()
@@ -1387,7 +1488,7 @@ export default function MapScreen() {
         mapRef.current?.animateCamera({ zoom }, { duration: 200 });
       })
       .catch(() => {});
-  }, [zoomTarget, wakeFrameLoop]);
+  }, [zoomTarget, wakeFrameLoop, zoomMapboxBy]);
 
   // ── Location button ──────────────────────────────────────────────────────
   // Same as Continue Following: back into follow mode with the navigation
@@ -1404,16 +1505,16 @@ export default function MapScreen() {
     if (
       followModeRef.current !== "following" &&
       Platform.OS !== "web" &&
-      mapRef.current
+      hasMap()
     ) {
       try {
-        liveCamera = await mapRef.current.getCamera();
+        liveCamera = await readMapCamera();
       } catch {
         // No live camera: the loop fetches one, or starts from the target
       }
     }
     startFollowing(true, liveCamera);
-  }, [startFollowing]);
+  }, [startFollowing, readMapCamera]);
 
   // ── Formatters ────────────────────────────────────────────────────────────
   function formatDriveTime(sec: number) {
@@ -1644,9 +1745,37 @@ export default function MapScreen() {
   const markerRotation = Platform.OS === "ios" ? 0 : displayHeading;
 
   return (
-    <View style={styles.container}>
+    <View
+      style={styles.container}
+      onLayout={
+        USING_MAPBOX
+          ? (e) => setScreenHeight(e.nativeEvent.layout.height)
+          : undefined
+      }
+    >
       {/* ── Map ── */}
-      {Platform.OS !== "web" ? (
+      {Platform.OS !== "web" && MapboxDriveMap && DRIVE_MAPBOX ? (
+        <MapboxDriveMap
+          ref={mapboxRef}
+          style={styles.mapFull}
+          accessToken={DRIVE_MAPBOX.token}
+          styleURL={mapboxStyleFor(mapType, DRIVE_MAPBOX.styleUrl)}
+          initialCenter={userLocation ?? CONFIG.DEMO_REGION}
+          showPuck={userLocation != null}
+          trail={isDriving && currentDrive ? currentDrive.coordinates : null}
+          trailColor={colors.primary}
+          ornamentBottom={
+            (isDriving && driveMapAreaHeight > 0
+              ? Math.max(screenHeight - driveMapAreaHeight, 0)
+              : idleBottomHeight) + ORNAMENT_GAP
+          }
+          // While driving, clear of the locate and zoom buttons on the left
+          ornamentLeft={isDriving ? 66 : ORNAMENT_GAP}
+          onUserGesture={handleMapPanDrag}
+          onTouchStart={handleMapTouchStart}
+          onTouchEnd={handleMapTouchEnd}
+        />
+      ) : Platform.OS !== "web" ? (
         <MapView
           userInterfaceStyle="dark"
           ref={mapRef}
@@ -1719,6 +1848,17 @@ export default function MapScreen() {
         </MapView>
       ) : (
         <DemoMapBackground mapType={mapType} />
+      )}
+
+      {/* TEMPORARY (development builds only): which map was chosen, and why */}
+      {__DEV__ && Platform.OS !== "web" && (
+        <View pointerEvents="none" style={devMapDiagnosticsStyle}>
+          {Object.entries(MAP_PROVIDER_DIAGNOSTICS).map(([key, value]) => (
+            <Text key={key} style={devMapDiagnosticsText}>
+              {key}: {String(value)}
+            </Text>
+          ))}
+        </View>
       )}
 
       {/* ── Passenger banner ── */}
@@ -2042,6 +2182,7 @@ export default function MapScreen() {
           onResumeFollowing={handleResumeFollowing}
           onZoomIn={handleZoomIn}
           onZoomOut={handleZoomOut}
+          onMapAreaLayout={USING_MAPBOX ? setDriveMapAreaHeight : undefined}
         />
       )}
 
@@ -2051,6 +2192,11 @@ export default function MapScreen() {
           pointerEvents="box-none"
           fallbackInset={TAB_BAR_FOOTPRINT}
           style={styles.bottomArea}
+          onLayout={
+            USING_MAPBOX
+              ? (e) => setIdleBottomHeight(e.nativeEvent.layout.height)
+              : undefined
+          }
         >
           {/* Resume following (the drive overlay has its own) */}
           <Animated.View

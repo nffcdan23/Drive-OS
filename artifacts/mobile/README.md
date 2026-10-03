@@ -46,6 +46,8 @@ The app contains only public values. **Never add the Supabase secret or service-
 | `EXPO_PUBLIC_SUPABASE_URL` | `https://<project-ref>.supabase.co` |
 | `EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | The project's publishable (anon) key |
 | `EXPO_PUBLIC_API_URL` | The DriveOS API base URL (HTTPS outside development) |
+| `EXPO_PUBLIC_MAPBOX_TOKEN` | Mapbox public token (`pk.…`) for the Drive map; optional |
+| `EXPO_PUBLIC_MAPBOX_STYLE_URL` | The published Derwent Mapbox style (`mapbox://styles/…`); optional |
 
 - **Local development:** copy `.env.example` to `.env` and fill in the staging Supabase values (see *Running locally* below).
 - **EAS builds:** set the values as EAS environment variables. Use `preview` for staging builds and `production` for store builds, for example:

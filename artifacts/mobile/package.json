@@ -64,6 +64,7 @@
   },
   "dependencies": {
     "@expo-google-fonts/archivo": "^0.4.2",
+    "@rnmapbox/maps": "10.3.5",
     "@supabase/supabase-js": "2.117.0",
     "expo-apple-authentication": "57.0.2",
     "expo-crypto": "~57.0.3",
