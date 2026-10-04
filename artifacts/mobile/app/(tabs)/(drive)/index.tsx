@@ -1,5 +1,11 @@
 import { GlassSurface, GlassButton } from "@/components/Glass";
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import React, {
+  useState,
+  useEffect,
+  useRef,
+  useCallback,
+  useMemo,
+} from "react";
 import {
   View,
   Text,
@@ -568,6 +574,19 @@ export default function MapScreen() {
       };
     })(),
   ).current;
+  // The same arrow on the Mapbox map (a view annotation there), turned and
+  // tilted by the same native-driven values
+  const mapboxArrow = useMemo(
+    () => (
+      <LocationArrow
+        rotation={arrowRotation}
+        scaleY={arrowPerspective.scaleY}
+        edgeLift={arrowPerspective.edgeLift}
+        shadowLift={arrowPerspective.shadowLift}
+      />
+    ),
+    [arrowRotation, arrowPerspective],
+  );
 
   // ── Drive state ──
   const [driveSeconds, setDriveSeconds] = useState(0);
@@ -823,12 +842,9 @@ export default function MapScreen() {
 
     const position = locationSmoother.sample(now);
     let cameraSettled = true;
-    if (position && USING_MAPBOX) {
-      // ── Puck ── Mapbox draws it on the map, turned to the heading and
-      // laid onto the tilted ground itself
-      mapboxRef.current?.setPuck(position, drawnHeadingRef.current);
-    } else if (position) {
-      // ── Marker ── (skipped when only the heading is moving)
+    if (position) {
+      // ── Marker ── (skipped when only the heading is moving).  The same
+      // arrow on either map; it's turned below, once the camera is written.
       const drawn = markerDrawnAtRef.current;
       if (
         !drawn ||
@@ -836,7 +852,8 @@ export default function MapScreen() {
         drawn.longitude !== position.longitude
       ) {
         markerDrawnAtRef.current = position;
-        markerRef.current?.setCoordinates(position);
+        if (USING_MAPBOX) mapboxRef.current?.setMarker(position);
+        else markerRef.current?.setCoordinates(position);
       }
     }
     // ── Live trail head ── on either map, ending exactly where the marker or
@@ -874,6 +891,9 @@ export default function MapScreen() {
         } else {
           const { pose } = frame;
           programmaticUntilRef.current = now + PROGRAMMATIC_GRACE_MS;
+          // The bearing and tilt written to the camera this frame: the arrow
+          // is turned against exactly these, below, so in heading-up follow
+          // (camera bearing = drawn heading) it holds still on screen
           mapHeadingRef.current = pose.heading;
           mapPitchRef.current = pose.pitch;
           // A plain (unanimated) set: the motion comes from this loop.  A
@@ -895,9 +915,10 @@ export default function MapScreen() {
         }
       }
     }
-    // Only the react-native-maps marker needs its turn and tilt pushed;
-    // Mapbox's puck does both itself
-    if (!USING_MAPBOX) syncArrowRotation();
+    // ── Arrow ── turned on screen by the drawn heading less the bearing the
+    // map shows: the one just written while following, or the one the user
+    // left it at.  Same frame, same values, on either map.
+    syncArrowRotation();
 
     const settled =
       headingSettled &&
@@ -1014,7 +1035,7 @@ export default function MapScreen() {
       // The first fix lands as-is; place the marker before it first renders so
       // it never flashes at the placeholder coordinate
       if (firstFix) {
-        mapboxRef.current?.setPuck(coord, drawnHeadingRef.current);
+        mapboxRef.current?.setMarker(coord);
         markerDrawnAtRef.current = coord;
         markerInitialCoordRef.current = coord;
       }
@@ -1781,7 +1802,8 @@ export default function MapScreen() {
           accessToken={DRIVE_MAPBOX.token}
           styleURL={mapboxStyleFor(mapType, DRIVE_MAPBOX.styleUrl)}
           initialCenter={userLocation ?? CONFIG.DEMO_REGION}
-          showPuck={userLocation != null}
+          showMarker={userLocation != null}
+          marker={mapboxArrow}
           trail={driveTrail}
           trailColor={colors.primary}
           trailHead={subscribeLiveTrail}
@@ -1793,6 +1815,7 @@ export default function MapScreen() {
           // While driving, clear of the locate and zoom buttons on the left
           ornamentLeft={isDriving ? 66 : ORNAMENT_GAP}
           onUserGesture={handleMapPanDrag}
+          onCameraChange={handleRegionChange}
           onTouchStart={handleMapTouchStart}
           onTouchEnd={handleMapTouchEnd}
         />

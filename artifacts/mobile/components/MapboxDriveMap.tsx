@@ -1,13 +1,23 @@
 // The Drive screen's map on Mapbox: the published Derwent style, the follow
-// camera written by the Drive screen's frame loop, Mapbox's own location
-// puck (fed Derwent's smoothed position and heading), and the recorded drive
-// trail as line layers, continued to the puck by the live trail head
-// (lib/liveTrail.ts) drawn from the same smoothed position.
+// camera written by the Drive screen's frame loop, Derwent's location arrow
+// (the same one the Apple map draws) at the smoothed position, and the
+// recorded drive trail as line layers, continued to the arrow by the live
+// trail head (lib/liveTrail.ts) drawn from the same smoothed position.
+//
+// The arrow is a view annotation (MarkerView), not Mapbox's location puck.
+// The puck re-animates every update it's given, heading over 0.3 s and
+// position over 1.1 s (LocationManager's ValueInterpolators in the Mapbox iOS
+// SDK); fed a new value every frame, that made it a lag filter on top of
+// Derwent's own smoothing, so it turned visibly behind the map and sat behind
+// where the camera and trail put the user.  The arrow is turned by the Drive
+// screen from the heading and the camera bearing it writes in the same frame,
+// so in heading-up follow it stays still on screen as the map turns.
 //
 // Loaded only when lib/mapProvider.ts selects Mapbox, so a binary without the
 // Mapbox native module never imports @rnmapbox/maps.
 
 import React, {
+  type ReactElement,
   forwardRef,
   memo,
   useCallback,
@@ -20,11 +30,9 @@ import React, {
 import { StyleSheet, View, type StyleProp, type ViewStyle } from "react-native";
 import Mapbox, {
   Camera,
-  CustomLocationProvider,
-  Images,
   LineLayer,
-  LocationPuck,
   MapView,
+  MarkerView,
   ShapeSource,
   type MapState,
 } from "@rnmapbox/maps";
@@ -49,8 +57,8 @@ export interface MapboxDriveMapHandle {
   getZoom(): Promise<number>;
   /** Animates to a zoom the user picked (outside follow mode) */
   easeToZoom(zoom: number): void;
-  /** Moves the location puck to the smoothed position and heading */
-  setPuck(position: LatLng, heading: number): void;
+  /** Moves the location arrow to the smoothed position */
+  setMarker(position: LatLng): void;
 }
 
 /** Hands the map a function that draws the live trail head (null: none) */
@@ -62,8 +70,10 @@ export interface MapboxDriveMapProps {
   accessToken: string;
   styleURL: string;
   initialCenter: LatLng;
-  /** Shows the location puck (once there is a position) */
-  showPuck: boolean;
+  /** Shows the location arrow (once there is a position) */
+  showMarker: boolean;
+  /** The location arrow; the Drive screen turns and tilts it */
+  marker: ReactElement;
   /** The recorded drive, drawn as the cyan trail; null when not driving */
   trail: readonly LatLng[] | null;
   trailColor: string;
@@ -77,15 +87,12 @@ export interface MapboxDriveMapProps {
   ornamentLeft: number;
   /** The user moved the map with a gesture (pan, pinch, rotate or tilt) */
   onUserGesture: () => void;
+  /** The camera changed, for any reason (the arrow turns against it) */
+  onCameraChange?: () => void;
   onTouchStart: () => void;
   onTouchEnd: () => void;
   style?: StyleProp<ViewStyle>;
 }
-
-const PUCK_IMAGES = {
-  "derwent-puck": require("@/assets/images/map/puck-arrow.png"),
-  "derwent-puck-shadow": require("@/assets/images/map/puck-shadow.png"),
-};
 
 // The recorded drive: a soft glow under the cyan line, as on the old map
 const TRAIL_GLOW = "rgba(0,207,232,0.28)";
@@ -99,44 +106,47 @@ function useAccessToken(token: string) {
 }
 
 /**
- * Feeds the puck.  Its own small component, so moving the puck every frame
- * re-renders only this and never the map or its layers.
+ * Places the location arrow.  Its own small component, so moving it every
+ * frame re-renders only this and never the map or its layers.  Mapbox moves a
+ * view annotation with the map in the same frame it draws the map; the arrow
+ * is turned (and tilted) by the Drive screen.
  */
-interface PuckFeederHandle {
-  set(position: LatLng, heading: number): void;
+interface MarkerFeederHandle {
+  set(position: LatLng): void;
 }
-type PuckState = { position: LatLng; heading: number };
-const toState = (p: PuckState) => ({
-  coordinate: [p.position.longitude, p.position.latitude] as [number, number],
-  heading: p.heading,
-});
-const PuckFeeder = memo(
+const toLngLat = (p: LatLng): [number, number] => [p.longitude, p.latitude];
+const MarkerFeeder = memo(
   forwardRef<
-    PuckFeederHandle,
-    { latest: React.RefObject<PuckState | null>; fallback: LatLng }
-  >(function PuckFeeder({ latest, fallback }, ref) {
-    const [puck, setPuckState] = useState(() =>
-      toState(latest.current ?? { position: fallback, heading: 0 }),
+    MarkerFeederHandle,
+    {
+      latest: React.RefObject<LatLng | null>;
+      fallback: LatLng;
+      children: ReactElement;
+    }
+  >(function MarkerFeeder({ latest, fallback, children }, ref) {
+    const [coordinate, setCoordinate] = useState(() =>
+      toLngLat(latest.current ?? fallback),
     );
-    const set = useCallback((position: LatLng, heading: number) => {
-      setPuckState((prev) =>
-        prev.coordinate[0] === position.longitude &&
-        prev.coordinate[1] === position.latitude &&
-        prev.heading === heading
+    const set = useCallback((position: LatLng) => {
+      setCoordinate((prev) =>
+        prev[0] === position.longitude && prev[1] === position.latitude
           ? prev
-          : toState({ position, heading }),
+          : toLngLat(position),
       );
     }, []);
     useImperativeHandle(ref, () => ({ set }), [set]);
     // A position pushed between this render and mounting is picked up here
     useEffect(() => {
-      if (latest.current) set(latest.current.position, latest.current.heading);
+      if (latest.current) set(latest.current);
     }, [latest, set]);
     return (
-      <CustomLocationProvider
-        coordinate={puck.coordinate}
-        heading={puck.heading}
-      />
+      <MarkerView
+        coordinate={coordinate}
+        anchor={{ x: 0.5, y: 0.5 }}
+        allowOverlap
+      >
+        {children}
+      </MarkerView>
     );
   }),
 );
@@ -190,13 +200,15 @@ const MapboxDriveMap = forwardRef<MapboxDriveMapHandle, MapboxDriveMapProps>(
       accessToken,
       styleURL,
       initialCenter,
-      showPuck,
+      showMarker,
+      marker,
       trail,
       trailColor,
       trailHead,
       ornamentBottom,
       ornamentLeft,
       onUserGesture,
+      onCameraChange,
       onTouchStart,
       onTouchEnd,
       style,
@@ -206,9 +218,9 @@ const MapboxDriveMap = forwardRef<MapboxDriveMapHandle, MapboxDriveMapProps>(
     useAccessToken(accessToken);
     const mapRef = useRef<MapView>(null);
     const cameraRef = useRef<Camera>(null);
-    const puckRef = useRef<PuckFeederHandle>(null);
+    const markerRef = useRef<MarkerFeederHandle>(null);
     const lastCameraRef = useRef<ReportedPose | null>(null);
-    const lastPuckRef = useRef<PuckState | null>(null);
+    const lastMarkerRef = useRef<LatLng | null>(null);
 
     useImperativeHandle(
       ref,
@@ -232,9 +244,9 @@ const MapboxDriveMap = forwardRef<MapboxDriveMapHandle, MapboxDriveMapProps>(
             animationMode: "easeTo",
           });
         },
-        setPuck(position, heading) {
-          lastPuckRef.current = { position, heading };
-          puckRef.current?.set(position, heading);
+        setMarker(position) {
+          lastMarkerRef.current = position;
+          markerRef.current?.set(position);
         },
       }),
       [],
@@ -248,8 +260,9 @@ const MapboxDriveMap = forwardRef<MapboxDriveMapHandle, MapboxDriveMapProps>(
       (state: MapState) => {
         lastCameraRef.current = reportedPoseFromMapbox(state.properties);
         if (state.gestures?.isGestureActive) onUserGesture();
+        onCameraChange?.();
       },
-      [onUserGesture],
+      [onUserGesture, onCameraChange],
     );
 
     const trailShape = useMemo(() => trailFeatureCollection(trail), [trail]);
@@ -288,12 +301,11 @@ const MapboxDriveMap = forwardRef<MapboxDriveMapHandle, MapboxDriveMapProps>(
           onCameraChanged={handleCameraChanged}
         >
           <Camera ref={cameraRef} defaultSettings={initialCamera} />
-          <Images images={PUCK_IMAGES} />
-          {/* Mounted before the trail and puck: the head draws beneath both */}
+          {/* Mounted before the trail: the head draws beneath it (and the
+              arrow, a view annotation, sits above every layer) */}
           {trailHead && (
             <TrailHeadLayers subscribe={trailHead} color={trailColor} />
           )}
-          {/* Mounted before the puck so the trail always draws beneath it */}
           <ShapeSource id="derwent-drive-trail" shape={trailShape}>
             <LineLayer
               id="derwent-drive-trail-glow"
@@ -316,23 +328,14 @@ const MapboxDriveMap = forwardRef<MapboxDriveMapHandle, MapboxDriveMapProps>(
               }}
             />
           </ShapeSource>
-          {showPuck && (
-            <PuckFeeder
-              ref={puckRef}
-              latest={lastPuckRef}
+          {showMarker && (
+            <MarkerFeeder
+              ref={markerRef}
+              latest={lastMarkerRef}
               fallback={initialCenter}
-            />
-          )}
-          {showPuck && (
-            // Keyed on the style so a style change re-adds it above the trail
-            <LocationPuck
-              key={styleURL}
-              topImage="derwent-puck"
-              shadowImage="derwent-puck-shadow"
-              puckBearing="heading"
-              puckBearingEnabled
-              pulsing={{ isEnabled: false }}
-            />
+            >
+              {marker}
+            </MarkerFeeder>
           )}
         </MapView>
       </View>

@@ -2536,7 +2536,7 @@ test('on the Mapbox map (zoom, no altitude) a tilt still keeps following and a p
 // The Drive screen on Mapbox, wired as index.tsx wires it: CloudSync accepts
 // fixes into the live route (AppContext's onDriveFix → appendLiveFix); the
 // route's newest point is where the live head starts (the driveTrail effect);
-// each frame the smoothed position goes to the puck (setPuck) and to
+// each frame the smoothed position goes to the arrow (setMarker) and to
 // liveTrail.update, whose draws reach MapboxDriveMap's head source as
 // trailFeatureCollection(head).
 
@@ -2549,7 +2549,7 @@ class FakeMapboxDriveMap {
   puck: LatLng | null = null;
   head: TrailFeatureCollection = trailFeatureCollection(null);
   draws: { t: number; puck: LatLng | null; shape: TrailFeatureCollection }[] = [];
-  setPuck(position: LatLng) { this.puck = position; }
+  setMarker(position: LatLng) { this.puck = position; }
   drawHead(head: LatLng[] | null, t: number) {
     this.head = trailFeatureCollection(head);
     this.draws.push({ t, puck: this.puck, shape: this.head });
@@ -2603,7 +2603,7 @@ async function mapboxDriveScreen() {
     },
     frame() {
       const position = sm.sample(clock.t);
-      if (position) map.setPuck(position);
+      if (position) map.setMarker(position);
       const u = liveTrail.update(position, s.driving && !s.paused, clock.t);
       if (u.kind === 'draw') map.drawHead(u.head, clock.t);
       return u;
@@ -2812,7 +2812,7 @@ test('the Mapbox Drive map draws the live head from the same position as its puc
   // One head update per frame, for either map, from the very `position`
   // handed to the puck (and the Apple marker), after both
   const loop = screen.slice(screen.indexOf('const position = locationSmoother.sample(now);'));
-  const puck = loop.indexOf('mapboxRef.current?.setPuck(position, ');
+  const puck = loop.indexOf('mapboxRef.current?.setMarker(position)');
   const marker = loop.indexOf('markerRef.current?.setCoordinates(position)');
   const update = loop.search(/liveTrail\.update\(\s*position,/);
   assert.ok(puck > 0 && marker > puck && update > marker, 'head not updated from the puck position');
@@ -2836,7 +2836,7 @@ test('the Mapbox Drive map draws the live head from the same position as its puc
   // The map: its own head source, beneath the recorded trail and the puck,
   // styled like the trail, and built with the trail's own feature function
   const head = map.indexOf('<TrailHeadLayers');
-  assert.ok(head > 0 && head < map.indexOf('id="derwent-drive-trail"') && head < map.indexOf('<LocationPuck'));
+  assert.ok(head > 0 && head < map.indexOf('id="derwent-drive-trail"') && head < map.search(/<MarkerFeeder\s/));
   assert.ok(/trailFeatureCollection\(head\)/.test(map));
   assert.ok(/id="derwent-drive-trail-head"/.test(map));
   const layers = map.slice(map.indexOf('const TrailHeadLayers'), map.indexOf('const MapboxDriveMap'));
@@ -2947,6 +2947,14 @@ function followSim(provider: 'mapbox' | 'apple', opts: { reads?: boolean } = {})
         ctl.gestureMoved();
         s.reader.request();
       }
+      s.regionChange();
+    },
+    /** The map's camera changed (Apple onRegionChange, Mapbox onCameraChange) */
+    regionChange() {
+      const following = s.mode === 'following';
+      const gesture = zoomTarget.gestureActive(clock.t);
+      if (following && gesture) ctl.gestureMoved();
+      if (!following || gesture) s.reader.request();
     },
     touchEnd() { zoomTarget.touchEnd(clock.t); },
     /** A whole gesture.  framesDuring: whether the frame loop happened to be running */
@@ -3164,4 +3172,112 @@ test('the Drive screen moves the camera only while following; heading only turns
     assert.ok(/headingFilter\.update\(/.test(body), `${name} doesn't update the heading`);
     assert.ok(!/startFollowing|setFollowMode|followModeRef\.current =|followCamera\.(enter|retarget)|setCamera|setFollowCamera|animateCamera/.test(body), `${name} touches follow mode or the camera`);
   }
+});
+
+// ─── The arrow holds still on screen while following heading-up ────────────
+// The arrow's on-screen turn is the drawn heading less the bearing the map
+// shows.  While following heading-up, the frame loop writes the camera's
+// bearing from that same drawn heading and turns the arrow against it in the
+// same frame, so the two can't drift apart: the map turns, the arrow doesn't.
+
+/** Frames with the compass turning toward `to`, reporting what each frame showed */
+function turnFrames(s: ReturnType<typeof followSim>, to: number, frames: number) {
+  s.compass(to);
+  const out: { bearing: number; drawn: number; arrow: number }[] = [];
+  for (let i = 0; i < frames; i++) {
+    s.frame();
+    out.push({ bearing: s.report().heading!, drawn: s.drawnHeading, arrow: s.markerRotation });
+  }
+  return out;
+}
+
+for (const provider of ['mapbox', 'apple'] as const) {
+  test(`${provider}: following heading-up, the arrow stays locked on screen as the map turns`, () => {
+    const s = followSim(provider);
+    let turned = 0, prevBearing: number | null = null, lagIfPrevBearing = 0;
+    for (const h of [40, 95, 180, 170, 260, 300, 20, 120]) {
+      for (const f of turnFrames(s, h, 45)) {
+        // Screen-locked: the arrow's own turn on screen is nil, every frame
+        assert.ok(Math.abs(angleDelta(0, f.arrow)) < 1e-9, `arrow turned ${f.arrow}° on screen while the map turned`);
+        // ...because it's turned against this frame's camera bearing, which
+        // is this frame's drawn heading (no frame of lag between them)
+        assert.ok(Math.abs(angleDelta(f.bearing, f.drawn)) < 1e-9, 'camera bearing and drawn heading out of step');
+        assert.equal(f.arrow, markerScreenRotation(f.drawn, f.bearing));
+        if (prevBearing != null) {
+          turned += Math.abs(angleDelta(prevBearing, f.bearing));
+          // Turned against last frame's bearing instead, it would chase the map
+          lagIfPrevBearing = Math.max(lagIfPrevBearing, Math.abs(markerScreenRotation(f.drawn, prevBearing)));
+        }
+        prevBearing = f.bearing;
+      }
+    }
+    assert.ok(turned > 400, `the map only turned ${turned.toFixed(0)}°`);
+    assert.ok(lagIfPrevBearing > 1, 'the sweep should be fast enough to show a frame of lag');
+    // Still eased, not snapped: the camera bearing moves a step at a time
+    assert.equal(s.mode, 'following');
+  });
+
+  test(`${provider}: 359° → 0° keeps the arrow still and turns the map the short way`, () => {
+    const s = followSim(provider);
+    turnFrames(s, 355, 300);
+    for (const h of [5, 358, 2, 350, 10, 0]) {
+      let prev: number | null = null;
+      for (const f of turnFrames(s, h, 120)) {
+        assert.ok(Math.abs(angleDelta(0, f.arrow)) < 1e-9, `arrow turned ${f.arrow}° crossing north`);
+        if (prev != null) assert.ok(Math.abs(angleDelta(prev, f.bearing)) < 3, `map spun the long way: ${prev}° → ${f.bearing}°`);
+        prev = f.bearing;
+      }
+      assert.ok(headingNear(prev, h, 0.5), `map at ${prev}°, heading ${h}°`);
+    }
+  });
+
+  test(`${provider}: exploring, the arrow turns against the map bearing the user left`, async () => {
+    const s = followSim(provider);
+    turnFrames(s, 0, 200);
+    await s.gesture([{ rotate: 35 }, { rotate: 35 }]);
+    assert.equal(s.mode, 'free');
+    const bearing = s.report().heading!;
+    assert.ok(headingNear(bearing, 70, 0.01));
+    for (const h of [10, 90, 200, 359, 1, 270]) {
+      for (const f of turnFrames(s, h, 90)) {
+        assert.equal(f.bearing, bearing, 'the map turned while exploring');
+        assert.equal(f.arrow, markerScreenRotation(f.drawn, bearing));
+      }
+      // Pointing the phone where the map's "up" is shows the arrow upright
+      assert.ok(headingNear(s.markerRotation, angleDelta(bearing, h), 1));
+    }
+    // Continue Following: the arrow eases back to upright as the map catches up
+    s.continueFollowing();
+    turnFrames(s, 270, 400);
+    assert.ok(Math.abs(angleDelta(0, s.markerRotation)) < 1e-9);
+  });
+}
+
+test('the Drive screen turns one arrow, on either map, against the bearing written that frame', () => {
+  const src = readFileSync(toPath(new URL('../app/(tabs)/(drive)/index.tsx', import.meta.url)), 'utf8');
+  const map = readFileSync(toPath(new URL('../components/MapboxDriveMap.tsx', import.meta.url)), 'utf8');
+  const code = src.replace(/\/\/.*$/gm, '');
+  const mapCode = map.replace(/\/\/.*$/gm, '').replace(/\{\/\*[\s\S]*?\*\/\}/g, '');
+  // Mapbox's own puck (which re-animates each heading over 0.3 s and each
+  // position over 1.1 s) is gone; Derwent's arrow is a view annotation
+  assert.ok(!/LocationPuck|CustomLocationProvider|puckBearing/.test(mapCode));
+  assert.ok(/<MarkerView[\s\S]*\{children\}[\s\S]*<\/MarkerView>/.test(mapCode));
+  assert.ok(/marker=\{mapboxArrow\}/.test(code) && /<LocationArrow\s+rotation=\{arrowRotation\}/.test(code));
+  // The frame loop: camera bearing recorded as written, then the arrow turned
+  // against it, for both maps (no provider guard around it)
+  const loop = code.slice(code.indexOf('frameLoopRef.current = () => {'), code.indexOf('const settled ='));
+  const written = loop.indexOf('mapHeadingRef.current = pose.heading;');
+  const mapbox = loop.indexOf('mapboxRef.current?.setFollowCamera(pose)');
+  const apple = loop.indexOf('mapRef.current?.setCamera(');
+  const turn = loop.lastIndexOf('syncArrowRotation();');
+  assert.ok(written > 0 && mapbox > written && apple > written && turn > mapbox && turn > apple);
+  assert.ok(!/USING_MAPBOX\)\s*syncArrowRotation/.test(loop));
+  assert.equal(loop.match(/syncArrowRotation\(\)/g)?.length, 1);
+  // The turn itself: drawn heading less that bearing, nothing smoothed after
+  const sync = code.slice(code.indexOf('const syncArrowRotation = useCallback'), code.indexOf('}, [arrowRotation, arrowPerspective]);'));
+  assert.ok(/markerScreenRotation\(drawnHeadingRef\.current, mapHeadingRef\.current\)/.test(sync));
+  assert.ok(!/Animated\.(timing|spring|decay)\(\s*(arrowRotation|arrowPerspective)/.test(code), 'the arrow must not be animated after the camera');
+  assert.ok(!/arrowRotation\.setValue/.test(code.replace(sync, '')), 'the arrow turned somewhere else');
+  // Exploring, Mapbox camera changes keep the arrow's map bearing current
+  assert.ok(/onCameraChange=\{handleRegionChange\}/.test(code));
 });
