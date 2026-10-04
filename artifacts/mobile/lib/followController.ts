@@ -104,7 +104,18 @@ export type FollowFrame =
   /** The user's fingers are on the map: write nothing */
   | { kind: "paused" }
   /** Entering follow from a user-positioned map: read its camera once */
-  | { kind: "needsSeed" };
+  | { kind: "needsSeed" }
+  /**
+   * Not following (the user moved the map): write nothing.  Only enter()
+   * (Continue Following, locate, a drive starting) follows again; heading,
+   * course and position changes never do.
+   */
+  | { kind: "free" }
+  /**
+   * A gesture just moved the map and no camera read showed it was only a
+   * tilt (or a tap): follow mode has ended here.  Write nothing.
+   */
+  | { kind: "left" };
 
 export class FollowCameraController {
   /** The single authoritative follow distance/zoom, plus gesture tracking */
@@ -119,6 +130,12 @@ export class FollowCameraController {
   // the navigation pitch for the rest of the session, through Continue
   // Following too.  Null until they do.
   private userPitch: number | null = null;
+  // The authoritative follow state.  The Drive screen starts out following.
+  private following = true;
+  // The gesture in progress (or just ended) while following: whether the map
+  // reported it moving the camera, and what the latest camera read made of it
+  private gesture: { moved: boolean; verdict: FollowGesture | null } | null =
+    null;
 
   constructor(initial: FollowZoom, limits?: { min: number; max: number }) {
     this.zoom = new FollowZoomTarget(initial, limits);
@@ -126,6 +143,11 @@ export class FollowCameraController {
 
   get isSeeded(): boolean {
     return this.easer.isSeeded;
+  }
+
+  /** Whether the camera follows the user.  Only enter() turns it back on. */
+  get isFollowing(): boolean {
+    return this.following;
   }
 
   /**
@@ -170,17 +192,45 @@ export class FollowCameraController {
     live?: ReportedPose,
     target?: FollowFrameTarget,
   ): void {
-    if (wasFollowing && this.easer.isSeeded) return;
+    this.gesture = null;
+    if (wasFollowing && this.following && this.easer.isSeeded) return;
     this.leave();
+    this.following = true;
     if (live && target) this.easer.seed(live, this.full(target));
   }
 
   /** Follow mode ended (the user moved the map): forget the camera */
   leave(): void {
+    this.following = false;
+    this.gesture = null;
     this.epoch++;
     this.seedingEpoch = null;
     this.paused = false;
     this.easer.reset();
+  }
+
+  /** A touch began on the map: a new gesture, judged from here */
+  beginGesture(): void {
+    if (this.following) this.gesture = { moved: false, verdict: null };
+  }
+
+  /** The map says the user's gesture is moving the camera */
+  gestureMoved(): void {
+    if (!this.following) return;
+    (this.gesture ??= { moved: false, verdict: null }).moved = true;
+  }
+
+  /**
+   * A camera read during the gesture, against the camera as it began.  The
+   * caller acts on the verdict (explore: leave; pitch: setUserPitch); it's
+   * also kept, for when the gesture ends.
+   */
+  judgeGesture(start: ReportedPose, now: ReportedPose): FollowGesture {
+    const verdict = classifyFollowGesture(start, now);
+    if (this.following) {
+      (this.gesture ??= { moved: false, verdict: null }).verdict = verdict;
+    }
+    return verdict;
   }
 
   /**
@@ -221,12 +271,28 @@ export class FollowCameraController {
     dtMs: number,
     gestureActive: boolean,
   ): FollowFrame {
+    // Not following: the camera is wherever the user left it, whatever the
+    // heading, course or position do
+    if (!this.following) return { kind: "free" };
     if (gestureActive) {
       // Write nothing while fingers are down.  If the user moves the map that
       // ends follow mode (leave()); if they only tapped, the map is still
       // where we last put it, so we resume from our own last pose.
       this.paused = true;
       return { kind: "paused" };
+    }
+    // The gesture is over.  If it moved the map, follow carries on only when
+    // a camera read showed it was just a tilt (or nothing much); otherwise
+    // (a pan, or no read at all) the camera stays where the user put it.
+    const gesture = this.gesture;
+    this.gesture = null;
+    if (
+      gesture?.moved &&
+      gesture.verdict !== "pitch" &&
+      gesture.verdict !== "none"
+    ) {
+      this.leave();
+      return { kind: "left" };
     }
     if (!this.easer.isSeeded) return { kind: "needsSeed" };
     const full = this.full(target);

@@ -1990,7 +1990,7 @@ test('the Drive screen judges gestures by what they did, not by the pan callback
   // A settling gesture defers to the camera reads instead of always leaving
   assert.ok(/gestureActive\(now\)\)\s*\{\s*readMapBearing\(\);\s*return;/.test(body('handleRegionChangeComplete')));
   // Exploring leaves follow mode; a tilt sets the follow pitch
-  assert.ok(/classifyFollowGesture\(start, cam\)/.test(src));
+  assert.ok(/followCamera\.judgeGesture\(start, cam\)/.test(src));
   assert.ok(/followCamera\.setUserPitch\(cam\.pitch\)/.test(src));
 });
 
@@ -2841,4 +2841,327 @@ test('the Mapbox Drive map draws the live head from the same position as its puc
   assert.ok(/id="derwent-drive-trail-head"/.test(map));
   const layers = map.slice(map.indexOf('const TrailHeadLayers'), map.indexOf('const MapboxDriveMap'));
   assert.ok(/lineColor: TRAIL_GLOW,\s*lineWidth: 12/.test(layers) && /lineColor: color,\s*lineWidth: 4/.test(layers));
+});
+
+// ─── Leaving follow mode stays left ─────────────────────────────────────────
+// The Drive screen's follow wiring (index.tsx) on either map: the camera read
+// that judges a gesture, the frame loop's follow block, the compass and GPS
+// course feeding the heading filter, and Continue Following.  Once the user
+// has moved the map, nothing but Continue Following may move the camera.
+
+import type { ReportedPose } from '@/lib/locationSmoothing';
+
+type MapChange = { east?: number; north?: number; rotate?: number; tilt?: number; zoom?: number };
+const flush = () => new Promise((r) => setImmediate(r));
+
+function followSim(provider: 'mapbox' | 'apple', opts: { reads?: boolean } = {}) {
+  const clock = { t: 1_000_000 };
+  const mb = new FakeMapbox();
+  const mk = new FakeMapKit();
+  const followZoom = provider === 'mapbox' ? NAV_CAMERA.mapboxZoom : NAV_CAMERA.androidZoom;
+  const ctl = new FollowCameraController(
+    { zoom: followZoom, distance: NAV_CAMERA.distanceM },
+    { min: NAV_CAMERA.minDistanceM, max: NAV_CAMERA.maxDistanceM },
+  );
+  const zoomTarget = ctl.zoom;
+  const heading = new HeadingFilter();
+  const s = {
+    clock, ctl, heading,
+    mode: 'following' as 'following' | 'free',
+    position: START,
+    drawnHeading: 0,
+    mapHeading: 0,
+    // What the user sees of the arrow: Mapbox's puck gets the heading and
+    // turns it against the map itself; Apple's arrow is turned on screen
+    puckHeading: null as number | null,
+    markerRotation: 0,
+    gestureStart: null as ReportedPose | null,
+    writes: () => (provider === 'mapbox' ? mb.writes.length : mk.writes),
+    camera: () => structuredClone(provider === 'mapbox' ? mb.camera : mk.camera),
+    report: (): ReportedPose => (provider === 'mapbox' ? reportedPoseFromMapbox(mb.camera) : mk.getCamera()),
+    target: () => navTarget(s.position, s.drawnHeading),
+    leaveFollow() {
+      if (s.mode !== 'following') return;
+      s.mode = 'free';
+      ctl.leave();
+    },
+    judge(cam: ReportedPose) {
+      if (!s.gestureStart) { s.gestureStart = cam; return; }
+      const verdict = ctl.judgeGesture(s.gestureStart, cam);
+      if (verdict === 'explore') s.leaveFollow();
+      else if (verdict === 'pitch' && cam.pitch != null) ctl.setUserPitch(cam.pitch);
+    },
+    reader: null as unknown as LatestReader<ReportedPose>,
+    frame() {
+      s.drawnHeading = heading.step(16);
+      s.puckHeading = s.drawnHeading;
+      if (s.mode === 'following') {
+        const target = s.target();
+        const f = ctl.frame(target, 16, zoomTarget.gestureActive(clock.t));
+        if (f.kind === 'left' || f.kind === 'free') s.leaveFollow();
+        else if (f.kind === 'needsSeed') {
+          const token = ctl.beginSeed();
+          if (token != null) ctl.completeSeed(token, s.report(), target);
+        } else if (f.kind === 'camera') {
+          s.mapHeading = f.pose.heading;
+          if (provider === 'mapbox') mb.setCamera(mapboxFollowCamera(f.pose));
+          else mk.setCamera(buildFollowCamera(f.pose.center, f.pose.heading, f.pose.pitch, f.pose, 'ios'));
+        }
+      }
+      s.markerRotation = markerScreenRotation(s.drawnHeading, s.mapHeading);
+      clock.t += 16;
+    },
+    frames(n: number) { for (let i = 0; i < n; i++) s.frame(); },
+    // ── The user's fingers on the map ──
+    touchStart() {
+      zoomTarget.touchStart(clock.t);
+      if (s.mode === 'following') { s.gestureStart = null; ctl.beginGesture(); s.reader.request(); }
+    },
+    /** The user's gesture moves the camera; the map reports it (onPanDrag / Mapbox isGestureActive) */
+    userMoves(c: MapChange) {
+      if (provider === 'mapbox') {
+        const centre = offsetMeters({ latitude: mb.camera.center[1]!, longitude: mb.camera.center[0]! }, c.east ?? 0, c.north ?? 0);
+        mb.camera = {
+          center: [centre.longitude, centre.latitude],
+          zoom: mb.camera.zoom + (c.zoom ?? 0),
+          heading: (mb.camera.heading + (c.rotate ?? 0) + 360) % 360,
+          pitch: c.tilt ?? mb.camera.pitch,
+        };
+      } else {
+        mk.camera = {
+          center: offsetMeters(mk.camera.center, c.east ?? 0, c.north ?? 0),
+          heading: (mk.camera.heading + (c.rotate ?? 0) + 360) % 360,
+          pitch: c.tilt ?? mk.camera.pitch,
+          // A tilt keeps the camera's distance from the centre (so its eye
+          // height changes); a pinch scales it
+          altitude: altitudeForDistance(
+            (distanceForAltitude(mk.camera.altitude, mk.camera.pitch)) * 2 ** -(c.zoom ?? 0),
+            c.tilt ?? mk.camera.pitch,
+          ),
+        };
+      }
+      const fresh = !zoomTarget.gestureActive(clock.t);
+      zoomTarget.gestureMoved(clock.t);
+      if (s.mode === 'following') {
+        if (fresh) { s.gestureStart = null; ctl.beginGesture(); }
+        ctl.gestureMoved();
+        s.reader.request();
+      }
+    },
+    touchEnd() { zoomTarget.touchEnd(clock.t); },
+    /** A whole gesture.  framesDuring: whether the frame loop happened to be running */
+    async gesture(steps: MapChange[], framesDuring = true) {
+      s.touchStart();
+      await flush();
+      for (const step of steps) {
+        s.userMoves(step);
+        await flush();
+        if (framesDuring) s.frames(3); else clock.t += 48;
+      }
+      s.touchEnd();
+      await flush();
+      // The map settles; the loop may be asleep (nothing to animate)
+      if (framesDuring) s.frames(Math.ceil(GESTURE_SETTLE_MS / 16) + 10);
+      else clock.t += GESTURE_SETTLE_MS + 100;
+    },
+    // ── Heading sources (each wakes the frame loop) ──
+    compass(deg: number) { heading.update(deg, 'compass'); },
+    gpsFix(position: LatLng, course: number) { s.position = position; heading.update(course, 'course'); },
+    // ── The Continue Following button ──
+    continueFollowing() {
+      zoomTarget.clearGesture();
+      zoomTarget.set({ zoom: followZoom, distance: NAV_CAMERA.distanceM });
+      const was = s.mode === 'following';
+      s.mode = 'following';
+      ctl.enter(was, undefined, s.target());
+    },
+  };
+  s.reader = new LatestReader(
+    () => (opts.reads === false ? Promise.reject(new Error('no map')) : Promise.resolve(s.report())),
+    (cam) => {
+      const following = s.mode === 'following';
+      const gesture = zoomTarget.gestureActive(clock.t);
+      if (following && !gesture) return;
+      if (cam.heading != null) s.mapHeading = cam.heading;
+      if (following) s.judge(cam);
+    },
+  );
+  // Settled following at the navigation camera
+  s.frames(400);
+  assert.equal(s.mode, 'following');
+  return s;
+}
+
+const headingNear = (a: number | null, b: number, tol = 1.5) => a != null && Math.abs(angleDelta(a, b)) < tol;
+
+for (const provider of ['mapbox', 'apple'] as const) {
+  for (const framesDuring of [true, false]) {
+    test(`${provider}: after panning away (${framesDuring ? 'loop running' : 'loop asleep'}), turning the phone never brings the camera back`, async () => {
+      const s = followSim(provider);
+      await s.gesture([{ east: 40 }, { east: 90 }, { east: 160, north: 60 }], framesDuring);
+      assert.equal(s.mode, 'free', 'panning leaves follow mode');
+      assert.equal(s.ctl.isFollowing, false);
+      const camera = s.camera();
+      const writes = s.writes();
+      const mapBearing = s.mapHeading;
+      // The phone turns, repeatedly, through every direction
+      for (const h of [10, 55, 120, 200, 300, 15, 90, 270, 180, 359, 45, 225]) {
+        s.compass(h);
+        s.frames(90);
+        // The marker still turns with the phone, against the map as the user left it
+        assert.ok(headingNear(s.puckHeading, h), `marker at ${s.puckHeading}°, phone at ${h}°`);
+        assert.equal(s.markerRotation, markerScreenRotation(s.drawnHeading, mapBearing));
+        // The camera doesn't move: position, bearing, zoom and pitch exactly as left
+        assert.deepEqual(s.camera(), camera, `camera moved at ${h}°`);
+        assert.equal(s.writes(), writes, `camera written at ${h}°`);
+        assert.equal(s.mode, 'free', `follow mode came back at ${h}°`);
+      }
+    });
+  }
+
+  test(`${provider}: GPS course changes while exploring don't restore follow mode; only Continue Following does`, async () => {
+    const s = followSim(provider);
+    await s.gesture([{ rotate: 20 }, { rotate: 45 }]);
+    assert.equal(s.mode, 'free', 'rotating leaves follow mode');
+    const camera = s.camera();
+    const writes = s.writes();
+    // Driving on: a fix a second, the course swinging through a junction
+    let pos = START;
+    for (const course of [0, 20, 60, 90, 90, 140, 200, 260, 300, 330, 10, 40]) {
+      pos = offsetMeters(pos, 15 * Math.sin((course * Math.PI) / 180), 15 * Math.cos((course * Math.PI) / 180));
+      s.gpsFix(pos, course);
+      s.frames(150);
+      assert.ok(headingNear(s.puckHeading, course, 3), `marker at ${s.puckHeading}°, course ${course}°`);
+      assert.deepEqual(s.camera(), camera, `camera moved at course ${course}°`);
+      assert.equal(s.writes(), writes);
+      assert.equal(s.mode, 'free');
+    }
+    // A tap on the map (no movement) doesn't bring it back either
+    await s.gesture([]);
+    s.compass(80);
+    s.frames(60);
+    assert.equal(s.mode, 'free');
+    assert.deepEqual(s.camera(), camera);
+    // Continue Following: the camera eases back to the navigation view
+    s.continueFollowing();
+    s.frames(400);
+    assert.equal(s.mode, 'following');
+    assert.ok(s.writes() > writes, 'Continue Following must move the camera');
+    const report = s.report();
+    assert.ok(headingNear(report.heading ?? null, s.drawnHeading, 0.5), 'heading-up again');
+    assert.equal(report.pitch, NAV_CAMERA.pitchDeg);
+    if (provider === 'mapbox') assert.ok(Math.abs(report.zoom! - NAV_CAMERA.mapboxZoom) < 0.02, 'nav zoom again');
+    const ahead = distM(report.center!, s.position);
+    assert.ok(ahead < NAV_CAMERA.lookAhead.maxM + 1, `centred ${ahead.toFixed(0)} m from the vehicle`);
+  });
+
+  test(`${provider}: a tilt still keeps following; pinching and rotating still leave`, async () => {
+    const s = followSim(provider);
+    await s.gesture([{ tilt: 52 }, { tilt: 47 }]);
+    assert.equal(s.mode, 'following', 'a tilt must not leave follow mode');
+    assert.equal(s.ctl.followPitch, 47);
+    s.compass(140);
+    s.frames(200);
+    assert.equal(s.report().pitch, 47, 'follows at the chosen tilt');
+    assert.ok(headingNear(s.report().heading ?? null, s.drawnHeading, 0.5), 'and still turns with the heading');
+    await s.gesture([{ zoom: 0.6 }, { zoom: 1.2 }]);
+    assert.equal(s.mode, 'free', 'a pinch leaves follow mode');
+    s.continueFollowing();
+    s.frames(300);
+    await s.gesture([{ rotate: 15 }, { rotate: 30 }]);
+    assert.equal(s.mode, 'free', 'a rotation leaves follow mode');
+  });
+}
+
+test('a gesture no camera read could judge leaves follow mode rather than snapping back', async () => {
+  // The Build 15 bug: on Mapbox the gesture judge read only the Apple map, so
+  // every read failed, follow mode never ended, and the next heading change
+  // eased the camera back.  Even with no reads, a moving gesture now ends it.
+  for (const framesDuring of [true, false]) {
+    const s = followSim('mapbox', { reads: false });
+    await s.gesture([{ east: 50 }, { east: 120 }], framesDuring);
+    s.compass(200);
+    s.frames(120);
+    assert.equal(s.mode, 'free', `follow resumed (loop ${framesDuring ? 'running' : 'asleep'})`);
+    const camera = s.camera();
+    s.compass(20);
+    s.frames(120);
+    assert.deepEqual(s.camera(), camera);
+  }
+  // A plain tap, which moves nothing, keeps following
+  const s = followSim('mapbox', { reads: false });
+  await s.gesture([]);
+  s.compass(90);
+  s.frames(200);
+  assert.equal(s.mode, 'following');
+});
+
+test('the follow controller writes no camera once left, whatever the target, until enter()', () => {
+  const { ctl, map } = settledFollowing();
+  ctl.leave();
+  assert.equal(ctl.isFollowing, false);
+  const writes = map.writes;
+  for (let i = 0; i < 500; i++) {
+    const f = ctl.frame(navTarget(offsetMeters(START, i, -i), (i * 37) % 360), 16, i % 7 === 0);
+    assert.equal(f.kind, 'free');
+  }
+  // Retargeting (a heading-mode switch) and stray gesture notes change nothing
+  ctl.retarget(navTarget(START, 90));
+  ctl.gestureMoved();
+  assert.equal(ctl.frame(navTarget(START, 90), 16, false).kind, 'free');
+  assert.equal(map.writes, writes);
+  // Only enter() follows again
+  ctl.enter(false);
+  assert.equal(ctl.isFollowing, true);
+  for (let i = 0; i < 400; i++) followFrame(ctl, map, navTarget(START, 90));
+  assert.ok(map.writes > writes);
+  // A tap while following (touched, nothing moved) carries on following
+  ctl.beginGesture();
+  assert.equal(ctl.frame(navTarget(START, 90), 16, true).kind, 'paused');
+  assert.equal(ctl.frame(navTarget(START, 90), 16, false).kind, 'camera');
+  // A moving gesture that no read judged ends it, once, at the gesture's end
+  ctl.beginGesture();
+  ctl.gestureMoved();
+  assert.equal(ctl.frame(navTarget(START, 90), 16, true).kind, 'paused');
+  assert.equal(ctl.frame(navTarget(START, 90), 16, false).kind, 'left');
+  assert.equal(ctl.isFollowing, false);
+  assert.equal(ctl.frame(navTarget(START, 90), 16, false).kind, 'free');
+});
+
+test('the Drive screen moves the camera only while following; heading only turns the marker', () => {
+  const src = readFileSync(toPath(new URL('../app/(tabs)/(drive)/index.tsx', import.meta.url)), 'utf8');
+  const code = src.replace(/\/\/.*$/gm, '');
+  // Gestures are judged from whichever map is in use (not Apple's alone)
+  assert.ok(/new LatestReader\(readMapCamera,/.test(code));
+  // Every follow camera write sits inside the follow-mode guard
+  const guard = code.indexOf('followModeRef.current === "following" &&\n        hasMap()');
+  assert.ok(guard > 0, 'follow guard not found');
+  const block = code.slice(guard, code.indexOf('syncArrowRotation();', guard));
+  for (const write of ['setFollowCamera(', 'setCamera(\n              buildFollowCamera(']) {
+    assert.equal(code.split(write).length - 1, 1, `${write} written elsewhere`);
+    assert.ok(block.includes(write), `${write} outside the follow guard`);
+  }
+  // A finished gesture the controller says left follow mode ends it on screen too
+  assert.ok(/frame\.kind === "left" \|\| frame\.kind === "free"\)\s*\{\s*leaveFollowRef\.current\(\);/.test(code));
+  // The map reporting a gesture is noted with the controller (Apple onPanDrag, Mapbox onUserGesture)
+  const pan = code.slice(code.indexOf('const handleMapPanDrag'), code.indexOf('const handleMapTouchStart'));
+  assert.ok(/followCamera\.gestureMoved\(\)/.test(pan));
+  assert.ok(/onUserGesture=\{handleMapPanDrag\}/.test(code) && /onPanDrag=\{handleMapPanDrag\}/.test(code));
+  // Follow mode is entered in one place, from three explicit actions only
+  assert.equal(code.match(/setFollowMode\("following"\)/g)?.length, 1);
+  assert.equal(code.match(/followModeRef\.current = "following"/g)?.length, 1);
+  assert.equal(code.match(/startFollowing\(true/g)?.length, 3);
+  for (const caller of ['if (isDriving) {', 'const handleResumeFollowing', 'const handleLocateButton']) {
+    const i = code.indexOf(caller);
+    assert.ok(i > 0 && /startFollowing\(true/.test(code.slice(i, i + 900)), `${caller} doesn't start following`);
+  }
+  // The compass and GPS heading paths only feed the heading filter
+  const strip = (from: string, to: string) => src.slice(src.indexOf(from), src.indexOf(to, src.indexOf(from))).replace(/\/\/.*$/gm, '');
+  const compass = strip('Location.watchHeadingAsync', 'headingSubRef.current = sub');
+  const gps = strip('const processPosition = useCallback', '// ── Location watcher lifecycle');
+  assert.ok(compass.length > 200 && gps.length > 1000 && gps.length < 12000);
+  for (const [name, body] of [['compass', compass], ['GPS', gps]] as const) {
+    assert.ok(/headingFilter\.update\(/.test(body), `${name} doesn't update the heading`);
+    assert.ok(!/startFollowing|setFollowMode|followModeRef\.current =|followCamera\.(enter|retarget)|setCamera|setFollowCamera|animateCamera/.test(body), `${name} touches follow mode or the camera`);
+  }
 });

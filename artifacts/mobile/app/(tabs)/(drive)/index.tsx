@@ -38,7 +38,6 @@ import * as Location from "expo-location";
 import { requestForegroundLocation } from "@/lib/locationPermission";
 import { buildFollowCamera } from "@/lib/followCamera";
 import {
-  classifyFollowGesture,
   FollowCameraController,
   type FollowFrameTarget,
 } from "@/lib/followController";
@@ -755,6 +754,8 @@ export default function MapScreen() {
   );
 
   const frameLoopRef = useRef<() => void>(() => {});
+  // Ends follow mode (set below, once its callback exists)
+  const leaveFollowRef = useRef<() => void>(() => {});
   const wakeFrameLoop = useCallback(() => {
     if (frameIdRef.current != null) return;
     lastFrameAtRef.current = Date.now();
@@ -863,6 +864,10 @@ export default function MapScreen() {
         if (frame.kind === "paused") {
           // Hands off while the user touches the map
           cameraSettled = false;
+        } else if (frame.kind === "left" || frame.kind === "free") {
+          // The user moved the map: it stays where they left it until
+          // Continue Following.  Heading changes only turn the marker.
+          leaveFollowRef.current();
         } else if (frame.kind === "needsSeed") {
           requestCameraSeed();
           cameraSettled = false;
@@ -1277,25 +1282,20 @@ export default function MapScreen() {
   // annotations upright while the map turns, and react-native-maps' region
   // events carry no bearing, so while the user rotates or tilts the map the
   // camera is read on every region change (one read in flight, the latest
-  // always followed up).  Display only: nothing here reaches the camera.
+  // always followed up).  The same reads judge a gesture made while
+  // following, on either map.  Nothing here writes the camera.
   const [bearingReader] = useState(
     () =>
-      new LatestReader(
-        () =>
-          mapRef.current
-            ? mapRef.current.getCamera()
-            : Promise.reject(new Error("no map")),
-        (cam) => {
-          const following = followModeRef.current === "following";
-          const gesture = zoomTarget.gestureActive(Date.now());
-          // While following outside a gesture the loop sets these itself
-          if (following && !gesture) return;
-          if (cam.heading != null) mapHeadingRef.current = cam.heading;
-          if (cam.pitch != null) mapPitchRef.current = cam.pitch;
-          syncArrowRotation();
-          if (following) judgeFollowGestureRef.current(cam);
-        },
-      ),
+      new LatestReader(readMapCamera, (cam) => {
+        const following = followModeRef.current === "following";
+        const gesture = zoomTarget.gestureActive(Date.now());
+        // While following outside a gesture the loop sets these itself
+        if (following && !gesture) return;
+        if (cam.heading != null) mapHeadingRef.current = cam.heading;
+        if (cam.pitch != null) mapPitchRef.current = cam.pitch;
+        syncArrowRotation();
+        if (following) judgeFollowGestureRef.current(cam);
+      }),
   );
   const readMapBearing = useCallback(() => {
     if (Platform.OS !== "web") bearingReader.request();
@@ -1316,6 +1316,7 @@ export default function MapScreen() {
     setFollowMode("free");
     Haptics.selectionAsync();
   }, [followCamera]);
+  leaveFollowRef.current = leaveFollow;
   const judgeFollowGestureRef = useRef<(cam: ReportedPose) => void>(() => {});
   judgeFollowGestureRef.current = (cam) => {
     const start = followGestureStartRef.current;
@@ -1323,7 +1324,7 @@ export default function MapScreen() {
       followGestureStartRef.current = cam;
       return;
     }
-    const verdict = classifyFollowGesture(start, cam);
+    const verdict = followCamera.judgeGesture(start, cam);
     if (
       verdict === "explore" ||
       (verdict === "pitch" && headingModeRef.current !== "heading-up")
@@ -1335,20 +1336,33 @@ export default function MapScreen() {
   };
 
   // ── Map user-interaction detection ────────────────────────────────────────
+  // Apple's onPanDrag, or Mapbox reporting a gesture moving its camera
   const handleMapPanDrag = useCallback(() => {
-    zoomTarget.gestureMoved(Date.now());
-    // Not an exit by itself: a tilt fires this too.  The camera read decides.
-    if (followModeRef.current === "following") readMapBearing();
-  }, [zoomTarget, readMapBearing]);
+    const now = Date.now();
+    // A gesture whose touch-start never arrived is still a new gesture
+    const fresh = !zoomTarget.gestureActive(now);
+    zoomTarget.gestureMoved(now);
+    // Not an exit by itself: a tilt fires this too.  The camera reads decide,
+    // and if none can, the gesture ends follow mode when it's over.
+    if (followModeRef.current === "following") {
+      if (fresh) {
+        followGestureStartRef.current = null;
+        followCamera.beginGesture();
+      }
+      followCamera.gestureMoved();
+      readMapBearing();
+    }
+  }, [zoomTarget, followCamera, readMapBearing]);
 
   const handleMapTouchStart = useCallback(() => {
     zoomTarget.touchStart(Date.now());
     // A new gesture: its first camera read is what it's judged against
     if (followModeRef.current === "following") {
       followGestureStartRef.current = null;
+      followCamera.beginGesture();
       readMapBearing();
     }
-  }, [zoomTarget, readMapBearing]);
+  }, [zoomTarget, followCamera, readMapBearing]);
 
   const handleMapTouchEnd = useCallback(() => {
     zoomTarget.touchEnd(Date.now());
@@ -1356,13 +1370,13 @@ export default function MapScreen() {
 
   // Fires continuously while the map moves, including during a gesture
   const handleRegionChange = useCallback(() => {
-    if (
-      followModeRef.current !== "following" ||
-      zoomTarget.gestureActive(Date.now())
-    ) {
-      readMapBearing();
-    }
-  }, [zoomTarget, readMapBearing]);
+    const following = followModeRef.current === "following";
+    const gesture = zoomTarget.gestureActive(Date.now());
+    // The loop writes nothing during a touch, so this is the user's doing (a
+    // pinch fires no pan callback)
+    if (following && gesture) followCamera.gestureMoved();
+    if (!following || gesture) readMapBearing();
+  }, [zoomTarget, followCamera, readMapBearing]);
 
   const handleRegionChangeComplete = useCallback(() => {
     // While following, the frame loop writes the camera every frame, so this
