@@ -8,6 +8,7 @@
     "scheme": "mobile",
     "userInterfaceStyle": "dark",
     "ios": {
+      "icon": "./assets/app.icon",
       "supportsTablet": false,
       "infoPlist": {}
     },
