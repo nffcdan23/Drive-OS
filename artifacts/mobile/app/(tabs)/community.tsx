@@ -2,6 +2,7 @@ import { GlassSurface, GlassButton } from "@/components/Glass";
 import { APP_NAME } from "@/constants/brand";
 import { describeError } from "@/lib/backend/http";
 import { KeyboardAwareScrollViewCompat } from "@/components/KeyboardAwareScrollViewCompat";
+import { KeyboardAwareSheet } from "@/components/KeyboardAwareSheet";
 import { ScreenTitle, Disclosure } from "@/components/Cockpit";
 import React, { useState, useEffect } from "react";
 import {
@@ -1738,7 +1739,7 @@ export default function CommunityScreen() {
         animationType="slide"
         onRequestClose={() => setShowAddFriend(false)}
       >
-        <View style={styles.modalOverlay}>
+        <KeyboardAwareSheet backdropColor="rgba(0,0,0,0.5)">
           <GlassSurface material="dense" style={styles.modalContent}>
             <View style={styles.modalHandle} />
             <Text style={styles.modalTitle}>Add Friend</Text>
@@ -1829,7 +1830,7 @@ export default function CommunityScreen() {
               <Text style={styles.submitBtnText}>Send Request</Text>
             </TouchableOpacity>
           </GlassSurface>
-        </View>
+        </KeyboardAwareSheet>
       </Modal>
 
       {/* ── Create Group modal ── */}

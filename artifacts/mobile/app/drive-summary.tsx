@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, TextInput, Platform,
-  ScrollView, KeyboardAvoidingView, Keyboard,
+  Keyboard,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -11,6 +11,7 @@ import { useColors } from '@/hooks/useColors';
 import { useApp } from '@/context/AppContext';
 import { formatDistance, formatSpeed } from '@/lib/units';
 import { SyncBanner } from '@/components/SyncBanner';
+import { KeyboardAwareScrollViewCompat } from '@/components/KeyboardAwareScrollViewCompat';
 import * as Haptics from 'expo-haptics';
 
 function formatDuration(seconds: number): string {
@@ -74,9 +75,7 @@ export default function DriveSummaryScreen() {
     startTime:  currentDrive?.startTime ?? Date.now(),
   }).current;
 
-  const scrollRef      = useRef<ScrollView>(null);
   const inputRef       = useRef<TextInput>(null);
-  const nameSectionRef = useRef<View>(null);
   const webKeyboardHeight = useWebKeyboardHeight();
   const webKeyboardOpen   = webKeyboardHeight > 50;
 
@@ -112,22 +111,8 @@ export default function DriveSummaryScreen() {
     return () => clearTimeout(timer);
   }, [webKeyboardOpen]);
 
-  // Scroll to input on native when keyboard appears
-  useEffect(() => {
-    if (Platform.OS === 'web') return;
-    const sub = Keyboard.addListener('keyboardDidShow', () => {
-      nameSectionRef.current?.measureLayout(
-        scrollRef.current?.getScrollableNode() as Parameters<View['measureLayout']>[0],
-        (_x: number, y: number) => {
-          scrollRef.current?.scrollTo({ y: Math.max(0, y - 24), animated: true });
-        },
-        () => {
-          scrollRef.current?.scrollToEnd({ animated: true });
-        },
-      );
-    });
-    return () => sub.remove();
-  }, []);
+  // On native the scroll view keeps the name field clear of the keyboard,
+  // moving only if the keyboard would cover it (KeyboardAwareScrollViewCompat)
 
   const driveDuration = Math.round((Date.now() - driveSnapshot.startTime) / 1000);
 
@@ -173,11 +158,7 @@ export default function DriveSummaryScreen() {
   }
 
   return (
-    <KeyboardAvoidingView
-      style={styles.kaView}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      keyboardVerticalOffset={0}
-    >
+    <View style={styles.kaView}>
       <LinearGradient colors={['#F4631A', '#FF4E3A']} style={styles.heroGradient}>
         <View style={styles.completedIcon}>
           <Ionicons name="checkmark" size={36} color="#fff" />
@@ -188,8 +169,7 @@ export default function DriveSummaryScreen() {
         </Text>
       </LinearGradient>
 
-      <ScrollView
-        ref={scrollRef}
+      <KeyboardAwareScrollViewCompat
         contentContainerStyle={{ padding: 24, paddingBottom: scrollBottomPadding }}
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
@@ -220,7 +200,7 @@ export default function DriveSummaryScreen() {
           </View>
         </View>
 
-        <View ref={nameSectionRef} style={styles.nameSection}>
+        <View style={styles.nameSection}>
           <Text style={styles.nameLabel}>Name this journey</Text>
           <TextInput
             ref={inputRef}
@@ -251,7 +231,7 @@ export default function DriveSummaryScreen() {
             <Text style={styles.backToMapBtnText}>Back to Map</Text>
           </TouchableOpacity>
         </View>
-      </ScrollView>
+      </KeyboardAwareScrollViewCompat>
 
       {/* Sync banner — visible when the server save failed */}
       <SyncBanner
@@ -259,6 +239,6 @@ export default function DriveSummaryScreen() {
         status={syncStatus === 'syncing' ? 'syncing' : syncStatus === 'error' ? 'error' : 'waiting'}
         onRetry={retryJourneySync}
       />
-    </KeyboardAvoidingView>
+    </View>
   );
 }

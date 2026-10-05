@@ -16,6 +16,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import Constants from "expo-constants";
 import { GlassSurface, GlassButton } from "@/components/Glass";
+import { KeyboardAwareSheet } from "@/components/KeyboardAwareSheet";
 import { ScreenTitle } from "@/components/Cockpit";
 import { AccountPreferences } from "@/components/AccountPreferences";
 import { useSignOut } from "@/hooks/useSignOut";
@@ -338,7 +339,7 @@ export default function SettingsScreen() {
           if (!deleting) setShowDelete(false);
         }}
       >
-        <View style={s.overlay}>
+        <KeyboardAwareSheet backdropColor="rgba(0,0,0,0.55)">
           <GlassSurface
             material="dense"
             style={[
@@ -389,7 +390,7 @@ export default function SettingsScreen() {
               <Text style={s.label}>Cancel</Text>
             </GlassButton>
           </GlassSurface>
-        </View>
+        </KeyboardAwareSheet>
       </Modal>
     </View>
   );
@@ -422,11 +423,6 @@ const s = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 12,
-  },
-  overlay: {
-    flex: 1,
-    backgroundColor: "rgba(0,0,0,0.55)",
-    justifyContent: "flex-end",
   },
   sheet: {
     padding: 24,

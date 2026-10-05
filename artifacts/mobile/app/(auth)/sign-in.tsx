@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { APP_NAME } from '@/constants/brand';
 import {
-  ActivityIndicator, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View,
+  ActivityIndicator, Platform, StyleSheet, Text, TextInput, TouchableOpacity, View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -10,6 +10,7 @@ import { useAuth } from '@/context/AuthContext';
 import { describeAuthError, MIN_PASSWORD_LENGTH, validateCredentials } from '@/lib/backend/auth';
 import { cockpit } from '@/constants/colors';
 import { useColors } from '@/hooks/useColors';
+import { KeyboardAwareScrollViewCompat } from '@/components/KeyboardAwareScrollViewCompat';
 import { backendEnv } from '@/lib/backendClient';
 
 type Mode = 'signin' | 'signup' | 'forgot' | 'check-email' | 'reset-sent';
@@ -77,7 +78,7 @@ export default function SignInScreen() {
   }
 
   return (
-    <ScrollView style={s.container} contentContainerStyle={s.content} keyboardShouldPersistTaps="handled">
+    <KeyboardAwareScrollViewCompat style={s.container} contentContainerStyle={s.content}>
       <Text style={s.brand}>{APP_NAME}</Text>
       <Text style={s.title}>{title}</Text>
       {backendEnv && backendEnv.appEnv !== 'production' ? (
@@ -151,7 +152,7 @@ export default function SignInScreen() {
           <Text style={s.body}>{mode === 'signup' ? 'Already have an account? ' : ''}<Text style={s.link}>Back to sign in</Text></Text>
         </TouchableOpacity>
       )}
-    </ScrollView>
+    </KeyboardAwareScrollViewCompat>
   );
 }
 

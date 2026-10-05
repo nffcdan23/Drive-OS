@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { describeError } from '@/lib/backend/http';
 import {
-  View, Text, ScrollView, StyleSheet, TouchableOpacity, Platform, Alert,
+  View, Text, StyleSheet, TouchableOpacity, Platform, Alert,
   TextInput, Modal,
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
@@ -9,6 +9,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Svg, { Path, Circle, Defs, LinearGradient as SvgLinearGradient, Stop } from 'react-native-svg';
 import { useColors } from '@/hooks/useColors';
+import { KeyboardAwareScrollViewCompat } from '@/components/KeyboardAwareScrollViewCompat';
 import { useApp, Coordinate } from '@/context/AppContext';
 import { formatDistance, formatSpeed } from '@/lib/units';
 import * as Haptics from 'expo-haptics';
@@ -293,7 +294,7 @@ export default function JourneyDetailScreen() {
         </TouchableOpacity>
       </View>
 
-      <ScrollView style={styles.scroll} contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
+      <KeyboardAwareScrollViewCompat style={styles.scroll} contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
 
         {journey.syncState && journey.syncState !== 'synced' ? (
           <View style={{ backgroundColor: journey.syncState === 'failed' ? '#3A1618' : '#16283A', borderRadius: 12, padding: 12, marginBottom: 12 }}>
@@ -448,7 +449,7 @@ export default function JourneyDetailScreen() {
           <Ionicons name="camera-outline" size={28} color={colors.mutedForeground} />
           <Text style={styles.photosText}>Photo upload — coming in next update</Text>
         </TouchableOpacity>
-      </ScrollView>
+      </KeyboardAwareScrollViewCompat>
 
       {/* Category picker modal */}
       <Modal visible={showCategoryPicker} transparent animationType="slide" onRequestClose={() => setShowCategoryPicker(false)}>

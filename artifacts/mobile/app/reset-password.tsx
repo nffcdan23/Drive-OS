@@ -5,6 +5,7 @@ import { useAuth } from '@/context/AuthContext';
 import { describeAuthError, MIN_PASSWORD_LENGTH } from '@/lib/backend/auth';
 import { useColors } from '@/hooks/useColors';
 import { cockpit } from '@/constants/colors';
+import { KeyboardAwareScrollViewCompat } from '@/components/KeyboardAwareScrollViewCompat';
 
 export default function ResetPasswordScreen() {
   const colors = useColors();
@@ -26,7 +27,7 @@ export default function ResetPasswordScreen() {
   }
 
   return (
-    <View style={[styles.container, { backgroundColor: colors.background }]}>
+    <KeyboardAwareScrollViewCompat style={{ flex: 1, backgroundColor: colors.background }} contentContainerStyle={styles.container}>
       <Text style={[styles.title, { color: colors.foreground }]}>Choose a new password</Text>
       <TextInput
         style={[styles.input, { color: colors.foreground, borderColor: colors.input, backgroundColor: colors.card }]}
@@ -40,12 +41,12 @@ export default function ResetPasswordScreen() {
       <TouchableOpacity onPress={() => { void signOut(); }} style={{ alignItems: 'center', padding: 8 }}>
         <Text style={{ color: colors.primary, fontFamily: cockpit.type.label }}>Cancel and sign out</Text>
       </TouchableOpacity>
-    </View>
+    </KeyboardAwareScrollViewCompat>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, justifyContent: 'center', padding: 24, gap: 12 },
+  container: { flexGrow: 1, justifyContent: 'center', padding: 24, gap: 12 },
   title: { fontFamily: cockpit.type.label, fontSize: 22 },
   input: { height: cockpit.touch, borderRadius: cockpit.radius.control, borderWidth: 1, paddingHorizontal: 14, fontSize: 16 },
   btn: { height: cockpit.touch, borderRadius: cockpit.radius.control, alignItems: 'center', justifyContent: 'center' },

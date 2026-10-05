@@ -1,4 +1,5 @@
 import { GlassButton, GlassSurface } from "@/components/Glass";
+import { KeyboardAwareSheet } from "@/components/KeyboardAwareSheet";
 import { useSignOut } from "@/hooks/useSignOut";
 import { sectionAccent } from "@/constants/colors";
 import { ScreenTitle, Disclosure } from "@/components/Cockpit";
@@ -440,13 +441,7 @@ export default function ProfileScreen() {
         animationType="slide"
         onRequestClose={() => setEditing(false)}
       >
-        <View
-          style={{
-            flex: 1,
-            justifyContent: "flex-end",
-            backgroundColor: "rgba(0,0,0,0.5)",
-          }}
-        >
+        <KeyboardAwareSheet backdropColor="rgba(0,0,0,0.5)">
           <View
             style={{
               backgroundColor: colors.card,
@@ -523,7 +518,7 @@ export default function ProfileScreen() {
               </Text>
             </TouchableOpacity>
           </View>
-        </View>
+        </KeyboardAwareSheet>
       </Modal>
     </View>
   );

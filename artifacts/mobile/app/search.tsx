@@ -4,6 +4,7 @@
  * stored in the user's account; places saved offline upload later.
  */
 import { GlassSurface } from "@/components/Glass";
+import { KeyboardAwareScrollViewCompat } from "@/components/KeyboardAwareScrollViewCompat";
 import { openDirections } from "@/lib/directions";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
@@ -13,7 +14,6 @@ import {
   KeyboardAvoidingView,
   Modal,
   Platform,
-  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -447,10 +447,7 @@ function SavePlaceSheet({
     >
       <View style={s.overlay}>
         <GlassSurface material="dense" style={s.sheet}>
-          <ScrollView
-            keyboardShouldPersistTaps="handled"
-            contentContainerStyle={{ gap: 12 }}
-          >
+          <KeyboardAwareScrollViewCompat contentContainerStyle={{ gap: 12 }}>
             <Text style={s.sheetTitle}>Save this place</Text>
             <View style={s.chips}>
               {SAVE_KINDS.map((k) => (
@@ -532,7 +529,7 @@ function SavePlaceSheet({
             >
               <Text style={s.cancelText}>Cancel</Text>
             </TouchableOpacity>
-          </ScrollView>
+          </KeyboardAwareScrollViewCompat>
         </GlassSurface>
       </View>
     </Modal>

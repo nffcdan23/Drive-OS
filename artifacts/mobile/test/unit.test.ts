@@ -3281,3 +3281,92 @@ test('the Drive screen turns one arrow, on either map, against the bearing writt
   // Exploring, Mapbox camera changes keep the arrow's map bearing current
   assert.ok(/onCameraChange=\{handleRegionChange\}/.test(code));
 });
+
+// ─── Keyboard avoidance on forms ────────────────────────────────────────────
+// Every text field sits in a keyboard-aware container: the scroll view (or
+// bottom sheet) moves only when the keyboard would cover the focused field,
+// only as far as it needs, and back when the keyboard closes
+// (react-native-keyboard-controller's KeyboardAwareScrollView).  The chat
+// composer, pinned to the bottom, rides above the keyboard instead.  Fields at
+// the top of a screen, which the keyboard can't reach, are listed with why.
+
+import { readdirSync, statSync } from 'node:fs';
+import { join, relative } from 'node:path';
+
+const MOBILE = toPath(new URL('..', import.meta.url));
+const KEYBOARD_CONTAINERS = ['KeyboardAwareScrollViewCompat', 'KeyboardAwareSheet', 'KeyboardAvoidingView'];
+// Fields the keyboard can't reach: each sits at the top of its screen
+const TOP_OF_SCREEN_FIELDS: Record<string, string[]> = {
+  'app/(tabs)/(drive)/explore.tsx': ['Search places and events'],
+  'app/(tabs)/community.tsx': ['Search Social'],
+};
+
+function sourceFiles(dir: string): string[] {
+  return readdirSync(dir).flatMap((name) => {
+    const p = join(dir, name);
+    return statSync(p).isDirectory() ? sourceFiles(p) : p.endsWith('.tsx') ? [p] : [];
+  });
+}
+
+/** [start, end) of each element with this tag name (nesting-aware) */
+function elementSpans(src: string, tag: string): [number, number][] {
+  const spans: [number, number][] = [];
+  const re = new RegExp(`<(/?)${tag}(?=[\\s>/])`, 'g');
+  const stack: number[] = [];
+  for (let m; (m = re.exec(src)); ) {
+    if (m[1]) { const start = stack.pop(); if (start != null) spans.push([start, m.index]); continue; }
+    // Self-closing: <Tag ... />
+    const close = src.indexOf('>', m.index);
+    if (src[close - 1] === '/') continue;
+    stack.push(m.index);
+  }
+  return spans;
+}
+
+test('every form field is in a keyboard-aware container (or out of the keyboard\'s reach)', () => {
+  const files = [...sourceFiles(join(MOBILE, 'app')), ...sourceFiles(join(MOBILE, 'components'))];
+  let fields = 0;
+  const uncovered: string[] = [];
+  for (const file of files) {
+    const src = readFileSync(file, 'utf8');
+    const rel = relative(MOBILE, file);
+    const spans = KEYBOARD_CONTAINERS.flatMap((t) => elementSpans(src, t));
+    // JSX only (not a type such as useRef<TextInput>)
+    for (const m of src.matchAll(/(?<![\w.])<TextInput(?=[\s/>])/g)) {
+      fields++;
+      const at = m.index!;
+      if (spans.some(([a, b]) => a < at && at < b)) continue;
+      const tag = src.slice(at, src.indexOf('/>', at));
+      if ((TOP_OF_SCREEN_FIELDS[rel] ?? []).some((label) => tag.includes(label))) continue;
+      uncovered.push(`${rel}:${src.slice(0, at).split('\n').length}`);
+    }
+  }
+  assert.ok(fields >= 40, `only ${fields} fields found`);
+  assert.deepEqual(uncovered, [], 'fields the keyboard can cover');
+});
+
+test('keyboard avoidance is measured, never a fixed shift', () => {
+  const compat = readFileSync(join(MOBILE, 'components/KeyboardAwareScrollViewCompat.tsx'), 'utf8');
+  const sheet = readFileSync(join(MOBILE, 'components/KeyboardAwareSheet.tsx'), 'utf8');
+  const root = readFileSync(join(MOBILE, 'app/_layout.tsx'), 'utf8');
+  // One app-wide gap above the keyboard, on the library's measured scroll
+  assert.ok(/export const KEYBOARD_FIELD_GAP = (\d+);/.test(compat));
+  assert.ok(Number(compat.match(/KEYBOARD_FIELD_GAP = (\d+)/)![1]) >= 12);
+  assert.ok(/bottomOffset = KEYBOARD_FIELD_GAP/.test(compat) && /<KeyboardAwareScrollView\b[\s\S]*bottomOffset=\{bottomOffset\}/.test(compat));
+  // Bottom sheets stay at the bottom and move only through the same view
+  assert.ok(/<KeyboardAwareScrollViewCompat[\s\S]*justifyContent: ["']flex-end["']/.test(sheet));
+  // The library's provider wraps the whole app
+  assert.ok(/<KeyboardProvider>[\s\S]*<RootLayoutNav \/>[\s\S]*<\/KeyboardProvider>/.test(root));
+  // No screen shifts itself on every keyboard open, or by a fixed offset
+  for (const file of [...sourceFiles(join(MOBILE, 'app')), ...sourceFiles(join(MOBILE, 'components'))]) {
+    const src = readFileSync(file, 'utf8');
+    const rel = relative(MOBILE, file);
+    assert.ok(!/Keyboard\.addListener\(\s*['"]keyboard(Did|Will)Show/.test(src), `${rel} moves the screen on every keyboard open`);
+    for (const m of src.matchAll(/keyboardVerticalOffset=\{([^}]*)\}/g)) {
+      assert.equal(m[1]!.trim(), '0', `${rel} shifts by a fixed ${m[1]}`);
+    }
+  }
+  // The chat composer is the one pinned field that rides the keyboard
+  const avoiding = sourceFiles(join(MOBILE, 'app')).filter((f) => /<KeyboardAvoidingView\b/.test(readFileSync(f, 'utf8'))).map((f) => relative(MOBILE, f)).sort();
+  assert.deepEqual(avoiding, ['app/conversation/[id].tsx', 'app/search.tsx']);
+});
