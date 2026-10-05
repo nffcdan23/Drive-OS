@@ -61,7 +61,12 @@ export interface CloudSyncDeps {
   now?: () => number;
   /** Background location recording during drives (none in the Node tests against staging). */
   tracker?: DriveTracker;
+  /** Wait before retrying a friends refresh that failed after an action (ms). */
+  friendsRetryMs?: number;
 }
+
+/** A friends refresh that failed after a successful action is retried after this long. */
+const FRIENDS_RETRY_MS = 3_000;
 
 export function emptyData(): CachedData {
   return {
@@ -111,6 +116,16 @@ export class CloudSync {
   private wiped = false;
   /** Bumped whenever a change reaches the server (to detect refresh races). */
   private completedChanges = 0;
+  /**
+   * Bumped whenever a friend action (send, accept, decline, remove) succeeds.
+   * Friends data fetched before the latest action is out of date and is never
+   * applied over what the action showed.
+   */
+  private friendsVersion = 0;
+  /** Friend actions in flight, by action and target: a second tap joins the first. */
+  private friendActions = new Map<string, Promise<unknown>>();
+  private friendsRetry: ReturnType<typeof setTimeout> | null = null;
+  private friendsSettled: Promise<void> = Promise.resolve();
 
   constructor(private readonly deps: CloudSyncDeps) {
     this.outbox = new Outbox(deps.store, deps.userId, (op) => this.execute(op));
@@ -222,16 +237,19 @@ export class CloudSync {
     if (this.status.refreshing) return;
     // If a queued change reaches the server while the lists are being fetched,
     // the fetched data may predate it; fetch again so it can't briefly vanish.
+    // Likewise a friend action completing mid-refresh: its lists are fetched again.
     for (let attempt = 0; attempt < 3; attempt++) {
       const before = this.completedChanges;
+      const friendsBefore = this.friendsVersion;
       await this.refreshOnce();
-      if (this.completedChanges === before) return;
+      if (this.completedChanges === before && this.friendsVersion === friendsBefore) return;
     }
   }
 
   private async refreshOnce(): Promise<void> {
     this.setStatus({ refreshing: true });
     const ep = this.ep;
+    const friendsVersion = this.friendsVersion;
     const [
       me, achievements, stats, vehicles, journeys, categories, places, friends, requests, blocks,
       convoys, groups, events, notifications,
@@ -243,6 +261,8 @@ export class CloudSync {
     const ok = <T>(r: PromiseSettledResult<T>): T | undefined => (r.status === 'fulfilled' ? r.value : undefined);
     const failures = [me, vehicles, journeys].filter((r) => r.status === 'rejected') as PromiseRejectedResult[];
 
+    // A friend action finished while these were fetched: keep what it showed
+    const friendsCurrent = this.friendsVersion === friendsVersion;
     this.update((d) => {
       const next: CachedData = { ...d };
       const m = ok(me);
@@ -252,13 +272,13 @@ export class CloudSync {
         })) ?? d.profile.achievements);
         if (m.settings) next.unitSystem = m.settings.unitSystem;
       }
-      const s = ok(stats); if (s) next.profileStats = toStats(s);
+      const s = ok(stats); if (s && friendsCurrent) next.profileStats = toStats(s);
       const v = ok(vehicles); if (v) next.vehicles = v.map(toVehicle);
       const j = ok(journeys); if (j) next.journeys = j.map(toJourney);
       const c = ok(categories); if (c) next.categories = c.map(toCategory);
       const p = ok(places); if (p) next.places = p.map(toPlace);
-      const f = ok(friends); if (f) next.friends = f.map(toFriend);
-      const fr = ok(requests); if (fr) next.friendRequests = toFriendRequests(fr);
+      const f = ok(friends); if (f && friendsCurrent) next.friends = f.map(toFriend);
+      const fr = ok(requests); if (fr && friendsCurrent) next.friendRequests = toFriendRequests(fr);
       const b = ok(blocks); if (b) next.blockedUsers = b.map((x): BlockedUser => ({ id: x.id, blockedName: x.displayName }));
       const cv = ok(convoys); if (cv) next.convoys = cv.map(toConvoy);
       const g = ok(groups); if (g) next.groups = g.map(toGroup);
@@ -891,22 +911,125 @@ export class CloudSync {
     this.update((d) => apply(d, v));
   }
 
-  refreshFriends() {
-    return Promise.all([
-      this.refreshSection(() => this.ep.listFriends(), (d, f) => ({ ...d, friends: f.map(toFriend) })),
-      this.refreshSection(() => this.ep.listFriendRequests(), (d, r) => ({ ...d, friendRequests: toFriendRequests(r) })),
-      this.refreshSection(() => this.ep.getStats(), (d, s) => ({ ...d, profileStats: toStats(s) })),
-    ]).then(() => undefined);
+  /**
+   * Reloads friends, requests and stats.  Whatever loaded is applied in one go,
+   * unless a friend action finished meanwhile (then it's older than what the
+   * action showed, and dropped).  Rejects if any of the three failed.
+   */
+  async refreshFriends(): Promise<void> {
+    const version = this.friendsVersion;
+    const [friends, requests, stats] = await Promise.allSettled([
+      this.ep.listFriends(), this.ep.listFriendRequests(), this.ep.getStats(),
+    ]);
+    if (this.friendsVersion === version) {
+      this.update((d) => ({
+        ...d,
+        ...(friends.status === 'fulfilled' ? { friends: friends.value.map(toFriend) } : {}),
+        ...(requests.status === 'fulfilled' ? { friendRequests: toFriendRequests(requests.value) } : {}),
+        ...(stats.status === 'fulfilled' ? { profileStats: toStats(stats.value) } : {}),
+      }));
+    }
+    const failed = [friends, requests, stats].find((r) => r.status === 'rejected') as PromiseRejectedResult | undefined;
+    if (failed) throw failed.reason;
   }
 
-  async sendFriendRequest(friendCode: string) {
-    const r = await this.ep.sendFriendRequest(friendCode.trim().toUpperCase());
-    await this.refreshFriends();
-    return r.status;
+  /** One call per action and target at a time: a second tap joins the first. */
+  private friendAction<T>(key: string, run: () => Promise<T>): Promise<T> {
+    const running = this.friendActions.get(key) as Promise<T> | undefined;
+    if (running) return running;
+    const action = run().finally(() => this.friendActions.delete(key));
+    this.friendActions.set(key, action);
+    return action;
   }
-  async acceptFriendRequest(id: string) { await this.ep.acceptFriendRequest(id); await this.refreshFriends(); }
-  async declineFriendRequest(id: string) { await this.ep.declineFriendRequest(id); await this.refreshFriends(); }
-  async removeFriend(userId: string) { await this.ep.removeFriend(userId); await this.refreshFriends(); }
+
+  /**
+   * A friend action reached the server.  Its result shows at once (`apply`);
+   * the lists then catch up in the background, and a failure there never makes
+   * the action itself look failed (one retry follows shortly).
+   */
+  private friendActionDone(apply?: (d: CachedData) => CachedData) {
+    this.friendsVersion++;
+    if (apply) this.update(apply);
+    if (this.friendsRetry) clearTimeout(this.friendsRetry);
+    this.friendsRetry = null;
+    this.friendsSettled = this.refreshFriends().catch(() => new Promise<void>((resolve) => {
+      if (this.disposed) return resolve();
+      this.friendsRetry = setTimeout(() => {
+        this.friendsRetry = null;
+        this.refreshFriends().catch(() => {}).finally(resolve);
+      }, this.deps.friendsRetryMs ?? FRIENDS_RETRY_MS);
+    }));
+  }
+
+  /** Resolves once the lists have caught up with the latest friend action. */
+  whenFriendsSettled(): Promise<void> { return this.friendsSettled; }
+
+  /**
+   * Asks the driver with this code to be friends.  'accepted' when they had
+   * already asked (or asked at the same moment): you're friends now.
+   */
+  sendFriendRequest(friendCode: string): Promise<'pending' | 'accepted'> {
+    const code = friendCode.trim().toUpperCase();
+    return this.friendAction(`send:${code}`, async () => {
+      let status: 'pending' | 'accepted';
+      try {
+        status = (await this.ep.sendFriendRequest(code)).status;
+      } catch (err) {
+        // Our own request is already waiting (sent from another device, or
+        // the reply to an earlier send was lost): it stands, so this is sent
+        if (err instanceof ApiError && err.code === 'request_pending') status = 'pending';
+        else throw err;
+      }
+      this.friendActionDone();
+      return status;
+    });
+  }
+
+  acceptFriendRequest(id: string): Promise<void> {
+    return this.friendAction(`answer:${id}`, async () => {
+      const request = this.data.friendRequests.find((r) => r.id === id);
+      try {
+        await this.ep.acceptFriendRequest(id);
+      } catch (err) {
+        if (!(err instanceof ApiError && err.status === 404)) throw err;
+        // It's no longer pending (they cancelled it, or it was answered on
+        // another device): take it off the list, and say so
+        this.friendActionDone((d) => ({ ...d, friendRequests: d.friendRequests.filter((r) => r.id !== id) }));
+        throw new ApiError(404, 'request_gone', 'That friend request is no longer pending.');
+      }
+      this.friendActionDone((d) => ({
+        ...d,
+        friendRequests: d.friendRequests.filter((r) => r.id !== id),
+        friends: request && !d.friends.some((f) => f.id === request.fromId)
+          ? [...d.friends, { id: request.fromId, name: request.fromName, initials: request.fromInitials, status: 'offline', location: '' }]
+          : d.friends,
+      }));
+    });
+  }
+
+  declineFriendRequest(id: string): Promise<void> {
+    return this.friendAction(`answer:${id}`, async () => {
+      try {
+        await this.ep.declineFriendRequest(id);
+      } catch (err) {
+        // Already gone: declining it is done either way
+        if (!(err instanceof ApiError && err.status === 404)) throw err;
+      }
+      this.friendActionDone((d) => ({ ...d, friendRequests: d.friendRequests.filter((r) => r.id !== id) }));
+    });
+  }
+
+  removeFriend(userId: string): Promise<void> {
+    return this.friendAction(`remove:${userId}`, async () => {
+      try {
+        await this.ep.removeFriend(userId);
+      } catch (err) {
+        // Already removed (by them, or on another device)
+        if (!(err instanceof ApiError && err.status === 404)) throw err;
+      }
+      this.friendActionDone((d) => ({ ...d, friends: d.friends.filter((f) => f.id !== userId) }));
+    });
+  }
   async blockUser(userId: string) {
     await this.ep.block(userId);
     await this.refreshSection(() => this.ep.listBlocks(), (d, b) => ({ ...d, blockedUsers: b.map((x) => ({ id: x.id, blockedName: x.displayName })) }));
@@ -958,6 +1081,7 @@ export class CloudSync {
   dispose() {
     this.disposed = true;
     if (this.cacheTimer) clearTimeout(this.cacheTimer);
+    if (this.friendsRetry) clearTimeout(this.friendsRetry);
     // Background updates keep running (the drive goes on); with no listener,
     // their fixes are saved to the device for the next start().
     this.detachTracker?.();

@@ -4,7 +4,7 @@ import { describeError } from "@/lib/backend/http";
 import { KeyboardAwareScrollViewCompat } from "@/components/KeyboardAwareScrollViewCompat";
 import { KeyboardAwareSheet } from "@/components/KeyboardAwareSheet";
 import { ScreenTitle, Disclosure } from "@/components/Cockpit";
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import {
   SectionHeader,
   CommunityPreviewCard,
@@ -24,6 +24,7 @@ import {
   Alert,
   Switch,
   Image,
+  ActivityIndicator,
 } from "react-native";
 import { useRouter, useLocalSearchParams } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
@@ -97,9 +98,7 @@ export default function CommunityScreen() {
     addEvent,
     rsvpEvent,
     conversations,
-    startConversation,
     userProfile,
-    refreshProfileStats,
   } = useApp();
 
   const [activeTab, setActiveTab] = useState<CommunityTab>("overview");
@@ -166,6 +165,30 @@ export default function CommunityScreen() {
   // Friend search
   const [showAddFriend, setShowAddFriend] = useState(false);
   const [friendSearch, setFriendSearch] = useState("");
+  // Friend actions in flight: their buttons are disabled (and show a
+  // spinner) until the server answers, so a second tap can't send it twice
+  // (The refs see a tap made before the disabled button has re-rendered.)
+  const [sendingRequest, setSendingRequest] = useState(false);
+  const sendingRef = useRef(false);
+  const [friendBusy, setFriendBusy] = useState<
+    Record<string, "accept" | "decline" | "remove">
+  >({});
+  const friendBusyRef = useRef(new Set<string>());
+  async function runFriendAction(
+    id: string,
+    kind: "accept" | "decline" | "remove",
+    action: () => Promise<boolean>,
+  ) {
+    if (friendBusyRef.current.has(id)) return false;
+    friendBusyRef.current.add(id);
+    setFriendBusy((b) => ({ ...b, [id]: kind }));
+    try {
+      return await action();
+    } finally {
+      friendBusyRef.current.delete(id);
+      setFriendBusy(({ [id]: _done, ...rest }) => rest);
+    }
+  }
 
   const styles = StyleSheet.create({
     container: { flex: 1, backgroundColor: colors.background },
@@ -713,17 +736,18 @@ export default function CommunityScreen() {
   }
 
   function handleRemoveFriend(f: Friend) {
+    if (friendBusyRef.current.has(f.id)) return;
     Alert.alert("Remove Friend", `Remove ${f.name} from your friends?`, [
       { text: "Cancel", style: "cancel" },
       {
         text: "Remove",
         style: "destructive",
         onPress: () => {
-          removeFriend(f.id);
-          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-          // refreshProfileStats is called inside removeFriend in AppContext
-          // but we also refresh here after the animation to reconcile
-          setTimeout(() => refreshProfileStats(), 500);
+          void runFriendAction(f.id, "remove", () => removeFriend(f.id)).then(
+            (done) => {
+              if (done) Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+            },
+          );
         },
       },
     ]);
@@ -885,33 +909,23 @@ export default function CommunityScreen() {
             <Text style={styles.statusText}>{STATUS_LABEL[item.status]}</Text>
           </View>
         </View>
+        {/* No message button until messaging exists */}
         <View style={styles.friendActions}>
           <TouchableOpacity
             style={styles.iconAction}
-            onPress={() => {
-              const convId = startConversation(
-                item.id,
-                item.name,
-                item.initials,
-              );
-              router.push(`/conversation/${convId}`);
-            }}
-          >
-            <Ionicons
-              name="chatbubble-outline"
-              size={16}
-              color={colors.foreground}
-            />
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={styles.iconAction}
             onPress={() => handleRemoveFriend(item)}
+            disabled={!!friendBusy[item.id]}
+            accessibilityLabel={`Remove ${item.name}`}
           >
-            <Ionicons
-              name="person-remove-outline"
-              size={16}
-              color={colors.destructive}
-            />
+            {friendBusy[item.id] ? (
+              <ActivityIndicator size="small" color={colors.destructive} />
+            ) : (
+              <Ionicons
+                name="person-remove-outline"
+                size={16}
+                color={colors.destructive}
+              />
+            )}
           </TouchableOpacity>
         </View>
       </GlassSurface>
@@ -1499,22 +1513,47 @@ export default function CommunityScreen() {
                       style={[
                         styles.primaryBtn,
                         { paddingHorizontal: 14, flex: 0 },
+                        !!friendBusy[req.id] && { opacity: 0.6 },
                       ]}
+                      disabled={!!friendBusy[req.id]}
                       onPress={() => {
-                        acceptFriendRequest(req.id);
-                        Haptics.notificationAsync(
-                          Haptics.NotificationFeedbackType.Success,
-                        );
-                        refreshProfileStats();
+                        void runFriendAction(req.id, "accept", () =>
+                          acceptFriendRequest(req.id),
+                        ).then((done) => {
+                          if (done) {
+                            Haptics.notificationAsync(
+                              Haptics.NotificationFeedbackType.Success,
+                            );
+                          }
+                        });
                       }}
                     >
-                      <Text style={styles.primaryBtnText}>Accept</Text>
+                      {friendBusy[req.id] === "accept" ? (
+                        <ActivityIndicator size="small" color="#fff" />
+                      ) : (
+                        <Text style={styles.primaryBtnText}>Accept</Text>
+                      )}
                     </TouchableOpacity>
                     <TouchableOpacity
-                      style={[styles.secondaryBtn]}
-                      onPress={() => declineFriendRequest(req.id)}
+                      style={[
+                        styles.secondaryBtn,
+                        !!friendBusy[req.id] && { opacity: 0.6 },
+                      ]}
+                      disabled={!!friendBusy[req.id]}
+                      onPress={() => {
+                        void runFriendAction(req.id, "decline", () =>
+                          declineFriendRequest(req.id),
+                        );
+                      }}
                     >
-                      <Text style={styles.secondaryBtnText}>Decline</Text>
+                      {friendBusy[req.id] === "decline" ? (
+                        <ActivityIndicator
+                          size="small"
+                          color={colors.foreground}
+                        />
+                      ) : (
+                        <Text style={styles.secondaryBtnText}>Decline</Text>
+                      )}
                     </TouchableOpacity>
                   </View>
                 </View>
@@ -1800,8 +1839,10 @@ export default function CommunityScreen() {
               Share your code or send a link so friends can find you directly.
             </Text>
             <TouchableOpacity
-              style={styles.submitBtn}
+              style={[styles.submitBtn, sendingRequest && { opacity: 0.6 }]}
+              disabled={sendingRequest}
               onPress={async () => {
+                if (sendingRef.current) return;
                 const code = friendSearch.replace(/\s+/g, "").toUpperCase();
                 if (!/^[A-Z0-9]{8}$/.test(code)) {
                   Alert.alert(
@@ -1810,6 +1851,8 @@ export default function CommunityScreen() {
                   );
                   return;
                 }
+                sendingRef.current = true;
+                setSendingRequest(true);
                 try {
                   const result = await sendFriendRequest(code);
                   setFriendSearch("");
@@ -1824,10 +1867,17 @@ export default function CommunityScreen() {
                   );
                 } catch (err) {
                   Alert.alert("Request not sent", describeError(err));
+                } finally {
+                  sendingRef.current = false;
+                  setSendingRequest(false);
                 }
               }}
             >
-              <Text style={styles.submitBtnText}>Send Request</Text>
+              {sendingRequest ? (
+                <ActivityIndicator color="#fff" />
+              ) : (
+                <Text style={styles.submitBtnText}>Send Request</Text>
+              )}
             </TouchableOpacity>
           </GlassSurface>
         </KeyboardAwareSheet>

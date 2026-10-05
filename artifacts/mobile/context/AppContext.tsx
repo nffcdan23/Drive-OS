@@ -100,9 +100,10 @@ interface AppContextValue {
   friends: Friend[];
   friendRequests: FriendRequest[];
   sendFriendRequest: (friendCode: string) => Promise<'pending' | 'accepted'>;
-  acceptFriendRequest: (id: string) => void;
-  declineFriendRequest: (id: string) => void;
-  removeFriend: (id: string) => void;
+  /** Each resolves true once done on the server (a failure is reported, and resolves false) */
+  acceptFriendRequest: (id: string) => Promise<boolean>;
+  declineFriendRequest: (id: string) => Promise<boolean>;
+  removeFriend: (id: string) => Promise<boolean>;
   blockedUsers: BlockedUser[];
   blockUser: (id: string, name: string) => void;
   unblockUser: (id: string) => void;
@@ -355,6 +356,13 @@ export function AppProvider({ userId, children }: { userId: string; children: Re
           .catch((err) => reportFailure(label, err))
           .finally(() => { if (after) after().catch(() => {}); });
       };
+    // Like online(), but the caller can wait for it (to show it's in progress)
+    const awaited = <A extends unknown[]>(label: string, fn: (...a: A) => Promise<unknown>) =>
+      (...args: A): Promise<boolean> =>
+        Promise.resolve().then(() => fn(...args)).then(
+          () => true,
+          (err) => { reportFailure(label, err); return false; },
+        );
     return {
       retryJourneySync: () => cloud.syncJourneys().then(() => cloud.refresh()),
       retrySync: async () => { if (api) await api.ping(); await cloud.sync(); },
@@ -387,9 +395,9 @@ export function AppProvider({ userId, children }: { userId: string; children: Re
       findNearbySpots: (lat: number, lng: number, r?: number) => cloud.nearbySpots(lat, lng, r),
 
       sendFriendRequest: (code: string) => cloud.sendFriendRequest(code),
-      acceptFriendRequest: online('Could not accept the request', (id: string) => cloud.acceptFriendRequest(id)),
-      declineFriendRequest: online('Could not decline the request', (id: string) => cloud.declineFriendRequest(id)),
-      removeFriend: online('Could not remove the friend', (id: string) => cloud.removeFriend(id)),
+      acceptFriendRequest: awaited('Could not accept the request', (id: string) => cloud.acceptFriendRequest(id)),
+      declineFriendRequest: awaited('Could not decline the request', (id: string) => cloud.declineFriendRequest(id)),
+      removeFriend: awaited('Could not remove the friend', (id: string) => cloud.removeFriend(id)),
       blockUser: online('Could not block this driver', (id: string, _name: string) => cloud.blockUser(id)),
       unblockUser: online('Could not unblock this driver', (id: string) => cloud.unblockUser(id)),
 

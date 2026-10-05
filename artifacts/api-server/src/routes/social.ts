@@ -27,6 +27,22 @@ async function befriend(tx: Tx, a: string, b: string) {
     on conflict do nothing`);
 }
 
+/**
+ * `me` answers `other`'s pending request by asking them back: accept it,
+ * locked, so it can't be accepted twice. Null when there's no such request.
+ */
+async function acceptIncoming(tx: Tx, me: string, other: string) {
+  const incoming = first<{ id: string }>(await tx.execute(sql`
+    select id from public.friend_requests
+    where from_user_id = ${other} and to_user_id = ${me} and status = 'pending' for update`));
+  if (!incoming) return null;
+  await tx.execute(sql`update public.friend_requests set status = 'accepted', responded_at = now() where id = ${incoming.id}`);
+  await befriend(tx, me, other);
+  await notify(tx, { userId: other, actorId: me, type: "friend_accepted",
+    title: `${await displayName(tx, me)} accepted your friend request`, data: { userId: me } });
+  return { status: 200, body: { id: incoming.id, status: "accepted" } };
+}
+
 // ─── Friends ────────────────────────────────────────────────────────────────
 
 // GET /api/friends
@@ -89,23 +105,23 @@ router.post("/friend-requests", requireUser, requestLimit, handler(async (req, r
       throw conflict("already_friends", "You're already friends.");
     }
     // If they already asked us, accept their request instead of making a second one.
-    const incoming = first<{ id: string }>(await tx.execute(sql`
-      select id from public.friend_requests
-      where from_user_id = ${target.id} and to_user_id = ${req.userId} and status = 'pending' for update`));
-    if (incoming) {
-      await tx.execute(sql`update public.friend_requests set status = 'accepted', responded_at = now() where id = ${incoming.id}`);
-      await befriend(tx, req.userId, target.id);
-      await notify(tx, { userId: target.id, actorId: req.userId, type: "friend_accepted",
-        title: `${await displayName(tx, req.userId)} accepted your friend request`, data: { userId: req.userId } });
-      return { status: 200, body: { id: incoming.id, status: "accepted" } };
-    }
+    const accepted = await acceptIncoming(tx, req.userId, target.id);
+    if (accepted) return accepted;
     if (!first<{ ok: boolean }>(await tx.execute(sql`select private.accepts_friend_requests(${target.id}) as ok`))?.ok) {
       throw forbidden("not_accepting_requests", "This driver isn't accepting friend requests.");
     }
     const created = first<{ id: string }>(await tx.execute(sql`
       insert into public.friend_requests (from_user_id, to_user_id) values (${req.userId}, ${target.id})
       on conflict do nothing returning id`));
-    if (!created) throw conflict("request_pending", "A friend request is already pending.");
+    if (!created) {
+      // A pending request between the two already exists.  If it's theirs,
+      // they asked us at the same moment: the insert waited for their request
+      // to commit (one pending request per pair), and it's visible now, so
+      // accept it and both ask-each-other requests end in one friendship.
+      const raced = await acceptIncoming(tx, req.userId, target.id);
+      if (raced) return raced;
+      throw conflict("request_pending", "A friend request is already pending.");
+    }
     await notify(tx, { userId: target.id, actorId: req.userId, type: "friend_request",
       title: `${await displayName(tx, req.userId)} sent you a friend request`, data: { requestId: created.id, userId: req.userId } });
     return { status: 201, body: { id: created.id, status: "pending" } };

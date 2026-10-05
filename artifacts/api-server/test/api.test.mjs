@@ -412,6 +412,40 @@ test("friend requests: only the recipient can accept; blocks end everything", as
   expect(await del(b, `/blocks/${a.id}`), 204, "unblock");
 });
 
+test("friend requests: two drivers asking each other at the same moment become friends", async () => {
+  const outcomes = new Map();
+  for (let i = 0; i < 25; i++) {
+    const a = await newUser(`Mutual A${i}`);
+    const b = await newUser(`Mutual B${i}`);
+    const [codeA, codeB] = [(await get(a, "/me")).body.friendCode, (await get(b, "/me")).body.friendCode];
+    const [ra, rb] = await Promise.all([
+      post(a, "/friend-requests", { friendCode: codeB }),
+      post(b, "/friend-requests", { friendCode: codeA }),
+    ]);
+    const key = [`${ra.status}:${ra.body.status}`, `${rb.status}:${rb.body.status}`].sort().join(" + ");
+    outcomes.set(key, (outcomes.get(key) ?? 0) + 1);
+    // Never a "request already pending" for either of them: one asks, the other's ask accepts it
+    assert.equal(key, "200:accepted + 201:pending", `pair ${i}: ${JSON.stringify([ra.body, rb.body])}`);
+    // Exactly one friendship (both directions) and no pending request left behind
+    const rows = await db.query(
+      `select (select count(*)::int from public.friendships where (user_id = $1 and friend_id = $2) or (user_id = $2 and friend_id = $1)) as friendships,
+              (select count(*)::int from public.friend_requests where status = 'pending' and ((from_user_id = $1 and to_user_id = $2) or (from_user_id = $2 and to_user_id = $1))) as pending,
+              (select count(*)::int from public.friend_requests where (from_user_id = $1 and to_user_id = $2) or (from_user_id = $2 and to_user_id = $1)) as requests`,
+      [a.id, b.id]);
+    assert.deepEqual(rows.rows[0], { friendships: 2, pending: 0, requests: 1 });
+    assert.equal((await get(a, "/friends")).body.length, 1);
+    assert.equal((await get(b, "/friends")).body.length, 1);
+    assert.deepEqual((await get(a, "/friend-requests")).body, { incoming: [], outgoing: [] });
+    assert.deepEqual((await get(b, "/friend-requests")).body, { incoming: [], outgoing: [] });
+  }
+  // Asking twice yourself is still one request (the second is told it's pending)
+  const c = await newUser("Twice C");
+  const d = await newUser("Twice D");
+  const twice = await Promise.all([post(c, "/friend-requests", { userId: d.id }), post(c, "/friend-requests", { userId: d.id })]);
+  assert.deepEqual(twice.map((r) => r.status).sort(), [201, 409]);
+  assert.equal(twice.find((r) => r.status === 409).body.error, "request_pending");
+});
+
 // ─── Convoys ────────────────────────────────────────────────────────────────
 
 test("convoys: private visibility, join codes, capacity under concurrency", async () => {

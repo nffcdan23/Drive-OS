@@ -3370,3 +3370,257 @@ test('keyboard avoidance is measured, never a fixed shift', () => {
   const avoiding = sourceFiles(join(MOBILE, 'app')).filter((f) => /<KeyboardAvoidingView\b/.test(readFileSync(f, 'utf8'))).map((f) => relative(MOBILE, f)).sort();
   assert.deepEqual(avoiding, ['app/conversation/[id].tsx', 'app/search.tsx']);
 });
+
+// ─── Friends: two drivers, one server ───────────────────────────────────────
+// A fake server with the real API's rules (one pending request per pair, a
+// request back accepts the first, only the recipient accepts), shared by two
+// apps' CloudSync.  Any call can be made to fail or to answer late: a late
+// list answers with the state as it was when it was asked.
+
+type FriendCall = 'listFriends' | 'listFriendRequests' | 'getStats' | 'sendFriendRequest' | 'acceptFriendRequest' | 'declineFriendRequest' | 'removeFriend';
+
+class FriendsWorld {
+  users = new Map<string, { id: string; name: string; code: string }>();
+  requests: { id: string; from: string; to: string; status: 'pending' | 'accepted' | 'declined' | 'cancelled' }[] = [];
+  friendships = new Set<string>();
+  calls: string[] = [];
+  fail = new Set<string>();
+  hold = new Map<string, Promise<void>>();
+  private n = 0;
+
+  addUser(id: string, name: string, code: string) { this.users.set(id, { id, name, code }); }
+  card(id: string) { const u = this.users.get(id)!; return { id, username: null, displayName: u.name, avatarUrl: null, level: 1 }; }
+  areFriends(a: string, b: string) { return this.friendships.has(`${a}|${b}`) && this.friendships.has(`${b}|${a}`); }
+  pending(a: string, b: string) { return this.requests.filter((r) => r.status === 'pending' && ((r.from === a && r.to === b) || (r.from === b && r.to === a))); }
+
+  ep(me: string): Endpoints {
+    const world = this;
+    const answer = async <T>(call: FriendCall, compute: () => T): Promise<T> => {
+      world.calls.push(`${me}:${call}`);
+      const snapshot = compute();
+      await world.hold.get(`${me}:${call}`);
+      if (world.fail.has(`${me}:${call}`)) throw new NetworkError();
+      return snapshot;
+    };
+    const act = async <T>(call: FriendCall, run: () => T): Promise<T> => {
+      world.calls.push(`${me}:${call}`);
+      await world.hold.get(`${me}:${call}`);
+      if (world.fail.has(`${me}:${call}`)) throw new NetworkError();
+      return run();
+    };
+    const befriend = (a: string, b: string) => { world.friendships.add(`${a}|${b}`); world.friendships.add(`${b}|${a}`); };
+    const handlers: Partial<Record<keyof Endpoints, unknown>> = {
+      getMe: async () => ({ id: me, username: null, displayName: world.users.get(me)!.name, bio: '', avatarUrl: null, friendCode: world.users.get(me)!.code, xp: 0, level: 1, xpIntoLevel: 0, xpToNextLevel: 1000, totalDistanceKm: 0, totalJourneys: 0, createdAt: '', settings: null }),
+      listNotifications: async () => ({ items: [], unreadCount: 0 }),
+      listFriends: () => answer('listFriends', () => [...world.users.keys()].filter((id) => world.friendships.has(`${me}|${id}`)).map((id) => ({ ...world.card(id), since: '' }))),
+      listFriendRequests: () => answer('listFriendRequests', () => {
+        const mine = world.requests.filter((r) => r.status === 'pending' && (r.from === me || r.to === me));
+        const row = (r: typeof mine[number]) => ({ id: r.id, createdAt: '', user: world.card(r.from === me ? r.to : r.from) });
+        return { incoming: mine.filter((r) => r.to === me).map(row), outgoing: mine.filter((r) => r.from === me).map(row) };
+      }),
+      getStats: () => answer('getStats', () => ({ friends: [...world.friendships].filter((f) => f.startsWith(`${me}|`)).length, vehicles: 0, journeys: 0, totalDistanceKm: 0 })),
+      sendFriendRequest: (code: string) => act('sendFriendRequest', () => {
+        const target = [...world.users.values()].find((u) => u.code === code);
+        if (!target) throw new ApiError(404, 'user_not_found', 'No driver has that friend code.');
+        if (target.id === me) throw new ApiError(400, 'cannot_add_self', "That's your own friend code.");
+        if (world.areFriends(me, target.id)) throw new ApiError(409, 'already_friends', "You're already friends.");
+        const pending = world.pending(me, target.id)[0];
+        if (pending?.from === target.id) {
+          pending.status = 'accepted';
+          befriend(me, target.id);
+          return { id: pending.id, status: 'accepted' as const };
+        }
+        if (pending) throw new ApiError(409, 'request_pending', 'A friend request is already pending.');
+        const r = { id: `fr${++world.n}`, from: me, to: target.id, status: 'pending' as const };
+        world.requests.push(r);
+        return { id: r.id, status: 'pending' as const };
+      }),
+      acceptFriendRequest: (id: string) => act('acceptFriendRequest', () => {
+        const r = world.requests.find((x) => x.id === id && x.to === me && x.status === 'pending');
+        if (!r) throw new ApiError(404, 'not_found', 'Not found.');
+        r.status = 'accepted';
+        befriend(me, r.from);
+      }),
+      declineFriendRequest: (id: string) => act('declineFriendRequest', () => {
+        const r = world.requests.find((x) => x.id === id && x.to === me && x.status === 'pending');
+        if (!r) throw new ApiError(404, 'not_found', 'Not found.');
+        r.status = 'declined';
+      }),
+      removeFriend: (other: string) => act('removeFriend', () => {
+        if (!world.areFriends(me, other)) throw new ApiError(404, 'not_found', 'Not found.');
+        world.friendships.delete(`${me}|${other}`);
+        world.friendships.delete(`${other}|${me}`);
+      }),
+    };
+    return new Proxy(handlers, { get: (h, name) => (h as Record<string | symbol, unknown>)[name] ?? (async () => []) }) as unknown as Endpoints;
+  }
+
+  async app(me: string) {
+    const app = new CloudSync({
+      ep: this.ep(me), store: new MemoryStore(), userId: me, publishableKey: 'sb_publishable_x', newId: () => Math.random().toString(36).slice(2),
+      timezone: () => 'UTC', friendsRetryMs: 5,
+      prepareFile: async () => ({ body: new Uint8Array([1]), size: 1, mimeType: 'image/jpeg' }),
+    });
+    await app.start();
+    return app;
+  }
+
+  count(prefix: string) { return this.calls.filter((c) => c === prefix).length; }
+}
+
+async function twoDrivers() {
+  const world = new FriendsWorld();
+  world.addUser('alice', 'Alice Hart', 'ALICE234');
+  world.addUser('bob', 'Bob Lane', 'BOBLANE5');
+  return { world, alice: await world.app('alice'), bob: await world.app('bob') };
+}
+/** What each app shows in the Friends tab */
+const friendsShown = (app: CloudSync) => app.data.friends.map((f) => f.name).sort();
+const incomingShown = (app: CloudSync) => app.data.friendRequests.filter((r) => r.isIncoming && r.status === 'pending').map((r) => r.fromName);
+
+test('friends: Alice sends by code, Bob sees it, accepts, and both are friends', async () => {
+  const { world, alice, bob } = await twoDrivers();
+  assert.equal(await alice.sendFriendRequest(' boblane5 '), 'pending');
+  await alice.whenFriendsSettled();
+  assert.deepEqual(incomingShown(alice), [], "the sender's own request isn't an incoming one");
+  await bob.refresh();
+  assert.deepEqual(incomingShown(bob), ['Alice Hart']);
+  const request = bob.data.friendRequests[0]!;
+  await bob.acceptFriendRequest(request.id);
+  // Shown at once, before the lists reload
+  assert.deepEqual(friendsShown(bob), ['Alice Hart']);
+  assert.deepEqual(incomingShown(bob), []);
+  await bob.whenFriendsSettled();
+  await alice.refresh();
+  assert.deepEqual(friendsShown(alice), ['Bob Lane']);
+  assert.deepEqual(friendsShown(bob), ['Alice Hart']);
+  assert.ok(world.areFriends('alice', 'bob'));
+  assert.equal(world.pending('alice', 'bob').length, 0);
+  assert.equal(bob.data.profileStats.friends, 1);
+});
+
+test('friends: asking each other at the same moment ends in one friendship, no error on either side', async () => {
+  const { world, alice, bob } = await twoDrivers();
+  const results = await Promise.all([alice.sendFriendRequest('BOBLANE5'), bob.sendFriendRequest('ALICE234')]);
+  assert.deepEqual([...results].sort(), ['accepted', 'pending']);
+  await Promise.all([alice.whenFriendsSettled(), bob.whenFriendsSettled()]);
+  await Promise.all([alice.refresh(), bob.refresh()]);
+  assert.deepEqual(friendsShown(alice), ['Bob Lane']);
+  assert.deepEqual(friendsShown(bob), ['Alice Hart']);
+  assert.deepEqual([incomingShown(alice), incomingShown(bob)], [[], []]);
+  assert.equal(world.pending('alice', 'bob').length, 0);
+  assert.equal(world.requests.length, 1, 'one request, accepted by the other ask');
+});
+
+test('friends: a double-tapped Send makes one request; sending again while it waits is not an error', async () => {
+  const { world, alice } = await twoDrivers();
+  const taps = await Promise.all([alice.sendFriendRequest('BOBLANE5'), alice.sendFriendRequest('BOBLANE5')]);
+  assert.deepEqual(taps, ['pending', 'pending']);
+  assert.equal(world.count('alice:sendFriendRequest'), 1, 'one request reached the server');
+  // A later send to the same driver (another device, a lost reply) stands as sent
+  assert.equal(await alice.sendFriendRequest('BOBLANE5'), 'pending');
+  assert.equal(world.requests.length, 1);
+  await assert.rejects(alice.sendFriendRequest('ZZZZZZZZ'), /No driver has that friend code/);
+  await assert.rejects(alice.sendFriendRequest('ALICE234'), /your own friend code/);
+});
+
+test('friends: a double-tapped Accept (or Accept then Decline) answers once, without an error', async () => {
+  const { world, alice, bob } = await twoDrivers();
+  await alice.sendFriendRequest('BOBLANE5');
+  await bob.refresh();
+  const id = bob.data.friendRequests[0]!.id;
+  await Promise.all([bob.acceptFriendRequest(id), bob.acceptFriendRequest(id), bob.declineFriendRequest(id)]);
+  assert.equal(world.count('bob:acceptFriendRequest'), 1);
+  assert.equal(world.count('bob:declineFriendRequest'), 0);
+  assert.deepEqual(friendsShown(bob), ['Alice Hart']);
+  assert.ok(world.areFriends('alice', 'bob'));
+  // A request that's gone (cancelled, or answered elsewhere) comes off the list with a clear message
+  await assert.rejects(bob.acceptFriendRequest(id), /no longer pending/);
+  // Remove: twice at once is one call; already removed counts as removed
+  await bob.whenFriendsSettled();
+  await Promise.all([bob.removeFriend('alice'), bob.removeFriend('alice')]);
+  assert.equal(world.count('bob:removeFriend'), 1);
+  assert.deepEqual(friendsShown(bob), []);
+  await alice.removeFriend('bob');
+  assert.deepEqual(friendsShown(alice), []);
+});
+
+test('friends: an action that succeeded is shown as done even if the refresh after it fails', async () => {
+  const { world, alice, bob } = await twoDrivers();
+  // Send: the request reached the server; the lists can't be reloaded
+  world.fail.add('alice:getStats');
+  world.fail.add('alice:listFriendRequests');
+  assert.equal(await alice.sendFriendRequest('BOBLANE5'), 'pending');
+  world.fail.clear();
+  await alice.whenFriendsSettled();
+  assert.equal(alice.data.friendRequests.filter((r) => !r.isIncoming).length, 1, 'the retry caught up');
+
+  // Accept: done on the server, but every reload fails for a while
+  await bob.refresh();
+  const id = bob.data.friendRequests[0]!.id;
+  for (const call of ['listFriends', 'listFriendRequests', 'getStats']) world.fail.add(`bob:${call}`);
+  await bob.acceptFriendRequest(id);
+  assert.deepEqual(friendsShown(bob), ['Alice Hart'], 'the new friend shows straight away');
+  assert.deepEqual(incomingShown(bob), [], 'the request is gone');
+  // The first reload fails; the retry after it succeeds
+  await new Promise((r) => setTimeout(r, 1));
+  world.fail.clear();
+  await bob.whenFriendsSettled();
+  assert.deepEqual(friendsShown(bob), ['Alice Hart']);
+  assert.equal(bob.data.profileStats.friends, 1);
+  assert.ok(world.calls.filter((c) => c === 'bob:listFriends').length >= 2, 'retried');
+});
+
+test('friends: a refresh started before an action never puts the older state back', async () => {
+  const { world, alice, bob } = await twoDrivers();
+  await alice.sendFriendRequest('BOBLANE5');
+  await bob.refresh();
+  const id = bob.data.friendRequests[0]!.id;
+
+  // The app comes to the foreground: a full sync asks for the lists (answered late)
+  let release!: () => void;
+  world.hold.set('bob:listFriends', new Promise<void>((r) => { release = r; }));
+  const sync = bob.refresh();
+  await new Promise((r) => setTimeout(r, 1));
+  world.hold.clear();
+  await bob.acceptFriendRequest(id);
+  // Every state the screen is given from here on, not just the last one
+  const shown: string[] = [];
+  const unsubscribe = bob.subscribe(() => shown.push(`${friendsShown(bob).join(',')}|${incomingShown(bob).join(',')}`));
+  await bob.whenFriendsSettled();
+  release();
+  await sync;
+  unsubscribe();
+  assert.deepEqual(friendsShown(bob), ['Alice Hart'], 'the old (empty) friends list was applied over the accept');
+  assert.deepEqual(incomingShown(bob), [], 'the accepted request came back');
+  assert.ok(shown.length > 0 && shown.every((s) => s === 'Alice Hart|'), `the older state flashed back: ${[...new Set(shown)].join(' / ')}`);
+
+  // The same for a friends-only reload started before a remove
+  let release2!: () => void;
+  world.hold.set('bob:listFriends', new Promise<void>((r) => { release2 = r; }));
+  const reload = bob.refreshFriends();
+  await new Promise((r) => setTimeout(r, 1));
+  world.hold.clear();
+  await bob.removeFriend('alice');
+  await bob.whenFriendsSettled();
+  release2();
+  await reload;
+  assert.deepEqual(friendsShown(bob), [], 'the removed friend came back');
+  assert.ok(!world.areFriends('alice', 'bob'));
+});
+
+test('the friends list has no path to a missing screen (no message button until messaging exists)', () => {
+  const src = readFileSync(toPath(new URL('../app/(tabs)/community.tsx', import.meta.url)), 'utf8');
+  const code = src.replace(/\/\/.*$/gm, '').replace(/\{\/\*[\s\S]*?\*\/\}/g, '');
+  assert.ok(!/startConversation/.test(code), 'messaging is started from the Social screen');
+  assert.ok(!/\/conversation/.test(code), 'the Social screen links to a conversation');
+  // The friend card itself navigates nowhere
+  const row = code.slice(code.indexOf('function FriendRow'), code.indexOf('function GroupCard'));
+  assert.ok(row.length > 200 && !/router\.|<Link\b|href=/.test(row));
+  // Every friend action button is disabled while it's in flight
+  for (const action of ['acceptFriendRequest(req.id)', 'declineFriendRequest(req.id)', 'removeFriend(f.id)']) {
+    assert.ok(new RegExp(`runFriendAction\\([^)]*\\)?[^;]*${action.replace(/[.()]/g, '\\$&')}`).test(code), `${action} isn't guarded`);
+  }
+  assert.equal(code.match(/disabled=\{!!friendBusy\[(req|item)\.id\]\}/g)?.length, 3);
+  assert.ok(/disabled=\{sendingRequest\}/.test(code) && /if \(sendingRef\.current\) return;/.test(code));
+});
