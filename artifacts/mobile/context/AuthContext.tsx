@@ -2,10 +2,11 @@
  * Authentication state for the app: the Supabase session and the sign-in
  * methods (email + password, Sign in with Apple, Sign in with Google).
  * The session is kept in the device's secure keychain, so users stay signed
- * in across restarts; signing in on another phone gives the same account.
+ * in across restarts (unless they turn off "Keep me signed in"); signing in
+ * on another phone gives the same account.
  */
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
-import { Platform } from 'react-native';
+import { AppState, Platform } from 'react-native';
 import * as Linking from 'expo-linking';
 import * as WebBrowser from 'expo-web-browser';
 import * as Crypto from 'expo-crypto';
@@ -36,6 +37,12 @@ async function traced<T>(operation: string, fn: () => Promise<T>, redirect?: str
   }
 }
 
+/**
+ * "Keep me signed in" switched off: the session is kept while the app runs
+ * and removed the next time the app is opened. Stored next to the session.
+ */
+const END_SESSION_ON_LAUNCH = 'derwent.auth.endSessionOnLaunch';
+
 /** Where Supabase sends users back to the app (must be allow-listed in Supabase Auth). */
 export const authRedirectUrl = () => Linking.createURL('auth/callback');
 
@@ -53,6 +60,8 @@ interface AuthContextValue {
   /** True after opening a password-reset link, until a new password is set. */
   recoveringPassword: boolean;
   appleAvailable: boolean;
+  /** Whether the next sign-in should survive the app being closed (default: yes). */
+  setKeepSignedIn: (keep: boolean) => Promise<void>;
   signIn: (email: string, password: string) => Promise<void>;
   signUp: (email: string, password: string, displayName?: string) => Promise<{ needsConfirmation: boolean }>;
   signInWithApple: () => Promise<void>;
@@ -82,12 +91,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     // for ~25 s before answering. Don't hold the splash screen that long: if
     // a session is saved on this phone, open the app from it (cached data,
     // offline banner) and let getSession's answer correct it afterwards.
+    // A foreground launch ends a session the user chose not to keep. Not a
+    // background launch (e.g. for drive recording): the app isn't "opened".
+    const endUnkeptSession = async () => {
+      if (AppState.currentState === 'background') return;
+      if ((await authStorage.getItem(END_SESSION_ON_LAUNCH)) !== '1') return;
+      const key = (client.auth as unknown as { storageKey?: string }).storageKey;
+      if (key) await authStorage.removeItem(key);
+      await authStorage.removeItem(END_SESSION_ON_LAUNCH);
+    };
     const early = setTimeout(() => {
       void storedSessionUser(client, authStorage).then((saved) => {
         if (mounted && !settled && saved) { setOfflineUser(saved); setInitialising(false); }
       });
     }, 1_500);
-    client.auth.getSession().then(async ({ data, error }) => {
+    endUnkeptSession().catch(() => {}).then(() => client.auth.getSession()).then(async ({ data, error }) => {
       settled = true;
       // Offline with an expired access token: supabase-js can't refresh and
       // reports no session, but the user never signed out. Stay signed in from
@@ -133,6 +151,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }).catch(() => {});
     return () => sub.remove();
   }, [handleAuthUrl]);
+
+  const setKeepSignedIn = useCallback(async (keep: boolean) => {
+    if (keep) await authStorage.removeItem(END_SESSION_ON_LAUNCH);
+    else await authStorage.setItem(END_SESSION_ON_LAUNCH, '1');
+  }, []);
 
   const signIn = useCallback(async (email: string, password: string) => {
     await traced('sign in (email)', () => signInWithEmail(client(), email, password));
@@ -209,9 +232,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const value = useMemo<AuthContextValue>(() => ({
     session, userId: session?.user.id ?? offlineUser?.id ?? null, offline: !session && !!offlineUser, linkError,
     email: session?.user.email ?? offlineUser?.email ?? null, initialising, recoveringPassword,
-    appleAvailable, signIn, signUp, signInWithApple, signInWithGoogle, requestPasswordReset, setNewPassword,
+    appleAvailable, setKeepSignedIn, signIn, signUp, signInWithApple, signInWithGoogle, requestPasswordReset, setNewPassword,
     handleAuthUrl, signOut,
-  }), [session, offlineUser, linkError, initialising, recoveringPassword, appleAvailable, signIn, signUp, signInWithApple, signInWithGoogle,
+  }), [session, offlineUser, linkError, initialising, recoveringPassword, appleAvailable, setKeepSignedIn, signIn, signUp, signInWithApple, signInWithGoogle,
     requestPasswordReset, setNewPassword, handleAuthUrl, signOut]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
