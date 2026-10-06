@@ -95,7 +95,12 @@ export interface Friend {
   id: string;
   name: string;
   initials: string;
+  /** What the UI shows: Away is shown as offline for now (see `presence`). */
   status: 'online' | 'offline' | 'driving';
+  /** The server's status, including Away; null when the friend doesn't share it. */
+  presence: 'online' | 'away' | 'offline' | 'driving' | null;
+  /** When they were last active; null if unknown or not shared. */
+  lastSeenAt: string | null;
   location: string;
   avatarUrl?: string | null;
   level?: number;

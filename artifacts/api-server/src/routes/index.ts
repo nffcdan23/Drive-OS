@@ -11,6 +11,7 @@ import convoysRouter from "./convoys";
 import groupsRouter from "./groups";
 import eventsRouter from "./events";
 import notificationsRouter from "./notifications";
+import presenceRouter from "./presence";
 
 const router: IRouter = Router();
 
@@ -26,5 +27,6 @@ router.use(convoysRouter);
 router.use(groupsRouter);
 router.use(eventsRouter);
 router.use(notificationsRouter);
+router.use(presenceRouter);
 
 export default router;

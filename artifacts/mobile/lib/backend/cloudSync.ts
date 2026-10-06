@@ -21,6 +21,7 @@ import {
   setRecordPaused, syncJourneyRecord, type FixRef, type GpsFix, type JourneyRecord,
 } from './journeyRecorder';
 import type { BackgroundTracking, DriveTracker } from './driveTracking';
+import type { DriveState } from './presence';
 import {
   toCategory, toConvoy, toEvent, toFriend, toFriendRequests, toGroup, toJourney, toNearbySpot, toNotification,
   toPlace, toProfile, toStats, toVehicle, vehicleFields,
@@ -107,6 +108,9 @@ export class CloudSync {
   private lastFix: FixRef | null = null;
   private passenger = false;
   private fixListeners = new Set<(fix: GpsFix) => void>();
+  private driveListeners = new Set<(drive: DriveState) => void>();
+  private activityListeners = new Set<() => void>();
+  private lastDriveState: DriveState = { driving: false, journeyId: null };
   private detachTracker: (() => void) | null = null;
   private journeySync: Promise<void> | null = null;
   private activePush: Promise<void> | null = null;
@@ -223,6 +227,7 @@ export class CloudSync {
     }
     this.data = this.withPendingJourneys(this.data);
     this.setStatus({ pendingJourneys: this.pending.length, lastSyncedAt: cached?.savedAt ?? null });
+    this.notifyDrive();
   }
 
   /** Full refresh: upload what's waiting, then reload everything. */
@@ -689,6 +694,33 @@ export class CloudSync {
     return () => { this.fixListeners.delete(fn); };
   }
 
+  /** Whether a drive is in progress, and its server id once it has one (for presence). */
+  get driveState(): DriveState {
+    return { driving: !!this.active, journeyId: this.active?.serverId ?? null };
+  }
+
+  /**
+   * Called when driveState changes: a drive started, ended, was discarded or
+   * picked up after a relaunch, or its journey was created on the server.
+   */
+  onDriveChange(fn: (drive: DriveState) => void): () => void {
+    this.driveListeners.add(fn);
+    return () => { this.driveListeners.delete(fn); };
+  }
+
+  /** Called for every GPS fix delivered during a drive (screen or background), accepted or not. */
+  onDriveActivity(fn: () => void): () => void {
+    this.activityListeners.add(fn);
+    return () => { this.activityListeners.delete(fn); };
+  }
+
+  private notifyDrive() {
+    const next = this.driveState;
+    if (next.driving === this.lastDriveState.driving && next.journeyId === this.lastDriveState.journeyId) return;
+    this.lastDriveState = next;
+    for (const fn of this.driveListeners) fn(next);
+  }
+
   /** Passenger mode: nothing is recorded while it's on (it isn't saved, like the setting itself). */
   setPassengerMode(on: boolean): void {
     this.passenger = on;
@@ -724,6 +756,7 @@ export class CloudSync {
     const rec = this.active;
     if (!rec) return;
     this.active = null;
+    this.notifyDrive();
     await this.stopTracking();
     await this.journeys.saveActive(null);
     // The start-of-drive upload may still be creating the server journey
@@ -757,6 +790,7 @@ export class CloudSync {
     this.lastPointFlush = this.now();
     this.lastFix = null;
     const rec = this.active;
+    this.notifyDrive();
     await this.journeys.saveActive(rec);
     // Record in the background too, for as long as the drive lasts.
     void this.startTracking(rec);
@@ -792,6 +826,7 @@ export class CloudSync {
     if (!rec) return false;
     const now = this.now();
     noteFixTime(rec, fix);
+    for (const fn of this.activityListeners) fn();
     if (this.passenger || !acceptDriveFix(rec, this.lastFix, fix)) {
       if (now - this.lastPointPersist >= PERSIST_HEARTBEAT_EVERY_MS) {
         this.lastPointPersist = now;
@@ -820,7 +855,11 @@ export class CloudSync {
     if (!rec) return Promise.resolve();
     this.activePush = syncJourneyRecord(this.ep, rec, {
       resolveId: (id) => this.outbox.resolve(id),
-      save: async (r) => { if (this.active === r) await this.journeys.saveActive(r); },
+      save: async (r) => {
+        if (this.active !== r) return;
+        this.notifyDrive(); // the journey now has its server id
+        await this.journeys.saveActive(r);
+      },
     }).then(() => undefined, () => {
       // Points stay on the device and go up with the next flush or at the end.
     }).finally(() => { this.activePush = null; });
@@ -843,6 +882,7 @@ export class CloudSync {
     if (this.activePush) await this.activePush;
     rec.endedAt = new Date(this.now()).toISOString();
     this.active = null;
+    this.notifyDrive();
     this.pending.push(rec);
     await this.journeys.savePending(this.pending);
     await this.journeys.saveActive(null);
@@ -1001,7 +1041,7 @@ export class CloudSync {
         ...d,
         friendRequests: d.friendRequests.filter((r) => r.id !== id),
         friends: request && !d.friends.some((f) => f.id === request.fromId)
-          ? [...d.friends, { id: request.fromId, name: request.fromName, initials: request.fromInitials, status: 'offline', location: '' }]
+          ? [...d.friends, { id: request.fromId, name: request.fromName, initials: request.fromInitials, status: 'offline', presence: null, lastSeenAt: null, location: '' }]
           : d.friends,
       }));
     });
@@ -1065,6 +1105,7 @@ export class CloudSync {
     if (this.cacheTimer) clearTimeout(this.cacheTimer);
     // Signing out mid-drive: the drive is deleted below, so stop recording it.
     this.active = null;
+    this.notifyDrive();
     this.detachTracker?.();
     this.detachTracker = null;
     await this.deps.tracker?.stop().catch(() => {});

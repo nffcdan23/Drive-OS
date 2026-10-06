@@ -626,4 +626,57 @@ select pg_temp.check_affects('bob', $q$update storage.objects set name = 'b00000
 select pg_temp.check_storage_delete('alice', $q$delete from storage.objects where bucket_id = 'vehicle-documents'$q$, 1,
   'an owner can delete their own document file');
 
+\echo '--- presence (online / away / offline / driving, last active)'
+-- As the owner (the API): every user has reported; alice is driving.
+insert into user_presence (user_id, app_state, driving, journey_id) values
+  ('a0000000-0000-0000-0000-000000000000', 'foreground', true, 'e2000000-0000-0000-0000-000000000004'),
+  ('b0000000-0000-0000-0000-000000000000', 'foreground', false, null),
+  ('c0000000-0000-0000-0000-000000000000', 'background', false, null),
+  ('d0000000-0000-0000-0000-000000000000', 'foreground', false, null);
+-- For this section only: a friendship row alongside alice's block of dave
+-- (the API removes friendships on block; the rule must hold regardless).
+insert into friendships (user_id, friend_id) values
+  ('a0000000-0000-0000-0000-000000000000', 'd0000000-0000-0000-0000-000000000000'),
+  ('d0000000-0000-0000-0000-000000000000', 'a0000000-0000-0000-0000-000000000000');
+
+select pg_temp.check_list('alice', $q$select user_id from public.user_presence$q$,
+  array['a0000000-0000-0000-0000-000000000000','b0000000-0000-0000-0000-000000000000'],
+  'the owner sees their own presence, and a friend''s');
+select pg_temp.check_list('bob', $q$select user_id from public.user_presence$q$,
+  array['a0000000-0000-0000-0000-000000000000','b0000000-0000-0000-0000-000000000000'],
+  'a friend sees presence when permitted');
+select pg_temp.check_list('bob', $q$select private.presence_status(app_state, driving, last_seen_at) from public.user_presence where user_id = 'a0000000-0000-0000-0000-000000000000'$q$,
+  array['driving'], 'a friend sees that alice is driving');
+select pg_temp.check_list('carol', $q$select user_id from public.user_presence$q$,
+  array['c0000000-0000-0000-0000-000000000000'], 'a stranger sees no one else''s presence');
+select pg_temp.check_list('dave', $q$select user_id from public.user_presence$q$,
+  array['d0000000-0000-0000-0000-000000000000'], 'a blocked user cannot see presence, even with a friendship row');
+select pg_temp.check_list('dave', $q$select private.can_see_presence('a0000000-0000-0000-0000-000000000000')$q$,
+  array['false'], 'the visibility function agrees for a blocked user');
+select pg_temp.check_rows('anon', $q$select * from public.user_presence$q$, 0, 'anonymous callers see no presence');
+select pg_temp.check_denied('anon', $q$select private.can_see_presence('a0000000-0000-0000-0000-000000000000')$q$,
+  '42501', 'permission denied%', 'callers who are not signed in cannot even ask');
+
+-- Turning activity status off hides it from friends at once
+select pg_temp.check_affects('bob', $q$update public.user_settings set show_activity_status = false where user_id = 'b0000000-0000-0000-0000-000000000000'$q$, 1,
+  'a user can turn off their activity status');
+select pg_temp.check_list('alice', $q$select user_id from public.user_presence$q$,
+  array['a0000000-0000-0000-0000-000000000000'], 'with activity status off, friends no longer see it');
+select pg_temp.check_rows('bob', $q$select * from public.user_presence where user_id = 'b0000000-0000-0000-0000-000000000000'$q$, 1,
+  'the owner still sees their own presence with it off');
+select pg_temp.check_affects('alice', $q$update public.user_settings set show_activity_status = false where user_id = 'b0000000-0000-0000-0000-000000000000'$q$, 0,
+  'nobody can change someone else''s activity setting');
+
+-- Presence is written by the API only (it validates the journey and uses the server clock)
+select pg_temp.check_denied('carol', $q$insert into public.user_presence (user_id) values ('c0000000-0000-0000-0000-000000000000')$q$,
+  '42501', '%row-level security%', 'clients cannot write presence rows, even their own');
+select pg_temp.check_affects('alice', $q$update public.user_presence set last_seen_at = now() + interval '1 year' where user_id = 'a0000000-0000-0000-0000-000000000000'$q$, 0,
+  'clients cannot fake their own last-seen time');
+select pg_temp.check_affects('bob', $q$update public.user_presence set driving = false where user_id = 'a0000000-0000-0000-0000-000000000000'$q$, 0,
+  'clients cannot change someone else''s presence');
+select pg_temp.check_affects('alice', $q$delete from public.user_presence$q$, 0, 'clients cannot delete presence');
+
+delete from friendships where 'd0000000-0000-0000-0000-000000000000' in (user_id, friend_id);
+update user_settings set show_activity_status = true where user_id = 'b0000000-0000-0000-0000-000000000000';
+
 \echo '=== ALL RLS AND SECURITY TESTS PASSED ==='

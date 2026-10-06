@@ -46,9 +46,9 @@ select pg_temp.ok(
   array['achievements','content_reports','convoy_participants','convoys','event_rsvps','events',
         'friend_requests','friendships','group_members','groups','journey_categories',
         'journey_route_points','journey_routes','journeys','notifications','photos','profiles','push_devices',
-        'saved_locations','user_achievements','user_blocks','user_settings','vehicle_documents',
+        'saved_locations','user_achievements','user_blocks','user_presence','user_settings','vehicle_documents',
         'vehicle_modifications','vehicle_service_records','vehicles'],
-  'public schema contains exactly the 26 DriveOS tables');
+  'public schema contains exactly the 27 DriveOS tables');
 
 select pg_temp.ok(
   not exists (select 1 from pg_class c join pg_namespace n on n.oid = c.relnamespace
@@ -359,6 +359,49 @@ insert into notifications (user_id, type, title) values ('aaaaaaaa-0000-0000-000
 update notifications set read_at = now();
 select pg_temp.ok((select bool_and(is_read) from notifications), 'is_read derived from read_at');
 
+-- ─── 10b. Presence ───────────────────────────────────────────────────────────
+\echo '--- presence'
+select pg_temp.ok((select bool_and(show_activity_status) from user_settings), 'activity status is shared with friends by default');
+-- Status is derived from timestamps (p_now moves the clock)
+select pg_temp.ok(private.presence_status('foreground', false, now() - interval '30 seconds') = 'online',  'heard from 30 s ago on screen: online');
+select pg_temp.ok(private.presence_status('foreground', false, now() - interval '119 seconds') = 'online', 'just under 2 minutes: still online');
+select pg_temp.ok(private.presence_status('foreground', false, now() - interval '3 minutes') = 'away',     'quiet for 3 minutes: away');
+select pg_temp.ok(private.presence_status('background', false, now() - interval '5 seconds') = 'away',    'just went to the background: away');
+select pg_temp.ok(private.presence_status('foreground', false, now() - interval '11 minutes') = 'offline', 'stale heartbeat (11 minutes): offline');
+select pg_temp.ok(private.presence_status('signed_out', false, now()) = 'offline',                         'signed out: offline at once');
+select pg_temp.ok(private.presence_status(null, null, null) = 'offline',                                     'never reported: offline');
+select pg_temp.ok(private.presence_status('background', true, now() - interval '90 seconds') = 'driving',  'driving with a recent heartbeat (locked phone): driving');
+select pg_temp.ok(private.presence_status('foreground', true, now() - interval '30 seconds') = 'driving',  'driving takes priority over online');
+select pg_temp.ok(private.presence_status('background', true, now() - interval '5 minutes') = 'away',      'driving but silent for 5 minutes: no longer driving (away)');
+select pg_temp.ok(private.presence_status('foreground', true, now() - interval '2 hours') = 'offline',     'a crashed drive does not stay driving: offline');
+select pg_temp.ok(private.presence_status('foreground', false, now(), now() + interval '15 minutes') = 'offline',
+  'the same row turns offline as time passes, with no write');
+
+insert into journeys (id, owner_id, started_at, status) values
+  ('a2000000-0000-0000-0000-0000000000f1', 'aaaaaaaa-0000-0000-0000-000000000001', now(), 'active');
+insert into user_presence (user_id, app_state, driving, journey_id) values
+  ('aaaaaaaa-0000-0000-0000-000000000001', 'foreground', true, 'a2000000-0000-0000-0000-0000000000f1');
+select pg_temp.expect_error($$insert into user_presence (user_id, driving, journey_id) values
+    ('bbbbbbbb-0000-0000-0000-000000000002', false, 'a2000000-0000-0000-0000-0000000000f1')$$,
+  '23514', 'a journey only while driving');
+select pg_temp.expect_error($$insert into user_presence (user_id, app_state, driving) values
+    ('bbbbbbbb-0000-0000-0000-000000000002', 'signed_out', true)$$,
+  '23514', 'signed out is never driving');
+select pg_temp.expect_error($$insert into user_presence (user_id, app_state) values
+    ('bbbbbbbb-0000-0000-0000-000000000002', 'asleep')$$,
+  '23514', 'unknown app state rejected');
+update journeys set status = 'completed', ended_at = now() where id = 'a2000000-0000-0000-0000-0000000000f1';
+select pg_temp.ok(
+  (select not driving and journey_id is null from user_presence where user_id = 'aaaaaaaa-0000-0000-0000-000000000001'),
+  'completing the drive clears driving even if the app never said so');
+update user_presence set driving = true, journey_id = 'a2000000-0000-0000-0000-000000000001'
+  where user_id = 'aaaaaaaa-0000-0000-0000-000000000001';
+update journeys set name = 'Renamed' where id = 'a2000000-0000-0000-0000-0000000000f1';
+select pg_temp.ok(
+  (select driving from user_presence where user_id = 'aaaaaaaa-0000-0000-0000-000000000001'),
+  'changes to other journeys leave a current drive alone');
+update user_presence set driving = false, journey_id = null where user_id = 'aaaaaaaa-0000-0000-0000-000000000001';
+
 -- ─── 11. Account deletion cascade ────────────────────────────────────────────
 \echo '--- account deletion'
 insert into content_reports (reporter_id, target_type, target_id, reason) values
@@ -372,6 +415,7 @@ select pg_temp.ok(
   and not exists (select 1 from journey_routes)
   and not exists (select 1 from saved_locations where owner_id = 'aaaaaaaa-0000-0000-0000-000000000001')
   and not exists (select 1 from friend_requests)
+  and not exists (select 1 from user_presence where user_id = 'aaaaaaaa-0000-0000-0000-000000000001')
   and not exists (select 1 from groups      where owner_id = 'aaaaaaaa-0000-0000-0000-000000000001'),
   'deleting the auth user removes all of their data');
 select pg_temp.ok(

@@ -37,6 +37,7 @@ function presentProfile(p: typeof profiles.$inferSelect, s: typeof userSettings.
           allowFriendRequests: s.allowFriendRequests,
           shareLiveLocationInConvoys: s.shareLiveLocationInConvoys,
           notificationPrefs: s.notificationPrefs,
+          showActivityStatus: s.showActivityStatus,
         }
       : null,
   };
@@ -75,6 +76,7 @@ router.patch("/me/settings", requireUser, handler(async (req, res) => {
   if (b.has("defaultLocationVisibility")) u.defaultLocationVisibility = b.oneOf("defaultLocationVisibility", VISIBILITY)!;
   if (b.has("allowFriendRequests")) u.allowFriendRequests = b.oneOf("allowFriendRequests", ["everyone", "nobody"] as const)!;
   if (b.has("shareLiveLocationInConvoys")) u.shareLiveLocationInConvoys = b.bool("shareLiveLocationInConvoys")!;
+  if (b.has("showActivityStatus")) u.showActivityStatus = b.bool("showActivityStatus")!;
   if (b.has("notificationPrefs")) {
     const prefs = b.object("notificationPrefs")!;
     const out: Record<string, boolean> = {};

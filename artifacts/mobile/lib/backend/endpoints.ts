@@ -3,6 +3,7 @@
  * server's JSON responses; screens use the mapped types in `mappers.ts`.
  */
 import type { ApiClient } from './http';
+import type { PresenceUpdate } from './presence';
 
 export type Visibility = 'private' | 'friends' | 'public';
 
@@ -14,6 +15,8 @@ export interface ServerSettings {
   allowFriendRequests: 'everyone' | 'nobody';
   shareLiveLocationInConvoys: boolean;
   notificationPrefs: Record<string, boolean>;
+  /** Friends may see when you're online, driving or last active (absent from older servers: on). */
+  showActivityStatus?: boolean;
 }
 
 export interface ServerProfile {
@@ -174,6 +177,26 @@ export interface ServerNotification {
 
 export interface UserCard { id: string; username: string | null; displayName: string; avatarUrl: string | null; level: number }
 
+/** A friend's presence as the server derives it; null when they don't share it with you. */
+export interface ServerPresence {
+  status: 'online' | 'away' | 'offline' | 'driving';
+  lastSeenAt: string | null;
+}
+
+export interface ServerFriend extends UserCard {
+  since: string;
+  /** Absent from servers before presence existed. */
+  presence?: ServerPresence | null;
+}
+
+export interface ServerOwnPresence {
+  status: ServerPresence['status'];
+  appState: 'foreground' | 'background' | 'signed_out' | null;
+  driving: boolean;
+  journeyId: string | null;
+  lastSeenAt: string | null;
+}
+
 export interface ServerConvoy {
   id: string; ownerId: string; groupId: string | null; name: string; description: string;
   destinationName: string; destinationLat: number | null; destinationLng: number | null;
@@ -273,7 +296,10 @@ export const endpoints = (api: ApiClient) => ({
   markAllNotificationsRead: () => api.post('/notifications/read-all'),
 
   // Friends
-  listFriends: () => api.get<Array<UserCard & { since: string }>>('/friends'),
+  listFriends: () => api.get<ServerFriend[]>('/friends'),
+  /** Heartbeat. Quiet: a presence failure never raises the app-wide server banner. */
+  updatePresence: (update: PresenceUpdate) =>
+    api.request<ServerOwnPresence>('PUT', '/me/presence', update, { quiet: true }),
   removeFriend: (userId: string) => api.delete(`/friends/${userId}`),
   listFriendRequests: () => api.get<{
     incoming: Array<{ id: string; createdAt: string; user: UserCard }>;

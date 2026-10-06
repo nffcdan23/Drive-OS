@@ -53,6 +53,7 @@ export const userSettings = pgTable('user_settings', {
   allowFriendRequests:        text('allow_friend_requests').notNull().default('everyone'),
   shareLiveLocationInConvoys: boolean('share_live_location_in_convoys').notNull().default(true),
   notificationPrefs:          jsonb('notification_prefs').$type<Record<string, unknown>>().notNull().default({}),
+  showActivityStatus:         boolean('show_activity_status').notNull().default(true),
   createdAt:                  timestamptz('created_at').notNull().defaultNow(),
   updatedAt:                  timestamptz('updated_at').notNull().defaultNow(),
 });
@@ -300,6 +301,16 @@ export const friendships = pgTable('friendships', {
   friendId:  uuid('friend_id').notNull(),
   createdAt: timestamptz('created_at').notNull().defaultNow(),
 }, (t) => [primaryKey({ columns: [t.userId, t.friendId] })]);
+
+/** Online/away/offline/driving are derived on read: see private.presence_status. */
+export const userPresence = pgTable('user_presence', {
+  userId:     uuid('user_id').primaryKey(),
+  appState:   text('app_state').notNull().default('foreground'),
+  driving:    boolean('driving').notNull().default(false),
+  journeyId:  uuid('journey_id'),
+  lastSeenAt: timestamptz('last_seen_at').notNull().defaultNow(),
+  updatedAt:  timestamptz('updated_at').notNull().defaultNow(),
+});
 
 export const friendRequests = pgTable('friend_requests', {
   id:          uuid('id').primaryKey().defaultRandom(),

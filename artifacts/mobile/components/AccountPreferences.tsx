@@ -10,6 +10,7 @@ import {
 import { ep } from "@/lib/backendClient";
 import { type ServerSettings, type Visibility } from "@/lib/backend/endpoints";
 import { describeError } from "@/lib/backend/http";
+import { showsActivityStatus } from "@/lib/backend/mappers";
 import { GlassSurface, GlassButton } from "@/components/Glass";
 import { Ionicons } from "@expo/vector-icons";
 import colors, { sectionAccent } from "@/constants/colors";
@@ -147,6 +148,24 @@ export function AccountPreferences({
                   void update({
                     allowFriendRequests: value ? "everyone" : "nobody",
                   })
+                }
+              />
+            </View>
+            <View style={s.toggle}>
+              <View style={{ flex: 1 }}>
+                <Text style={s.label}>Show Activity Status</Text>
+                <Text style={s.note}>
+                  Allow friends to see when you're online, driving, or when
+                  you were last active.
+                </Text>
+              </View>
+              <Switch
+                accessibilityLabel="Show Activity Status"
+                disabled={saving}
+                value={showsActivityStatus(settings)}
+                trackColor={{ true: sectionAccent.profile }}
+                onValueChange={(value) =>
+                  void update({ showActivityStatus: value })
                 }
               />
             </View>
