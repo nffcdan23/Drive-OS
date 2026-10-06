@@ -5,7 +5,6 @@ import {
   StyleSheet,
   ScrollView,
   Alert,
-  Modal,
   ActivityIndicator,
   TextInput,
   Switch,
@@ -331,67 +330,59 @@ export default function SettingsScreen() {
           </>
         )}
       </ScrollView>
-      <Modal
+      <KeyboardAwareSheet
         visible={showDelete}
-        transparent
-        animationType="slide"
-        onRequestClose={() => {
+        onClose={() => {
           if (!deleting) setShowDelete(false);
         }}
+        backdropColor="rgba(0,0,0,0.55)"
       >
-        <KeyboardAwareSheet backdropColor="rgba(0,0,0,0.55)">
-          <GlassSurface
-            material="dense"
-            style={[
-              s.sheet,
-              { paddingBottom: Math.max(insets.bottom, 16) + 16 },
-            ]}
+        <GlassSurface
+          material="dense"
+          style={[s.sheet, { paddingBottom: Math.max(insets.bottom, 16) + 16 }]}
+        >
+          <Text style={s.title}>Delete your account?</Text>
+          <Text style={s.note}>
+            This permanently deletes your account and its data. Type DELETE to
+            confirm.
+          </Text>
+          <TextInput
+            accessibilityLabel="Type DELETE to confirm account deletion"
+            value={deleteText}
+            onChangeText={setDeleteText}
+            editable={!deleting}
+            autoCapitalize="characters"
+            placeholder="DELETE"
+            placeholderTextColor={c.mutedForeground}
+            style={s.input}
+          />
+          <GlassButton
+            style={[s.action, { justifyContent: "center" }]}
+            disabled={deleteText !== "DELETE" || deleting}
+            onPress={() => void handleDeleteAccount()}
           >
-            <Text style={s.title}>Delete your account?</Text>
-            <Text style={s.note}>
-              This permanently deletes your account and its data. Type DELETE to
-              confirm.
-            </Text>
-            <TextInput
-              accessibilityLabel="Type DELETE to confirm account deletion"
-              value={deleteText}
-              onChangeText={setDeleteText}
-              editable={!deleting}
-              autoCapitalize="characters"
-              placeholder="DELETE"
-              placeholderTextColor={c.mutedForeground}
-              style={s.input}
-            />
-            <GlassButton
-              style={[s.action, { justifyContent: "center" }]}
-              disabled={deleteText !== "DELETE" || deleting}
-              onPress={() => void handleDeleteAccount()}
-            >
-              {deleting ? (
-                <ActivityIndicator color={c.destructive} />
-              ) : (
-                <Text
-                  style={{
-                    color:
-                      deleteText === "DELETE"
-                        ? c.destructive
-                        : c.mutedForeground,
-                  }}
-                >
-                  Delete Account Permanently
-                </Text>
-              )}
-            </GlassButton>
-            <GlassButton
-              style={[s.action, { justifyContent: "center" }]}
-              disabled={deleting}
-              onPress={() => setShowDelete(false)}
-            >
-              <Text style={s.label}>Cancel</Text>
-            </GlassButton>
-          </GlassSurface>
-        </KeyboardAwareSheet>
-      </Modal>
+            {deleting ? (
+              <ActivityIndicator color={c.destructive} />
+            ) : (
+              <Text
+                style={{
+                  color:
+                    deleteText === "DELETE" ? c.destructive : c.mutedForeground,
+                }}
+              >
+                Delete Account Permanently
+              </Text>
+            )}
+          </GlassButton>
+          <GlassButton
+            style={[s.action, { justifyContent: "center" }]}
+            disabled={deleting}
+            onPress={() => setShowDelete(false)}
+          >
+            <Text style={s.label}>Cancel</Text>
+          </GlassButton>
+        </GlassSurface>
+      </KeyboardAwareSheet>
     </View>
   );
 }

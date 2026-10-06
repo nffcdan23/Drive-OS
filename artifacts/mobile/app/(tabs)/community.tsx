@@ -165,6 +165,11 @@ export default function CommunityScreen() {
   // Friend search
   const [showAddFriend, setShowAddFriend] = useState(false);
   const [friendSearch, setFriendSearch] = useState("");
+  // Closing Add Friend (sent, or dismissed) leaves nothing typed behind
+  const closeAddFriend = () => {
+    setShowAddFriend(false);
+    setFriendSearch("");
+  };
   // Friend actions in flight: their buttons are disabled (and show a
   // spinner) until the server answers, so a second tap can't send it twice
   // (The refs see a tap made before the disabled button has re-rendered.)
@@ -1772,116 +1777,106 @@ export default function CommunityScreen() {
       </Modal>
 
       {/* ── Add Friend modal ── */}
-      <Modal
+      <KeyboardAwareSheet
         visible={showAddFriend}
-        transparent
-        animationType="slide"
-        onRequestClose={() => setShowAddFriend(false)}
+        onClose={closeAddFriend}
+        backdropColor="rgba(0,0,0,0.5)"
       >
-        <KeyboardAwareSheet backdropColor="rgba(0,0,0,0.5)">
-          <GlassSurface material="dense" style={styles.modalContent}>
-            <View style={styles.modalHandle} />
-            <Text style={styles.modalTitle}>Add Friend</Text>
-            <Text style={styles.inputLabel}>Their friend code</Text>
-            <TextInput
-              style={styles.input}
-              placeholder="e.g. K7M2QX9P"
-              placeholderTextColor={colors.mutedForeground}
-              value={friendSearch}
-              onChangeText={setFriendSearch}
-              autoCapitalize="characters"
-              maxLength={12}
-              autoCorrect={false}
-            />
-            <Text style={[styles.inputLabel, { marginTop: 16 }]}>
-              Your friend code
-            </Text>
-            <View
+        <GlassSurface material="dense" style={styles.modalContent}>
+          <View style={styles.modalHandle} />
+          <Text style={styles.modalTitle}>Add Friend</Text>
+          <Text style={styles.inputLabel}>Their friend code</Text>
+          <TextInput
+            style={styles.input}
+            placeholder="e.g. K7M2QX9P"
+            placeholderTextColor={colors.mutedForeground}
+            value={friendSearch}
+            onChangeText={setFriendSearch}
+            autoCapitalize="characters"
+            maxLength={12}
+            autoCorrect={false}
+          />
+          <Text style={[styles.inputLabel, { marginTop: 16 }]}>
+            Your friend code
+          </Text>
+          <View
+            style={{
+              flexDirection: "row",
+              alignItems: "center",
+              gap: 10,
+              backgroundColor: colors.muted,
+              borderRadius: 12,
+              padding: 14,
+              borderWidth: StyleSheet.hairlineWidth,
+              borderColor: colors.border,
+            }}
+          >
+            <Text
               style={{
-                flexDirection: "row",
-                alignItems: "center",
-                gap: 10,
-                backgroundColor: colors.muted,
-                borderRadius: 12,
-                padding: 14,
-                borderWidth: StyleSheet.hairlineWidth,
-                borderColor: colors.border,
+                fontSize: 18,
+                fontWeight: "700",
+                color: colors.primary,
+
+                flex: 1,
+                letterSpacing: 2,
               }}
             >
-              <Text
-                style={{
-                  fontSize: 18,
-                  fontWeight: "700",
-                  color: colors.primary,
-
-                  flex: 1,
-                  letterSpacing: 2,
-                }}
-              >
-                {userProfile.friendCode ?? "…"}
-              </Text>
-              <TouchableOpacity
-                onPress={() =>
-                  Alert.alert(
-                    "Share link",
-                    `Share this code with a friend: ${userProfile.friendCode ?? ""}`,
-                  )
-                }
-              >
-                <Ionicons
-                  name="share-outline"
-                  size={20}
-                  color={colors.primary}
-                />
-              </TouchableOpacity>
-            </View>
-            <Text style={styles.privacyNote}>
-              Share your code or send a link so friends can find you directly.
+              {userProfile.friendCode ?? "…"}
             </Text>
             <TouchableOpacity
-              style={[styles.submitBtn, sendingRequest && { opacity: 0.6 }]}
-              disabled={sendingRequest}
-              onPress={async () => {
-                if (sendingRef.current) return;
-                const code = friendSearch.replace(/\s+/g, "").toUpperCase();
-                if (!/^[A-Z0-9]{8}$/.test(code)) {
-                  Alert.alert(
-                    "Enter a friend code",
-                    "Friend codes are 8 letters and numbers.",
-                  );
-                  return;
-                }
-                sendingRef.current = true;
-                setSendingRequest(true);
-                try {
-                  const result = await sendFriendRequest(code);
-                  setFriendSearch("");
-                  setShowAddFriend(false);
-                  Alert.alert(
-                    result === "accepted"
-                      ? "You're now friends"
-                      : "Request sent",
-                    result === "accepted"
-                      ? "They had already sent you a request, so you're now connected."
-                      : `They'll see your request next time they open ${APP_NAME}.`,
-                  );
-                } catch (err) {
-                  Alert.alert("Request not sent", describeError(err));
-                } finally {
-                  sendingRef.current = false;
-                  setSendingRequest(false);
-                }
-              }}
+              onPress={() =>
+                Alert.alert(
+                  "Share link",
+                  `Share this code with a friend: ${userProfile.friendCode ?? ""}`,
+                )
+              }
             >
-              {sendingRequest ? (
-                <ActivityIndicator color="#fff" />
-              ) : (
-                <Text style={styles.submitBtnText}>Send Request</Text>
-              )}
+              <Ionicons name="share-outline" size={20} color={colors.primary} />
             </TouchableOpacity>
-          </GlassSurface>
-        </KeyboardAwareSheet>
-      </Modal>
+          </View>
+          <Text style={styles.privacyNote}>
+            Share your code or send a link so friends can find you directly.
+          </Text>
+          <TouchableOpacity
+            style={[styles.submitBtn, sendingRequest && { opacity: 0.6 }]}
+            disabled={sendingRequest}
+            onPress={async () => {
+              if (sendingRef.current) return;
+              const code = friendSearch.replace(/\s+/g, "").toUpperCase();
+              if (!/^[A-Z0-9]{8}$/.test(code)) {
+                Alert.alert(
+                  "Enter a friend code",
+                  "Friend codes are 8 letters and numbers.",
+                );
+                return;
+              }
+              sendingRef.current = true;
+              setSendingRequest(true);
+              try {
+                const result = await sendFriendRequest(code);
+                closeAddFriend();
+                Alert.alert(
+                  result === "accepted" ? "You're now friends" : "Request sent",
+                  result === "accepted"
+                    ? "They had already sent you a request, so you're now connected."
+                    : `They'll see your request next time they open ${APP_NAME}.`,
+                );
+              } catch (err) {
+                Alert.alert("Request not sent", describeError(err));
+              } finally {
+                sendingRef.current = false;
+                setSendingRequest(false);
+              }
+            }}
+          >
+            {sendingRequest ? (
+              <ActivityIndicator color="#fff" />
+            ) : (
+              <Text style={styles.submitBtnText}>Send Request</Text>
+            )}
+          </TouchableOpacity>
+        </GlassSurface>
+      </KeyboardAwareSheet>
 
       {/* ── Create Group modal ── */}
       <Modal

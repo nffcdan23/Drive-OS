@@ -14,7 +14,6 @@ import {
   AppState,
   AppStateStatus,
   Alert,
-  Modal,
   TextInput,
   ActivityIndicator,
 } from "react-native";
@@ -435,91 +434,88 @@ export default function ProfileScreen() {
         </GlassButton>
       </ScrollView>
 
-      <Modal
+      <KeyboardAwareSheet
         visible={editing}
-        transparent
-        animationType="slide"
-        onRequestClose={() => setEditing(false)}
+        onClose={() => setEditing(false)}
+        backdropColor="rgba(0,0,0,0.5)"
       >
-        <KeyboardAwareSheet backdropColor="rgba(0,0,0,0.5)">
-          <View
+        <View
+          style={{
+            backgroundColor: colors.card,
+            padding: 20,
+            paddingBottom: insets.bottom + 20,
+            borderTopLeftRadius: 24,
+            borderTopRightRadius: 24,
+            gap: 10,
+          }}
+        >
+          <Text
             style={{
-              backgroundColor: colors.card,
-              padding: 20,
-              paddingBottom: insets.bottom + 20,
-              borderTopLeftRadius: 24,
-              borderTopRightRadius: 24,
-              gap: 10,
+              color: colors.foreground,
+              fontSize: 18,
+              fontWeight: "700",
+            }}
+          >
+            Edit profile
+          </Text>
+          {(
+            [
+              ["name", "Display name", 50],
+              ["username", "Username (optional)", 30],
+              ["bio", "Bio (optional)", 500],
+            ] as const
+          ).map(([key, label, max]) => (
+            <TextInput
+              key={key}
+              placeholder={label}
+              placeholderTextColor={colors.mutedForeground}
+              value={form[key]}
+              onChangeText={(t) => setForm((f) => ({ ...f, [key]: t }))}
+              maxLength={max}
+              autoCapitalize={key === "username" ? "none" : "sentences"}
+              multiline={key === "bio"}
+              style={{
+                minHeight: 46,
+                borderRadius: 12,
+                borderWidth: 1,
+                borderColor: colors.input,
+                color: colors.foreground,
+                paddingHorizontal: 14,
+                paddingVertical: 10,
+                fontSize: 16,
+              }}
+            />
+          ))}
+          <TouchableOpacity
+            onPress={saveEdit}
+            style={{
+              height: 48,
+              borderRadius: 12,
+              backgroundColor: colors.primary,
+              alignItems: "center",
+              justifyContent: "center",
             }}
           >
             <Text
               style={{
-                color: colors.foreground,
-                fontSize: 18,
-                fontWeight: "700",
+                color: colors.primaryForeground,
+                fontWeight: "600",
+                fontSize: 16,
               }}
             >
-              Edit profile
+              Save
             </Text>
-            {(
-              [
-                ["name", "Display name", 50],
-                ["username", "Username (optional)", 30],
-                ["bio", "Bio (optional)", 500],
-              ] as const
-            ).map(([key, label, max]) => (
-              <TextInput
-                key={key}
-                placeholder={label}
-                placeholderTextColor={colors.mutedForeground}
-                value={form[key]}
-                onChangeText={(t) => setForm((f) => ({ ...f, [key]: t }))}
-                maxLength={max}
-                autoCapitalize={key === "username" ? "none" : "sentences"}
-                multiline={key === "bio"}
-                style={{
-                  minHeight: 46,
-                  borderRadius: 12,
-                  borderWidth: 1,
-                  borderColor: colors.input,
-                  color: colors.foreground,
-                  paddingHorizontal: 14,
-                  paddingVertical: 10,
-                  fontSize: 16,
-                }}
-              />
-            ))}
-            <TouchableOpacity
-              onPress={saveEdit}
-              style={{
-                height: 48,
-                borderRadius: 12,
-                backgroundColor: colors.primary,
-                alignItems: "center",
-                justifyContent: "center",
-              }}
-            >
-              <Text
-                style={{
-                  color: colors.primaryForeground,
-                  fontWeight: "600",
-                  fontSize: 16,
-                }}
-              >
-                Save
-              </Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              onPress={() => setEditing(false)}
-              style={{ alignItems: "center", padding: 8 }}
-            >
-              <Text style={{ color: colors.primary, fontWeight: "600" }}>
-                Cancel
-              </Text>
-            </TouchableOpacity>
-          </View>
-        </KeyboardAwareSheet>
-      </Modal>
+          </TouchableOpacity>
+          <TouchableOpacity
+            onPress={() => setEditing(false)}
+            style={{ alignItems: "center", padding: 8 }}
+          >
+            <Text style={{ color: colors.primary, fontWeight: "600" }}>
+              Cancel
+            </Text>
+          </TouchableOpacity>
+        </View>
+      </KeyboardAwareSheet>
     </View>
   );
 }

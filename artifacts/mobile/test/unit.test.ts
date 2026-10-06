@@ -3353,8 +3353,8 @@ test('keyboard avoidance is measured, never a fixed shift', () => {
   assert.ok(/export const KEYBOARD_FIELD_GAP = (\d+);/.test(compat));
   assert.ok(Number(compat.match(/KEYBOARD_FIELD_GAP = (\d+)/)![1]) >= 12);
   assert.ok(/bottomOffset = KEYBOARD_FIELD_GAP/.test(compat) && /<KeyboardAwareScrollView\b[\s\S]*bottomOffset=\{bottomOffset\}/.test(compat));
-  // Bottom sheets stay at the bottom and move only through the same view
-  assert.ok(/<KeyboardAwareScrollViewCompat[\s\S]*justifyContent: ["']flex-end["']/.test(sheet));
+  // Bottom sheets ride on the keyboard by its measured height (see the sheet tests below)
+  assert.ok(/<KeyboardAvoidingView[\s\S]*keyboardVerticalOffset=\{-insets\.bottom\}/.test(sheet));
   // The library's provider wraps the whole app
   assert.ok(/<KeyboardProvider>[\s\S]*<RootLayoutNav \/>[\s\S]*<\/KeyboardProvider>/.test(root));
   // No screen shifts itself on every keyboard open, or by a fixed offset
@@ -3362,8 +3362,9 @@ test('keyboard avoidance is measured, never a fixed shift', () => {
     const src = readFileSync(file, 'utf8');
     const rel = relative(MOBILE, file);
     assert.ok(!/Keyboard\.addListener\(\s*['"]keyboard(Did|Will)Show/.test(src), `${rel} moves the screen on every keyboard open`);
+    // An offset is 0 or a measured safe-area inset, never a number picked by hand
     for (const m of src.matchAll(/keyboardVerticalOffset=\{([^}]*)\}/g)) {
-      assert.equal(m[1]!.trim(), '0', `${rel} shifts by a fixed ${m[1]}`);
+      assert.ok(/^(0|-?insets\.(bottom|top))$/.test(m[1]!.trim()), `${rel} shifts by a fixed ${m[1]}`);
     }
   }
   // The chat composer is the one pinned field that rides the keyboard
@@ -3622,5 +3623,103 @@ test('the friends list has no path to a missing screen (no message button until 
     assert.ok(new RegExp(`runFriendAction\\([^)]*\\)?[^;]*${action.replace(/[.()]/g, '\\$&')}`).test(code), `${action} isn't guarded`);
   }
   assert.equal(code.match(/disabled=\{!!friendBusy\[(req|item)\.id\]\}/g)?.length, 3);
+  assert.ok(/disabled=\{sendingRequest\}/.test(code) && /if \(sendingRef\.current\) return;/.test(code));
+});
+
+
+// ─── Bottom sheets with fields (Add Friend, edit profile, delete account) ───
+
+import { claimsSheetDrag, releaseDismisses, sheetDragOffset, sheetKeyboardLift, SHEET_DISMISS } from '@/lib/sheetDismiss';
+
+test('a sheet is dragged down to close; taps and sideways moves stay with its buttons and fields', () => {
+  assert.equal(claimsSheetDrag(0, 4), false, 'a tap or jitter');
+  assert.equal(claimsSheetDrag(30, 12), false, 'mostly sideways');
+  assert.equal(claimsSheetDrag(2, -40), false, 'upwards');
+  assert.equal(claimsSheetDrag(3, 20), true, 'a downward drag');
+  assert.equal(sheetDragOffset(90), 90, 'follows the finger down');
+  assert.ok(sheetDragOffset(-100) > -20, 'resists being pulled up');
+  // Letting go: far enough or fast enough closes; a short slow drag snaps back
+  const sheet = 420;
+  assert.equal(releaseDismisses(40, 0.1, sheet), false);
+  assert.equal(releaseDismisses(SHEET_DISMISS.dismissDistance, 0.1, sheet), true);
+  assert.equal(releaseDismisses(30, 1.2, sheet), true, 'a flick');
+  assert.equal(releaseDismisses(-50, 2, sheet), false, 'a flick upwards');
+  assert.equal(releaseDismisses(70, 0.1, 200), true, 'a short sheet needs a shorter drag');
+});
+
+test('with the keyboard open, the field and the button under it sit above the keyboard; closed, the sheet is back', () => {
+  // The Add Friend sheet as laid out (community.tsx modalContent): its bottom
+  // padding keeps the home indicator clear; Send Request sits on that padding,
+  // the friend code field a little above it
+  for (const [phone, screen, keyboard, inset, statusBar] of [['iPhone 15', 852, 336, 34, 59], ['iPhone SE', 667, 260, 0, 20], ['iPhone 15 Pro Max', 932, 346, 34, 59]] as const) {
+    const sheetPadding = Math.max(inset, 16) + 16;
+    // Its styles, top to bottom: padding, handle, title, label, field, label,
+    // your code, note, Send Request, bottom padding
+    const fieldBottomInSheet = 24 + (4 + 20) + (25 + 20) + (12 + 16 + 6) + 46;
+    const buttonBottomInSheet = fieldBottomInSheet + (16 + 16 + 6) + 50 + (4 + 15 + 12) + (20 + 47);
+    const sheetHeight = buttonBottomInSheet + sheetPadding;
+    const sheetTop = (lift: number) => screen - lift - sheetHeight;
+    // Keyboard open: the sheet rises by the keyboard less the inset it already keeps clear
+    const lift = sheetKeyboardLift(keyboard, inset);
+    const keyboardTop = screen - keyboard;
+    const buttonBottom = sheetTop(lift) + buttonBottomInSheet;
+    const fieldBottom = sheetTop(lift) + fieldBottomInSheet;
+    assert.ok(keyboardTop - buttonBottom >= 16, `${phone}: Send Request ${keyboardTop - buttonBottom} pt above the keyboard`);
+    assert.ok(fieldBottom < buttonBottom, `${phone}: the field is above the button`);
+    assert.ok(sheetTop(lift) + 24 >= statusBar, `${phone}: the sheet's content runs under the status bar (top at ${sheetTop(lift)})`);
+    // Exactly enough: the gap is the sheet's own padding less the home indicator area
+    assert.equal(keyboardTop - buttonBottom, sheetPadding - inset);
+    // Keyboard closed: back where it was
+    assert.equal(sheetKeyboardLift(0, inset), 0);
+    assert.equal(screen - (sheetTop(0) + buttonBottomInSheet), sheetPadding);
+  }
+});
+
+test('sheets with fields: no keyboard-aware ScrollView inside their Modal, and every way out closes them', () => {
+  const read = (rel: string) => readFileSync(toPath(new URL(rel, import.meta.url)), 'utf8');
+  const sheet = read('../components/KeyboardAwareSheet.tsx');
+  const code = sheet.replace(/\/\/.*$/gm, '');
+  // The crash: react-native-keyboard-controller's ScrollView in the Modal.
+  // The sheet uses React Native's own KeyboardAvoidingView instead.
+  assert.ok(!/react-native-keyboard-controller|KeyboardAwareScrollView/.test(code));
+  assert.ok(/KeyboardAvoidingView,[\s\S]*from "react-native"/.test(code));
+  // Its own Modal, closed by: the system (onRequestClose), a tap on the backdrop,
+  // the accessibility escape gesture, and a swipe down
+  assert.ok(/<Modal[\s\S]*visible=\{visible\}[\s\S]*onRequestClose=\{close\}/.test(code));
+  assert.ok(/<Pressable[\s\S]*onPress=\{close\}/.test(code));
+  assert.ok(/onAccessibilityEscape=\{close\}/.test(code));
+  assert.ok(/claimsSheetDrag\(/.test(code) && /releaseDismisses\(/.test(code));
+  // Closing puts the keyboard away, and each opening starts in place
+  assert.ok(/const close = \(\) => \{\s*Keyboard\.dismiss\(\);\s*onCloseRef\.current\(\);/.test(code));
+  assert.ok(/if \(visible\) drag\.setValue\(0\)/.test(code));
+
+  // Every sheet that uses it: no Modal of its own around it, and nothing
+  // keyboard-aware (a ScrollView from the library) inside it
+  for (const rel of ['../app/(tabs)/community.tsx', '../app/(tabs)/profile.tsx', '../app/settings.tsx']) {
+    const src = read(rel);
+    for (const m of src.matchAll(/<KeyboardAwareSheet\b/g)) {
+      const body = src.slice(m.index!, src.indexOf('</KeyboardAwareSheet>', m.index!));
+      assert.ok(/visible=\{\w+\}/.test(body) && /onClose=\{/.test(body), `${rel}: sheet without visible/onClose`);
+      assert.ok(!/KeyboardAwareScrollView|<Modal\b/.test(body), `${rel}: a ScrollView or Modal nested in the sheet`);
+      const before = src.slice(Math.max(0, m.index! - 200), m.index!);
+      assert.ok(!/<Modal[^>]*>\s*$/.test(before), `${rel}: the sheet is wrapped in another Modal`);
+    }
+  }
+});
+
+test('Add Friend opens from every entry point, closes any way, and reopens empty', () => {
+  const src = readFileSync(toPath(new URL('../app/(tabs)/community.tsx', import.meta.url)), 'utf8');
+  const code = src.replace(/\/\/.*$/gm, '');
+  // Its sheet is shown by showAddFriend, and closing it goes through one function
+  assert.ok(/<KeyboardAwareSheet\s+visible=\{showAddFriend\}\s+onClose=\{closeAddFriend\}/.test(code));
+  // which clears what was typed, so reopening starts empty
+  assert.ok(/const closeAddFriend = \(\) => \{\s*setShowAddFriend\(false\);\s*setFriendSearch\(""\);\s*\};/.test(code));
+  // Sent: closed the same way; not sent: stays open with the code kept for a retry
+  const send = code.slice(code.indexOf('const result = await sendFriendRequest(code);'), code.indexOf('setSendingRequest(false);'));
+  assert.ok(/closeAddFriend\(\);/.test(send));
+  assert.ok(!/setShowAddFriend\(false\)|setFriendSearch\(""\)/.test(send.slice(send.indexOf('catch'))));
+  // Opened from the header (overview and Friends tabs) and the empty friends list
+  assert.equal(code.match(/setShowAddFriend\(true\)/g)?.length, 3);
+  // Phase 1 guards are still on Send Request
   assert.ok(/disabled=\{sendingRequest\}/.test(code) && /if \(sendingRef\.current\) return;/.test(code));
 });
