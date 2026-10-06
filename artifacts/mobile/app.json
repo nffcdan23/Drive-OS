@@ -46,7 +46,13 @@
         {
           "image": "./assets/images/splash.png",
           "resizeMode": "cover",
-          "backgroundColor": "#F4631A"
+          "backgroundColor": "#F4631A",
+          "ios": {
+            "image": "./assets/images/loading-screen.png",
+            "enableFullScreenImage_legacy": true,
+            "resizeMode": "cover",
+            "backgroundColor": "#07090C"
+          }
         }
       ]
     ],

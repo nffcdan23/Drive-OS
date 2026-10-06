@@ -1,7 +1,7 @@
 import "@/lib/polyfills";
 import { APP_NAME } from "@/constants/brand";
 import { MaterialProvider } from "@/components/Glass";
-import React, { useEffect } from "react";
+import React, { createContext, useCallback, useContext, useEffect, useState } from "react";
 import { StatusBar } from "expo-status-bar";
 import { StyleSheet, Text, View } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
@@ -22,11 +22,15 @@ import {
 } from "@expo-google-fonts/archivo";
 import { Stack } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
-import { AppProvider } from "@/context/AppContext";
+import { AppProvider, useApp } from "@/context/AppContext";
+import LoadingScreen from "@/components/LoadingScreen";
 import { AuthProvider, useAuth } from "@/context/AuthContext";
 import { configError } from "@/lib/backendClient";
 
 SplashScreen.preventAutoHideAsync();
+// The loading screen hides the native splash once its artwork is showing;
+// this is only a backstop (e.g. a render error before that happens).
+setTimeout(() => { SplashScreen.hideAsync().catch(() => {}); }, 5000);
 
 function AppStack({ signedIn, recovering }: { signedIn: boolean; recovering: boolean }) {
   return (
@@ -62,12 +66,28 @@ function AppStack({ signedIn, recovering }: { signedIn: boolean; recovering: boo
   );
 }
 
+/** Start-up steps the loading screen follows, in order. */
+type LaunchStep = "session" | "data" | "ready";
+/** Where the navigator reports start-up steps to the loading screen. */
+const LaunchStepContext = createContext<(step: LaunchStep) => void>(() => {});
+
+/** Reports when the signed-in user's saved data has loaded. */
+function DataLoaded({ onLoaded }: { onLoaded: () => void }) {
+  const { isLoading } = useApp();
+  useEffect(() => {
+    if (!isLoading) onLoaded();
+  }, [isLoading, onLoaded]);
+  return null;
+}
+
 function RootLayoutNav() {
   const { userId, initialising, recoveringPassword } = useAuth();
+  const onLaunchStep = useContext(LaunchStepContext);
 
   useEffect(() => {
-    if (!initialising) SplashScreen.hideAsync();
-  }, [initialising]);
+    if (!initialising) onLaunchStep(userId ? "data" : "ready");
+  }, [initialising, userId, onLaunchStep]);
+  const dataLoaded = useCallback(() => onLaunchStep("ready"), [onLaunchStep]);
 
   if (initialising) return null;
 
@@ -76,6 +96,7 @@ function RootLayoutNav() {
   // One provider per account: signing in as someone else starts from a clean slate.
   return (
     <AppProvider key={userId} userId={userId}>
+      <DataLoaded onLoaded={dataLoaded} />
       <View style={{ flex: 1 }}>
         <ConnectionBanner />
         <AppStack signedIn recovering={recoveringPassword} />
@@ -83,6 +104,14 @@ function RootLayoutNav() {
     </AppProvider>
   );
 }
+
+// How far along the bar is when each step starts.
+const STEP_PROGRESS: Record<LaunchStep | "fonts", number> = {
+  fonts: 0.12,
+  session: 0.4,
+  data: 0.7,
+  ready: 1,
+};
 
 /** Shown instead of the app when a build lacks its Supabase/API settings. */
 function ConfigErrorScreen({ message }: { message: string }) {
@@ -105,11 +134,19 @@ export default function RootLayout() {
     Archivo_700Bold,
   });
 
-  if (!fontsLoaded && !fontError) {
-    return null;
-  }
+  const fontsReady = fontsLoaded || !!fontError;
+  // Only the first start-up drives the loading screen; later sign-ins don't.
+  const [launchStep, setLaunchStep] = useState<LaunchStep>("session");
+  const [showLoading, setShowLoading] = useState(true);
+  const onLaunchStep = useCallback((step: LaunchStep) => {
+    setLaunchStep((prev) => (STEP_PROGRESS[step] > STEP_PROGRESS[prev] ? step : prev));
+  }, []);
+  const loadingFinished = useCallback(() => setShowLoading(false), []);
 
-  if (configError) return <ConfigErrorScreen message={configError} />;
+  if (configError) {
+    if (!fontsReady) return null;
+    return <ConfigErrorScreen message={configError} />;
+  }
 
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
@@ -120,7 +157,16 @@ export default function RootLayout() {
                 <MaterialProvider>
                   <View style={{ flex: 1 }}>
                     <StatusBar style="light" />
-                    <RootLayoutNav />
+                    <LaunchStepContext.Provider value={onLaunchStep}>
+                      {fontsReady ? <RootLayoutNav /> : null}
+                    </LaunchStepContext.Provider>
+                    {showLoading ? (
+                      <LoadingScreen
+                        progress={fontsReady ? STEP_PROGRESS[launchStep] : STEP_PROGRESS.fonts}
+                        ready={fontsReady && launchStep === "ready"}
+                        onFinished={loadingFinished}
+                      />
+                    ) : null}
                   </View>
                 </MaterialProvider>
               </AuthProvider>
