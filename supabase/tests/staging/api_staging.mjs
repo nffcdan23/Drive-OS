@@ -171,6 +171,27 @@ async function run() {
   check('friendship exists both ways',
     (await api(a, 'GET', '/friends')).json?.length === 1 && (await api(b, 'GET', '/friends')).json?.length === 1);
 
+  // ─── Presence (migration 0016) ───────────────────────────────────────────
+  const presenceOfA = async (viewer) => (await api(viewer, 'GET', '/friends')).json?.find((f) => f.id === a.id)?.presence;
+  const hb = await api(a, 'PUT', '/me/presence', { appState: 'foreground' });
+  check('presence: heartbeat accepted', hb.status === 200 && hb.json?.status === 'online', `HTTP ${hb.status} ${hb.json?.status}`);
+  check('presence: a friend sees online with a last-active time', (await presenceOfA(b))?.status === 'online' && !!(await presenceOfA(b))?.lastSeenAt);
+  check('presence: a stranger has no way to see it', !(await api(c, 'GET', '/friends')).json?.some((f) => f.id === a.id));
+  await api(a, 'PUT', '/me/presence', { appState: 'background' });
+  check('presence: backgrounded shows as away', (await presenceOfA(b))?.status === 'away');
+  const drive = await api(a, 'POST', '/journeys', { clientRef: `presence-${Date.now()}` });
+  const driving = await api(a, 'PUT', '/me/presence', { appState: 'foreground', driving: true, journeyId: drive.json?.id });
+  check('presence: driving with its journey', driving.status === 200 && driving.json?.journeyId === drive.json?.id, `HTTP ${driving.status}`);
+  check('presence: a friend sees driving', (await presenceOfA(b))?.status === 'driving');
+  check('presence: someone else\'s journey is refused',
+    (await api(b, 'PUT', '/me/presence', { appState: 'foreground', driving: true, journeyId: drive.json?.id })).status === 400);
+  await api(a, 'PATCH', '/me/settings', { showActivityStatus: false });
+  check('presence: hidden from friends when activity status is off', (await presenceOfA(b)) === null);
+  check('presence: the owner still sees their own', (await api(a, 'GET', '/me/presence')).json?.status === 'driving');
+  await api(a, 'PATCH', '/me/settings', { showActivityStatus: true });
+  await api(a, 'PUT', '/me/presence', { appState: 'signed_out' });
+  check('presence: signed out shows offline', (await presenceOfA(b))?.status === 'offline');
+
   const convoy = await api(a, 'POST', '/convoys', { name: 'Staging convoy', visibility: 'private', startsAt: new Date(Date.now() + 3600_000).toISOString(), maxParticipants: 2 });
   check('private convoy created', convoy.status === 201, `HTTP ${convoy.status}`);
   check('private convoy hidden from a stranger', (await api(c, 'GET', `/convoys/${convoy.json?.id}`)).status === 404);
