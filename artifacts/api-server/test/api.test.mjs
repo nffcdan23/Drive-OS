@@ -412,6 +412,135 @@ test("friend requests: only the recipient can accept; blocks end everything", as
   expect(await del(b, `/blocks/${a.id}`), 204, "unblock");
 });
 
+// ─── Presence ───────────────────────────────────────────────────────────────
+
+const put = (u, p, b) => call(u, "PUT", p, b);
+async function befriend(a, b) {
+  const sent = await post(a, "/friend-requests", { friendCode: (await get(b, "/me")).body.friendCode });
+  expect(sent, 201, "friend request");
+  expect(await post(b, `/friend-requests/${sent.body.id}/accept`), 200, "accept");
+}
+const presenceOf = async (viewer, friendId) => (await get(viewer, "/friends")).body.find((f) => f.id === friendId)?.presence;
+const ageHeartbeat = (userId, interval) =>
+  db.query(`update public.user_presence set last_seen_at = now() - $2::interval where user_id = $1`, [userId, interval]);
+
+test("presence: owner updates it; friends see online / away / offline / driving and last active", async () => {
+  const a = await newUser("A");
+  const b = await newUser("B");
+  await befriend(a, b);
+
+  // Never reported: offline with no last-active time
+  assert.deepEqual(await presenceOf(b, a.id), { status: "offline", lastSeenAt: null });
+  expect(await get(a, "/me/presence"), 200, "own presence before any heartbeat");
+  assert.equal((await get(a, "/me/presence")).body.status, "offline");
+
+  // Foreground heartbeat: online, stamped with the server clock
+  const hb = await put(a, "/me/presence", { appState: "foreground" });
+  expect(hb, 200, "heartbeat");
+  assert.equal(hb.body.status, "online");
+  assert.ok(Math.abs(Date.parse(hb.body.lastSeenAt) - Date.now()) < 60_000);
+  assert.equal((await presenceOf(b, a.id)).status, "online");
+
+  // Backgrounded: away at once
+  await put(a, "/me/presence", { appState: "background" });
+  assert.equal((await presenceOf(b, a.id)).status, "away");
+
+  // Stale heartbeat resolves to offline with no further write; last active kept
+  await put(a, "/me/presence", { appState: "foreground" });
+  await ageHeartbeat(a.id, "11 minutes");
+  const stale = await presenceOf(b, a.id);
+  assert.equal(stale.status, "offline");
+  assert.ok(stale.lastSeenAt, "last active time is shown when offline");
+  await ageHeartbeat(a.id, "5 minutes");
+  assert.equal((await presenceOf(b, a.id)).status, "away", "2–10 minutes: away");
+
+  // Driving: with its journey, priority over online, still driving with the phone locked
+  const j = await post(a, "/journeys", { clientRef: randomUUID() });
+  expect(j, 201, "start journey");
+  const drive = await put(a, "/me/presence", { appState: "foreground", driving: true, journeyId: j.body.id });
+  expect(drive, 200, "start driving");
+  assert.equal(drive.body.status, "driving");
+  assert.equal(drive.body.journeyId, j.body.id);
+  await put(a, "/me/presence", { appState: "background" }); // driving and journey unchanged when omitted
+  assert.equal((await presenceOf(b, a.id)).status, "driving");
+  assert.equal((await get(a, "/me/presence")).body.journeyId, j.body.id);
+
+  // A drive that stops reporting doesn't stay "driving"
+  await ageHeartbeat(a.id, "4 minutes");
+  assert.equal((await presenceOf(b, a.id)).status, "away");
+  await ageHeartbeat(a.id, "3 hours");
+  assert.equal((await presenceOf(b, a.id)).status, "offline");
+
+  // Completing the journey on the server ends "driving" even if the app never said so
+  await put(a, "/me/presence", { appState: "foreground" });
+  expect(await post(a, `/journeys/${j.body.id}/complete`, { distanceKm: 0 }), 200, "complete");
+  const after = (await get(a, "/me/presence")).body;
+  assert.equal(after.driving, false);
+  assert.equal(after.journeyId, null);
+  assert.equal(after.status, "online");
+
+  // Leaving driving explicitly
+  await put(a, "/me/presence", { appState: "foreground", driving: true });
+  assert.equal((await put(a, "/me/presence", { appState: "foreground", driving: false })).body.status, "online");
+
+  // Sign-out: offline straight away, driving cleared
+  await put(a, "/me/presence", { appState: "foreground", driving: true });
+  const out = await put(a, "/me/presence", { appState: "signed_out" });
+  assert.equal(out.body.status, "offline");
+  assert.equal(out.body.driving, false);
+  assert.equal((await presenceOf(b, a.id)).status, "offline");
+});
+
+test("presence: only friends who are allowed can see it", async () => {
+  const a = await newUser("A");
+  const friend = await newUser("Friend");
+  const stranger = await newUser("Stranger");
+  const blocked = await newUser("Blocked");
+  await befriend(a, friend);
+  await befriend(a, blocked);
+  await put(a, "/me/presence", { appState: "foreground" });
+
+  assert.equal((await presenceOf(friend, a.id)).status, "online", "friend sees it");
+  assert.equal((await get(stranger, "/friends")).body.length, 0, "a stranger has no friend entry to read");
+  expect(await get(stranger, `/users/${a.id}`), 200, "public profile");
+  assert.equal((await get(stranger, `/users/${a.id}`)).body.presence, undefined, "no presence on other people's profiles");
+
+  // Turning activity status off hides it from friends (presence: null), not from yourself
+  const off = await patch(a, "/me/settings", { showActivityStatus: false });
+  expect(off, 200, "settings");
+  assert.equal(off.body.settings.showActivityStatus, false);
+  const hidden = (await get(friend, "/friends")).body.find((f) => f.id === a.id);
+  assert.ok(hidden, "still listed as a friend");
+  assert.equal(hidden.presence, null, "presence hidden");
+  assert.equal((await get(a, "/me/presence")).body.status, "online", "the owner still sees their own");
+  await patch(a, "/me/settings", { showActivityStatus: true });
+  assert.equal((await presenceOf(friend, a.id)).status, "online");
+
+  // A block ends the friendship and with it any presence
+  expect(await post(a, "/blocks", { userId: blocked.id }), 204, "block");
+  assert.equal((await get(blocked, "/friends")).body.length, 0);
+  // Even a friendship row left behind would not reveal it: the database rule refuses
+  await db.query("insert into public.friendships (user_id, friend_id) values ($1, $2), ($2, $1)", [a.id, blocked.id]);
+  assert.equal(await presenceOf(blocked, a.id), null, "blocked: presence null even with a friendship row");
+  await db.query("delete from public.friendships where user_id in ($1, $2) and friend_id in ($1, $2)", [a.id, blocked.id]);
+});
+
+test("presence: input is validated; journeys must be your own drive in progress", async () => {
+  const a = await newUser("A");
+  const b = await newUser("B");
+  expect(await put(a, "/me/presence", {}), 400, "appState required");
+  expect(await put(a, "/me/presence", { appState: "asleep" }), 400, "unknown state");
+  expect(await put(a, "/me/presence", { appState: "foreground", driving: "yes" }), 400, "driving must be boolean");
+  expect(await put(a, "/me/presence", { appState: "foreground", journeyId: randomUUID() }), 400, "journey only while driving");
+  const theirs = await post(b, "/journeys", { clientRef: randomUUID() });
+  expect(await put(a, "/me/presence", { appState: "foreground", driving: true, journeyId: theirs.body.id }), 400,
+    "someone else's journey");
+  expect(await put(a, "/me/presence", { appState: "foreground", driving: true, journeyId: randomUUID() }), 400, "unknown journey");
+  expect(await put(null, "/me/presence", { appState: "foreground" }), 401, "signed in only");
+  // Driving with no server journey yet (drive started offline) is fine
+  expect(await put(a, "/me/presence", { appState: "foreground", driving: true }), 200, "driving without a journey id");
+});
+
 // ─── Convoys ────────────────────────────────────────────────────────────────
 
 test("convoys: private visibility, join codes, capacity under concurrency", async () => {

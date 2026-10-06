@@ -7,6 +7,7 @@ import { Body } from "../lib/validate";
 import { asUser, first, type Tx } from "../lib/userDb";
 import { notify } from "../lib/notify";
 import { cardColumns, toCard } from "../lib/community";
+import { presenceColumns, toPresence } from "../lib/presence";
 import { rateLimit } from "../lib/rateLimit";
 
 const router = Router();
@@ -29,14 +30,18 @@ async function befriend(tx: Tx, a: string, b: string) {
 
 // ─── Friends ────────────────────────────────────────────────────────────────
 
-// GET /api/friends
+// GET /api/friends — each with `presence` (online / away / offline /
+// driving, last active), or presence: null when they don't share it
 router.get("/friends", requireUser, handler(async (req, res) => {
-  const r = await db.execute(sql`
-    select ${cardColumns}, f.created_at as "since"
+  const r = await asUser(req.userId, (tx) => tx.execute(sql`
+    select ${cardColumns}, f.created_at as "since", ${presenceColumns}
     from public.friendships f join public.profiles p on p.id = f.friend_id
+    left join public.user_presence pr on pr.user_id = p.id
     where f.user_id = ${req.userId}
-    order by p.display_name`);
-  res.json(r.rows.map((row) => ({ ...toCard(row), since: (row as { since: unknown }).since })));
+    order by p.display_name`));
+  res.json(r.rows.map((row) => ({
+    ...toCard(row), since: (row as { since: unknown }).since, presence: toPresence(row),
+  })));
 }));
 
 // DELETE /api/friends/:userId — removes the friendship for both people
