@@ -1,8 +1,10 @@
 import { GlassSurface, GlassButton } from "@/components/Glass";
 import { APP_NAME } from "@/constants/brand";
 import { describeError } from "@/lib/backend/http";
-import { KeyboardAwareScrollViewCompat } from "@/components/KeyboardAwareScrollViewCompat";
-import { KeyboardAwareSheet } from "@/components/KeyboardAwareSheet";
+import {
+  KeyboardAwareSheet,
+  SheetScrollView,
+} from "@/components/KeyboardAwareSheet";
 import { ScreenTitle, Disclosure } from "@/components/Cockpit";
 import React, { useState, useEffect, useRef } from "react";
 import {
@@ -20,7 +22,6 @@ import {
   Platform,
   ScrollView,
   TextInput,
-  Modal,
   Alert,
   Switch,
   Image,
@@ -74,6 +75,37 @@ const CONVOY_SECTIONS = [
 type CommunityTab = "overview" | "convoys" | "friends" | "groups" | "events";
 type ConvoySection = "my" | "joined" | "public";
 
+// The create sheets' blank forms
+const BLANK_CONVOY = {
+  name: "",
+  destination: "",
+  description: "",
+  startTime: "",
+  maxParticipants: "12",
+  isPrivate: false,
+  privacyMethod: "invite_only" as Convoy["privacyMethod"],
+};
+const BLANK_GROUP = {
+  name: "",
+  description: "",
+  primaryLocation: "",
+  vehicleInterests: "",
+  isPublic: true,
+  membershipMethod: "open" as Group["membershipMethod"],
+};
+const BLANK_EVENT = {
+  name: "",
+  description: "",
+  location: "",
+  date: "",
+  startTime: "",
+  endTime: "",
+  eventType: "static_car_meet" as EventType,
+  isPublic: true,
+  vehicleCategory: "Open to All",
+  entryCost: "Free",
+};
+
 export default function CommunityScreen() {
   const colors = { ...useColors(), primary: sectionAccent.social };
   const insets = useSafeAreaInsets();
@@ -124,43 +156,25 @@ export default function CommunityScreen() {
     (c) => c.status === "active" && matches(c.name),
   );
 
-  // Convoy create
+  // Create sheets.  Closing one (created, or dismissed) clears its form.
   const [showCreateConvoy, setShowCreateConvoy] = useState(false);
-  const [newConvoy, setNewConvoy] = useState({
-    name: "",
-    destination: "",
-    description: "",
-    startTime: "",
-    maxParticipants: "12",
-    isPrivate: false,
-    privacyMethod: "invite_only" as Convoy["privacyMethod"],
-  });
-
-  // Group create
+  const [newConvoy, setNewConvoy] = useState(BLANK_CONVOY);
+  const closeCreateConvoy = () => {
+    setShowCreateConvoy(false);
+    setNewConvoy(BLANK_CONVOY);
+  };
   const [showCreateGroup, setShowCreateGroup] = useState(false);
-  const [newGroup, setNewGroup] = useState({
-    name: "",
-    description: "",
-    primaryLocation: "",
-    vehicleInterests: "",
-    isPublic: true,
-    membershipMethod: "open" as Group["membershipMethod"],
-  });
-
-  // Event create
+  const [newGroup, setNewGroup] = useState(BLANK_GROUP);
+  const closeCreateGroup = () => {
+    setShowCreateGroup(false);
+    setNewGroup(BLANK_GROUP);
+  };
   const [showCreateEvent, setShowCreateEvent] = useState(false);
-  const [newEvent, setNewEvent] = useState({
-    name: "",
-    description: "",
-    location: "",
-    date: "",
-    startTime: "",
-    endTime: "",
-    eventType: "static_car_meet" as EventType,
-    isPublic: true,
-    vehicleCategory: "Open to All",
-    entryCost: "Free",
-  });
+  const [newEvent, setNewEvent] = useState(BLANK_EVENT);
+  const closeCreateEvent = () => {
+    setShowCreateEvent(false);
+    setNewEvent(BLANK_EVENT);
+  };
 
   // Friend search
   const [showAddFriend, setShowAddFriend] = useState(false);
@@ -519,12 +533,7 @@ export default function CommunityScreen() {
 
       marginTop: 10,
     },
-    // Modal
-    modalOverlay: {
-      flex: 1,
-      backgroundColor: "rgba(0,0,0,0.5)",
-      justifyContent: "flex-end",
-    },
+    // Sheets
     modalContent: {
       backgroundColor: colors.card,
       borderTopLeftRadius: 24,
@@ -532,6 +541,8 @@ export default function CommunityScreen() {
       padding: 24,
       paddingBottom: Math.max(insets.bottom, 16) + 16,
     },
+    // A long create sheet's panel shrinks to fit; its fields then scroll
+    modalScrollable: { flexShrink: 1 },
     modalHandle: {
       width: 40,
       height: 4,
@@ -646,16 +657,7 @@ export default function CommunityScreen() {
       isOwn: true,
       isJoined: true,
     });
-    setNewConvoy({
-      name: "",
-      destination: "",
-      description: "",
-      startTime: "",
-      maxParticipants: "12",
-      isPrivate: false,
-      privacyMethod: "invite_only",
-    });
-    setShowCreateConvoy(false);
+    closeCreateConvoy();
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
   }
 
@@ -691,15 +693,7 @@ export default function CommunityScreen() {
       vehicleInterests: newGroup.vehicleInterests,
       membershipMethod: newGroup.membershipMethod,
     });
-    setNewGroup({
-      name: "",
-      description: "",
-      primaryLocation: "",
-      vehicleInterests: "",
-      isPublic: true,
-      membershipMethod: "open",
-    });
-    setShowCreateGroup(false);
+    closeCreateGroup();
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
   }
 
@@ -724,19 +718,7 @@ export default function CommunityScreen() {
       vehicleCategory: newEvent.vehicleCategory,
       entryCost: newEvent.entryCost,
     });
-    setNewEvent({
-      name: "",
-      description: "",
-      location: "",
-      date: "",
-      startTime: "",
-      endTime: "",
-      eventType: "static_car_meet",
-      isPublic: true,
-      vehicleCategory: "Open to All",
-      entryCost: "Free",
-    });
-    setShowCreateEvent(false);
+    closeCreateEvent();
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
   }
 
@@ -1645,84 +1627,76 @@ export default function CommunityScreen() {
       )}
 
       {/* ── Create Convoy modal ── */}
-      <Modal
+      <KeyboardAwareSheet
         visible={showCreateConvoy}
-        transparent
-        animationType="slide"
-        onRequestClose={() => setShowCreateConvoy(false)}
+        onClose={closeCreateConvoy}
+        backdropColor="rgba(0,0,0,0.5)"
+        scrollable
       >
-        <KeyboardAwareScrollViewCompat
-          style={{ flex: 1 }}
-          contentContainerStyle={{ flexGrow: 1, justifyContent: "flex-end" }}
-          keyboardShouldPersistTaps="handled"
+        <GlassSurface
+          material="dense"
+          style={[styles.modalContent, styles.modalScrollable]}
         >
-          <View
-            style={[
-              styles.modalOverlay,
-              { position: "relative", backgroundColor: "transparent" },
-            ]}
-          >
-            <GlassSurface material="dense" style={styles.modalContent}>
-              <View style={styles.modalHandle} />
-              <Text style={styles.modalTitle}>Create Convoy</Text>
-              <Text style={styles.inputLabel}>Convoy Name *</Text>
-              <TextInput
-                style={styles.input}
-                placeholder="e.g. Sunday Scenic Run"
-                placeholderTextColor={colors.mutedForeground}
-                value={newConvoy.name}
-                onChangeText={(t) => setNewConvoy((p) => ({ ...p, name: t }))}
-              />
-              <Text style={styles.inputLabel}>Destination *</Text>
-              <TextInput
-                style={styles.input}
-                placeholder="e.g. Kirkstone Pass Inn"
-                placeholderTextColor={colors.mutedForeground}
-                value={newConvoy.destination}
-                onChangeText={(t) =>
-                  setNewConvoy((p) => ({ ...p, destination: t }))
+          <View style={styles.modalHandle} />
+          <SheetScrollView>
+            <Text style={styles.modalTitle}>Create Convoy</Text>
+            <Text style={styles.inputLabel}>Convoy Name *</Text>
+            <TextInput
+              style={styles.input}
+              placeholder="e.g. Sunday Scenic Run"
+              placeholderTextColor={colors.mutedForeground}
+              value={newConvoy.name}
+              onChangeText={(t) => setNewConvoy((p) => ({ ...p, name: t }))}
+            />
+            <Text style={styles.inputLabel}>Destination *</Text>
+            <TextInput
+              style={styles.input}
+              placeholder="e.g. Kirkstone Pass Inn"
+              placeholderTextColor={colors.mutedForeground}
+              value={newConvoy.destination}
+              onChangeText={(t) =>
+                setNewConvoy((p) => ({ ...p, destination: t }))
+              }
+            />
+            <Text style={styles.inputLabel}>Description</Text>
+            <TextInput
+              style={styles.input}
+              placeholder="Optional details about the run…"
+              placeholderTextColor={colors.mutedForeground}
+              value={newConvoy.description}
+              onChangeText={(t) =>
+                setNewConvoy((p) => ({ ...p, description: t }))
+              }
+            />
+            <Text style={styles.inputLabel}>Max Participants</Text>
+            <TextInput
+              style={styles.input}
+              placeholder="12"
+              placeholderTextColor={colors.mutedForeground}
+              value={newConvoy.maxParticipants}
+              onChangeText={(t) =>
+                setNewConvoy((p) => ({ ...p, maxParticipants: t }))
+              }
+              keyboardType="numeric"
+            />
+            <View style={styles.toggleRow}>
+              <Text style={styles.toggleLabel}>Private convoy</Text>
+              <Switch
+                value={newConvoy.isPrivate}
+                onValueChange={(v) =>
+                  setNewConvoy((p) => ({ ...p, isPrivate: v }))
                 }
+                trackColor={{ true: colors.primary }}
               />
-              <Text style={styles.inputLabel}>Description</Text>
-              <TextInput
-                style={styles.input}
-                placeholder="Optional details about the run…"
-                placeholderTextColor={colors.mutedForeground}
-                value={newConvoy.description}
-                onChangeText={(t) =>
-                  setNewConvoy((p) => ({ ...p, description: t }))
-                }
-              />
-              <Text style={styles.inputLabel}>Max Participants</Text>
-              <TextInput
-                style={styles.input}
-                placeholder="12"
-                placeholderTextColor={colors.mutedForeground}
-                value={newConvoy.maxParticipants}
-                onChangeText={(t) =>
-                  setNewConvoy((p) => ({ ...p, maxParticipants: t }))
-                }
-                keyboardType="numeric"
-              />
-              <View style={styles.toggleRow}>
-                <Text style={styles.toggleLabel}>Private convoy</Text>
-                <Switch
-                  value={newConvoy.isPrivate}
-                  onValueChange={(v) =>
-                    setNewConvoy((p) => ({ ...p, isPrivate: v }))
-                  }
-                  trackColor={{ true: colors.primary }}
-                />
-              </View>
-              {newConvoy.isPrivate && (
-                <>
-                  <Text style={styles.privacyNote}>
-                    Choose how participants join this convoy.
-                  </Text>
-                  <View style={styles.privacyOptionRow}>
-                    {(
-                      ["invite_only", "passcode", "group_members"] as const
-                    ).map((m) => (
+            </View>
+            {newConvoy.isPrivate && (
+              <>
+                <Text style={styles.privacyNote}>
+                  Choose how participants join this convoy.
+                </Text>
+                <View style={styles.privacyOptionRow}>
+                  {(["invite_only", "passcode", "group_members"] as const).map(
+                    (m) => (
                       <TouchableOpacity
                         key={m}
                         style={[
@@ -1748,33 +1722,32 @@ export default function CommunityScreen() {
                               : "Group Only"}
                         </Text>
                       </TouchableOpacity>
-                    ))}
-                  </View>
-                  {newConvoy.privacyMethod !== "invite_only" &&
-                    newConvoy.privacyMethod !== "group_members" && (
-                      <TextInput
-                        style={styles.input}
-                        placeholder="Enter a passcode (leave blank for invite-only)"
-                        placeholderTextColor={colors.mutedForeground}
-                        secureTextEntry
-                      />
-                    )}
-                  <Text style={styles.privacyNote}>
-                    If no passcode is entered, the convoy defaults to Invite
-                    Only.
-                  </Text>
-                </>
-              )}
-              <TouchableOpacity
-                style={styles.submitBtn}
-                onPress={handleCreateConvoy}
-              >
-                <Text style={styles.submitBtnText}>Create Convoy</Text>
-              </TouchableOpacity>
-            </GlassSurface>
-          </View>
-        </KeyboardAwareScrollViewCompat>
-      </Modal>
+                    ),
+                  )}
+                </View>
+                {newConvoy.privacyMethod !== "invite_only" &&
+                  newConvoy.privacyMethod !== "group_members" && (
+                    <TextInput
+                      style={styles.input}
+                      placeholder="Enter a passcode (leave blank for invite-only)"
+                      placeholderTextColor={colors.mutedForeground}
+                      secureTextEntry
+                    />
+                  )}
+                <Text style={styles.privacyNote}>
+                  If no passcode is entered, the convoy defaults to Invite Only.
+                </Text>
+              </>
+            )}
+            <TouchableOpacity
+              style={styles.submitBtn}
+              onPress={handleCreateConvoy}
+            >
+              <Text style={styles.submitBtnText}>Create Convoy</Text>
+            </TouchableOpacity>
+          </SheetScrollView>
+        </GlassSurface>
+      </KeyboardAwareSheet>
 
       {/* ── Add Friend modal ── */}
       <KeyboardAwareSheet
@@ -1879,273 +1852,251 @@ export default function CommunityScreen() {
       </KeyboardAwareSheet>
 
       {/* ── Create Group modal ── */}
-      <Modal
+      <KeyboardAwareSheet
         visible={showCreateGroup}
-        transparent
-        animationType="slide"
-        onRequestClose={() => setShowCreateGroup(false)}
+        onClose={closeCreateGroup}
+        backdropColor="rgba(0,0,0,0.5)"
+        scrollable
       >
-        <KeyboardAwareScrollViewCompat
-          style={{ flex: 1 }}
-          contentContainerStyle={{ flexGrow: 1, justifyContent: "flex-end" }}
-          keyboardShouldPersistTaps="handled"
+        <GlassSurface
+          material="dense"
+          style={[styles.modalContent, styles.modalScrollable]}
         >
-          <View
-            style={[
-              styles.modalOverlay,
-              { position: "relative", backgroundColor: "transparent" },
-            ]}
-          >
-            <GlassSurface material="dense" style={styles.modalContent}>
-              <View style={styles.modalHandle} />
-              <Text style={styles.modalTitle}>Create Group</Text>
-              <Text style={styles.inputLabel}>Group Name *</Text>
-              <TextInput
-                style={styles.input}
-                placeholder="e.g. Lake District MINI Club"
-                placeholderTextColor={colors.mutedForeground}
-                value={newGroup.name}
-                onChangeText={(t) => setNewGroup((p) => ({ ...p, name: t }))}
-              />
-              <Text style={styles.inputLabel}>Description</Text>
-              <TextInput
-                style={[styles.input, { minHeight: 70 }]}
-                placeholder="Tell people what this group is about…"
-                placeholderTextColor={colors.mutedForeground}
-                value={newGroup.description}
-                onChangeText={(t) =>
-                  setNewGroup((p) => ({ ...p, description: t }))
+          <View style={styles.modalHandle} />
+          <SheetScrollView>
+            <Text style={styles.modalTitle}>Create Group</Text>
+            <Text style={styles.inputLabel}>Group Name *</Text>
+            <TextInput
+              style={styles.input}
+              placeholder="e.g. Lake District MINI Club"
+              placeholderTextColor={colors.mutedForeground}
+              value={newGroup.name}
+              onChangeText={(t) => setNewGroup((p) => ({ ...p, name: t }))}
+            />
+            <Text style={styles.inputLabel}>Description</Text>
+            <TextInput
+              style={[styles.input, { minHeight: 70 }]}
+              placeholder="Tell people what this group is about…"
+              placeholderTextColor={colors.mutedForeground}
+              value={newGroup.description}
+              onChangeText={(t) =>
+                setNewGroup((p) => ({ ...p, description: t }))
+              }
+              multiline
+            />
+            <Text style={styles.inputLabel}>Primary Location</Text>
+            <TextInput
+              style={styles.input}
+              placeholder="e.g. Keswick, Cumbria"
+              placeholderTextColor={colors.mutedForeground}
+              value={newGroup.primaryLocation}
+              onChangeText={(t) =>
+                setNewGroup((p) => ({ ...p, primaryLocation: t }))
+              }
+            />
+            <Text style={styles.inputLabel}>Vehicle Interests</Text>
+            <TextInput
+              style={styles.input}
+              placeholder="e.g. MINIs, Classics, Performance"
+              placeholderTextColor={colors.mutedForeground}
+              value={newGroup.vehicleInterests}
+              onChangeText={(t) =>
+                setNewGroup((p) => ({ ...p, vehicleInterests: t }))
+              }
+            />
+            <View style={styles.toggleRow}>
+              <Text style={styles.toggleLabel}>Public group</Text>
+              <Switch
+                value={newGroup.isPublic}
+                onValueChange={(v) =>
+                  setNewGroup((p) => ({ ...p, isPublic: v }))
                 }
-                multiline
+                trackColor={{ true: colors.primary }}
               />
-              <Text style={styles.inputLabel}>Primary Location</Text>
-              <TextInput
-                style={styles.input}
-                placeholder="e.g. Keswick, Cumbria"
-                placeholderTextColor={colors.mutedForeground}
-                value={newGroup.primaryLocation}
-                onChangeText={(t) =>
-                  setNewGroup((p) => ({ ...p, primaryLocation: t }))
-                }
-              />
-              <Text style={styles.inputLabel}>Vehicle Interests</Text>
-              <TextInput
-                style={styles.input}
-                placeholder="e.g. MINIs, Classics, Performance"
-                placeholderTextColor={colors.mutedForeground}
-                value={newGroup.vehicleInterests}
-                onChangeText={(t) =>
-                  setNewGroup((p) => ({ ...p, vehicleInterests: t }))
-                }
-              />
-              <View style={styles.toggleRow}>
-                <Text style={styles.toggleLabel}>Public group</Text>
-                <Switch
-                  value={newGroup.isPublic}
-                  onValueChange={(v) =>
-                    setNewGroup((p) => ({ ...p, isPublic: v }))
+            </View>
+            <Text style={styles.inputLabel}>Membership</Text>
+            <View style={styles.privacyOptionRow}>
+              {(["open", "request", "invite", "code"] as const).map((m) => (
+                <TouchableOpacity
+                  key={m}
+                  style={[
+                    styles.privacyOption,
+                    newGroup.membershipMethod === m &&
+                      styles.privacyOptionActive,
+                  ]}
+                  onPress={() =>
+                    setNewGroup((p) => ({ ...p, membershipMethod: m }))
                   }
-                  trackColor={{ true: colors.primary }}
+                >
+                  <Text
+                    style={[
+                      styles.privacyOptionText,
+                      newGroup.membershipMethod === m &&
+                        styles.privacyOptionTextActive,
+                    ]}
+                  >
+                    {m === "open"
+                      ? "Open"
+                      : m === "request"
+                        ? "Request"
+                        : m === "invite"
+                          ? "Invite"
+                          : "Code"}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+            <TouchableOpacity
+              style={styles.submitBtn}
+              onPress={handleCreateGroup}
+            >
+              <Text style={styles.submitBtnText}>Create Group</Text>
+            </TouchableOpacity>
+          </SheetScrollView>
+        </GlassSurface>
+      </KeyboardAwareSheet>
+
+      {/* ── Create Event modal ── */}
+      <KeyboardAwareSheet
+        visible={showCreateEvent}
+        onClose={closeCreateEvent}
+        backdropColor="rgba(0,0,0,0.5)"
+        scrollable
+      >
+        <GlassSurface
+          material="dense"
+          style={[styles.modalContent, styles.modalScrollable]}
+        >
+          <View style={styles.modalHandle} />
+          <SheetScrollView>
+            <Text style={styles.modalTitle}>Create Event</Text>
+            <Text style={styles.inputLabel}>Event Name *</Text>
+            <TextInput
+              style={styles.input}
+              placeholder="e.g. Sunday Car Meet"
+              placeholderTextColor={colors.mutedForeground}
+              value={newEvent.name}
+              onChangeText={(t) => setNewEvent((p) => ({ ...p, name: t }))}
+            />
+            <Text style={styles.inputLabel}>Location *</Text>
+            <TextInput
+              style={styles.input}
+              placeholder="Venue name and postcode"
+              placeholderTextColor={colors.mutedForeground}
+              value={newEvent.location}
+              onChangeText={(t) => setNewEvent((p) => ({ ...p, location: t }))}
+            />
+            <Text style={styles.inputLabel}>Description</Text>
+            <TextInput
+              style={[styles.input, { minHeight: 60 }]}
+              placeholder="Tell attendees what to expect…"
+              placeholderTextColor={colors.mutedForeground}
+              value={newEvent.description}
+              onChangeText={(t) =>
+                setNewEvent((p) => ({ ...p, description: t }))
+              }
+              multiline
+            />
+            <View style={{ flexDirection: "row", gap: 10 }}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.inputLabel}>Date</Text>
+                <TextInput
+                  style={styles.input}
+                  placeholder="2026-08-01"
+                  placeholderTextColor={colors.mutedForeground}
+                  value={newEvent.date}
+                  onChangeText={(t) => setNewEvent((p) => ({ ...p, date: t }))}
                 />
               </View>
-              <Text style={styles.inputLabel}>Membership</Text>
-              <View style={styles.privacyOptionRow}>
-                {(["open", "request", "invite", "code"] as const).map((m) => (
+              <View style={{ flex: 1 }}>
+                <Text style={styles.inputLabel}>Start</Text>
+                <TextInput
+                  style={styles.input}
+                  placeholder="10:00"
+                  placeholderTextColor={colors.mutedForeground}
+                  value={newEvent.startTime}
+                  onChangeText={(t) =>
+                    setNewEvent((p) => ({ ...p, startTime: t }))
+                  }
+                />
+              </View>
+            </View>
+            <Text style={styles.inputLabel}>Event Type</Text>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              style={{ marginBottom: 4 }}
+            >
+              <View style={{ flexDirection: "row", gap: 8 }}>
+                {(
+                  Object.entries(EVENT_TYPE_LABELS) as [EventType, string][]
+                ).map(([k, label]) => (
                   <TouchableOpacity
-                    key={m}
+                    key={k}
                     style={[
-                      styles.privacyOption,
-                      newGroup.membershipMethod === m &&
-                        styles.privacyOptionActive,
+                      styles.sectionPill,
+                      newEvent.eventType === k && styles.sectionPillActive,
                     ]}
-                    onPress={() =>
-                      setNewGroup((p) => ({ ...p, membershipMethod: m }))
-                    }
+                    onPress={() => setNewEvent((p) => ({ ...p, eventType: k }))}
                   >
                     <Text
                       style={[
-                        styles.privacyOptionText,
-                        newGroup.membershipMethod === m &&
-                          styles.privacyOptionTextActive,
+                        styles.sectionPillText,
+                        newEvent.eventType === k &&
+                          styles.sectionPillTextActive,
                       ]}
                     >
-                      {m === "open"
-                        ? "Open"
-                        : m === "request"
-                          ? "Request"
-                          : m === "invite"
-                            ? "Invite"
-                            : "Code"}
+                      {label}
                     </Text>
                   </TouchableOpacity>
                 ))}
               </View>
-              <TouchableOpacity
-                style={styles.submitBtn}
-                onPress={handleCreateGroup}
-              >
-                <Text style={styles.submitBtnText}>Create Group</Text>
-              </TouchableOpacity>
-            </GlassSurface>
-          </View>
-        </KeyboardAwareScrollViewCompat>
-      </Modal>
-
-      {/* ── Create Event modal ── */}
-      <Modal
-        visible={showCreateEvent}
-        transparent
-        animationType="slide"
-        onRequestClose={() => setShowCreateEvent(false)}
-      >
-        <KeyboardAwareScrollViewCompat
-          style={{ flex: 1 }}
-          contentContainerStyle={{ flexGrow: 1, justifyContent: "flex-end" }}
-          keyboardShouldPersistTaps="handled"
-        >
-          <View
-            style={[
-              styles.modalOverlay,
-              { position: "relative", backgroundColor: "transparent" },
-            ]}
-          >
-            <GlassSurface material="dense" style={styles.modalContent}>
-              <View style={styles.modalHandle} />
-              <Text style={styles.modalTitle}>Create Event</Text>
-              <Text style={styles.inputLabel}>Event Name *</Text>
-              <TextInput
-                style={styles.input}
-                placeholder="e.g. Sunday Car Meet"
-                placeholderTextColor={colors.mutedForeground}
-                value={newEvent.name}
-                onChangeText={(t) => setNewEvent((p) => ({ ...p, name: t }))}
-              />
-              <Text style={styles.inputLabel}>Location *</Text>
-              <TextInput
-                style={styles.input}
-                placeholder="Venue name and postcode"
-                placeholderTextColor={colors.mutedForeground}
-                value={newEvent.location}
-                onChangeText={(t) =>
-                  setNewEvent((p) => ({ ...p, location: t }))
-                }
-              />
-              <Text style={styles.inputLabel}>Description</Text>
-              <TextInput
-                style={[styles.input, { minHeight: 60 }]}
-                placeholder="Tell attendees what to expect…"
-                placeholderTextColor={colors.mutedForeground}
-                value={newEvent.description}
-                onChangeText={(t) =>
-                  setNewEvent((p) => ({ ...p, description: t }))
-                }
-                multiline
-              />
-              <View style={{ flexDirection: "row", gap: 10 }}>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.inputLabel}>Date</Text>
-                  <TextInput
-                    style={styles.input}
-                    placeholder="2026-08-01"
-                    placeholderTextColor={colors.mutedForeground}
-                    value={newEvent.date}
-                    onChangeText={(t) =>
-                      setNewEvent((p) => ({ ...p, date: t }))
-                    }
-                  />
-                </View>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.inputLabel}>Start</Text>
-                  <TextInput
-                    style={styles.input}
-                    placeholder="10:00"
-                    placeholderTextColor={colors.mutedForeground}
-                    value={newEvent.startTime}
-                    onChangeText={(t) =>
-                      setNewEvent((p) => ({ ...p, startTime: t }))
-                    }
-                  />
-                </View>
-              </View>
-              <Text style={styles.inputLabel}>Event Type</Text>
-              <ScrollView
-                horizontal
-                showsHorizontalScrollIndicator={false}
-                style={{ marginBottom: 4 }}
-              >
-                <View style={{ flexDirection: "row", gap: 8 }}>
-                  {(
-                    Object.entries(EVENT_TYPE_LABELS) as [EventType, string][]
-                  ).map(([k, label]) => (
-                    <TouchableOpacity
-                      key={k}
-                      style={[
-                        styles.sectionPill,
-                        newEvent.eventType === k && styles.sectionPillActive,
-                      ]}
-                      onPress={() =>
-                        setNewEvent((p) => ({ ...p, eventType: k }))
-                      }
-                    >
-                      <Text
-                        style={[
-                          styles.sectionPillText,
-                          newEvent.eventType === k &&
-                            styles.sectionPillTextActive,
-                        ]}
-                      >
-                        {label}
-                      </Text>
-                    </TouchableOpacity>
-                  ))}
-                </View>
-              </ScrollView>
-              <View style={{ flexDirection: "row", gap: 10 }}>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.inputLabel}>Vehicle Category</Text>
-                  <TextInput
-                    style={styles.input}
-                    placeholder="Open to All"
-                    placeholderTextColor={colors.mutedForeground}
-                    value={newEvent.vehicleCategory}
-                    onChangeText={(t) =>
-                      setNewEvent((p) => ({ ...p, vehicleCategory: t }))
-                    }
-                  />
-                </View>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.inputLabel}>Entry Cost</Text>
-                  <TextInput
-                    style={styles.input}
-                    placeholder="Free"
-                    placeholderTextColor={colors.mutedForeground}
-                    value={newEvent.entryCost}
-                    onChangeText={(t) =>
-                      setNewEvent((p) => ({ ...p, entryCost: t }))
-                    }
-                  />
-                </View>
-              </View>
-              <View style={styles.toggleRow}>
-                <Text style={styles.toggleLabel}>Public event</Text>
-                <Switch
-                  value={newEvent.isPublic}
-                  onValueChange={(v) =>
-                    setNewEvent((p) => ({ ...p, isPublic: v }))
+            </ScrollView>
+            <View style={{ flexDirection: "row", gap: 10 }}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.inputLabel}>Vehicle Category</Text>
+                <TextInput
+                  style={styles.input}
+                  placeholder="Open to All"
+                  placeholderTextColor={colors.mutedForeground}
+                  value={newEvent.vehicleCategory}
+                  onChangeText={(t) =>
+                    setNewEvent((p) => ({ ...p, vehicleCategory: t }))
                   }
-                  trackColor={{ true: colors.primary }}
                 />
               </View>
-              <TouchableOpacity
-                style={styles.submitBtn}
-                onPress={handleCreateEvent}
-              >
-                <Text style={styles.submitBtnText}>Create Event</Text>
-              </TouchableOpacity>
-            </GlassSurface>
-          </View>
-        </KeyboardAwareScrollViewCompat>
-      </Modal>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.inputLabel}>Entry Cost</Text>
+                <TextInput
+                  style={styles.input}
+                  placeholder="Free"
+                  placeholderTextColor={colors.mutedForeground}
+                  value={newEvent.entryCost}
+                  onChangeText={(t) =>
+                    setNewEvent((p) => ({ ...p, entryCost: t }))
+                  }
+                />
+              </View>
+            </View>
+            <View style={styles.toggleRow}>
+              <Text style={styles.toggleLabel}>Public event</Text>
+              <Switch
+                value={newEvent.isPublic}
+                onValueChange={(v) =>
+                  setNewEvent((p) => ({ ...p, isPublic: v }))
+                }
+                trackColor={{ true: colors.primary }}
+              />
+            </View>
+            <TouchableOpacity
+              style={styles.submitBtn}
+              onPress={handleCreateEvent}
+            >
+              <Text style={styles.submitBtnText}>Create Event</Text>
+            </TouchableOpacity>
+          </SheetScrollView>
+        </GlassSurface>
+      </KeyboardAwareSheet>
     </View>
   );
 }

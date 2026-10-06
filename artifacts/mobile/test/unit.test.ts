@@ -3350,8 +3350,10 @@ test('keyboard avoidance is measured, never a fixed shift', () => {
   const sheet = readFileSync(join(MOBILE, 'components/KeyboardAwareSheet.tsx'), 'utf8');
   const root = readFileSync(join(MOBILE, 'app/_layout.tsx'), 'utf8');
   // One app-wide gap above the keyboard, on the library's measured scroll
-  assert.ok(/export const KEYBOARD_FIELD_GAP = (\d+);/.test(compat));
-  assert.ok(Number(compat.match(/KEYBOARD_FIELD_GAP = (\d+)/)![1]) >= 12);
+  const gap = readFileSync(join(MOBILE, 'lib/keyboardGap.ts'), 'utf8');
+  assert.ok(/export const KEYBOARD_FIELD_GAP = (\d+);/.test(gap));
+  assert.ok(Number(gap.match(/KEYBOARD_FIELD_GAP = (\d+)/)![1]) >= 12);
+  assert.ok(/import \{ KEYBOARD_FIELD_GAP \} from "@\/lib\/keyboardGap"/.test(compat));
   assert.ok(/bottomOffset = KEYBOARD_FIELD_GAP/.test(compat) && /<KeyboardAwareScrollView\b[\s\S]*bottomOffset=\{bottomOffset\}/.test(compat));
   // Bottom sheets ride on the keyboard by its measured height (see the sheet tests below)
   assert.ok(/<KeyboardAvoidingView[\s\S]*keyboardVerticalOffset=\{-insets\.bottom\}/.test(sheet));
@@ -3738,10 +3740,109 @@ test('a sheet\'s dimmed backdrop stays full-screen and still; only the panel rid
   const root = tree.slice(tree.indexOf('<View'), tree.indexOf('>', tree.indexOf('<View')));
   assert.ok(!/backgroundColor/.test(root), 'the root view is tinted (and the sheet sits inside it)');
   // The keyboard handling wraps only the panel, docked to the screen's bottom edge
-  assert.ok(/style=\{styles\.sheetDock\}/.test(kav));
+  assert.ok(/style=\{\[\s*styles\.sheetDock,/.test(kav));
+  // A long sheet's dock reaches up to below the status bar, but stays transparent
+  // to touches, so a tap above the panel still lands on the backdrop
+  assert.ok(/scrollable && \{\s*top: insets\.top \+ SHEET_DISMISS\.topGap,/.test(kav));
+  assert.ok(/pointerEvents="box-none"/.test(kav));
   assert.ok(/sheetDock: \{ position: "absolute", left: 0, right: 0, bottom: 0 \}/.test(code));
   assert.ok(/<Animated\.View[\s\S]*\{children\}[\s\S]*<\/Animated\.View>/.test(kav), 'the panel is inside the keyboard handling');
   // Lift, dismissal and escape unchanged
   assert.ok(/keyboardVerticalOffset=\{-insets\.bottom\}/.test(kav));
   assert.ok(/onPress=\{close\}/.test(backdrop) && /onAccessibilityEscape=\{close\}/.test(kav) && /\.\.\.pan\.panHandlers/.test(kav));
+});
+
+
+// ─── Every sheet with fields: one shared sheet ──────────────────────────────
+
+import { overscrollDismisses, revealScrollOffset } from '@/lib/sheetDismiss';
+
+test("a long sheet's fields scroll into view above the keyboard, and pulling its content down closes it", () => {
+  // Already fully visible (with the gap): nothing moves
+  assert.equal(revealScrollOffset(100, 150, 0, 400, 24), null);
+  // The keyboard shortened the view and the field is now below it: just far enough
+  assert.equal(revealScrollOffset(300, 350, 0, 300, 24), 74);
+  // Above the visible part: back up to it
+  assert.equal(revealScrollOffset(40, 90, 200, 300, 24), 16);
+  // A field taller than the view shows its top (where the caret starts)
+  assert.equal(revealScrollOffset(500, 1000, 0, 300, 24), 476);
+  // Pulled down past the top far enough, or not
+  assert.equal(overscrollDismisses(-80), true);
+  assert.equal(overscrollDismisses(-20), false);
+  assert.equal(overscrollDismisses(150), false);
+});
+
+test('no sheet with fields is a one-off Modal: every one is the shared sheet, and none can trap the user', () => {
+  const read = (rel: string) => readFileSync(join(MOBILE, rel), 'utf8');
+  // Any Modal in the app that has a text field in it is a one-off sheet
+  for (const file of sourceFiles(join(MOBILE, 'app'))) {
+    const src = readFileSync(file, 'utf8');
+    for (const [a, b] of elementSpans(src, 'Modal')) {
+      assert.ok(!/<TextInput\b/.test(src.slice(a, b)), `${relative(MOBILE, file)}: a Modal with fields (use KeyboardAwareSheet)`);
+    }
+  }
+  // The four that were trapping (or crash-prone) are on it, as long sheets
+  const sheets = [
+    ['app/(tabs)/community.tsx', 'showCreateGroup', 'closeCreateGroup'],
+    ['app/(tabs)/community.tsx', 'showCreateConvoy', 'closeCreateConvoy'],
+    ['app/(tabs)/community.tsx', 'showCreateEvent', 'closeCreateEvent'],
+    ['app/search.tsx', 'visible', 'onClose'],
+  ] as const;
+  for (const [rel, show, close] of sheets) {
+    const src = read(rel).replace(/\/\/.*$/gm, '');
+    const at = src.search(new RegExp(`<KeyboardAwareSheet\\s+visible=\\{${show}\\}\\s+onClose=\\{${close}\\}`));
+    assert.ok(at > 0, `${rel}: ${show} isn't a KeyboardAwareSheet closing through ${close}`);
+    const body = src.slice(at, src.indexOf('</KeyboardAwareSheet>', at));
+    const head = body.slice(0, body.indexOf('>'));
+    assert.ok(/backdropColor=/.test(head) && /scrollable/.test(head), `${rel}: ${show} has no backdrop or isn't scrollable`);
+    // Its fields scroll inside the panel; nothing from the keyboard library, no nested Modal
+    assert.ok(/<SheetScrollView\b/.test(body) && /<TextInput\b/.test(body.slice(body.indexOf('<SheetScrollView'))));
+    assert.ok(!/KeyboardAwareScrollView|<Modal\b/.test(body), `${rel}: ${show} nests a ScrollView or Modal`);
+  }
+  for (const rel of ['app/(tabs)/community.tsx', 'app/search.tsx']) {
+    assert.ok(!/KeyboardAwareScrollViewCompat|\bModal,/.test(read(rel)), `${rel} still uses the old pattern`);
+  }
+});
+
+test('Create Group, Convoy and Event close without creating, reset their forms, reopen blank, and still create', () => {
+  const src = readFileSync(join(MOBILE, 'app/(tabs)/community.tsx'), 'utf8').replace(/\/\/.*$/gm, '');
+  for (const [kind, add, required] of [['Group', 'addGroup', 'newGroup.name'], ['Convoy', 'addConvoy', 'newConvoy.name'], ['Event', 'addEvent', 'newEvent.name']] as const) {
+    const blank = `BLANK_${kind.toUpperCase()}`;
+    // One blank form, for the first opening and every reset
+    assert.ok(new RegExp(`const ${blank} = \\{`).test(src) && new RegExp(`useState\\(${blank}\\)`).test(src), `${kind}: no shared blank form`);
+    // Dismissing (backdrop, swipe, escape all call onClose) closes and clears it
+    assert.ok(new RegExp(`const closeCreate${kind} = \\(\\) => \\{\\s*setShowCreate${kind}\\(false\\);\\s*setNew${kind}\\(${blank}\\);\\s*\\};`).test(src), `${kind}: closing doesn't reset`);
+    // Opening shows the (blank) form again
+    assert.ok(new RegExp(`setShowCreate${kind}\\(true\\)`).test(src));
+    // Submitting: still validated first (an invalid form stays open with what was typed),
+    // then created, then closed through the same reset
+    const handler = src.slice(src.indexOf(`function handleCreate${kind}()`), src.indexOf('\n  }\n', src.indexOf(`function handleCreate${kind}()`)));
+    const check = handler.indexOf(`!${required}.trim()`), create = handler.indexOf(`${add}({`), done = handler.indexOf(`closeCreate${kind}();`);
+    assert.ok(check > 0 && create > check && done > create, `${kind}: validate → create → close order broken`);
+    assert.ok(/return;/.test(handler.slice(check, create)), `${kind}: an invalid form doesn't stop`);
+    // The drag handle stays outside the scrolling fields, so it always drags the sheet
+    const sheet = src.slice(src.indexOf(`visible={showCreate${kind}}`), src.indexOf('</KeyboardAwareSheet>', src.indexOf(`visible={showCreate${kind}}`)));
+    assert.ok(sheet.indexOf('styles.modalHandle') < sheet.indexOf('<SheetScrollView'), `${kind}: the handle scrolls away`);
+    assert.ok(new RegExp(`onPress=\\{handleCreate${kind}\\}`).test(sheet), `${kind}: submit not wired`);
+  }
+  // Save Place: reset on every opening, Cancel and a successful save close it
+  const save = readFileSync(join(MOBILE, 'app/search.tsx'), 'utf8');
+  assert.ok(/if \(visible\) \{\s*setKind\(defaultKind\);\s*setName\(""\);\s*setDescription\(""\);/.test(save));
+  assert.ok(/await onSave\([\s\S]*?onClose\(\);/.test(save) && /onPress=\{onClose\}[\s\S]*?Cancel/.test(save));
+});
+
+test('a long sheet: scrolls only when its fields overflow, keeps the focused field in view, and closes on a pull-down', () => {
+  const code = readFileSync(join(MOBILE, 'components/KeyboardAwareSheet.tsx'), 'utf8').replace(/\/\/.*$/gm, '');
+  const view = code.slice(code.indexOf('export function SheetScrollView'));
+  assert.ok(/scrollEnabled=\{overflows\}/.test(view), 'scrolls (and steals drags from the sheet) even when everything fits');
+  assert.ok(/onScrollEndDrag=\{[\s\S]*?overscrollDismisses\([\s\S]*?close\(\)/.test(view));
+  assert.ok(/const close = useContext\(SheetClose\)/.test(view) && /<SheetClose\.Provider value=\{close\}>/.test(code));
+  // The keyboard shortening the view brings the focused field back into it
+  assert.ok(/if \(shrank\) revealFocused\(\)/.test(view) && /revealScrollOffset\(/.test(view));
+  assert.ok(/import \{ KEYBOARD_FIELD_GAP \} from "@\/lib\/keyboardGap"/.test(code));
+  // The panel shrinks to fit rather than running off the top
+  assert.ok(/scrollable && styles\.shrink/.test(code) && /shrink: \{ flexShrink: 1 \}/.test(code));
+  const community = readFileSync(join(MOBILE, 'app/(tabs)/community.tsx'), 'utf8');
+  assert.ok(/modalScrollable: \{ flexShrink: 1 \}/.test(community));
+  assert.ok(/flexShrink: 1,/.test(readFileSync(join(MOBILE, 'app/search.tsx'), 'utf8')));
 });

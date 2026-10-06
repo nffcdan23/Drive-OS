@@ -13,6 +13,12 @@ export const SHEET_DISMISS = {
   dismissVelocity: 0.8,
   // Dragging up moves the sheet only this fraction of the finger's travel
   upResistance: 0.15,
+  // A scrolling sheet's content pulled down past its top by this much (and
+  // let go) closes it.  The bounce halves the finger's travel, hence smaller
+  // than dismissDistance.
+  overscrollDistance: 64,
+  // A scrolling sheet stops this far below the status bar
+  topGap: 12,
 } as const;
 
 /** Whether a move on the sheet should start dragging it */
@@ -53,4 +59,29 @@ export function sheetKeyboardLift(
   safeAreaBottom: number,
 ): number {
   return Math.max(0, keyboardHeight - safeAreaBottom);
+}
+
+/** Whether a scrolling sheet's content, let go at `offsetY`, was pulled down far enough to close */
+export function overscrollDismisses(offsetY: number): boolean {
+  return offsetY <= -SHEET_DISMISS.overscrollDistance;
+}
+
+/**
+ * Where a sheet's scroll view should scroll so a field is fully visible, with
+ * `gap` to spare; null when it already is.  Positions are in the scroll
+ * content's coordinates; `viewport` is the visible height.
+ */
+export function revealScrollOffset(
+  fieldTop: number,
+  fieldBottom: number,
+  scrollY: number,
+  viewport: number,
+  gap: number,
+): number | null {
+  if (fieldBottom + gap > scrollY + viewport) {
+    // Below the visible part: scroll just far enough (but never past its top)
+    return Math.min(fieldBottom + gap - viewport, Math.max(0, fieldTop - gap));
+  }
+  if (fieldTop - gap < scrollY) return Math.max(0, fieldTop - gap);
+  return null;
 }

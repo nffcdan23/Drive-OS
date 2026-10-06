@@ -13,9 +13,9 @@ import {
   KeyboardAwareScrollView,
   KeyboardAwareScrollViewProps,
 } from "react-native-keyboard-controller";
+import { KEYBOARD_FIELD_GAP } from "@/lib/keyboardGap";
 
-/** Space kept between a focused field and the top of the keyboard */
-export const KEYBOARD_FIELD_GAP = 24;
+export { KEYBOARD_FIELD_GAP };
 
 type Props = KeyboardAwareScrollViewProps & ScrollViewProps;
 

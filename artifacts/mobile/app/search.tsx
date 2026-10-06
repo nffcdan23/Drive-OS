@@ -4,7 +4,10 @@
  * stored in the user's account; places saved offline upload later.
  */
 import { GlassSurface } from "@/components/Glass";
-import { KeyboardAwareScrollViewCompat } from "@/components/KeyboardAwareScrollViewCompat";
+import {
+  KeyboardAwareSheet,
+  SheetScrollView,
+} from "@/components/KeyboardAwareSheet";
 import { openDirections } from "@/lib/directions";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
@@ -12,7 +15,6 @@ import {
   Alert,
   FlatList,
   KeyboardAvoidingView,
-  Modal,
   Platform,
   StyleSheet,
   Text,
@@ -372,6 +374,7 @@ function SavePlaceSheet({
   onSave: ReturnType<typeof useApp>["addPlace"];
 }) {
   const colors = useColors();
+  const insets = useSafeAreaInsets();
   const [kind, setKind] = useState<LocationKind>(defaultKind);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
@@ -439,100 +442,102 @@ function SavePlaceSheet({
   );
 
   return (
-    <Modal
+    <KeyboardAwareSheet
       visible={visible}
-      transparent
-      animationType="slide"
-      onRequestClose={onClose}
+      onClose={onClose}
+      backdropColor="rgba(0,0,0,0.5)"
+      scrollable
     >
-      <View style={s.overlay}>
-        <GlassSurface material="dense" style={s.sheet}>
-          <KeyboardAwareScrollViewCompat contentContainerStyle={{ gap: 12 }}>
-            <Text style={s.sheetTitle}>Save this place</Text>
-            <View style={s.chips}>
-              {SAVE_KINDS.map((k) => (
-                <Chip
-                  key={k}
-                  label={KIND_LABEL[k]}
-                  active={kind === k}
-                  onPress={() => setKind(k)}
-                />
-              ))}
-            </View>
-            <TextInput
-              style={s.input}
-              placeholder={
-                kind === "home" || kind === "work" ? KIND_LABEL[kind] : "Name"
-              }
-              placeholderTextColor={colors.mutedForeground}
-              value={name}
-              onChangeText={setName}
-              maxLength={100}
-            />
-            {isSpot ? (
-              <>
-                <TextInput
-                  style={[
-                    s.input,
-                    { height: 80, textAlignVertical: "top", paddingTop: 12 },
-                  ]}
-                  placeholder="What makes it special? (optional)"
-                  placeholderTextColor={colors.mutedForeground}
-                  value={description}
-                  onChangeText={setDescription}
-                  multiline
-                  maxLength={2000}
-                />
-                <Text style={s.label}>Type</Text>
-                <View style={s.chips}>
-                  {SPOT_CATEGORIES.map((c) => (
-                    <Chip
-                      key={c.id}
-                      label={c.label}
-                      active={category === c.id}
-                      onPress={() => setCategory(c.id)}
-                    />
-                  ))}
-                </View>
-                <Text style={s.label}>Who can see it</Text>
-                <View style={s.chips}>
-                  {(["private", "friends", "public"] as const).map((v) => (
-                    <Chip
-                      key={v}
-                      label={VISIBILITY_LABEL[v]}
-                      active={visibility === v}
-                      onPress={() => setVisibility(v)}
-                    />
-                  ))}
-                </View>
-              </>
+      <GlassSurface
+        material="dense"
+        // Bottom padding clears the home indicator, as the sheet's keyboard lift expects
+        style={[s.sheet, { paddingBottom: Math.max(insets.bottom, 16) + 16 }]}
+      >
+        <SheetScrollView contentContainerStyle={{ gap: 12 }}>
+          <Text style={s.sheetTitle}>Save this place</Text>
+          <View style={s.chips}>
+            {SAVE_KINDS.map((k) => (
+              <Chip
+                key={k}
+                label={KIND_LABEL[k]}
+                active={kind === k}
+                onPress={() => setKind(k)}
+              />
+            ))}
+          </View>
+          <TextInput
+            style={s.input}
+            placeholder={
+              kind === "home" || kind === "work" ? KIND_LABEL[kind] : "Name"
+            }
+            placeholderTextColor={colors.mutedForeground}
+            value={name}
+            onChangeText={setName}
+            maxLength={100}
+          />
+          {isSpot ? (
+            <>
+              <TextInput
+                style={[
+                  s.input,
+                  { height: 80, textAlignVertical: "top", paddingTop: 12 },
+                ]}
+                placeholder="What makes it special? (optional)"
+                placeholderTextColor={colors.mutedForeground}
+                value={description}
+                onChangeText={setDescription}
+                multiline
+                maxLength={2000}
+              />
+              <Text style={s.label}>Type</Text>
+              <View style={s.chips}>
+                {SPOT_CATEGORIES.map((c) => (
+                  <Chip
+                    key={c.id}
+                    label={c.label}
+                    active={category === c.id}
+                    onPress={() => setCategory(c.id)}
+                  />
+                ))}
+              </View>
+              <Text style={s.label}>Who can see it</Text>
+              <View style={s.chips}>
+                {(["private", "friends", "public"] as const).map((v) => (
+                  <Chip
+                    key={v}
+                    label={VISIBILITY_LABEL[v]}
+                    active={visibility === v}
+                    onPress={() => setVisibility(v)}
+                  />
+                ))}
+              </View>
+            </>
+          ) : (
+            <Text style={s.note}>
+              {kind === "home" || kind === "work"
+                ? "Home and Work are always private."
+                : "Saved places are private to you."}
+            </Text>
+          )}
+          {error ? (
+            <Text style={{ color: colors.destructive }}>{error}</Text>
+          ) : null}
+          <TouchableOpacity style={s.primary} onPress={save} disabled={busy}>
+            {busy ? (
+              <ActivityIndicator color={colors.primaryForeground} />
             ) : (
-              <Text style={s.note}>
-                {kind === "home" || kind === "work"
-                  ? "Home and Work are always private."
-                  : "Saved places are private to you."}
-              </Text>
+              <Text style={s.saveText}>Save current location</Text>
             )}
-            {error ? (
-              <Text style={{ color: colors.destructive }}>{error}</Text>
-            ) : null}
-            <TouchableOpacity style={s.primary} onPress={save} disabled={busy}>
-              {busy ? (
-                <ActivityIndicator color={colors.primaryForeground} />
-              ) : (
-                <Text style={s.saveText}>Save current location</Text>
-              )}
-            </TouchableOpacity>
-            <TouchableOpacity
-              onPress={onClose}
-              style={{ alignItems: "center", padding: 8 }}
-            >
-              <Text style={s.cancelText}>Cancel</Text>
-            </TouchableOpacity>
-          </KeyboardAwareScrollViewCompat>
-        </GlassSurface>
-      </View>
-    </Modal>
+          </TouchableOpacity>
+          <TouchableOpacity
+            onPress={onClose}
+            style={{ alignItems: "center", padding: 8 }}
+          >
+            <Text style={s.cancelText}>Cancel</Text>
+          </TouchableOpacity>
+        </SheetScrollView>
+      </GlassSurface>
+    </KeyboardAwareSheet>
   );
 }
 
@@ -629,17 +634,13 @@ const styles = (c: ReturnType<typeof useColors>, top: number, bottom: number) =>
       gap: 8,
     },
     saveText: { color: c.primaryForeground, fontWeight: "600", fontSize: 16 },
-    overlay: {
-      flex: 1,
-      justifyContent: "flex-end",
-      backgroundColor: "rgba(0,0,0,0.5)",
-    },
     sheet: {
       padding: 20,
       paddingBottom: 36,
       borderTopLeftRadius: 24,
       borderTopRightRadius: 24,
-      maxHeight: "85%",
+      // Shrinks to fit the screen above the keyboard; its fields then scroll
+      flexShrink: 1,
     },
     sheetTitle: { color: c.foreground, fontWeight: "700", fontSize: 18 },
     label: { color: c.mutedForeground, fontWeight: "600", fontSize: 13 },
