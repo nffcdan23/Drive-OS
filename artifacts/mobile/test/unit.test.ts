@@ -2166,3 +2166,193 @@ test('"Allow Once": iOS shows no Always prompt, so it is asked again on a later 
   assert.equal(await ensureBackgroundAccess(p, store), 'granted');
   assert.equal(p.backgroundPrompts, 1);
 });
+
+// ─── Presence ───────────────────────────────────────────────────────────────
+import { friendStatus, showsActivityStatus, toFriend } from '@/lib/backend/mappers';
+import { PRESENCE_HEARTBEAT_MS, PresenceReporter, type PresenceUpdate } from '@/lib/backend/presence';
+import type { ServerFriend } from '@/lib/backend/endpoints';
+
+const card = (presence?: ServerFriend['presence']): ServerFriend => ({
+  id: 'f1', username: null, displayName: 'Sam Driver', avatarUrl: null, level: 3, since: '2026-10-01T00:00:00Z',
+  ...(presence === undefined ? {} : { presence }),
+});
+
+test('friends show the status the server reports, not a hard-coded Offline', () => {
+  const seen = '2026-10-06T10:00:00.000Z';
+  const online = toFriend(card({ status: 'online', lastSeenAt: seen }));
+  assert.equal(online.status, 'online');
+  assert.equal(online.presence, 'online');
+  assert.equal(online.lastSeenAt, seen);
+  assert.equal(toFriend(card({ status: 'driving', lastSeenAt: seen })).status, 'driving');
+  const offline = toFriend(card({ status: 'offline', lastSeenAt: seen }));
+  assert.equal(offline.status, 'offline');
+  assert.equal(offline.lastSeenAt, seen, 'last active kept for "Last active…"');
+  assert.equal(toFriend(card({ status: 'offline', lastSeenAt: null })).lastSeenAt, null);
+});
+
+test('Away shows as offline for now, keeping the real status and last active time', () => {
+  const away = toFriend(card({ status: 'away', lastSeenAt: '2026-10-06T10:00:00.000Z' }));
+  assert.equal(away.status, 'offline');
+  assert.equal(away.presence, 'away');
+  assert.equal(away.lastSeenAt, '2026-10-06T10:00:00.000Z');
+});
+
+test('hidden or missing presence is safe: offline, nothing else known', () => {
+  for (const f of [toFriend(card(null)), toFriend(card(undefined))]) {
+    assert.equal(f.status, 'offline');
+    assert.equal(f.presence, null);
+    assert.equal(f.lastSeenAt, null);
+  }
+  assert.equal(friendStatus({ status: 'bogus' as never, lastSeenAt: null }), 'offline', 'unknown values never crash');
+});
+
+test('the Show Activity Status setting maps from the server, defaulting on', () => {
+  assert.equal(showsActivityStatus({ showActivityStatus: true }), true);
+  assert.equal(showsActivityStatus({ showActivityStatus: false }), false);
+  assert.equal(showsActivityStatus({}), true, 'an older server without the setting: on, its default');
+});
+
+/** A reporter with a fake clock, interval and API. */
+function presenceRig(opts: { fail?: (u: PresenceUpdate) => unknown } = {}) {
+  const sent: PresenceUpdate[] = [];
+  const clock = { t: 1_000_000 };
+  const intervals = new Map<number, () => void>();
+  let nextId = 1;
+  const reporter = new PresenceReporter({
+    send: async (u) => { sent.push(u); const e = opts.fail?.(u); if (e) throw e; return {}; },
+    now: () => clock.t,
+    setInterval: (fn) => { const id = nextId++; intervals.set(id, fn); return id; },
+    clearInterval: (id) => { intervals.delete(id as number); },
+  });
+  const tick = async () => { clock.t += PRESENCE_HEARTBEAT_MS; for (const fn of [...intervals.values()]) fn(); await settle(); };
+  return { reporter, sent, clock, intervals, tick };
+}
+
+test('presence: reports at once on start, then every minute on screen, with one timer', async () => {
+  const r = presenceRig();
+  r.reporter.start('foreground', { driving: false, journeyId: null });
+  await settle();
+  assert.deepEqual(r.sent, [{ appState: 'foreground', driving: false }]);
+  r.reporter.start('foreground', { driving: false, journeyId: null }); // started twice: still one timer
+  r.reporter.setAppState('foreground'); // no change: nothing sent
+  assert.equal(r.intervals.size, 1);
+  await r.tick(); await r.tick();
+  assert.equal(r.sent.length, 3, 'heartbeat every 60 s');
+  assert.ok(r.sent.every((u) => u.appState === 'foreground'));
+});
+
+test('presence: background is reported at once and stops the heartbeat; returning resumes it', async () => {
+  const r = presenceRig();
+  r.reporter.start('foreground', { driving: false, journeyId: null });
+  await settle();
+  r.reporter.setAppState('background');
+  await settle();
+  assert.deepEqual(r.sent.at(-1), { appState: 'background', driving: false });
+  assert.equal(r.intervals.size, 0, 'no heartbeat in the background when not driving');
+  await r.tick();
+  assert.equal(r.sent.length, 2);
+  r.reporter.setAppState('foreground');
+  await settle();
+  assert.deepEqual(r.sent.at(-1), { appState: 'foreground', driving: false });
+  assert.equal(r.intervals.size, 1);
+});
+
+test('presence: driving with its journey; backgrounding keeps driving; drive fixes keep it fresh', async () => {
+  const r = presenceRig();
+  r.reporter.start('foreground', { driving: false, journeyId: null });
+  r.reporter.setDrive({ driving: true, journeyId: null }); // started offline: no server journey yet
+  await settle();
+  assert.deepEqual(r.sent.at(-1), { appState: 'foreground', driving: true });
+  r.reporter.setDrive({ driving: true, journeyId: 'j1' });
+  await settle();
+  assert.deepEqual(r.sent.at(-1), { appState: 'foreground', driving: true, journeyId: 'j1' });
+  r.reporter.setAppState('background');
+  await settle();
+  assert.deepEqual(r.sent.at(-1), { appState: 'background', driving: true, journeyId: 'j1' }, 'backgrounding never clears driving');
+  // Phone locked: background fixes refresh presence, at most once a minute
+  const before = r.sent.length;
+  for (let i = 0; i < 30; i++) { r.clock.t += 5_000; r.reporter.noteDriveActivity(); await settle(); }
+  assert.equal(r.sent.length - before, 2, '150 s of fixes: 2 heartbeats, not 30');
+  r.reporter.setDrive({ driving: false, journeyId: 'j1' });
+  await settle();
+  assert.deepEqual(r.sent.at(-1), { appState: 'background', driving: false }, 'journey cleared when the drive ends');
+  const after = r.sent.length;
+  r.reporter.noteDriveActivity();
+  await settle();
+  assert.equal(r.sent.length, after, 'no drive heartbeats once not driving');
+});
+
+test('presence: failures are swallowed; a journey the server no longer accepts is dropped', async () => {
+  const r = presenceRig({ fail: (u) => (u.journeyId === 'gone' ? new ApiError(400, 'invalid_journey', 'x') : u.appState === 'background' ? new NetworkError() : null) });
+  r.reporter.start('foreground', { driving: true, journeyId: 'gone' });
+  await settle(); await settle();
+  assert.deepEqual(r.sent.slice(-1), [{ appState: 'foreground', driving: true, journeyId: null }], 'resent without the journey');
+  r.reporter.setAppState('background'); // offline: rejected, nothing thrown
+  await settle();
+  r.reporter.setAppState('foreground');
+  await settle();
+  assert.deepEqual(r.sent.at(-1), { appState: 'foreground', driving: true }, 'carries on afterwards');
+});
+
+test('presence: sign-out reports signed_out, stops everything, and never blocks on failure', async () => {
+  const r = presenceRig();
+  r.reporter.start('foreground', { driving: true, journeyId: 'j1' });
+  await settle();
+  await r.reporter.signOut();
+  assert.deepEqual(r.sent.at(-1), { appState: 'signed_out' });
+  assert.equal(r.intervals.size, 0);
+  assert.equal(r.reporter.isRunning, false);
+  const count = r.sent.length;
+  r.reporter.setAppState('background'); r.reporter.noteDriveActivity(); await r.tick();
+  assert.equal(r.sent.length, count, 'nothing sent after sign-out');
+  // Network down: sign-out still completes, quickly
+  const down = presenceRig({ fail: () => new NetworkError() });
+  down.reporter.start('foreground', { driving: false, journeyId: null });
+  const t = Date.now();
+  await down.reporter.signOut();
+  assert.ok(Date.now() - t < 1000);
+  await new PresenceReporter({ send: async () => ({}) }).signOut(); // never started: no request, no throw
+});
+
+test('CloudSync reports drive start, server journey, end, discard and recovery to presence', async () => {
+  const b = backgroundApp();
+  const events: Array<{ driving: boolean; journeyId: string | null }> = [];
+  let activity = 0;
+  b.app.onDriveChange((d) => events.push(d));
+  b.app.onDriveActivity(() => { activity++; });
+  await b.app.start();
+  assert.deepEqual(events, [], 'nothing to report with no drive');
+  await b.app.startDrive(null);
+  await settle();
+  const serverId = b.server.journeys[0]!.id;
+  assert.deepEqual(events, [{ driving: true, journeyId: null }, { driving: true, journeyId: serverId }]);
+  assert.deepEqual(b.app.driveState, { driving: true, journeyId: serverId });
+  for (let s = 0; s < 30; s++) { b.clock.t += 1000; await b.tracker.deliver([roadFix(b.clock, s)]); }
+  b.app.setDrivePaused(true);
+  b.clock.t += 1000; await b.tracker.deliver([roadFix(b.clock, 31)]);
+  assert.equal(activity, 31, 'every drive fix, background and paused included, counts as activity');
+  b.app.setDrivePaused(false);
+  await b.app.endDrive();
+  assert.deepEqual(events.at(-1), { driving: false, journeyId: null });
+  await b.app.startDrive(null);
+  await settle();
+  await b.app.discardDrive();
+  assert.deepEqual(events.at(-1), { driving: false, journeyId: null }, 'discarding clears driving');
+
+  // Relaunch with a drive still recording in the background: Driving again
+  const store = new MemoryStore();
+  const clock = { t: Date.now() - 60 * 60_000 };
+  const updates = new FakeUpdates();
+  const first = backgroundApp(store, clock, updates);
+  await first.app.start();
+  await first.app.startDrive(null);
+  await settle();
+  for (let s = 0; s < 30; s++) { clock.t += 1000; first.app.addFix(roadFix(clock, s)); }
+  await first.app.saveActiveNow();
+  const again = backgroundApp(store, clock, updates);
+  const seen: boolean[] = [];
+  again.app.onDriveChange((d) => seen.push(d.driving));
+  await again.app.start();
+  assert.deepEqual(seen, [true], 'recovered drive reported as driving');
+  assert.equal(again.app.driveState.driving, true);
+});

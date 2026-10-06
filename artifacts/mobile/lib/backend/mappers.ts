@@ -1,7 +1,7 @@
 /** Server responses → the app's model. */
 import type {
   NearbySpot as ServerNearbySpot, ServerCategory, ServerConvoy, ServerEvent, ServerGroup, ServerJourney,
-  ServerLocation, ServerNotification, ServerProfile, ServerStats, ServerVehicle, UserCard,
+  ServerLocation, ServerNotification, ServerPresence, ServerProfile, ServerSettings, ServerStats, ServerVehicle, UserCard,
 } from './endpoints';
 import { decodePolyline } from './geo';
 import type {
@@ -133,10 +133,21 @@ export const toNearbySpot = (s: ServerNearbySpot, myId: string | undefined): Nea
   visibility: s.visibility, distanceM: s.distanceM ?? null, isOwn: s.ownerId === myId,
 });
 
-export const toFriend = (f: UserCard): Friend => ({
-  id: f.id, name: f.displayName, initials: initials(f.displayName), status: 'offline', location: '',
-  avatarUrl: f.avatarUrl, level: f.level,
+/** The UI's three states: Away (and hidden presence) show as offline for now. */
+export function friendStatus(p: ServerPresence | null | undefined): Friend['status'] {
+  if (p?.status === 'driving') return 'driving';
+  if (p?.status === 'online') return 'online';
+  return 'offline';
+}
+
+export const toFriend = (f: UserCard & { presence?: ServerPresence | null }): Friend => ({
+  id: f.id, name: f.displayName, initials: initials(f.displayName),
+  status: friendStatus(f.presence), presence: f.presence?.status ?? null, lastSeenAt: f.presence?.lastSeenAt ?? null,
+  location: '', avatarUrl: f.avatarUrl, level: f.level,
 });
+
+/** Whether friends may see your activity; servers without the setting behave as on (its default). */
+export const showsActivityStatus = (s: Pick<ServerSettings, 'showActivityStatus'>): boolean => s.showActivityStatus !== false;
 
 export function toFriendRequests(r: {
   incoming: Array<{ id: string; createdAt: string; user: UserCard }>;
