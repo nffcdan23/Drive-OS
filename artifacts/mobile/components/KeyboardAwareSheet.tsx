@@ -4,6 +4,8 @@
 //   accessibility escape gesture; each calls `onClose` (which also puts the
 //   keyboard away).  A transparent Modal gets no system swipe or close of its
 //   own on iOS, so without these the sheet could only be left by its own buttons.
+// - Layout: the dimmed backdrop is a full-screen layer of its own, behind the
+//   sheet and fixed in place; the keyboard handling wraps only the panel.
 // - Keyboard: the sheet rides on the keyboard.  It rises by the keyboard's
 //   height less the safe-area inset its bottom padding already keeps clear
 //   (lib/sheetDismiss.ts), so the whole sheet stays usable, the field being
@@ -101,15 +103,19 @@ export function KeyboardAwareSheet({
       animationType="slide"
       onRequestClose={close}
     >
-      <View style={[styles.fill, { backgroundColor: backdropColor }]}>
+      <View style={styles.fill}>
+        {/* The dimmed backdrop: the whole screen, behind the sheet, and
+            fixed; the keyboard never moves it.  Tapping it closes the sheet. */}
         <Pressable
-          style={StyleSheet.absoluteFill}
+          style={[StyleSheet.absoluteFill, { backgroundColor: backdropColor }]}
           onPress={close}
           accessibilityRole="button"
           accessibilityLabel="Close"
         />
+        {/* Only the sheet rides on the keyboard: this wraps just the panel,
+            anchored to the bottom of the screen */}
         <KeyboardAvoidingView
-          style={styles.bottom}
+          style={styles.sheetDock}
           behavior={Platform.OS === "ios" ? "padding" : undefined}
           // KeyboardAvoidingView pads by the keyboard's height plus this
           // offset: less the inset gives sheetKeyboardLift()
@@ -134,5 +140,7 @@ export function KeyboardAwareSheet({
 
 const styles = StyleSheet.create({
   fill: { flex: 1 },
-  bottom: { flex: 1, justifyContent: "flex-end" },
+  // Its bottom edge stays on the screen's, so the padding the keyboard adds
+  // raises the panel and nothing else
+  sheetDock: { position: "absolute", left: 0, right: 0, bottom: 0 },
 });

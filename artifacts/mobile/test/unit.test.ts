@@ -3723,3 +3723,25 @@ test('Add Friend opens from every entry point, closes any way, and reopens empty
   // Phase 1 guards are still on Send Request
   assert.ok(/disabled=\{sendingRequest\}/.test(code) && /if \(sendingRef\.current\) return;/.test(code));
 });
+
+test('a sheet\'s dimmed backdrop stays full-screen and still; only the panel rides on the keyboard', () => {
+  const src = readFileSync(toPath(new URL('../components/KeyboardAwareSheet.tsx', import.meta.url)), 'utf8');
+  const code = src.replace(/\/\/.*$/gm, '').replace(/\{\/\*[\s\S]*?\*\/\}/g, '');
+  const tree = code.slice(code.indexOf('<Modal'), code.indexOf('</Modal>'));
+  const kav = tree.slice(tree.indexOf('<KeyboardAvoidingView'), tree.indexOf('</KeyboardAvoidingView>'));
+  // The backdrop: a full-screen layer of its own, outside the keyboard handling
+  const backdrop = tree.slice(tree.indexOf('<Pressable'), tree.indexOf('/>', tree.indexOf('<Pressable')));
+  assert.ok(/StyleSheet\.absoluteFill/.test(backdrop) && /backgroundColor: backdropColor/.test(backdrop), 'the backdrop is not the full-screen layer');
+  assert.ok(tree.indexOf('<Pressable') < tree.indexOf('<KeyboardAvoidingView'), 'the backdrop must sit behind the sheet');
+  assert.ok(!/backdropColor|<Pressable/.test(kav), 'the backdrop moves with the keyboard');
+  // Nothing else is tinted: the Modal's root view carries no colour
+  const root = tree.slice(tree.indexOf('<View'), tree.indexOf('>', tree.indexOf('<View')));
+  assert.ok(!/backgroundColor/.test(root), 'the root view is tinted (and the sheet sits inside it)');
+  // The keyboard handling wraps only the panel, docked to the screen's bottom edge
+  assert.ok(/style=\{styles\.sheetDock\}/.test(kav));
+  assert.ok(/sheetDock: \{ position: "absolute", left: 0, right: 0, bottom: 0 \}/.test(code));
+  assert.ok(/<Animated\.View[\s\S]*\{children\}[\s\S]*<\/Animated\.View>/.test(kav), 'the panel is inside the keyboard handling');
+  // Lift, dismissal and escape unchanged
+  assert.ok(/keyboardVerticalOffset=\{-insets\.bottom\}/.test(kav));
+  assert.ok(/onPress=\{close\}/.test(backdrop) && /onAccessibilityEscape=\{close\}/.test(kav) && /\.\.\.pan\.panHandlers/.test(kav));
+});
