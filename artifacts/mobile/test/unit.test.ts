@@ -3631,13 +3631,9 @@ test('the friends list has no path to a missing screen (no message button until 
 
 // ─── Bottom sheets with fields (Add Friend, edit profile, delete account) ───
 
-import { claimsSheetDrag, releaseDismisses, sheetDragOffset, sheetKeyboardLift, SHEET_DISMISS } from '@/lib/sheetDismiss';
+import { releaseDismisses, sheetDragOffset, sheetKeyboardLift, SHEET_DISMISS } from '@/lib/sheetDismiss';
 
-test('a sheet is dragged down to close; taps and sideways moves stay with its buttons and fields', () => {
-  assert.equal(claimsSheetDrag(0, 4), false, 'a tap or jitter');
-  assert.equal(claimsSheetDrag(30, 12), false, 'mostly sideways');
-  assert.equal(claimsSheetDrag(2, -40), false, 'upwards');
-  assert.equal(claimsSheetDrag(3, 20), true, 'a downward drag');
+test('a sheet follows the finger down, resists going up, and closes when let go far or fast enough', () => {
   assert.equal(sheetDragOffset(90), 90, 'follows the finger down');
   assert.ok(sheetDragOffset(-100) > -20, 'resists being pulled up');
   // Letting go: far enough or fast enough closes; a short slow drag snaps back
@@ -3687,13 +3683,14 @@ test('sheets with fields: no keyboard-aware ScrollView inside their Modal, and e
   assert.ok(/KeyboardAvoidingView,[\s\S]*from "react-native"/.test(code));
   // Its own Modal, closed by: the system (onRequestClose), a tap on the backdrop,
   // the accessibility escape gesture, and a swipe down
-  assert.ok(/<Modal[\s\S]*visible=\{visible\}[\s\S]*onRequestClose=\{close\}/.test(code));
-  assert.ok(/<Pressable[\s\S]*onPress=\{close\}/.test(code));
+  assert.ok(/<Modal[\s\S]*visible=\{shown\}[\s\S]*onRequestClose=\{close\}/.test(code));
+  assert.ok(/<AnimatedPressable[\s\S]*onPress=\{close\}/.test(code));
   assert.ok(/onAccessibilityEscape=\{close\}/.test(code));
-  assert.ok(/claimsSheetDrag\(/.test(code) && /releaseDismisses\(/.test(code));
-  // Closing puts the keyboard away, and each opening starts in place
-  assert.ok(/const close = \(\) => \{\s*Keyboard\.dismiss\(\);\s*onCloseRef\.current\(\);/.test(code));
-  assert.ok(/if \(visible\) drag\.setValue\(0\)/.test(code));
+  assert.ok(/releaseDismisses\(/.test(code) && /sheetDragStep\(/.test(code));
+  // Every close slides away (keyboard put away first), then tells the screen
+  assert.ok(/const close = useCallback\(\(\) => dismiss\(0\)/.test(code));
+  assert.ok(/closing\.current = true;\s*Keyboard\.dismiss\(\);/.test(code));
+  assert.ok(/leave\(velocity, \(\) => \{\s*setShown\(false\);\s*onCloseRef\.current\(\);/.test(code));
 
   // Every sheet that uses it: no Modal of its own around it, and nothing
   // keyboard-aware (a ScrollView from the library) inside it
@@ -3732,12 +3729,13 @@ test('a sheet\'s dimmed backdrop stays full-screen and still; only the panel rid
   const tree = code.slice(code.indexOf('<Modal'), code.indexOf('</Modal>'));
   const kav = tree.slice(tree.indexOf('<KeyboardAvoidingView'), tree.indexOf('</KeyboardAvoidingView>'));
   // The backdrop: a full-screen layer of its own, outside the keyboard handling
-  const backdrop = tree.slice(tree.indexOf('<Pressable'), tree.indexOf('/>', tree.indexOf('<Pressable')));
+  const backdrop = tree.slice(tree.indexOf('<AnimatedPressable'), tree.indexOf('/>', tree.indexOf('<AnimatedPressable')));
   assert.ok(/StyleSheet\.absoluteFill/.test(backdrop) && /backgroundColor: backdropColor/.test(backdrop), 'the backdrop is not the full-screen layer');
-  assert.ok(tree.indexOf('<Pressable') < tree.indexOf('<KeyboardAvoidingView'), 'the backdrop must sit behind the sheet');
-  assert.ok(!/backdropColor|<Pressable/.test(kav), 'the backdrop moves with the keyboard');
+  assert.ok(tree.indexOf('<AnimatedPressable') < tree.indexOf('<KeyboardAvoidingView'), 'the backdrop must sit behind the sheet');
+  assert.ok(!/backdropColor|Pressable/.test(kav), 'the backdrop moves with the keyboard');
   // Nothing else is tinted: the Modal's root view carries no colour
-  const root = tree.slice(tree.indexOf('<View'), tree.indexOf('>', tree.indexOf('<View')));
+  const root = tree.slice(tree.indexOf('<GestureHandlerRootView'), tree.indexOf('>', tree.indexOf('<GestureHandlerRootView')));
+  assert.ok(root.length > 10, 'no gesture root inside the Modal');
   assert.ok(!/backgroundColor/.test(root), 'the root view is tinted (and the sheet sits inside it)');
   // The keyboard handling wraps only the panel, docked to the screen's bottom edge
   assert.ok(/style=\{\[\s*styles\.sheetDock,/.test(kav));
@@ -3749,15 +3747,17 @@ test('a sheet\'s dimmed backdrop stays full-screen and still; only the panel rid
   assert.ok(/<Animated\.View[\s\S]*\{children\}[\s\S]*<\/Animated\.View>/.test(kav), 'the panel is inside the keyboard handling');
   // Lift, dismissal and escape unchanged
   assert.ok(/keyboardVerticalOffset=\{-insets\.bottom\}/.test(kav));
-  assert.ok(/onPress=\{close\}/.test(backdrop) && /onAccessibilityEscape=\{close\}/.test(kav) && /\.\.\.pan\.panHandlers/.test(kav));
+  assert.ok(/onPress=\{close\}/.test(backdrop) && /onAccessibilityEscape=\{close\}/.test(kav) && /<GestureDetector gesture=\{pan\}>/.test(kav));
+  // Its opacity follows the sheet (so it fades as the sheet is dragged away), not a separate animation
+  assert.ok(/opacity: backdropOpacity/.test(backdrop) && /const backdropOpacity = translateY\.interpolate\(/.test(code));
 });
 
 
 // ─── Every sheet with fields: one shared sheet ──────────────────────────────
 
-import { overscrollDismisses, revealScrollOffset } from '@/lib/sheetDismiss';
+import { revealScrollOffset } from '@/lib/sheetDismiss';
 
-test("a long sheet's fields scroll into view above the keyboard, and pulling its content down closes it", () => {
+test("a long sheet's fields scroll into view above the keyboard", () => {
   // Already fully visible (with the gap): nothing moves
   assert.equal(revealScrollOffset(100, 150, 0, 400, 24), null);
   // The keyboard shortened the view and the field is now below it: just far enough
@@ -3766,10 +3766,6 @@ test("a long sheet's fields scroll into view above the keyboard, and pulling its
   assert.equal(revealScrollOffset(40, 90, 200, 300, 24), 16);
   // A field taller than the view shows its top (where the caret starts)
   assert.equal(revealScrollOffset(500, 1000, 0, 300, 24), 476);
-  // Pulled down past the top far enough, or not
-  assert.equal(overscrollDismisses(-80), true);
-  assert.equal(overscrollDismisses(-20), false);
-  assert.equal(overscrollDismisses(150), false);
 });
 
 test('no sheet with fields is a one-off Modal: every one is the shared sheet, and none can trap the user', () => {
@@ -3831,12 +3827,10 @@ test('Create Group, Convoy and Event close without creating, reset their forms, 
   assert.ok(/await onSave\([\s\S]*?onClose\(\);/.test(save) && /onPress=\{onClose\}[\s\S]*?Cancel/.test(save));
 });
 
-test('a long sheet: scrolls only when its fields overflow, keeps the focused field in view, and closes on a pull-down', () => {
+test('a long sheet: scrolls only when its fields overflow, and keeps the focused field in view', () => {
   const code = readFileSync(join(MOBILE, 'components/KeyboardAwareSheet.tsx'), 'utf8').replace(/\/\/.*$/gm, '');
   const view = code.slice(code.indexOf('export function SheetScrollView'));
   assert.ok(/scrollEnabled=\{overflows\}/.test(view), 'scrolls (and steals drags from the sheet) even when everything fits');
-  assert.ok(/onScrollEndDrag=\{[\s\S]*?overscrollDismisses\([\s\S]*?close\(\)/.test(view));
-  assert.ok(/const close = useContext\(SheetClose\)/.test(view) && /<SheetClose\.Provider value=\{close\}>/.test(code));
   // The keyboard shortening the view brings the focused field back into it
   assert.ok(/if \(shrank\) revealFocused\(\)/.test(view) && /revealScrollOffset\(/.test(view));
   assert.ok(/import \{ KEYBOARD_FIELD_GAP \} from "@\/lib\/keyboardGap"/.test(code));
@@ -3845,4 +3839,126 @@ test('a long sheet: scrolls only when its fields overflow, keeps the focused fie
   const community = readFileSync(join(MOBILE, 'app/(tabs)/community.tsx'), 'utf8');
   assert.ok(/modalScrollable: \{ flexShrink: 1 \}/.test(community));
   assert.ok(/flexShrink: 1,/.test(readFileSync(join(MOBILE, 'app/search.tsx'), 'utf8')));
+});
+
+// ─── Dragging a sheet like an iOS bottom sheet ──────────────────────────────
+
+import { backdropOpacity, dismissDuration, sheetDragStep, SHEET_MOTION } from '@/lib/sheetDismiss';
+
+/**
+ * A drag as the sheet runs it: each gesture frame (finger travel since
+ * touch-down, and whether the scrolling fields are at their top) goes through
+ * sheetDragStep; letting go decides between closing and springing back.
+ */
+function dragSheet(frames: { dy: number; atTop?: boolean }[], opts: { inContent?: boolean; start?: number; velocity?: number; sheetHeight?: number } = {}) {
+  let handoffAt: number | null = null;
+  let offset = opts.start ?? 0;
+  const drawn: (number | null)[] = [];
+  for (const f of frames) {
+    const step = sheetDragStep(f.dy, opts.inContent ?? false, f.atTop ?? true, handoffAt, opts.start ?? 0);
+    handoffAt = step.handoffAt;
+    drawn.push(step.offset);
+    if (step.offset !== null) offset = step.offset;
+  }
+  const closes = releaseDismisses(offset, opts.velocity ?? 0, opts.sheetHeight ?? 420);
+  return { drawn, offset, closes };
+}
+
+test('a dragged sheet follows the finger exactly, from wherever it was', () => {
+  const { drawn } = dragSheet([{ dy: 10 }, { dy: 40 }, { dy: 95 }, { dy: 60 }]);
+  assert.deepEqual(drawn, [10, 40, 95, 60], 'the sheet is where the finger is');
+  // Caught mid-animation (still rising, 30 pt below rest): it carries on from there
+  assert.deepEqual(dragSheet([{ dy: 10 }, { dy: 25 }], { start: 30 }).drawn, [40, 55]);
+  // Pushed up past its resting place it gives a little, not one for one
+  const up = dragSheet([{ dy: -60 }]).drawn[0]!;
+  assert.ok(up < 0 && up > -60 * 0.2, `moved ${up} for a 60 pt push up`);
+});
+
+test('let go: a short slow drag springs back; far enough, or a downward flick, carries it off', () => {
+  // A short, slow drag: back into place
+  assert.equal(dragSheet([{ dy: 20 }, { dy: 45 }], { velocity: 0.2 }).closes, false);
+  // Far enough (30% of the sheet, at most 120 pt): closes
+  assert.equal(dragSheet([{ dy: 60 }, { dy: 130 }], { velocity: 0.1 }).closes, true);
+  assert.equal(dragSheet([{ dy: 70 }], { velocity: 0, sheetHeight: 200 }).closes, true, 'a short sheet needs a shorter drag');
+  // A flick: closes even when short
+  assert.equal(dragSheet([{ dy: 25 }], { velocity: SHEET_DISMISS.dismissVelocity + 0.1 }).closes, true);
+  // Dragged down then pushed back up and let go there: stays
+  assert.equal(dragSheet([{ dy: 150 }, { dy: 20 }], { velocity: -0.5 }).closes, false);
+  // Leaving: a flick carries on at its own speed (faster flick, quicker exit),
+  // within bounds; otherwise the opening in reverse, at its full duration
+  assert.equal(dismissDuration(300, 0), SHEET_MOTION.closeMs);
+  assert.ok(dismissDuration(300, 3) < dismissDuration(300, 1.5));
+  assert.ok(dismissDuration(300, 50) >= SHEET_MOTION.minFlingMs, 'never just vanishes');
+  assert.ok(dismissDuration(1000, 1.3) <= SHEET_MOTION.closeMs);
+  // The backdrop dims with the sheet: full at rest, gone below the screen
+  assert.equal(backdropOpacity(0, 400), 1);
+  assert.equal(backdropOpacity(200, 400), 0.5);
+  assert.equal(backdropOpacity(400, 400), 0);
+  assert.equal(backdropOpacity(-20, 400), 1);
+});
+
+test('a long sheet: a drag in its fields scrolls them, and only at their top does it take the sheet', () => {
+  // Fields scrolled down: a downward drag scrolls them back up; the sheet stays put
+  // until they reach their top (here after 40 pt), then follows the finger from there
+  const frames = [
+    { dy: 15, atTop: false },
+    { dy: 40, atTop: true },
+    { dy: 70, atTop: true },
+    { dy: 160, atTop: true },
+  ];
+  const r = dragSheet(frames, { inContent: true });
+  assert.deepEqual(r.drawn, [null, 0, 30, 120], 'the sheet moved before the fields reached their top, or jumped');
+  assert.equal(r.closes, true);
+  // Pushed back up past where it took over: the sheet sits at rest and the fields scroll again
+  const back = dragSheet([{ dy: 10, atTop: true }, { dy: 60, atTop: true }, { dy: 5, atTop: true }, { dy: -40, atTop: false }], { inContent: true });
+  assert.deepEqual(back.drawn, [0, 50, 0, null]);
+  assert.equal(back.closes, false);
+  // Fields that don't scroll count as at their top: the sheet follows straight away
+  assert.deepEqual(dragSheet([{ dy: 10 }, { dy: 50 }], { inContent: true }).drawn, [0, 40]);
+  // Scrolling the fields (never at the top) never moves the sheet
+  assert.deepEqual(dragSheet([{ dy: -30, atTop: false }, { dy: 30, atTop: false }], { inContent: true }).drawn, [null, null]);
+  // The handle (or anything outside the fields) drags the sheet whatever the fields are doing
+  assert.deepEqual(dragSheet([{ dy: 30, atTop: false }], { inContent: false }).drawn, [30]);
+});
+
+test('the shared sheet opens from below, is dragged with the finger, and slides away to close', () => {
+  const code = readFileSync(join(MOBILE, 'components/KeyboardAwareSheet.tsx'), 'utf8').replace(/\/\/.*$/gm, '');
+  // It animates itself: no Modal slide; opens hidden below the screen, then
+  // (once laid out) springs up from just below the edge to rest
+  assert.ok(/animationType="none"/.test(code));
+  assert.ok(/new Animated\.Value\(screenHeight\)/.test(code));
+  assert.ok(/if \(opening\.current\) \{\s*opening\.current = false;\s*translateY\.setValue\(h\);\s*Animated\.spring\(translateY, \{\s*toValue: 0,\s*\.\.\.SHEET_MOTION\.spring,/.test(code), 'does not rise from below');
+  // Closing reverses it: down to just below the edge, at the flick's speed or eased in
+  assert.ok(/const offscreen = \(\) => sheetHeightRef\.current \|\| screenHeight;/.test(code));
+  assert.ok(/Animated\.timing\(translateY, \{\s*toValue: to,\s*duration: dismissDuration\(/.test(code));
+  assert.ok(/Easing\.in\(Easing\.cubic\)/.test(code));
+  // The drag: Gesture Handler's pan, side by side with the fields' scrolling,
+  // vertical only, and only once moved (a tap stays a tap)
+  assert.ok(!/PanResponder/.test(code));
+  assert.ok(/Gesture\.Pan\(\)\s*\.runOnJS\(true\)/.test(code));
+  assert.ok(/\.activeOffsetY\(\[/.test(code) && /\.failOffsetX\(\[/.test(code));
+  assert.ok(/\.simultaneousWithExternalGesture\(scrollGesture\)/.test(code));
+  assert.ok(/translateY\.setValue\(step\.offset\)/.test(code), 'the sheet does not follow the finger');
+  assert.ok(/if \(releaseDismisses\(offset, perMs, sheetHeightRef\.current\)\) \{\s*dismiss\(perMs\);\s*\} else \{\s*settle\(e\.velocityY\);/.test(code));
+  // Spring velocity in points per second (Animated.spring's unit), the rules per millisecond
+  assert.ok(/const perMs = e\.velocityY \/ 1000;/.test(code));
+  // Taking hold mid-animation starts from where the sheet actually is
+  assert.ok(/\.onStart\(\(\) => \{\s*translateY\.stopAnimation\(\);\s*drag\.current\.start = position\.current;/.test(code));
+  // A screen that mounts with its sheet closed doesn't animate (or put the keyboard away)
+  assert.ok(/\} else if \(shownRef\.current && !closing\.current\) \{/.test(code));
+  // Gestures inside a Modal need their own gesture root
+  assert.ok(/<Modal[\s\S]*<GestureHandlerRootView[\s\S]*<\/GestureHandlerRootView>\s*<\/Modal>/.test(code));
+  // The fields' scroll view: its native scrolling is the gesture the drag runs beside,
+  // it doesn't bounce at the top (a pull there moves the sheet), and it tells the drag
+  // where it is and whether it's at its top
+  const view = code.slice(code.indexOf('export function SheetScrollView'));
+  assert.ok(/<GestureDetector gesture=\{sheet\.scrollGesture\}>/.test(view));
+  assert.ok(/bounces=\{false\}/.test(view));
+  assert.ok(/atTop: \(\) => !overflowsRef\.current \|\| scrollY\.current <= 0/.test(view));
+  assert.ok(/if \(d\.inContent && step\.offset > 0\) scroll\.current\?\.holdAtTop\(\)/.test(code), 'the fields scroll while the sheet is dragged');
+  // Only a touch that lands in the fields waits for them to reach their top;
+  // the handle (above them) drags the sheet straight away
+  assert.ok(/d\.inContent = scroll\.current != null && e\.y >= scroll\.current\.top;/.test(code), 'the handle does not drag the sheet directly');
+  // The backdrop fades as the sheet goes down: full at rest, clear a sheet's height down
+  assert.ok(/translateY\.interpolate\(\{\s*inputRange: \[0, Math\.max\(sheetHeight, 1\)\],\s*outputRange: \[1, 0\],\s*extrapolate: "clamp",/.test(code), 'the backdrop does not fade with the sheet');
 });
