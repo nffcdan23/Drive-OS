@@ -129,8 +129,21 @@ jobs:
         with:
           version: latest
 
+      # fresh: first deployment to an empty project. incremental: the history
+      # on staging must be exactly the first N repository migrations, with
+      # newer ones pending (anything else stops here; see preflight.sql).
       - name: Pre-flight (read-only transaction)
-        run: psql "$STAGING_DB_URL" -X -q -f supabase/tests/staging/preflight.sql
+        run: |
+          repo_versions=$(ls supabase/migrations/*.sql | xargs -n1 basename | cut -d_ -f1 | paste -sd, -)
+          psql "$STAGING_DB_URL" -X -q -v repo_versions="$repo_versions" -f supabase/tests/staging/preflight.sql
+
+      - name: Deployment mode (read-only)
+        id: mode
+        run: |
+          recorded=$(psql "$STAGING_DB_URL" -X -A -t -c "select case when to_regclass('supabase_migrations.schema_migrations') is null then 0 else (select count(*) from supabase_migrations.schema_migrations) end")
+          mode=$([ "$recorded" = "0" ] && echo fresh || echo incremental)
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "Deployment mode: $mode ($recorded migrations already recorded)"
 
       - name: Storage policy proof (rollback only)
         run: psql "$STAGING_DB_URL" -X -q -f supabase/tests/staging/storage_policy_proof.sql
@@ -151,8 +164,18 @@ jobs:
           applied=$(psql "$STAGING_DB_URL" -X -A -t -c "select count(*) from supabase_migrations.schema_migrations")
           echo "Migrations in repo: $expected, recorded on staging: $applied"
           [ "$expected" = "$applied" ]
+          # The same versions, not just the same number
+          repo=$(ls supabase/migrations/*.sql | xargs -n1 basename | cut -d_ -f1 | paste -sd, -)
+          staging=$(psql "$STAGING_DB_URL" -X -A -t -c "select string_agg(version, ',' order by version) from supabase_migrations.schema_migrations")
+          [ "$repo" = "$staging" ] || { echo "::error::Recorded versions differ from the repository: $staging"; exit 1; }
+          echo "Recorded versions match the repository exactly."
 
+      # The smoke and RLS suites assert exact row counts over their own
+      # fixtures, so they need an empty database: they run on a first
+      # deployment (and on every change, against a throwaway database, in
+      # database.yml). An incremental deployment runs incremental_verify.sql.
       - name: Schema smoke tests (inside a rolled-back transaction)
+        if: steps.mode.outputs.mode == 'fresh'
         run: |
           psql "$STAGING_DB_URL" -X -q -v ON_ERROR_STOP=1 \
             -c 'begin' -f supabase/tests/local/10_schema_smoke.sql -c 'rollback' 2>&1 \
@@ -160,13 +183,48 @@ jobs:
           exit "${PIPESTATUS[0]}"
 
       - name: RLS and security tests (inside a rolled-back transaction)
+        if: steps.mode.outputs.mode == 'fresh'
         run: |
           psql "$STAGING_DB_URL" -X -q -v ON_ERROR_STOP=1 \
             -c 'begin' -f supabase/tests/local/20_rls_security.sql -c 'rollback' 2>&1 \
             | sed -e 's/^psql:[^ ]* NOTICE:  /    /' -e 's/^NOTICE:  /    /'
           exit "${PIPESTATUS[0]}"
 
+      - name: Snapshot before verification (read-only)
+        if: steps.mode.outputs.mode == 'incremental'
+        id: before
+        run: |
+          snapshot=$(psql "$STAGING_DB_URL" -X -A -t -c "
+            select concat_ws(',', (select count(*) from auth.users), (select count(*) from public.profiles),
+                                  (select count(*) from public.friendships), (select count(*) from public.user_blocks),
+                                  (select count(*) from public.user_presence), (select count(*) from private.storage_delete_queue))")
+          echo "snapshot=$snapshot" >> "$GITHUB_OUTPUT"
+          echo "Row counts before verification: $snapshot"
+
+      - name: Incremental verification (inside a rolled-back transaction)
+        if: steps.mode.outputs.mode == 'incremental'
+        run: |
+          psql "$STAGING_DB_URL" -X -q -v ON_ERROR_STOP=1 \
+            -c 'begin' -f supabase/tests/staging/incremental_verify.sql -c 'rollback' 2>&1 \
+            | sed -e 's/^psql:[^ ]* NOTICE:  /    /' -e 's/^NOTICE:  /    /'
+          exit "${PIPESTATUS[0]}"
+
+      - name: Confirm the verification left nothing behind
+        if: steps.mode.outputs.mode == 'incremental'
+        run: |
+          after=$(psql "$STAGING_DB_URL" -X -A -t -c "
+            select concat_ws(',', (select count(*) from auth.users), (select count(*) from public.profiles),
+                                  (select count(*) from public.friendships), (select count(*) from public.user_blocks),
+                                  (select count(*) from public.user_presence), (select count(*) from private.storage_delete_queue))")
+          extra=$(psql "$STAGING_DB_URL" -X -A -t -c "
+            select (select count(*) from auth.users where email like '%@example.test')
+                 + (select count(*) from information_schema.role_table_grants
+                      where table_schema = 'public' and grantee in ('anon', 'authenticated'))")
+          echo "Row counts after: $after (before: ${{ steps.before.outputs.snapshot }}); test users / client grants: $extra"
+          [ "$after" = "${{ steps.before.outputs.snapshot }}" ] && [ "$extra" = "0" ]
+
       - name: Confirm the test transactions left nothing behind
+        if: steps.mode.outputs.mode == 'fresh'
         run: |
           leftovers=$(psql "$STAGING_DB_URL" -X -A -t -c "
             select (select count(*) from auth.users where email like '%@example.test')

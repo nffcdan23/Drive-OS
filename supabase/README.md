@@ -106,12 +106,20 @@ first failing step:
 
 1. Checks the secrets are set and all refer to the same project.
 2. **Pre-flight** (`tests/staging/preflight.sql`, read-only session): the
-   project must be empty and must grant every permission the migrations use
-   (trigger on `auth.users`, policies on `storage.objects`, buckets, PostGIS).
-   Nothing is changed if it fails.
+   project must grant every permission the migrations use (trigger on
+   `auth.users`, policies on `storage.objects`, buckets, PostGIS), and either
+   be empty (first deployment) or have recorded exactly the first N
+   migrations in this repository, in order, with newer ones pending
+   (incremental deployment). Any other history stops it. Nothing is changed
+   if it fails.
 3. `supabase db push --dry-run`, then `supabase db push` (the Supabase CLI —
-   not drizzle-kit), then confirms every migration is recorded.
-4. The schema smoke tests and the RLS/security suite, each inside a
+   not drizzle-kit), then confirms the recorded versions match the
+   repository exactly.
+4. First deployment: the schema smoke tests and the RLS/security suite
+   (which need an empty database). Incremental deployment:
+   `tests/staging/incremental_verify.sql` (whole-schema exposure checks and
+   the new migration's rules and visibility, with temporary test users) and
+   a before/after row-count comparison. Each inside a
    transaction that is always rolled back, then a check that nothing was left
    behind.
 5. Live checks (`tests/staging/api_checks.mjs`) against the real Auth, Data
