@@ -2,6 +2,7 @@ import app from "./app";
 import { config } from "./config";
 import { logger } from "./lib/logger";
 import { startStorageWorker } from "./workers/storageCleanup";
+import { startLiveLocationCleanup } from "./workers/liveLocationCleanup";
 
 const server = app.listen(config.port, (err) => {
   if (err) {
@@ -16,6 +17,9 @@ if (config.supabaseSecretKey && config.storageWorker) {
 } else {
   logger.warn("Storage clean-up worker is off (no SUPABASE_SECRET_KEY or STORAGE_WORKER=off)");
 }
+
+// Expired live positions are already unreadable; this only tidies the table.
+startLiveLocationCleanup();
 
 for (const signal of ["SIGTERM", "SIGINT"] as const) {
   process.on(signal, () => {

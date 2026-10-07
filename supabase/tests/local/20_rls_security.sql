@@ -97,6 +97,30 @@ begin
 end;
 $$;
 
+create function pg_temp.expect_error_sql(p_sql text, p_sqlstate text, p_label text)
+returns void language plpgsql as $$
+begin
+  begin
+    execute p_sql;
+  exception when others then
+    if sqlstate = p_sqlstate then raise notice 'ok   % (rejected: %)', p_label, sqlstate; return; end if;
+    raise exception 'FAIL: % — expected %, got % (%)', p_label, p_sqlstate, sqlstate, sqlerrm;
+  end;
+  raise exception 'FAIL: % — expected rejection %', p_label, p_sqlstate;
+end;
+$$;
+
+create function pg_temp.live_seen_by_owner() returns boolean language plpgsql as $$
+declare n bigint; me uuid := '10000000-0000-4000-8000-000000000001';
+begin
+  perform set_config('request.jwt.claims', json_build_object('sub', me, 'role', 'authenticated')::text, true);
+  perform set_config('role', 'authenticated', true);
+  select count(*) into n from public.live_locations where user_id = me;
+  reset role; perform set_config('request.jwt.claims', '', true);
+  return n > 0;
+end;
+$$;
+
 create function pg_temp.ok_bool(p_value boolean, p_expected boolean, p_label text)
 returns void language plpgsql as $$
 begin
@@ -811,5 +835,263 @@ insert into friendships (user_id, friend_id) values
   ('a0000000-0000-0000-0000-000000000000', 'b0000000-0000-0000-0000-000000000000'),
   ('b0000000-0000-0000-0000-000000000000', 'a0000000-0000-0000-0000-000000000000');
 delete from friendships where 'd0000000-0000-0000-0000-000000000000' in (user_id, friend_id);
+
+\echo '--- live location (0018)'
+-- Own cast: O shares; F a friend; G another friend; K a Convoy member only;
+-- X a stranger; M shares only a Community with O; B a friend who will block.
+create function pg_temp.lu(p text) returns uuid language sql immutable as $$
+  select ('10000000-0000-4000-8000-0000000000' || case p
+    when 'O' then '01' when 'F' then '02' when 'G' then '03' when 'K' then '04'
+    when 'X' then '05' when 'M' then '06' when 'B' then '07' end)::uuid
+$$;
+insert into auth.users (id, email, raw_user_meta_data)
+select pg_temp.lu(x), 'live-' || lower(x) || '@example.test', json_build_object('display_name', 'Live ' || x)
+  from unnest(array['O','F','G','K','X','M','B']) x;
+insert into friendships (user_id, friend_id) values
+  (pg_temp.lu('O'), pg_temp.lu('F')), (pg_temp.lu('F'), pg_temp.lu('O')),
+  (pg_temp.lu('O'), pg_temp.lu('G')), (pg_temp.lu('G'), pg_temp.lu('O')),
+  (pg_temp.lu('O'), pg_temp.lu('B')), (pg_temp.lu('B'), pg_temp.lu('O'));
+-- A Community both O and M belong to
+insert into groups (id, owner_id, name, is_public) values ('1e000000-0000-4000-8000-000000000001', pg_temp.lu('M'), 'Big club', true);
+insert into group_members (group_id, user_id, role, status) values
+  ('1e000000-0000-4000-8000-000000000001', pg_temp.lu('M'), 'owner', 'active'),
+  ('1e000000-0000-4000-8000-000000000001', pg_temp.lu('O'), 'member', 'active');
+-- Convoys: private (counts), public, Community-linked private, another private O is not in
+insert into convoys (id, owner_id, group_id, name, visibility, starts_at) values
+  ('1c000000-0000-4000-8000-000000000001', pg_temp.lu('O'), null, 'Scotland Trip', 'private', now()),
+  ('1c000000-0000-4000-8000-000000000002', pg_temp.lu('O'), null, 'Open run', 'public', now()),
+  ('1c000000-0000-4000-8000-000000000003', pg_temp.lu('O'), '1e000000-0000-4000-8000-000000000001', 'Club convoy', 'private', now()),
+  ('1c000000-0000-4000-8000-000000000004', pg_temp.lu('X'), null, 'X trip', 'private', now());
+insert into convoy_participants (convoy_id, user_id, role) values
+  ('1c000000-0000-4000-8000-000000000001', pg_temp.lu('O'), 'leader'), ('1c000000-0000-4000-8000-000000000001', pg_temp.lu('K'), 'member'),
+  ('1c000000-0000-4000-8000-000000000002', pg_temp.lu('O'), 'leader'), ('1c000000-0000-4000-8000-000000000002', pg_temp.lu('X'), 'member'),
+  ('1c000000-0000-4000-8000-000000000003', pg_temp.lu('O'), 'leader'), ('1c000000-0000-4000-8000-000000000003', pg_temp.lu('M'), 'member'),
+  ('1c000000-0000-4000-8000-000000000004', pg_temp.lu('X'), 'leader'), ('1c000000-0000-4000-8000-000000000004', pg_temp.lu('F'), 'member');
+-- Everyone has the app open (fan-out goes to open apps)
+insert into user_presence (user_id, app_state, driving)
+select pg_temp.lu(x), 'foreground', false from unnest(array['O','F','G','K','X','M','B']) x;
+
+-- Who sees O's row, as real client sessions (table privileges granted above, worst case)
+create function pg_temp.live_seen_by(p_viewer text) returns boolean language plpgsql as $$
+declare
+  n bigint;
+  me uuid := pg_temp.lu(p_viewer);
+  owner uuid := pg_temp.lu('O');
+begin
+  perform set_config('request.jwt.claims', json_build_object('sub', me, 'role', 'authenticated')::text, true);
+  perform set_config('role', 'authenticated', true);
+  select count(*) into n from public.live_locations where user_id = owner;
+  reset role; perform set_config('request.jwt.claims', '', true);
+  return n > 0;
+end;
+$$;
+create function pg_temp.live_viewers() returns text[] language sql as $$
+  select coalesce(array_agg(x order by x), '{}') from unnest(array['F','G','K','X','M','B']) x where pg_temp.live_seen_by(x)
+$$;
+create function pg_temp.expect_viewers(p_expected text[], p_label text) returns void language plpgsql as $$
+declare v text[] := pg_temp.live_viewers();
+begin
+  if v is distinct from p_expected then raise exception 'FAIL: % — expected %, got %', p_label, p_expected, v; end if;
+  raise notice 'ok   % %', p_label, v;
+end;
+$$;
+-- Live-location inbox messages about O since the last mark (a repeated
+-- removal is harmless, so repeats of the same type count once)
+create temp table live_seen (id uuid primary key);
+create function pg_temp.live_mark() returns void language sql as $$
+  insert into live_seen select id from realtime.messages where event = 'live_location' on conflict do nothing
+$$;
+create function pg_temp.live_inbox(p_viewer text) returns text[] language sql as $$
+  select coalesce(array_agg(t order by first_at), '{}') from (
+    select payload->>'type' t, min(inserted_at) first_at from realtime.messages m
+     where m.topic = 'inbox:' || pg_temp.lu(p_viewer) and m.event = 'live_location' and m.payload->>'userId' = pg_temp.lu('O')::text
+       and not exists (select 1 from live_seen s where s.id = m.id)
+     group by 1) x
+$$;
+create function pg_temp.expect_live_inbox(p_viewer text, p_expected text[], p_label text) returns void language plpgsql as $$
+declare v text[] := pg_temp.live_inbox(p_viewer);
+begin
+  if v is distinct from p_expected then raise exception 'FAIL: % — expected %, got %', p_label, p_expected, v; end if;
+  raise notice 'ok   % %', p_label, v;
+end;
+$$;
+create function pg_temp.publish_o(p_driving boolean default true) returns void language sql as $$
+  insert into live_locations (user_id, latitude, longitude, heading_deg, speed_kmh, accuracy_m, driving, recorded_at, expires_at)
+  values (pg_temp.lu('O'), 55.95325, -3.18827, 90, 48, 5, p_driving, now(), now() + interval '3 minutes')
+  on conflict (user_id) do update set latitude = excluded.latitude, longitude = excluded.longitude,
+    driving = excluded.driving, recorded_at = excluded.recorded_at, expires_at = excluded.expires_at
+$$;
+
+-- Defaults: nothing is shared with anyone
+select pg_temp.ok_bool((select location_sharing = 'off' and location_friend_audience = 'none' from user_settings where user_id = pg_temp.lu('O')), true,
+  'by default location sharing is off and no friends are chosen');
+select pg_temp.publish_o();
+select pg_temp.expect_viewers('{}', 'with sharing off nobody sees a position, even if one exists');
+delete from live_locations where user_id = pg_temp.lu('O');
+
+-- Selected friends (O turns sharing on through the client path)
+select pg_temp.live_mark();
+update user_settings set location_sharing = 'while_driving', location_friend_audience = 'selected' where user_id = pg_temp.lu('O');
+insert into location_share_friends (owner_id, friend_id) values (pg_temp.lu('O'), pg_temp.lu('F'));
+select pg_temp.publish_o();
+select pg_temp.expect_viewers(array['F'], 'a selected friend sees; other friends, strangers, Convoy and Community members do not');
+select pg_temp.expect_live_inbox('F', array['live_location'], 'the selected friend receives it live');
+select pg_temp.expect_live_inbox('G', '{}', 'a friend who was not selected receives nothing');
+select pg_temp.expect_live_inbox('X', '{}', 'a stranger receives nothing');
+select pg_temp.expect_live_inbox('M', '{}', 'a Community member (even in a Community-linked Convoy) receives nothing');
+select pg_temp.ok_bool((select count(*) = 1 from live_locations where user_id = pg_temp.lu('O')), true, 'one row per user');
+select pg_temp.publish_o();
+select pg_temp.ok_bool((select count(*) = 1 from live_locations where user_id = pg_temp.lu('O')), true, 'an update overwrites the row; no history');
+select pg_temp.live_mark();
+
+-- All friends
+update user_settings set location_friend_audience = 'all' where user_id = pg_temp.lu('O');
+select pg_temp.expect_viewers(array['B','F','G'], 'all friends see');
+select pg_temp.expect_live_inbox('G', array['live_location'], 'a friend newly covered receives it at once');
+select pg_temp.live_mark();
+
+-- WHEN: while driving needs a drive; expired positions are gone
+select pg_temp.publish_o(false);
+select pg_temp.expect_viewers('{}', 'sharing while driving: not shown when not driving');
+select pg_temp.publish_o(true);
+update live_locations set expires_at = now() - interval '1 second', recorded_at = now() - interval '2 minutes' where user_id = pg_temp.lu('O');
+select pg_temp.expect_viewers('{}', 'an expired position is not readable, even before clean-up');
+select pg_temp.ok_bool(pg_temp.live_seen_by_owner(), false, 'not even by its owner as current');
+select pg_temp.publish_o(true);
+select pg_temp.live_mark();
+
+-- Blocks win, either way
+insert into user_blocks (blocker_id, blocked_id) values (pg_temp.lu('O'), pg_temp.lu('B'));
+select pg_temp.expect_viewers(array['F','G'], 'a user O blocks loses access at once');
+select pg_temp.expect_live_inbox('B', array['live_location_hidden'], 'and is told to remove it');
+delete from user_blocks where blocker_id = pg_temp.lu('O') and blocked_id = pg_temp.lu('B');
+select pg_temp.live_mark();
+insert into user_blocks (blocker_id, blocked_id) values (pg_temp.lu('G'), pg_temp.lu('O'));
+select pg_temp.expect_viewers(array['B','F'], 'a user who blocks O cannot see O either');
+select pg_temp.expect_live_inbox('G', array['live_location_hidden'], 'and is told to remove it');
+delete from user_blocks where blocker_id = pg_temp.lu('G');
+select pg_temp.live_mark();
+
+-- Unfriending ends access, and takes the selected-friend grant with it
+update user_settings set location_friend_audience = 'selected' where user_id = pg_temp.lu('O');
+select pg_temp.live_mark();
+delete from friendships where (user_id, friend_id) in ((pg_temp.lu('O'), pg_temp.lu('F')), (pg_temp.lu('F'), pg_temp.lu('O')));
+select pg_temp.expect_viewers('{}', 'a selected friend who is no longer a friend loses access');
+select pg_temp.expect_live_inbox('F', array['live_location_hidden'], 'and is told to remove it');
+select pg_temp.ok_bool(exists (select 1 from location_share_friends where friend_id = pg_temp.lu('F')), false,
+  'the selection does not outlive the friendship');
+insert into friendships (user_id, friend_id) values (pg_temp.lu('O'), pg_temp.lu('F')), (pg_temp.lu('F'), pg_temp.lu('O'));
+select pg_temp.expect_viewers('{}', 'becoming friends again does not restore it by itself');
+insert into location_share_friends (owner_id, friend_id) values (pg_temp.lu('O'), pg_temp.lu('F'));
+select pg_temp.live_mark();
+
+-- Removing a selected friend
+delete from location_share_friends where owner_id = pg_temp.lu('O') and friend_id = pg_temp.lu('F');
+select pg_temp.expect_viewers('{}', 'deselecting a friend removes access');
+select pg_temp.expect_live_inbox('F', array['live_location_hidden'], 'at once');
+select pg_temp.live_mark();
+
+-- Convoys: only explicit, only private non-Community Convoys, only current members
+select pg_temp.expect_viewers('{}', 'being in a Convoy with O shares nothing by itself');
+insert into location_share_convoys (owner_id, convoy_id) values
+  (pg_temp.lu('O'), '1c000000-0000-4000-8000-000000000001'),
+  (pg_temp.lu('O'), '1c000000-0000-4000-8000-000000000002'),
+  (pg_temp.lu('O'), '1c000000-0000-4000-8000-000000000003');
+select pg_temp.expect_viewers(array['K'], 'members of the private Convoy O shares with see; public and Community-linked Convoys grant nothing');
+select pg_temp.expect_live_inbox('K', array['live_location'], 'the Convoy member receives it live');
+select pg_temp.expect_live_inbox('X', '{}', 'a member of a public Convoy receives nothing');
+select pg_temp.expect_live_inbox('M', '{}', 'a member of a Community-linked Convoy receives nothing');
+select pg_temp.live_mark();
+delete from convoy_participants where convoy_id = '1c000000-0000-4000-8000-000000000001' and user_id = pg_temp.lu('K');
+select pg_temp.expect_viewers('{}', 'leaving (or being removed from) the Convoy removes access');
+select pg_temp.expect_live_inbox('K', array['live_location_hidden'], 'at once');
+insert into convoy_participants (convoy_id, user_id, role) values ('1c000000-0000-4000-8000-000000000001', pg_temp.lu('K'), 'member');
+select pg_temp.live_mark();
+select pg_temp.expect_viewers(array['K'], 'rejoining while O still shares with the Convoy restores it');
+delete from location_share_convoys where owner_id = pg_temp.lu('O') and convoy_id = '1c000000-0000-4000-8000-000000000001';
+select pg_temp.expect_viewers('{}', 'turning the Convoy off removes access');
+select pg_temp.expect_live_inbox('K', array['live_location_hidden'], 'at once');
+insert into location_share_convoys (owner_id, convoy_id) values (pg_temp.lu('O'), '1c000000-0000-4000-8000-000000000001');
+update convoys set visibility = 'public' where id = '1c000000-0000-4000-8000-000000000001';
+select pg_temp.expect_viewers('{}', 'a Convoy made public stops granting');
+update convoys set visibility = 'private' where id = '1c000000-0000-4000-8000-000000000001';
+update convoys set status = 'cancelled' where id = '1c000000-0000-4000-8000-000000000001';
+select pg_temp.expect_viewers('{}', 'a cancelled Convoy stops granting');
+update convoys set status = 'completed' where id = '1c000000-0000-4000-8000-000000000001';
+select pg_temp.expect_viewers('{}', 'nor does a completed one');
+update convoys set status = 'forming' where id = '1c000000-0000-4000-8000-000000000001';
+select pg_temp.expect_viewers(array['K'], 'back to private and forming: granted again');
+select pg_temp.live_mark();
+
+-- Grants are a union: losing one keeps any other
+insert into friendships (user_id, friend_id) values (pg_temp.lu('O'), pg_temp.lu('K')), (pg_temp.lu('K'), pg_temp.lu('O'));
+insert into location_share_friends (owner_id, friend_id) values (pg_temp.lu('O'), pg_temp.lu('K'));
+select pg_temp.live_mark();
+delete from location_share_friends where owner_id = pg_temp.lu('O') and friend_id = pg_temp.lu('K');
+select pg_temp.expect_viewers(array['K'], 'deselecting a friend who is also in a shared Convoy keeps access');
+select pg_temp.expect_live_inbox('K', '{}', 'and sends no removal');
+insert into location_share_friends (owner_id, friend_id) values (pg_temp.lu('O'), pg_temp.lu('K'));
+select pg_temp.live_mark();
+delete from location_share_convoys where owner_id = pg_temp.lu('O') and convoy_id = '1c000000-0000-4000-8000-000000000001';
+select pg_temp.expect_viewers(array['K'], 'turning the Convoy off keeps access granted as a selected friend');
+select pg_temp.expect_live_inbox('K', '{}', 'and sends no removal');
+delete from friendships where (user_id, friend_id) in ((pg_temp.lu('O'), pg_temp.lu('K')), (pg_temp.lu('K'), pg_temp.lu('O')));
+insert into location_share_convoys (owner_id, convoy_id) values (pg_temp.lu('O'), '1c000000-0000-4000-8000-000000000001');
+select pg_temp.live_mark();
+
+-- The owner leaving a Convoy ends their sharing with it
+delete from convoy_participants where convoy_id = '1c000000-0000-4000-8000-000000000001' and user_id = pg_temp.lu('O');
+select pg_temp.expect_viewers('{}', 'an owner who leaves the Convoy stops sharing with it');
+select pg_temp.ok_bool(exists (select 1 from location_share_convoys where owner_id = pg_temp.lu('O') and convoy_id = '1c000000-0000-4000-8000-000000000001'), false,
+  'and the Convoy grant is removed');
+insert into convoy_participants (convoy_id, user_id, role) values ('1c000000-0000-4000-8000-000000000001', pg_temp.lu('O'), 'leader');
+insert into location_share_convoys (owner_id, convoy_id) values (pg_temp.lu('O'), '1c000000-0000-4000-8000-000000000001');
+select pg_temp.live_mark();
+
+-- A Community alone never grants, whatever else is switched on
+update user_settings set location_sharing = 'while_using', location_friend_audience = 'all' where user_id = pg_temp.lu('O');
+select pg_temp.ok_bool(pg_temp.live_seen_by('M'), false, 'sharing a Community (and its Convoy) never grants location');
+select pg_temp.ok_bool(private.live_location_granted(pg_temp.lu('O'), pg_temp.lu('M')), false, 'the canonical rule agrees');
+select pg_temp.live_mark();
+
+-- Turning sharing off revokes everyone and deletes the position
+update user_settings set location_sharing = 'off' where user_id = pg_temp.lu('O');
+select pg_temp.ok_bool(exists (select 1 from live_locations where user_id = pg_temp.lu('O')), false, 'turning sharing off deletes the position');
+select pg_temp.expect_live_inbox('F', array['live_location_hidden'], 'friends are told to remove it');
+select pg_temp.expect_live_inbox('K', array['live_location_hidden'], 'Convoy members are told to remove it');
+update user_settings set location_sharing = 'while_driving' where user_id = pg_temp.lu('O');
+
+-- The server ends sharing that no longer applies
+update user_presence set driving = true where user_id = pg_temp.lu('O');
+select pg_temp.publish_o(true);
+select pg_temp.live_mark();
+update user_presence set driving = false where user_id = pg_temp.lu('O');
+select pg_temp.ok_bool(exists (select 1 from live_locations where user_id = pg_temp.lu('O')), false, 'sharing while driving: the position goes when the drive ends');
+select pg_temp.expect_live_inbox('K', array['live_location_hidden'], 'and viewers are told');
+update user_presence set app_state = 'signed_out' where user_id = pg_temp.lu('O');
+update user_presence set app_state = 'foreground' where user_id = pg_temp.lu('O');
+
+-- Writes and data checks
+select pg_temp.check_denied('alice', $q$insert into public.live_locations (user_id, latitude, longitude, expires_at) values ('10000000-0000-4000-8000-000000000001', 1, 1, now() + interval '1 minute')$q$,
+  '42501', '%row-level security%', 'a client cannot publish a position for someone else');
+select pg_temp.check_denied('alice', $q$insert into public.live_locations (user_id, latitude, longitude, expires_at) values ('a0000000-0000-0000-0000-000000000000', 1, 1, now() + interval '1 minute')$q$,
+  '42501', '%row-level security%', 'nor for themselves directly (only through the API)');
+select pg_temp.check_denied('alice', $q$insert into public.location_share_friends (owner_id, friend_id) values ('a0000000-0000-0000-0000-000000000000', 'b0000000-0000-0000-0000-000000000000')$q$,
+  '42501', '%row-level security%', 'grants are written only through the API');
+select pg_temp.check_rows('carol', $q$select * from public.location_share_friends$q$, 0, 'nobody can read someone else''s grants');
+select pg_temp.expect_error_sql($$insert into live_locations (user_id, latitude, longitude, expires_at) values (pg_temp.lu('X'), 91, 0, now() + interval '1 minute')$$, '23514', 'latitude out of range rejected');
+select pg_temp.expect_error_sql($$insert into live_locations (user_id, latitude, longitude, expires_at) values (pg_temp.lu('X'), 0, 181, now() + interval '1 minute')$$, '23514', 'longitude out of range rejected');
+select pg_temp.expect_error_sql($$insert into live_locations (user_id, latitude, longitude, speed_kmh, expires_at) values (pg_temp.lu('X'), 0, 0, -1, now() + interval '1 minute')$$, '23514', 'negative speed rejected');
+select pg_temp.expect_error_sql($$insert into live_locations (user_id, latitude, longitude, heading_deg, expires_at) values (pg_temp.lu('X'), 0, 0, 360, now() + interval '1 minute')$$, '23514', 'heading outside 0–360 rejected');
+select pg_temp.expect_error_sql($$insert into live_locations (user_id, latitude, longitude, expires_at) values (pg_temp.lu('X'), 0, 0, now() + interval '1 day')$$, '23514', 'an expiry more than 10 minutes ahead is rejected');
+select pg_temp.expect_error_sql($$update user_settings set location_sharing = 'always' where user_id = pg_temp.lu('X')$$, '23514', 'always-on (background) sharing cannot be turned on');
+
+-- Account deletion removes the position and tells viewers
+update user_settings set location_sharing = 'while_using', location_friend_audience = 'all' where user_id = pg_temp.lu('O');
+select pg_temp.publish_o(false);
+select pg_temp.live_mark();
+delete from auth.users where id = pg_temp.lu('O');
+select pg_temp.ok_bool(exists (select 1 from live_locations where user_id = pg_temp.lu('O')), false, 'deleting the account deletes the position');
+select pg_temp.expect_live_inbox('F', array['live_location_hidden'], 'and viewers are told to remove it');
 
 \echo '=== ALL RLS AND SECURITY TESTS PASSED ==='

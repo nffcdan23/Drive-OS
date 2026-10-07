@@ -12,6 +12,7 @@ import groupsRouter from "./groups";
 import eventsRouter from "./events";
 import notificationsRouter from "./notifications";
 import presenceRouter from "./presence";
+import liveLocationRouter from "./liveLocation";
 
 const router: IRouter = Router();
 
@@ -28,5 +29,6 @@ router.use(groupsRouter);
 router.use(eventsRouter);
 router.use(notificationsRouter);
 router.use(presenceRouter);
+router.use(liveLocationRouter);
 
 export default router;

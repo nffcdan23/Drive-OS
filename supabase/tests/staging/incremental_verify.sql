@@ -10,7 +10,10 @@
 --      (the same rules the smoke suite asserts);
 --   2. the presence status rules (migration 0016);
 --   3. presence visibility, as real `authenticated` / `anon` sessions, with
---      temporary fixture users (@example.test) that no other row refers to.
+--      temporary fixture users (@example.test) that no other row refers to;
+--   4. the Realtime inbox (0017);
+--   5. private live location (0018): who may read a position, and who is
+--      sent it, with the same fixture users and a temporary Convoy.
 -- The workflow runs it INSIDE A TRANSACTION THAT IS ALWAYS ROLLED BACK, and
 -- then confirms nothing was left behind. Never run it any other way against a
 -- hosted project.
@@ -244,5 +247,117 @@ select pg_temp.ok(pg_temp.inbox('s') = '{}', 'a stranger receives nothing');
 select pg_temp.ok(pg_temp.inbox('b') = '{}', 'a blocked user receives nothing');
 update public.user_settings set show_activity_status = false where user_id = pg_temp.id('o');
 select pg_temp.ok(pg_temp.inbox('f') = array['presence:driving', 'hidden:-'], 'hiding activity tells friends at once');
+
+-- ─── 5. Private live location (0018) ─────────────────────────────────────────
+\echo '--- live location schema (0018)'
+select pg_temp.ok(
+  (select array_agg(column_name::text order by ordinal_position) from information_schema.columns
+    where table_schema = 'public' and table_name = 'live_locations')
+  = array['user_id','latitude','longitude','heading_deg','speed_kmh','accuracy_m','driving','recorded_at','expires_at'],
+  'live_locations has the expected columns (one current row per user, no history)');
+select pg_temp.ok(
+  (select column_default = '''off''::text' and is_nullable = 'NO' from information_schema.columns
+    where table_schema = 'public' and table_name = 'user_settings' and column_name = 'location_sharing'),
+  'location_sharing exists, not null, default off');
+select pg_temp.ok(
+  (select column_default = '''none''::text' and is_nullable = 'NO' from information_schema.columns
+    where table_schema = 'public' and table_name = 'user_settings' and column_name = 'location_friend_audience'),
+  'location_friend_audience exists, not null, default none (nobody)');
+select pg_temp.ok(
+  (select array_agg(policyname::text order by policyname) from pg_policies
+    where schemaname = 'public' and tablename in ('live_locations', 'location_share_friends', 'location_share_convoys'))
+  = array['live_locations_select', 'location_share_convoys_select_own', 'location_share_friends_select_own']
+  and not exists (select 1 from pg_policies where schemaname = 'public'
+                   and tablename in ('live_locations', 'location_share_friends', 'location_share_convoys') and cmd <> 'SELECT'),
+  'live location tables are read-only to clients (no write policies)');
+select pg_temp.ok(
+  not has_function_privilege('anon', 'private.can_see_live_location(uuid, uuid)', 'EXECUTE')
+  and not has_function_privilege('authenticated', 'private.publish_live_location(uuid)', 'EXECUTE')
+  and not has_function_privilege('authenticated', 'private.revoke_live_location(uuid, uuid[])', 'EXECUTE'),
+  'clients cannot evaluate visibility anonymously or trigger a fan-out');
+select pg_temp.ok(
+  (select count(*) from pg_trigger where not tgisinternal and tgname in (
+     'live_locations_publish', 'user_settings_live_location', 'location_share_friends_publish', 'location_share_convoys_publish',
+     'convoy_participants_live_location', 'convoys_live_location', 'friendships_live_location', 'user_blocks_live_location',
+     'user_presence_live_location')) = 9,
+  'every revocation trigger is installed');
+
+\echo '--- live location visibility and fan-out'
+-- A Convoy member k, and a temporary private Convoy (o leads, k is in it).
+insert into auth.users (id, email, raw_user_meta_data) values
+  ('f1e5e0c0-0000-4000-8000-0000000000a5', 'presence-k@example.test', '{"display_name":"Presence K"}');
+insert into public.user_presence (user_id, app_state) values ('f1e5e0c0-0000-4000-8000-0000000000a5', 'foreground');
+insert into public.convoys (id, owner_id, name, visibility, starts_at) values
+  ('f1e5e0c0-0000-4000-8000-0000000000c1', pg_temp.id('o'), 'Verification Convoy', 'private', now() + interval '1 hour');
+insert into public.convoy_participants (convoy_id, user_id, role) values
+  ('f1e5e0c0-0000-4000-8000-0000000000c1', pg_temp.id('o'), 'leader'),
+  ('f1e5e0c0-0000-4000-8000-0000000000c1', 'f1e5e0c0-0000-4000-8000-0000000000a5', 'member');
+grant select on public.live_locations to authenticated;
+
+create function pg_temp.live_seen_by(p_who uuid) returns boolean language plpgsql as $$
+declare
+  n bigint;
+  owner uuid := pg_temp.id('o');
+begin
+  perform set_config('request.jwt.claims', json_build_object('sub', p_who, 'role', 'authenticated')::text, true);
+  perform set_config('role', 'authenticated', true);
+  select count(*) into n from public.live_locations where user_id = owner;
+  reset role; perform set_config('request.jwt.claims', '', true);
+  return n > 0;
+end;
+$$;
+create function pg_temp.live_inbox(p_who uuid) returns text[] language sql as $$
+  select coalesce(array_agg(distinct payload->>'type'), '{}') from realtime.messages m
+   where topic = 'inbox:' || p_who and event = 'live_location'
+     and not exists (select 1 from seen_messages s where s.id = m.id)
+$$;
+create function pg_temp.k() returns uuid language sql immutable as $$ select 'f1e5e0c0-0000-4000-8000-0000000000a5'::uuid $$;
+
+-- b is blocked by o (section 3); f is a friend; s a stranger; k only shares a Convoy.
+update public.user_presence set app_state = 'foreground', last_seen_at = now()
+ where user_id in (pg_temp.id('f'), pg_temp.id('s'), pg_temp.id('b'), pg_temp.k());
+update public.user_presence set app_state = 'foreground', driving = true, last_seen_at = now() where user_id = pg_temp.id('o');
+insert into public.live_locations (user_id, latitude, longitude, driving, expires_at)
+  values (pg_temp.id('o'), 0, 0, true, now() + interval '3 minutes');
+select pg_temp.ok(not pg_temp.live_seen_by(pg_temp.id('f')), 'with sharing off (the default) a friend sees nothing');
+delete from public.live_locations where user_id = pg_temp.id('o');
+
+select pg_temp.mark_seen();
+update public.user_settings set location_sharing = 'while_driving', location_friend_audience = 'selected' where user_id = pg_temp.id('o');
+insert into public.location_share_friends (owner_id, friend_id) values (pg_temp.id('o'), pg_temp.id('f'));
+insert into public.live_locations (user_id, latitude, longitude, driving, expires_at)
+  values (pg_temp.id('o'), 0, 0, true, now() + interval '3 minutes');
+select pg_temp.ok(pg_temp.live_seen_by(pg_temp.id('o')), 'the owner sees their own position');
+select pg_temp.ok(pg_temp.live_seen_by(pg_temp.id('f')), 'a selected friend sees it');
+select pg_temp.ok(not pg_temp.live_seen_by(pg_temp.id('s')), 'a stranger does not');
+select pg_temp.ok(not pg_temp.live_seen_by(pg_temp.id('b')), 'a blocked user does not, even with a friendship row');
+select pg_temp.ok(not pg_temp.live_seen_by(pg_temp.k()), 'a Convoy member does not, until the Convoy is turned on');
+select pg_temp.ok(pg_temp.live_inbox(pg_temp.id('f')) = array['live_location'], 'the selected friend receives it live');
+select pg_temp.ok(pg_temp.live_inbox(pg_temp.id('s')) = '{}' and pg_temp.live_inbox(pg_temp.id('b')) = '{}'
+                  and pg_temp.live_inbox(pg_temp.k()) = '{}', 'nobody else receives it');
+
+select pg_temp.mark_seen();
+insert into public.location_share_convoys (owner_id, convoy_id) values (pg_temp.id('o'), 'f1e5e0c0-0000-4000-8000-0000000000c1');
+select pg_temp.ok(pg_temp.live_seen_by(pg_temp.k()), 'turning the Convoy on shares with its members');
+select pg_temp.ok(pg_temp.live_inbox(pg_temp.k()) = array['live_location'], 'who receive it live');
+select pg_temp.mark_seen();
+delete from public.convoy_participants where convoy_id = 'f1e5e0c0-0000-4000-8000-0000000000c1' and user_id = pg_temp.k();
+select pg_temp.ok(not pg_temp.live_seen_by(pg_temp.k()), 'leaving the Convoy ends it');
+select pg_temp.ok(pg_temp.live_inbox(pg_temp.k()) = array['live_location_hidden'], 'and the ex-member is told to remove it');
+
+select pg_temp.mark_seen();
+delete from public.location_share_friends where owner_id = pg_temp.id('o') and friend_id = pg_temp.id('f');
+select pg_temp.ok(not pg_temp.live_seen_by(pg_temp.id('f')), 'removing a selected friend ends it');
+select pg_temp.ok(pg_temp.live_inbox(pg_temp.id('f')) = array['live_location_hidden'], 'and they are told to remove it');
+
+update public.user_settings set location_friend_audience = 'all' where user_id = pg_temp.id('o');
+update public.live_locations set recorded_at = now() - interval '5 minutes', expires_at = now() - interval '1 second' where user_id = pg_temp.id('o');
+select pg_temp.ok(not pg_temp.live_seen_by(pg_temp.id('f')) and not pg_temp.live_seen_by(pg_temp.id('o')),
+  'an expired position is unreadable, even before clean-up');
+select pg_temp.mark_seen();
+update public.live_locations set recorded_at = now(), expires_at = now() + interval '3 minutes' where user_id = pg_temp.id('o');
+update public.user_settings set location_sharing = 'off' where user_id = pg_temp.id('o');
+select pg_temp.ok(not exists (select 1 from public.live_locations where user_id = pg_temp.id('o')), 'turning sharing off deletes the position');
+select pg_temp.ok('live_location_hidden' = any (pg_temp.live_inbox(pg_temp.id('f'))), 'and viewers are told to remove it');
 
 \echo '=== ALL INCREMENTAL VERIFICATION CHECKS PASSED ==='

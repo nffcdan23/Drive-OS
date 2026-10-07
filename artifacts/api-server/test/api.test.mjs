@@ -627,6 +627,256 @@ test("presence: input is validated; journeys must be your own drive in progress"
   expect(await put(a, "/me/presence", { appState: "foreground", driving: true }), 200, "driving without a journey id");
 });
 
+// ─── Live location ──────────────────────────────────────────────────────────
+
+// A position nobody else uses, so it can be searched for in the logs.
+const HERE = { latitude: 54.321987, longitude: -2.876543 };
+const liveInbox = async (viewer, owner) => (await db.query(
+  `select payload from realtime.messages where topic = $1 and event = 'live_location' order by inserted_at, id`, [`inbox:${viewer.id}`])).rows
+  .map((r) => r.payload).filter((p) => p.userId === owner.id).map((p) => p.type);
+const sharedWith = async (viewer) => (await get(viewer, "/live-locations")).body.map((l) => l.userId);
+const share = (u, body) => patch(u, "/me/location-sharing", body);
+const appOpen = (u, extra = {}) => put(u, "/me/presence", { appState: "foreground", ...extra });
+
+test("live location: off by default; WHEN and WHO are enforced by the server", async () => {
+  const a = await newUser("Sharer");
+  const f = await newUser("Chosen friend");
+  const g = await newUser("Other friend");
+  const stranger = await newUser("Stranger");
+  await befriend(a, f);
+  await befriend(a, g);
+  for (const u of [a, f, g, stranger]) await appOpen(u);
+
+  const initial = (await get(a, "/me/location-sharing")).body;
+  assert.equal(initial.mode, "off");
+  assert.equal(initial.friendAudience, "none");
+  assert.equal(initial.sharingWithCount, 0);
+  assert.deepEqual(initial.friends.map((x) => x.selected), [false, false]);
+  const off = await put(a, "/me/live-location", HERE);
+  expect(off, 409, "nothing is stored while sharing is off");
+  assert.equal(off.body.error, "sharing_off");
+  assert.equal((await db.query("select count(*)::int n from public.live_locations where user_id = $1", [a.id])).rows[0].n, 0);
+
+  // While driving only
+  const on = await share(a, { mode: "while_driving", friendAudience: "selected" });
+  expect(on, 200, "turn on");
+  assert.equal(on.body.sharingWithCount, 0, "no one chosen yet");
+  expect(await put(a, `/me/location-sharing/friends/${f.id}`), 200, "choose a friend");
+  assert.equal((await get(a, "/me/location-sharing")).body.sharingWithCount, 1);
+  const notDriving = await put(a, "/me/live-location", HERE);
+  expect(notDriving, 409, "not driving");
+  assert.equal(notDriving.body.error, "not_driving");
+
+  await appOpen(a, { driving: true });
+  const sent = await put(a, "/me/live-location", { ...HERE, accuracyM: 6, speedMps: 13.4, headingDeg: 271.26, capturedAt: new Date().toISOString() });
+  expect(sent, 200, "publish while driving");
+  assert.equal(sent.body.driving, true, "driving comes from presence");
+  const ttl = Date.parse(sent.body.expiresAt) - Date.now();
+  assert.ok(ttl > 150_000 && ttl <= 181_000, "expires in about 3 minutes");
+
+  const seen = (await get(f, "/live-locations")).body;
+  assert.equal(seen.length, 1);
+  assert.deepEqual(Object.keys(seen[0]).sort(),
+    ["accuracyM", "driving", "expiresAt", "headingDeg", "latitude", "longitude", "recordedAt", "speedKmh", "userId"]);
+  assert.equal(seen[0].latitude, 54.32199, "rounded to 5 decimal places");
+  assert.equal(seen[0].longitude, -2.87654);
+  assert.equal(seen[0].speedKmh, 48.2);
+  assert.equal(seen[0].headingDeg, 271.3);
+  assert.deepEqual(await sharedWith(g), [], "a friend who was not chosen sees nothing");
+  assert.deepEqual(await sharedWith(stranger), [], "a stranger sees nothing");
+  assert.deepEqual(await liveInbox(f, a), ["live_location"], "the chosen friend gets it live");
+  assert.deepEqual(await liveInbox(g, a), []);
+  assert.deepEqual(await liveInbox(stranger, a), []);
+  const msg = (await db.query(`select payload from realtime.messages where topic = $1 and event = 'live_location' order by inserted_at desc limit 1`, [`inbox:${f.id}`])).rows[0].payload;
+  assert.deepEqual(Object.keys(msg).sort(),
+    ["accuracyM", "driving", "expiresAt", "headingDeg", "latitude", "longitude", "recordedAt", "speedKmh", "type", "userId"], "a minimal payload");
+
+  // Removing the friend: gone at once, live and from the snapshot
+  expect(await del(a, `/me/location-sharing/friends/${f.id}`), 200, "remove the friend");
+  assert.deepEqual(await sharedWith(f), []);
+  assert.deepEqual(await liveInbox(f, a), ["live_location", "live_location_hidden"]);
+
+  // All friends
+  expect(await share(a, { friendAudience: "all" }), 200, "all friends");
+  assert.deepEqual((await sharedWith(f)).length + (await sharedWith(g)).length, 2);
+  assert.deepEqual(await sharedWith(stranger), []);
+
+  // The drive ends: the server removes the position (sharing while driving)
+  await appOpen(a, { driving: false });
+  assert.deepEqual(await sharedWith(g), [], "gone when the drive ends");
+  assert.equal((await liveInbox(g, a)).at(-1), "live_location_hidden");
+
+  // While using: on screen counts, the background does not
+  expect(await share(a, { mode: "while_using" }), 200, "while using");
+  const using = await put(a, "/me/live-location", HERE);
+  expect(using, 200, "publish on screen");
+  assert.equal(using.body.driving, false);
+  assert.deepEqual(await sharedWith(g), [a.id]);
+  await put(a, "/me/presence", { appState: "background" });
+  assert.deepEqual(await sharedWith(g), [], "removed when the app goes to the background");
+  expect(await put(a, "/me/live-location", HERE), 409, "and refused from the background");
+  await appOpen(a);
+  expect(await put(a, "/me/live-location", HERE), 200, "on screen again");
+
+  // A stale heartbeat (crashed app) doesn't count as using
+  await ageHeartbeat(a.id, "5 minutes");
+  expect(await put(a, "/me/live-location", HERE), 409, "stale presence");
+  await appOpen(a);
+
+  // Stop showing it now
+  expect(await del(a, "/me/live-location"), 204, "delete own position");
+  assert.deepEqual(await sharedWith(g), []);
+
+  // Turning sharing off: position deleted, everyone told
+  expect(await put(a, "/me/live-location", HERE), 200, "publish");
+  expect(await share(a, { mode: "off" }), 200, "off");
+  assert.equal((await db.query("select count(*)::int n from public.live_locations where user_id = $1", [a.id])).rows[0].n, 0);
+  assert.equal((await liveInbox(f, a)).at(-1), "live_location_hidden");
+  assert.equal((await liveInbox(g, a)).at(-1), "live_location_hidden");
+});
+
+test("live location: unfriending and blocking end access; signing out removes the position", async () => {
+  const a = await newUser("Sharer");
+  const f = await newUser("Friend");
+  const b = await newUser("Blocker");
+  await befriend(a, f);
+  await befriend(a, b);
+  for (const u of [a, f, b]) await appOpen(u);
+  await share(a, { mode: "while_using", friendAudience: "selected" });
+  await put(a, `/me/location-sharing/friends/${f.id}`);
+  await put(a, `/me/location-sharing/friends/${b.id}`);
+  expect(await put(a, "/me/live-location", HERE), 200, "publish");
+  assert.deepEqual(await sharedWith(f), [a.id]);
+  assert.deepEqual(await sharedWith(b), [a.id]);
+
+  expect(await del(f, `/friends/${a.id}`), 204, "the friend unfriends");
+  assert.deepEqual(await sharedWith(f), [], "an ex-friend loses access");
+  assert.equal((await liveInbox(f, a)).at(-1), "live_location_hidden");
+  await befriend(a, f);
+  assert.deepEqual(await sharedWith(f), [], "becoming friends again doesn't restore the choice");
+  expect(await put(a, `/me/location-sharing/friends/${f.id}`), 200, "chosen again");
+
+  expect(await post(b, "/blocks", { userId: a.id }), 204, "block");
+  assert.deepEqual(await sharedWith(b), [], "a block ends it");
+  assert.equal((await liveInbox(b, a)).at(-1), "live_location_hidden");
+  expect(await put(a, `/me/location-sharing/friends/${b.id}`), 404, "a blocked person can't be chosen");
+
+  await put(a, "/me/presence", { appState: "signed_out" });
+  assert.deepEqual(await sharedWith(f), [], "signing out removes it");
+  assert.equal((await liveInbox(f, a)).at(-1), "live_location_hidden");
+});
+
+test("live location: Convoys share only when turned on, only private code-only ones, only with current members", async () => {
+  const a = await newUser("Leader");
+  const m = await newUser("Member");
+  const p = await newUser("Public joiner");
+  const club = await newUser("Club member");
+  for (const u of [a, m, p, club]) await appOpen(u);
+
+  const trip = (await post(a, "/convoys", { name: "Scotland Trip", visibility: "private", startsAt: future(60) })).body.id;
+  const code = (await post(a, `/convoys/${trip}/code`)).body.code;
+  expect(await post(m, "/convoys/join", { code }), 200, "member joins by code");
+  const open = (await post(a, "/convoys", { name: "Open run", visibility: "public", startsAt: future(60) })).body.id;
+  expect(await post(p, `/convoys/${open}/join`), 200, "anyone joins the public one");
+  const g = await post(club, "/groups", { name: "Club", membershipMethod: "open" });
+  expect(g, 201, "Community");
+  expect(await post(a, `/groups/${g.body.id}/join`), 200, "the sharer is in the Community");
+  const clubRun = await post(club, "/convoys", { name: "Club run", visibility: "private", startsAt: future(60), groupId: g.body.id });
+  expect(clubRun, 201, "Community Convoy");
+  const clubCode = (await post(club, `/convoys/${clubRun.body.id}/code`)).body.code;
+  expect(await post(a, "/convoys/join", { code: clubCode }), 200, "the sharer joins the Community Convoy");
+
+  await share(a, { mode: "while_using", friendAudience: "all" });
+  expect(await put(a, "/me/live-location", HERE), 200, "publish");
+  assert.deepEqual(await sharedWith(m), [], "being in a Convoy shares nothing by itself");
+  assert.deepEqual(await sharedWith(club), [], "nor does a Community");
+
+  const state = (await get(a, "/me/location-sharing")).body;
+  const byName = Object.fromEntries(state.convoys.map((c) => [c.name, c]));
+  assert.equal(byName["Scotland Trip"].eligible, true);
+  assert.equal(byName["Open run"].eligible, false, "public Convoys can't be chosen");
+  assert.equal(byName["Club run"].eligible, false, "nor Community ones");
+  const refused = await put(a, `/me/location-sharing/convoys/${open}`);
+  expect(refused, 409, "public Convoy refused");
+  assert.equal(refused.body.error, "convoy_not_eligible");
+  expect(await put(a, `/me/location-sharing/convoys/${clubRun.body.id}`), 409, "Community Convoy refused");
+  expect(await put(m, `/me/location-sharing/convoys/${open}`), 404, "a Convoy you're not in");
+
+  const on = await put(a, `/me/location-sharing/convoys/${trip}`);
+  expect(on, 200, "share with the trip");
+  assert.equal(on.body.sharingWithCount, 1);
+  assert.deepEqual(await sharedWith(m), [a.id], "its member sees it");
+  assert.equal((await liveInbox(m, a)).at(-1), "live_location", "and gets it live");
+  assert.deepEqual(await sharedWith(p), []);
+  assert.deepEqual(await sharedWith(club), []);
+  assert.deepEqual(await liveInbox(p, a), []);
+  assert.deepEqual(await liveInbox(club, a), []);
+
+  expect(await post(m, `/convoys/${trip}/leave`), 204, "the member leaves");
+  assert.deepEqual(await sharedWith(m), [], "leaving ends it");
+  assert.equal((await liveInbox(m, a)).at(-1), "live_location_hidden");
+  expect(await post(m, "/convoys/join", { code }), 200, "rejoins");
+  assert.deepEqual(await sharedWith(m), [a.id]);
+  expect(await del(a, `/convoys/${trip}/participants/${m.id}`), 204, "the leader removes them");
+  assert.deepEqual(await sharedWith(m), [], "removal ends it");
+  assert.equal((await liveInbox(m, a)).at(-1), "live_location_hidden");
+  expect(await post(m, "/convoys/join", { code }), 200, "rejoins");
+  expect(await del(a, `/me/location-sharing/convoys/${trip}`), 200, "turn the Convoy off");
+  assert.deepEqual(await sharedWith(m), []);
+  assert.equal((await liveInbox(m, a)).at(-1), "live_location_hidden");
+
+  // Members share back only if they choose to
+  await share(m, { mode: "while_using" });
+  expect(await put(m, "/me/live-location", HERE), 200, "member publishes");
+  assert.deepEqual(await sharedWith(a), [], "turning sharing on doesn't share with a Convoy");
+});
+
+test("live location: input is validated; no arbitrary lookups; nothing in the logs", async () => {
+  const a = await newUser("A");
+  const b = await newUser("B");
+  await befriend(a, b);
+  await appOpen(a);
+  await share(a, { mode: "while_using", friendAudience: "all" });
+  for (const bad of [{}, { latitude: 91, longitude: 0 }, { latitude: 0, longitude: -181 }, { latitude: "1", longitude: 0 },
+    { ...HERE, accuracyM: -1 }, { ...HERE, speedMps: "fast" }, { ...HERE, capturedAt: "yesterday" }]) {
+    expect(await put(a, "/me/live-location", bad), 400, `rejects ${JSON.stringify(bad)}`);
+  }
+  const stale = await put(a, "/me/live-location", { ...HERE, capturedAt: new Date(Date.now() - 5 * 60_000).toISOString() });
+  expect(stale, 409, "an old fix is not live");
+  assert.equal(stale.body.error, "stale_fix");
+  // Unknown (negative) and impossible values are dropped, not stored
+  expect(await put(a, "/me/live-location", { ...HERE, speedMps: -1, headingDeg: -1 }), 200, "unknown speed and heading");
+  let l = (await get(b, "/live-locations")).body[0];
+  assert.equal(l.speedKmh, null);
+  assert.equal(l.headingDeg, null);
+  expect(await put(a, "/me/live-location", { ...HERE, speedMps: 500, headingDeg: 720 }), 200, "impossible speed");
+  l = (await get(b, "/live-locations")).body[0];
+  assert.equal(l.speedKmh, null);
+  assert.equal(l.headingDeg, 0);
+  expect(await put(a, "/me/live-location", { ...HERE, speedMps: 0.2, headingDeg: 90 }), 200, "standing still");
+  assert.equal((await get(b, "/live-locations")).body[0].headingDeg, null, "no heading when stationary");
+
+  expect(await share(a, { mode: "always" }), 400, "always-on sharing isn't available");
+  expect(await share(a, { mode: "everyone" }), 400);
+  expect(await share(a, { friendAudience: "public" }), 400, "there is no public audience");
+  expect(await put(a, `/me/location-sharing/friends/${randomUUID()}`), 404, "only friends can be chosen");
+  expect(await put(a, `/me/location-sharing/friends/${a.id}`), 404, "not yourself");
+  expect(await get(b, `/users/${a.id}/live-location`), 404, "there is no per-user lookup");
+  expect(await get(null, "/live-locations"), 401, "signed in only");
+  expect(await put(null, "/me/live-location", HERE), 401, "signed in only");
+
+  // Expired: unreadable at once, removed by the clean-up
+  await db.query("update public.live_locations set recorded_at = now() - interval '4 minutes', expires_at = now() - interval '1 minute' where user_id = $1", [a.id]);
+  assert.deepEqual(await sharedWith(b), [], "an expired position is not shared");
+
+  // Rate limit
+  const many = await Promise.all(Array.from({ length: 32 }, () => put(a, "/me/live-location", HERE)));
+  assert.ok(many.some((r) => r.status === 429), "publishing is rate-limited");
+
+  await new Promise((r) => setTimeout(r, 200));
+  for (const v of ["54.32", "-2.87"]) assert.ok(!serverOutput.includes(v), `coordinates are never logged (${v})`);
+});
+
 // ─── Convoys ────────────────────────────────────────────────────────────────
 
 test("convoys: private visibility, join codes, capacity under concurrency", async () => {

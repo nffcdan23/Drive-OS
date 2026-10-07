@@ -220,7 +220,9 @@ jobs:
             select (select count(*) from auth.users where email like '%@example.test')
                  + (select count(*) from information_schema.role_table_grants
                       where table_schema = 'public' and grantee in ('anon', 'authenticated'))
-                 + (select count(*) from realtime.messages where topic like 'inbox:f1e5e0c0-0000-4000-8000-0000000000a%')")
+                 + (select count(*) from realtime.messages where topic like 'inbox:f1e5e0c0-0000-4000-8000-0000000000a%')
+                 + (select count(*) from public.convoys where id = 'f1e5e0c0-0000-4000-8000-0000000000c1')
+                 + (select count(*) from public.live_locations where user_id::text like 'f1e5e0c0-0000-4000-8000-0000000000a%')")
           echo "Row counts after: $after (before: ${{ steps.before.outputs.snapshot }}); test users / client grants / test messages: $extra"
           [ "$after" = "${{ steps.before.outputs.snapshot }}" ] && [ "$extra" = "0" ]
 

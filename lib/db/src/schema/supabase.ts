@@ -54,6 +54,8 @@ export const userSettings = pgTable('user_settings', {
   shareLiveLocationInConvoys: boolean('share_live_location_in_convoys').notNull().default(true),
   notificationPrefs:          jsonb('notification_prefs').$type<Record<string, unknown>>().notNull().default({}),
   showActivityStatus:         boolean('show_activity_status').notNull().default(true),
+  locationSharing:            text('location_sharing').notNull().default('off'),
+  locationFriendAudience:     text('location_friend_audience').notNull().default('none'),
   createdAt:                  timestamptz('created_at').notNull().defaultNow(),
   updatedAt:                  timestamptz('updated_at').notNull().defaultNow(),
 });
@@ -311,6 +313,32 @@ export const userPresence = pgTable('user_presence', {
   lastSeenAt: timestamptz('last_seen_at').notNull().defaultNow(),
   updatedAt:  timestamptz('updated_at').notNull().defaultNow(),
 });
+
+// ─── Live location (0018): current position only, never history ────────────
+
+export const liveLocations = pgTable('live_locations', {
+  userId:     uuid('user_id').primaryKey(),
+  latitude:   doublePrecision('latitude').notNull(),
+  longitude:  doublePrecision('longitude').notNull(),
+  headingDeg: real('heading_deg'),
+  speedKmh:   real('speed_kmh'),
+  accuracyM:  real('accuracy_m'),
+  driving:    boolean('driving').notNull().default(false),
+  recordedAt: timestamptz('recorded_at').notNull().defaultNow(),
+  expiresAt:  timestamptz('expires_at').notNull(),
+});
+
+export const locationShareFriends = pgTable('location_share_friends', {
+  ownerId:   uuid('owner_id').notNull(),
+  friendId:  uuid('friend_id').notNull(),
+  createdAt: timestamptz('created_at').notNull().defaultNow(),
+}, (t) => [primaryKey({ columns: [t.ownerId, t.friendId] })]);
+
+export const locationShareConvoys = pgTable('location_share_convoys', {
+  ownerId:   uuid('owner_id').notNull(),
+  convoyId:  uuid('convoy_id').notNull(),
+  createdAt: timestamptz('created_at').notNull().defaultNow(),
+}, (t) => [primaryKey({ columns: [t.ownerId, t.convoyId] })]);
 
 export const friendRequests = pgTable('friend_requests', {
   id:          uuid('id').primaryKey().defaultRandom(),
