@@ -12,6 +12,7 @@
  * de-duplicates, and completion can be repeated safely. So a drive recorded
  * offline, or interrupted by a crash, uploads later without duplicates.
  */
+import { msToKmh } from '../units';
 import { bearingDeg, distanceM, turnDeg } from './geo';
 import type { Endpoints, RoutePointInput, ServerJourney } from './endpoints';
 import { ApiError } from './http';
@@ -73,7 +74,7 @@ export function toPoint(fix: GpsFix): RecordedPoint {
     recordedAt: new Date(fix.timestamp).toISOString(),
     latitude: fix.latitude,
     longitude: fix.longitude,
-    speedKmh: fix.speedMs != null && fix.speedMs > 0 ? Math.min(fix.speedMs * 3.6, 350) : 0,
+    speedKmh: Math.min(msToKmh(fix.speedMs), 350),
     headingDeg: fix.headingDeg != null && fix.headingDeg >= 0 ? fix.headingDeg % 360 : null,
     accuracyM: fix.accuracyM ?? null,
     altitudeM: fix.altitudeM ?? null,

@@ -54,6 +54,7 @@ import {
   markerScreenRotation,
 } from "@/lib/headingFilter";
 import { LiveTrailHead } from "@/lib/liveTrail";
+import { msToKmh } from "@/lib/units";
 import { isLongEnoughToSave } from "@/lib/backend/journeyRecorder";
 import {
   lookAheadForSpeed,
@@ -1006,7 +1007,7 @@ export default function MapScreen() {
         const dt = (now - prev.time) / 1000;
         if (dt > 0) {
           const dist = haversineMeters(prev.lat, prev.lon, lat, lon);
-          const impliedKmh = (dist / dt) * 3.6;
+          const impliedKmh = msToKmh(dist / dt);
           if (impliedKmh > MAX_PLAUSIBLE_KMH) return; // reject implausible jump
         }
       }
@@ -1046,8 +1047,6 @@ export default function MapScreen() {
         !isPassengerModeRef.current &&
         !isPausedRef.current
       ) {
-        const speedKmh = speedMs != null ? speedMs * 3.6 : 0;
-        // Plausibility-checked speed before updating stats
         updateDriveCoordinate({
           latitude: lat,
           longitude: lon,
@@ -1063,7 +1062,7 @@ export default function MapScreen() {
       // Moving: the GPS course is the heading.  Stopped or crawling, the course
       // is noise and the compass handler supplies the heading instead; this
       // path no longer touches it, so the two never fight.
-      const speedKmh = speedMs != null ? speedMs * 3.6 : 0;
+      const speedKmh = msToKmh(speedMs);
       lastSpeedKmhRef.current = speedKmh;
       if (
         gpsHeading != null &&

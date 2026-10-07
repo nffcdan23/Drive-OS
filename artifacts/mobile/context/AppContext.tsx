@@ -12,6 +12,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { Alert, AppState, Linking } from 'react-native';
 import * as ImageManipulator from 'expo-image-manipulator';
+import { useLocales } from 'expo-localization';
 import { CloudSync, type SyncStatus } from '@/lib/backend/cloudSync';
 import { describeError } from '@/lib/backend/http';
 import type { GpsFix } from '@/lib/backend/journeyRecorder';
@@ -462,6 +463,9 @@ export function AppProvider({ userId, children }: { userId: string; children: Re
     };
   }, [cloud]);
 
+  // Automatic units follow the phone's region (updates if it's changed)
+  const deviceRegion = useLocales()[0]?.regionCode ?? null;
+
   const value: AppContextValue = {
     ...actions,
     vehicles: data.vehicles,
@@ -486,7 +490,7 @@ export function AppProvider({ userId, children }: { userId: string; children: Re
     notifications: data.notifications,
     unreadNotificationCount: data.notifications.filter((n) => !n.read).length,
     unitSystem: data.unitSystem,
-    resolvedUnitSystem: resolveUnitSystem(data.unitSystem),
+    resolvedUnitSystem: resolveUnitSystem(data.unitSystem, deviceRegion),
     profileStats: data.profileStats,
   };
 

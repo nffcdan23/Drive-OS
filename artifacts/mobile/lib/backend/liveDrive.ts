@@ -5,6 +5,7 @@
  * in another app or with the phone locked appears as the road actually
  * driven, not a straight line.
  */
+import { msToKmh } from '../units';
 import { distanceM } from './geo';
 import type { GpsFix, JourneyRecord } from './journeyRecorder';
 import type { ActiveDrive } from './model';
@@ -15,7 +16,7 @@ export function newLiveDrive(startTime: number): ActiveDrive {
 
 /** Adds an accepted fix to the live drive. */
 export function appendLiveFix(prev: ActiveDrive, fix: GpsFix): ActiveDrive {
-  const speedKmh = Math.max(0, fix.speedMs ?? 0) * 3.6;
+  const speedKmh = msToKmh(fix.speedMs);
   const last = prev.coordinates[prev.coordinates.length - 1];
   const addedKm = last ? distanceM(last, fix) / 1000 : 0;
   return {

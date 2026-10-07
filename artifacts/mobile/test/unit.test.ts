@@ -3962,3 +3962,128 @@ test('the shared sheet opens from below, is dragged with the finger, and slides 
   // The backdrop fades as the sheet goes down: full at rest, clear a sheet's height down
   assert.ok(/translateY\.interpolate\(\{\s*inputRange: \[0, Math\.max\(sheetHeight, 1\)\],\s*outputRange: \[1, 0\],\s*extrapolate: "clamp",/.test(code), 'the backdrop does not fade with the sheet');
 });
+
+// ─── Speed units ─────────────────────────────────────────────────────────────
+//
+// GPS reports m/s.  The app turns that into km/h once, as each fix arrives
+// (msToKmh), and keeps km/h everywhere after: the live drive, recorded
+// points, saved journeys and the server.  Only the screen shows mph, through
+// convertSpeed / speedUnit / formatSpeed in lib/units.
+
+import {
+  KMH_PER_MS, KM_PER_MILE, MPH_REGIONS, convertSpeed, formatSpeed, kmhToMph, localeRegion,
+  msToKmh, msToMph, resolveUnitSystem, speedUnit,
+} from '@/lib/units';
+import { toPoint } from '@/lib/backend/journeyRecorder';
+import { existsSync } from 'node:fs';
+
+const near = (actual: number, expected: number, within: number, what: string) =>
+  assert.ok(Math.abs(actual - expected) <= within, `${what}: ${actual} is not ≈ ${expected}`);
+
+test('GPS speeds (m/s) convert to the right mph and km/h', () => {
+  assert.equal(KMH_PER_MS, 3.6);
+  assert.equal(KM_PER_MILE, 1.609344);
+  assert.equal(msToMph(0), 0);
+  assert.equal(msToKmh(0), 0);
+  near(msToMph(10), 22.37, 0.005, '10 m/s in mph');
+  near(msToMph(30), 67.11, 0.005, '30 m/s in mph');
+  near(msToMph(49.17), 110, 0.05, '49.17 m/s in mph');
+  near(msToKmh(49.17), 177, 0.05, '49.17 m/s in km/h');
+  near(kmhToMph(100), 62.14, 0.005, '100 km/h in mph');
+  near(kmhToMph(177.0), 110, 0.05, '177 km/h in mph');
+  // No speed, or iOS's -1 for "invalid", is standing still, never negative
+  assert.equal(msToKmh(null), 0);
+  assert.equal(msToKmh(undefined), 0);
+  assert.equal(msToKmh(-1), 0);
+  assert.equal(msToMph(-1), 0);
+});
+
+test('110 mph shows as 110 mph (or 177 km/h), never as ~177 mph', () => {
+  const kmh = msToKmh(49.17); // the GPS reading at 110 mph
+  assert.equal(formatSpeed(kmh, 'imperial'), '110 mph');
+  assert.equal(formatSpeed(kmh, 'metric'), '177 km/h');
+  assert.equal(Math.round(convertSpeed(kmh, 'imperial')), 110);
+  assert.equal(Math.round(convertSpeed(kmh, 'metric')), 177);
+  // The number and its label come from the same unit system
+  for (const system of ['imperial', 'metric'] as const) {
+    const [value, label] = formatSpeed(kmh, system).split(' ');
+    assert.equal(label, speedUnit(system));
+    assert.equal(Number(value), Math.round(convertSpeed(kmh, system)));
+  }
+  assert.equal(speedUnit('imperial'), 'mph');
+  assert.equal(speedUnit('metric'), 'km/h');
+  // The ~1.609× mistake (km/h shown as mph, or m/s converted twice) can't happen
+  assert.notEqual(formatSpeed(kmh, 'imperial'), '177 mph');
+  assert.ok(!/^17\d mph$/.test(formatSpeed(kmh, 'imperial')));
+});
+
+test('live speed and saved drive stats convert a fix the same way', () => {
+  const fix: GpsFix = { latitude: 51.5, longitude: -0.12, speedMs: 49.17, headingDeg: 90, accuracyM: 5, altitudeM: 20, timestamp: Date.parse('2026-10-01T10:00:00Z') };
+  // Live: the Drive screen's speedometer and top speed
+  const live = appendLiveFix(newLiveDrive(fix.timestamp), fix);
+  // Saved: the recorded point uploaded to the server, and the drive's top speed
+  const rec = newJourneyRecord({ clientRef: 'speed-units', startedAt: new Date(fix.timestamp), timezone: 'Europe/London', vehicleId: null, vehicleSnapshot: null });
+  assert.ok(recordFix(rec, fix));
+  near(live.currentSpeed, 177, 0.05, 'live speed (km/h)');
+  assert.equal(live.topSpeed, live.currentSpeed);
+  assert.equal(rec.points[0]!.speedKmh, live.currentSpeed);
+  assert.equal(rec.topSpeedKmh, live.topSpeed);
+  assert.equal(toPoint(fix).speedKmh, live.currentSpeed);
+  // ...and both show the same thing
+  assert.equal(formatSpeed(live.topSpeed, 'imperial'), '110 mph');
+  assert.equal(formatSpeed(rec.topSpeedKmh, 'imperial'), '110 mph');
+  assert.equal(formatSpeed(liveDriveFromRecord(rec).topSpeed, 'imperial'), '110 mph');
+  // An invalid reading (-1) is 0 in both, not -3.6
+  const stopped = { ...fix, speedMs: -1, timestamp: fix.timestamp + 1000 };
+  assert.equal(appendLiveFix(live, stopped).currentSpeed, 0);
+  assert.equal(toPoint(stopped).speedKmh, 0);
+});
+
+test('"Automatic" units follow the phone region: mph in the UK and US, km/h elsewhere', () => {
+  for (const region of ['GB', 'US', 'IM', 'JE', 'GG', 'PR', 'gb', 'us']) {
+    assert.equal(resolveUnitSystem('auto', region), 'imperial', region);
+  }
+  for (const region of ['FR', 'DE', 'IE', 'CA', 'AU', 'NZ', 'IN', 'ES']) {
+    assert.equal(resolveUnitSystem('auto', region), 'metric', region);
+  }
+  assert.ok(MPH_REGIONS.has('GB') && MPH_REGIONS.has('US') && !MPH_REGIONS.has('IE'));
+  // A choice in Settings always wins over the region
+  assert.equal(resolveUnitSystem('metric', 'GB'), 'metric');
+  assert.equal(resolveUnitSystem('imperial', 'FR'), 'imperial');
+  // Without a region, the locale tag's region is used (any separator, with
+  // or without a script, ignoring extensions)
+  assert.equal(localeRegion('en-GB'), 'GB');
+  assert.equal(localeRegion('en_GB'), 'GB');
+  assert.equal(localeRegion('en-US'), 'US');
+  assert.equal(localeRegion('en_US@rg=gbzzzz'), 'US');
+  assert.equal(localeRegion('zh-Hans-CN'), 'CN');
+  assert.equal(localeRegion('en-US-u-ca-gregory'), 'US');
+  assert.equal(localeRegion('en'), null);
+  assert.equal(localeRegion('es-419'), null);
+  assert.equal(localeRegion(''), null);
+});
+
+test('speeds change unit in one place, and the app passes the phone region to "Automatic"', () => {
+  const sources = (dir: string): string[] =>
+    readdirSync(join(MOBILE, dir), { withFileTypes: true }).flatMap((e) =>
+      e.isDirectory() ? sources(join(dir, e.name)) : /\.tsx?$/.test(e.name) ? [join(dir, e.name)] : []);
+  const files = ['app', 'components', 'context', 'lib', 'hooks'].filter((d) => existsSync(join(MOBILE, d))).flatMap(sources);
+  assert.ok(files.length > 50);
+  for (const file of files) {
+    if (file === join('lib', 'units.ts')) continue;
+    const code = readFileSync(join(MOBILE, file), 'utf8').replace(/\/\/.*$/gm, '');
+    assert.ok(!/\b3\.6\b|0\.62137|1\.6093|2\.2369|1609\.3/.test(code), `${file} converts a speed or distance itself`);
+  }
+  // The speedometer's number and its label use the same unit system
+  const overlay = readFileSync(join(MOBILE, 'components/ActiveDriveOverlay.tsx'), 'utf8');
+  assert.ok(/const displaySpd = convertSpeed\(Math\.max\(0, speedKmh\), resolvedUnitSystem\);\s*const unit = speedUnit\(resolvedUnitSystem\);/.test(overlay));
+  assert.ok(/<Text style=\{styles\.speedoValue\}>\{Math\.round\(displaySpd\)\}<\/Text>\s*<Text style=\{styles\.speedoUnit\}>\{unit\}<\/Text>/.test(overlay));
+  assert.ok(!/function convertSpeed/.test(overlay), 'the overlay has its own speed conversion');
+  const ctx = readFileSync(join(MOBILE, 'context/AppContext.tsx'), 'utf8');
+  assert.ok(/const deviceRegion = useLocales\(\)\[0\]\?\.regionCode \?\? null;/.test(ctx));
+  assert.ok(/resolvedUnitSystem: resolveUnitSystem\(data\.unitSystem, deviceRegion\)/.test(ctx));
+  // The server keeps km/h: it stores the app's speedKmh as is, top speed is its highest
+  const server = readFileSync(join(MOBILE, '../api-server/src/routes/journeys.ts'), 'utf8');
+  assert.ok(/speed_kmh: Math\.min\(p\.num\("speedKmh"/.test(server));
+  assert.ok(/if \(p\.speed_kmh > topSpeedKmh\) topSpeedKmh = p\.speed_kmh;/.test(server));
+});

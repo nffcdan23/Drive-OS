@@ -22,23 +22,81 @@ export const UNIT_SYSTEM_OPTIONS: UnitOption[] = [
 ];
 
 /**
+ * Regions whose roads are signed in miles and mph: the UK and the Crown
+ * dependencies, the US and its territories, and the other countries and
+ * territories that still use mph.  Everywhere else uses km/h.
+ */
+export const MPH_REGIONS: ReadonlySet<string> = new Set([
+  'GB', 'IM', 'JE', 'GG',
+  'US', 'PR', 'GU', 'VI', 'AS', 'MP', 'UM',
+  'AG', 'AI', 'BS', 'BZ', 'DM', 'FK', 'GD', 'KN', 'KY', 'LC', 'LR', 'MS', 'SH', 'TC', 'VC', 'VG', 'WS',
+]);
+
+/** The region (e.g. "GB") a locale tag such as "en-GB" or "en_GB" names, if any */
+export function localeRegion(locale: string): string | null {
+  const m = /^[a-z]{2,3}(?:[-_][A-Za-z]{4})?[-_]([A-Za-z]{2})(?:$|[-_@])/i.exec(locale);
+  return m ? m[1]!.toUpperCase() : null;
+}
+
+/**
  * Resolves the effective unit system from the user's stored preference.
  *
- * 'auto' uses the device locale; UK locale (en-GB) maps to Imperial to match
- * real-world UK road sign conventions (miles & mph with metric tonnes/litres).
+ * 'auto' follows the device's region (Settings → General → Language & Region
+ * → Region), passed in as `deviceRegion`: imperial where roads are signed in
+ * mph (the UK, the US, ...), metric elsewhere.  The region is what decides
+ * it, not the language: a phone in English (US) with its region set to the
+ * UK still shows mph, and one in English (UK) set to France shows km/h.
+ * Without a region it falls back to the region in the locale's tag, then to
+ * metric.
  */
-export function resolveUnitSystem(pref: UnitSystem): ResolvedUnitSystem {
+export function resolveUnitSystem(pref: UnitSystem, deviceRegion?: string | null): ResolvedUnitSystem {
   if (pref === 'imperial') return 'imperial';
   if (pref === 'metric')   return 'metric';
 
-  // auto — detect from device locale via the Intl API (available on Hermes + web)
-  try {
-    const locale = Intl.DateTimeFormat().resolvedOptions().locale ?? '';
-    if (locale.includes('-GB') || locale === 'en-GB') return 'imperial';
-  } catch {
-    // Intl unavailable — default to metric
+  let region = deviceRegion ? deviceRegion.toUpperCase() : null;
+  if (!region) {
+    try {
+      region = localeRegion(Intl.DateTimeFormat().resolvedOptions().locale ?? '');
+    } catch {
+      // Intl unavailable — default to metric
+    }
   }
-  return 'metric';
+  return region && MPH_REGIONS.has(region) ? 'imperial' : 'metric';
+}
+
+// ─── Conversion ───────────────────────────────────────────────────────────────
+//
+// The only place speeds and distances change unit.  GPS (Expo Location and
+// the browser alike) reports speed in metres per second; the app converts it
+// to km/h once, as each fix comes in (msToKmh), and keeps km/h from then on:
+// the live drive, recorded points, saved journeys and the server all hold
+// km/h.  mph exists only on screen, converted from km/h by convertSpeed and
+// labelled by speedUnit.
+
+/** km/h in 1 m/s (3600 s/h ÷ 1000 m/km) */
+export const KMH_PER_MS = 3.6;
+/** Kilometres in an international mile (exact) */
+export const KM_PER_MILE = 1.609344;
+const METRES_PER_YARD = 0.9144;
+
+/** A GPS speed (m/s) in km/h.  Unknown or invalid (iOS reports -1) is 0. */
+export function msToKmh(ms: number | null | undefined): number {
+  return ms != null && ms > 0 ? ms * KMH_PER_MS : 0;
+}
+
+/** km/h in mph */
+export function kmhToMph(kmh: number): number {
+  return kmh / KM_PER_MILE;
+}
+
+/** A GPS speed (m/s) in mph */
+export function msToMph(ms: number | null | undefined): number {
+  return kmhToMph(msToKmh(ms));
+}
+
+/** A speed (km/h, the app's unit) in the unit `system` shows: mph or km/h */
+export function convertSpeed(kmh: number, system: ResolvedUnitSystem): number {
+  return system === 'imperial' ? kmhToMph(kmh) : kmh;
 }
 
 // ─── Distance ─────────────────────────────────────────────────────────────────
@@ -49,7 +107,7 @@ export function resolveUnitSystem(pref: UnitSystem): ResolvedUnitSystem {
  */
 export function formatDistance(km: number, system: ResolvedUnitSystem): string {
   if (system === 'imperial') {
-    return `${(km * 0.621371).toFixed(1)} mi`;
+    return `${(km / KM_PER_MILE).toFixed(1)} mi`;
   }
   return `${km.toFixed(1)} km`;
 }
@@ -60,9 +118,9 @@ export function formatDistance(km: number, system: ResolvedUnitSystem): string {
  */
 export function formatShortDistance(metres: number, system: ResolvedUnitSystem): string {
   if (system === 'imperial') {
-    const yards = metres * 1.09361;
+    const yards = metres / METRES_PER_YARD;
     if (yards < 880) return `${Math.round(yards)} yd`;
-    const miles = metres / 1609.344;
+    const miles = metres / (KM_PER_MILE * 1000);
     return miles < 10 ? `${miles.toFixed(1)} mi` : `${Math.round(miles)} mi`;
   }
   if (metres < 1000) return `${Math.round(metres)} m`;
@@ -82,10 +140,7 @@ export function distanceUnit(system: ResolvedUnitSystem): string {
  * Returns e.g. "62 mph" or "100 km/h".
  */
 export function formatSpeed(kmh: number, system: ResolvedUnitSystem): string {
-  if (system === 'imperial') {
-    return `${Math.round(kmh * 0.621371)} mph`;
-  }
-  return `${Math.round(kmh)} km/h`;
+  return `${Math.round(convertSpeed(kmh, system))} ${speedUnit(system)}`;
 }
 
 /** Unit label for speeds — "mph" or "km/h". */
