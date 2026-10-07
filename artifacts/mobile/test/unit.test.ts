@@ -4755,11 +4755,11 @@ test('live location publishing: while using, on screen only, about once a minute
   r.publisher.noteForegroundFix(r.fix(500));
   await settle();
   assert.equal(r.sent.length, 3, 'nothing from the background outside a drive');
-  // A drive while sharing "while using" publishes from the drive pipeline, screen or not
+  // While using means on screen: a drive in the background shares nothing
   r.publisher.setDriving(true);
   r.publisher.noteDriveFix(r.fix(10));
   await settle();
-  assert.equal(r.sent.length, 4);
+  assert.equal(r.sent.length, 3, 'a background drive is not "using"');
 });
 
 test('live location publishing: bad, stale or invalid fixes are not shared; unknown values are dropped', async () => {
@@ -4891,4 +4891,90 @@ test('live location: a dropped inbox connection drops shared positions until the
   channels.at(-1)!.status('error');
   assert.equal(store.list.length, 0, 'a removal could be missed while disconnected: nothing kept');
   feed.stop();
+});
+
+// Strict WHEN semantics: While Using = foreground only; While Driving = the drive.
+test('live location modes: While Using shares only on screen, even mid-drive; recording is untouched', async () => {
+  const r = publisherRig('while_using');
+  // 1. While Using + foreground → shared
+  r.publisher.noteForegroundFix(r.fix());
+  await settle();
+  assert.equal(r.sent.length, 1, '1. foreground: shared');
+  // 2. While Using + foreground drive → shared (from the drive's fixes)
+  r.publisher.setDriving(true);
+  r.clock.t += 10_000;
+  r.publisher.noteDriveFix(r.fix(60));
+  await settle();
+  assert.equal(r.sent.length, 2, '2. foreground drive: shared');
+  // 3. Background during that drive → withdrawn at once, nothing more sent
+  r.publisher.setOnScreen(false);
+  assert.equal(r.removed, 1, '3. backgrounded mid-drive: removed immediately');
+  for (let i = 0; i < 5; i++) {
+    r.clock.t += 10_000;
+    r.publisher.noteDriveFix(r.fix(100));
+  }
+  await settle();
+  assert.equal(r.sent.length, 2, '3. and nothing is published while in the background');
+  // 5. Back on screen: sharing resumes with the next fix
+  r.publisher.setOnScreen(true);
+  r.clock.t += 1_000;
+  r.publisher.noteDriveFix(r.fix(10));
+  await settle();
+  assert.equal(r.sent.length, 3, '5. foreground again: resumes with the next fix');
+});
+
+test('live location modes: While Driving shares through the drive, screen or not, and stops when it ends', async () => {
+  const r = publisherRig('while_driving');
+  r.publisher.noteForegroundFix(r.fix());
+  await settle();
+  assert.equal(r.sent.length, 0, 'no drive: nothing');
+  // 6. While Driving + foreground drive → shared
+  r.publisher.setDriving(true);
+  r.publisher.noteDriveFix(r.fix());
+  await settle();
+  assert.equal(r.sent.length, 1, '6. foreground drive: shared');
+  // 7. Background / locked → still shared, nothing removed
+  r.publisher.setOnScreen(false);
+  assert.equal(r.removed, 0, '7. backgrounded: not removed');
+  r.clock.t += 10_000;
+  r.publisher.noteDriveFix(r.fix(60));
+  await settle();
+  assert.equal(r.sent.length, 2, '7. locked phone: still published');
+  // 8. Drive ends → removed
+  r.publisher.setDriving(false);
+  assert.equal(r.removed, 1, '8. drive ended: removed');
+});
+
+test('live location modes: drive recording is the same whatever the sharing mode or screen state', async () => {
+  // 4. The recorder keeps every fix; sharing only listens to it.
+  const recordWith = async (mode: 'off' | 'while_using' | 'while_driving') => {
+    const clock = { t: Date.now() };
+    const cloud = makeSync(new FakeServer(), new MemoryStore(), clock);
+    await cloud.start();
+    const sent: LiveLocationUpdate[] = [];
+    const publisher = new LiveLocationPublisher({ send: async (u) => { sent.push(u); }, remove: async () => {}, now: () => clock.t });
+    publisher.start({ mode, onScreen: true, driving: false });
+    cloud.onDriveChange((d) => publisher.setDriving(d.driving));
+    cloud.onDriveFix((f) => publisher.noteDriveFix(f));
+    await cloud.startDrive(null);
+    publisher.setOnScreen(false); // phone locked mid-drive
+    const t0 = clock.t;
+    let kept = 0;
+    for (let i = 0; i < 60; i++) {
+      clock.t = t0 + i * 1000;
+      if (cloud.addFix({ latitude: 54.5 + i * 0.0003, longitude: -2.9, speedMs: 13, headingDeg: 0, accuracyM: 5, timestamp: clock.t })) kept++;
+    }
+    await settle();
+    const points = cloud.activeRecord?.points.length ?? 0;
+    cloud.dispose();
+    return { kept, points, shared: sent.length };
+  };
+  const off = await recordWith('off');
+  const using = await recordWith('while_using');
+  const driving = await recordWith('while_driving');
+  assert.ok(off.points > 0, 'the drive records');
+  assert.deepEqual([using.kept, using.points], [off.kept, off.points], '4. While Using in the background: recording unchanged');
+  assert.deepEqual([driving.kept, driving.points], [off.kept, off.points], 'While Driving: recording unchanged');
+  assert.equal(using.shared, 0, 'While Using in the background shares nothing');
+  assert.ok(driving.shared > 0, 'While Driving shares from the same fixes');
 });

@@ -132,7 +132,9 @@ router.put("/me/live-location", requireUser, publishLimit, handler(async (req, r
     const mode = settings?.mode ?? "off";
     const live = presence?.fresh === true && presence.app_state !== "signed_out";
     const driving = live && presence?.driving === true;
-    const using = live && (driving || presence?.app_state === "foreground");
+    // While Using means the app is in the foreground, drive or not: a drive
+    // in the background is shared only under While Driving.
+    const using = live && presence?.app_state === "foreground";
     if (mode === "off") throw conflict("sharing_off", "Location sharing is off.");
     if (mode === "while_driving" && !driving) throw conflict("not_driving", "Location is shared only while driving.");
     if (mode === "while_using" && !using) throw conflict("not_in_use", "Location is shared only while Derwent is open.");

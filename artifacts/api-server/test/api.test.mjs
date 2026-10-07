@@ -930,6 +930,53 @@ test("live location: expired positions and delivered messages are cleaned up", a
   assert.ok(purged, "no trail of positions is kept in realtime.messages");
 });
 
+
+test("live location: While Using is foreground only, even mid-drive; While Driving follows the drive", async () => {
+  const a = await newUser("Sharer");
+  const f = await newUser("Friend");
+  await befriend(a, f);
+  await appOpen(f);
+  await appOpen(a);
+  await share(a, { mode: "while_using", friendAudience: "all" });
+  // 1. While Using + foreground
+  expect(await put(a, "/me/live-location", HERE), 200, "1. foreground");
+  assert.deepEqual(await sharedWith(f), [a.id]);
+  // 2. While Using + foreground drive
+  const j = await post(a, "/journeys", { clientRef: randomUUID() });
+  expect(await put(a, "/me/presence", { appState: "foreground", driving: true, journeyId: j.body.id }), 200, "drive starts");
+  expect(await put(a, "/me/live-location", HERE), 200, "2. foreground drive");
+  assert.deepEqual(await sharedWith(f), [a.id]);
+  // 3. Background during that drive: hidden at once, and refused while there
+  await put(a, "/me/presence", { appState: "background" });
+  assert.deepEqual(await sharedWith(f), [], "3. backgrounded mid-drive: hidden");
+  assert.equal((await liveInbox(f, a)).at(-1), "live_location_hidden", "3. viewers told");
+  const refused = await put(a, "/me/live-location", HERE);
+  expect(refused, 409, "3. no publishing from the background under While Using");
+  assert.equal(refused.body.error, "not_in_use");
+  // 4. The drive keeps recording
+  const points = await post(a, `/journeys/${j.body.id}/route-points`, { points: [
+    { recordedAt: new Date().toISOString(), latitude: 54.3, longitude: -2.8, speedKmh: 50, accuracyM: 5 },
+  ] });
+  expect(points, 200, "4. route points still accepted");
+  assert.equal((await get(a, "/me/presence")).body.status, "driving", "4. still driving");
+  // 5. Back to the foreground: may share again
+  await put(a, "/me/presence", { appState: "foreground" });
+  expect(await put(a, "/me/live-location", HERE), 200, "5. foreground again");
+  assert.deepEqual(await sharedWith(f), [a.id]);
+  // 6. While Driving + foreground drive
+  await share(a, { mode: "while_driving" });
+  expect(await put(a, "/me/live-location", HERE), 200, "6. while driving, on screen");
+  assert.deepEqual(await sharedWith(f), [a.id]);
+  // 7. Background / locked: still shared, and updates still accepted
+  await put(a, "/me/presence", { appState: "background" });
+  assert.deepEqual(await sharedWith(f), [a.id], "7. backgrounded: still shared");
+  expect(await put(a, "/me/live-location", HERE), 200, "7. locked phone: updates accepted");
+  // 8. Ending the drive hides it
+  await put(a, "/me/presence", { appState: "background", driving: false });
+  assert.deepEqual(await sharedWith(f), [], "8. drive ended: hidden");
+  assert.equal((await liveInbox(f, a)).at(-1), "live_location_hidden");
+});
+
 // ─── Convoys ────────────────────────────────────────────────────────────────
 
 test("convoys: private visibility, join codes, capacity under concurrency", async () => {
