@@ -268,8 +268,24 @@ async function liveInboxChecks(a, b, c) {
     for (const end = Date.now() + ms; Date.now() < end; await sleep(250)) if (list.some(test)) return true;
     return false;
   };
+  // Read-only: Realtime stores broadcasts in realtime.messages, partitioned
+  // by day; it creates the partitions itself once the project's Realtime is
+  // in use. Without today's partition, joins and broadcasts fail.
+  const partitions = sql(`select coalesce(string_agg(c.relname, ', ' order by c.relname), 'none')
+    from pg_inherits i join pg_class c on c.oid = i.inhrelid where i.inhparent = 'realtime.messages'::regclass`);
+  const today = sql(`select exists (select 1 from pg_inherits i join pg_class c on c.oid = i.inhrelid
+    where i.inhparent = 'realtime.messages'::regclass
+      and c.relname = 'messages_' || to_char((now() at time zone 'utc')::date, 'YYYY_MM_DD'))`);
+  console.log(`     realtime.messages partitions: ${partitions}`);
+  check('realtime: today\'s realtime.messages partition exists', today === 't', partitions);
   try {
-    const inboxB = await join(b, `inbox:${b.id}`);
+    let inboxB = await join(b, `inbox:${b.id}`);
+    if (inboxB.status !== 'SUBSCRIBED') {
+      // The first connection to a project's Realtime may still be setting it up
+      console.log(`     own inbox: ${inboxB.status} on the first try; retrying in 10 s`);
+      await sleep(10_000);
+      inboxB = await join(b, `inbox:${b.id}`);
+    }
     check('realtime: a user can join their own private inbox', inboxB.status === 'SUBSCRIBED', inboxB.status);
     const spy = await join(c, `inbox:${b.id}`);
     check('realtime: a stranger cannot join someone else\'s inbox', spy.status !== 'SUBSCRIBED', spy.status);
