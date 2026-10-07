@@ -365,4 +365,21 @@ update public.user_settings set location_sharing = 'off' where user_id = pg_temp
 select pg_temp.ok(not exists (select 1 from public.live_locations where user_id = pg_temp.id('o')), 'turning sharing off deletes the position');
 select pg_temp.ok('live_location_hidden' = any (pg_temp.live_inbox(pg_temp.id('f'))), 'and viewers are told to remove it');
 
+\echo '--- live location strict WHEN (0019)'
+update public.user_settings set location_sharing = 'while_using', location_friend_audience = 'all' where user_id = pg_temp.id('o');
+update public.user_presence set app_state = 'foreground', driving = true, last_seen_at = now() where user_id = pg_temp.id('o');
+insert into public.live_locations (user_id, latitude, longitude, driving, expires_at)
+  values (pg_temp.id('o'), 0, 0, true, now() + interval '3 minutes');
+select pg_temp.ok(pg_temp.live_seen_by(pg_temp.id('f')), 'while using, on screen during a drive: shared');
+select pg_temp.mark_seen();
+update public.user_presence set app_state = 'background' where user_id = pg_temp.id('o');
+select pg_temp.ok(not pg_temp.live_seen_by(pg_temp.id('f')), 'while using, backgrounded mid-drive: hidden at once');
+select pg_temp.ok('live_location_hidden' = any (pg_temp.live_inbox(pg_temp.id('f'))), 'and viewers are told');
+update public.user_settings set location_sharing = 'while_driving' where user_id = pg_temp.id('o');
+insert into public.live_locations (user_id, latitude, longitude, driving, expires_at)
+  values (pg_temp.id('o'), 0, 0, true, now() + interval '3 minutes');
+select pg_temp.ok(pg_temp.live_seen_by(pg_temp.id('f')), 'while driving, backgrounded during a drive: still shared');
+update public.user_presence set driving = false where user_id = pg_temp.id('o');
+select pg_temp.ok(not pg_temp.live_seen_by(pg_temp.id('f')), 'while driving, the drive ends: hidden');
+
 \echo '=== ALL INCREMENTAL VERIFICATION CHECKS PASSED ==='

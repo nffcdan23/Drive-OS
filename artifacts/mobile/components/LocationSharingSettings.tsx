@@ -153,7 +153,7 @@ export function LocationSharingSettings() {
               {sharing.mode === "while_driving"
                 ? "Shared only during a drive Derwent is recording, including with your phone locked."
                 : sharing.mode === "while_using"
-                  ? "Shared while Derwent is open on screen, and during drives. It stops when you leave the app."
+                  ? "Shared only while Derwent is open on screen, including during a drive. Leaving the app or locking your phone stops it at once; your drive keeps recording."
                   : "Nothing is shared."}{" "}
               Derwent never shares your location in the background outside a drive.
             </Text>

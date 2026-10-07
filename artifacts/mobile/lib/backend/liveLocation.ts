@@ -322,14 +322,16 @@ export class LiveLocationPublisher {
     this.holdUntil = -Infinity;
     this.lastSentAt = -Infinity;
     if (mode === 'off') { this.published = false; this.pending = null; }
+    else if (!this.sharingApplies()) this.withdraw('mode no longer applies');
   }
 
   setOnScreen(onScreen: boolean): void {
     if (onScreen === this.onScreen) return;
     this.onScreen = onScreen;
-    // Leaving the screen outside a drive ends "while using" sharing at once
+    // Leaving the screen ends "while using" sharing at once, mid-drive too
     // (the server also removes it when presence reports the background).
-    if (!onScreen && !this.driving) this.withdraw('background');
+    // Only "while driving" carries on in the background during a drive.
+    if (!onScreen && !this.sharingApplies()) this.withdraw('background');
     if (onScreen) this.lastSentAt = -Infinity;
   }
 
@@ -338,12 +340,17 @@ export class LiveLocationPublisher {
     this.driving = driving;
     this.holdUntil = -Infinity;
     this.lastSentAt = -Infinity;
-    if (!driving && (this.mode === 'while_driving' || !this.onScreen)) this.withdraw('drive ended');
+    if (!driving && !this.sharingApplies()) this.withdraw('drive ended');
+  }
+
+  /** WHEN, strictly: while using = on screen; while driving = a drive in progress. */
+  private sharingApplies(): boolean {
+    return (this.mode === 'while_using' && this.onScreen) || (this.mode === 'while_driving' && this.driving);
   }
 
   /** A fix the drive accepted (screen or background). */
   noteDriveFix(fix: GpsFix): void {
-    if (!this.running || !this.driving || this.mode === 'off') return;
+    if (!this.running || !this.driving || !this.sharingApplies()) return;
     this.consider(fix, true);
   }
 

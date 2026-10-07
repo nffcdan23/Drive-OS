@@ -1095,6 +1095,37 @@ select pg_temp.expect_live_inbox('K', array['live_location_hidden'], 'and viewer
 update user_presence set app_state = 'signed_out' where user_id = pg_temp.lu('O');
 update user_presence set app_state = 'foreground' where user_id = pg_temp.lu('O');
 
+-- Strict WHEN (0019): While Using = foreground only, even mid-drive; While Driving = the drive
+update user_settings set location_sharing = 'while_using', location_friend_audience = 'all' where user_id = pg_temp.lu('O');
+update user_presence set app_state = 'foreground', driving = false where user_id = pg_temp.lu('O');
+select pg_temp.publish_o(false);
+select pg_temp.ok_bool(pg_temp.live_seen_by('F'), true, 'while using, on screen: shared');
+update user_presence set driving = true where user_id = pg_temp.lu('O');
+select pg_temp.publish_o(true);
+select pg_temp.ok_bool(pg_temp.live_seen_by('F'), true, 'while using, on screen during a drive: shared');
+select pg_temp.live_mark();
+update user_presence set app_state = 'background' where user_id = pg_temp.lu('O');
+select pg_temp.ok_bool(pg_temp.live_seen_by('F'), false, 'while using, backgrounded mid-drive: hidden at once');
+select pg_temp.ok_bool(exists (select 1 from live_locations where user_id = pg_temp.lu('O')), false, 'the position is removed');
+select pg_temp.expect_live_inbox('F', array['live_location_hidden'], 'and viewers are told');
+select pg_temp.ok_bool((select driving from user_presence where user_id = pg_temp.lu('O')), true, 'the drive itself carries on');
+select pg_temp.publish_o(true);
+select pg_temp.ok_bool(pg_temp.live_seen_by('F'), false, 'a position written while in the background is never shown under while using');
+delete from live_locations where user_id = pg_temp.lu('O');
+update user_presence set app_state = 'foreground' where user_id = pg_temp.lu('O');
+select pg_temp.publish_o(true);
+select pg_temp.ok_bool(pg_temp.live_seen_by('F'), true, 'back on screen: shared again from the next position');
+update user_settings set location_sharing = 'while_driving' where user_id = pg_temp.lu('O');
+select pg_temp.publish_o(true);
+select pg_temp.ok_bool(pg_temp.live_seen_by('F'), true, 'while driving, on screen during a drive: shared');
+update user_presence set app_state = 'background' where user_id = pg_temp.lu('O');
+select pg_temp.ok_bool(pg_temp.live_seen_by('F'), true, 'while driving, backgrounded or locked: still shared');
+select pg_temp.live_mark();
+update user_presence set driving = false where user_id = pg_temp.lu('O');
+select pg_temp.ok_bool(pg_temp.live_seen_by('F'), false, 'while driving, the drive ends: hidden');
+select pg_temp.expect_live_inbox('F', array['live_location_hidden'], 'and viewers are told');
+update user_presence set app_state = 'foreground' where user_id = pg_temp.lu('O');
+
 -- Writes and data checks
 select pg_temp.check_denied('alice', $q$insert into public.live_locations (user_id, latitude, longitude, expires_at) values ('10000000-0000-4000-8000-000000000001', 1, 1, now() + interval '1 minute')$q$,
   '42501', '%row-level security%', 'a client cannot publish a position for someone else');
