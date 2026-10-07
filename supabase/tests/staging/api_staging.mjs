@@ -19,6 +19,7 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 
 const need = (k) => {
   const v = process.env[k];
@@ -192,6 +193,9 @@ async function run() {
   await api(a, 'PUT', '/me/presence', { appState: 'signed_out' });
   check('presence: signed out shows offline', (await presenceOfA(b))?.status === 'offline');
 
+  // ─── Live presence over Supabase Realtime (migration 0017) ────────────────
+  await liveInboxChecks(a, b, c);
+
   const convoy = await api(a, 'POST', '/convoys', { name: 'Staging convoy', visibility: 'private', startsAt: new Date(Date.now() + 3600_000).toISOString(), maxParticipants: 2 });
   check('private convoy created', convoy.status === 201, `HTTP ${convoy.status}`);
   check('private convoy hidden from a stranger', (await api(c, 'GET', `/convoys/${convoy.json?.id}`)).status === 404);
@@ -241,6 +245,49 @@ async function run() {
   check('the profile and convoy membership are gone',
     sql(`select (select count(*) from public.profiles where id = '${c.id}') + (select count(*) from public.convoy_participants where user_id = '${c.id}')`) === '0');
   if (delC.status === 204) delete users.c;
+}
+
+// Real Supabase Realtime, as the app uses it: private inbox channels.
+async function liveInboxChecks(a, b, c) {
+  const { createClient } = createRequire(new URL('../../../artifacts/mobile/package.json', import.meta.url))('@supabase/supabase-js');
+  const clients = [];
+  const join = async (user, topic) => {
+    const client = createClient(BASE, PUB_KEY, { auth: { persistSession: false, autoRefreshToken: false } });
+    clients.push(client);
+    await client.realtime.setAuth(user.token);
+    const received = [];
+    const status = await new Promise((resolve) => {
+      const timer = setTimeout(() => resolve('NO_ANSWER'), 15_000);
+      client.channel(topic, { config: { private: true } })
+        .on('broadcast', { event: 'presence' }, (m) => received.push(m.payload))
+        .subscribe((s) => { if (s !== 'CLOSED') { clearTimeout(timer); resolve(s); } });
+    });
+    return { status, received };
+  };
+  const waitFor = async (list, test, ms = 15_000) => {
+    for (const end = Date.now() + ms; Date.now() < end; await sleep(250)) if (list.some(test)) return true;
+    return false;
+  };
+  try {
+    const inboxB = await join(b, `inbox:${b.id}`);
+    check('realtime: a user can join their own private inbox', inboxB.status === 'SUBSCRIBED', inboxB.status);
+    const spy = await join(c, `inbox:${b.id}`);
+    check('realtime: a stranger cannot join someone else\'s inbox', spy.status !== 'SUBSCRIBED', spy.status);
+    await api(b, 'PUT', '/me/presence', { appState: 'foreground' }); // B has the app open
+    await api(a, 'PUT', '/me/presence', { appState: 'foreground', driving: true });
+    check('realtime: the friend receives Driving live',
+      await waitFor(inboxB.received, (p) => p.userId === a.id && p.status === 'driving'));
+    await api(a, 'PUT', '/me/presence', { appState: 'foreground', driving: false });
+    check('realtime: and Online when the drive ends',
+      await waitFor(inboxB.received, (p) => p.userId === a.id && p.status === 'online'));
+    await api(a, 'PATCH', '/me/settings', { showActivityStatus: false });
+    check('realtime: hiding activity is pushed at once',
+      await waitFor(inboxB.received, (p) => p.userId === a.id && p.type === 'hidden'));
+    await api(a, 'PATCH', '/me/settings', { showActivityStatus: true });
+    check('realtime: the stranger received nothing', spy.received.length === 0, `${spy.received.length} messages`);
+  } finally {
+    for (const client of clients) await client.removeAllChannels().catch(() => {});
+  }
 }
 
 async function cleanup() {

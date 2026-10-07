@@ -4278,3 +4278,231 @@ test('the Community screen reloads friends on focus and on pull-to-refresh', asy
   assert.match(src, /<RefreshControl refreshing=\{pulling\} onRefresh=\{pullToRefresh\}/, 'pull-to-refresh');
   assert.equal((src.match(/refreshControl=\{friendsRefresh\}/g) ?? []).length, 2, 'on the overview and friends tabs');
 });
+
+// ─── Phase 3: live friend presence (Realtime inbox) ────────────────────────
+import { decayPresence, parsePresenceEvent, type PresenceEvent } from '@/lib/backend/presence';
+import { FEED_RETRY_MS, PresenceFeed, type InboxStatus } from '@/lib/backend/presenceFeed';
+
+test('inbox payloads are validated; anything unexpected is ignored', () => {
+  assert.deepEqual(parsePresenceEvent({ type: 'presence', userId: 'u', status: 'driving', lastSeenAt: '2026-10-07T10:00:00.000Z' }),
+    { type: 'presence', userId: 'u', status: 'driving', lastSeenAt: '2026-10-07T10:00:00.000Z' });
+  assert.deepEqual(parsePresenceEvent({ type: 'hidden', userId: 'u' }), { type: 'hidden', userId: 'u' });
+  assert.deepEqual(parsePresenceEvent({ type: 'unfriended', userId: 'u' }), { type: 'unfriended', userId: 'u' });
+  for (const bad of [null, 'x', {}, { type: 'presence', userId: 'u', status: 'flying' }, { type: 'presence', status: 'online' }, { type: 'probe', userId: 'u' }]) {
+    assert.equal(parsePresenceEvent(bad), null);
+  }
+});
+
+test('statuses age out on screen when a friend goes quiet (server rules, timed from receipt)', () => {
+  const t = 1_000_000, m = 60_000;
+  assert.equal(decayPresence('online', t, t + 119_000), 'online');
+  assert.equal(decayPresence('online', t, t + 3 * m), 'away');
+  assert.equal(decayPresence('driving', t, t + 170_000), 'driving');
+  assert.equal(decayPresence('driving', t, t + 4 * m), 'away');
+  assert.equal(decayPresence('away', t, t + 9 * m), 'away');
+  assert.equal(decayPresence('driving', t, t + 11 * m), 'offline');
+  assert.equal(decayPresence('offline', t, t), 'offline');
+  assert.equal(decayPresence(null, t, t + 99 * m), null, 'hidden stays hidden');
+});
+
+/** A fake Supabase inbox channel: records joins, can push messages and statuses. */
+function inboxRig(opts: { snapshot?: () => Promise<void>; openFails?: number } = {}) {
+  const timers = new Map<number, { fn: () => void; ms: number; repeat: boolean }>();
+  let id = 0;
+  const channels: Array<{ token: string; open: boolean; push: (p: unknown) => void; status: (s: InboxStatus) => void }> = [];
+  let token = 'token-1';
+  let openFails = opts.openFails ?? 0;
+  const applied: PresenceEvent[] = [];
+  let snapshots = 0;
+  let decays = 0;
+  const feed = new PresenceFeed({
+    open: async ({ onEvent, onStatus }) => {
+      if (openFails > 0) { openFails--; throw new Error('network'); }
+      const ch = { token, open: true, push: onEvent, status: onStatus };
+      channels.push(ch);
+      return { close: () => { ch.open = false; } };
+    },
+    snapshot: async () => { snapshots++; await opts.snapshot?.(); },
+    apply: (e) => applied.push(e),
+    decay: () => { decays++; },
+    setTimeout: (fn, ms) => { timers.set(++id, { fn, ms, repeat: false }); return id; },
+    clearTimeout: (h) => { timers.delete(h as number); },
+    setInterval: (fn, ms) => { timers.set(++id, { fn, ms, repeat: true }); return id; },
+    clearInterval: (h) => { timers.delete(h as number); },
+  });
+  const fireRetry = async () => {
+    for (const [k, t] of [...timers]) if (!t.repeat) { timers.delete(k); t.fn(); }
+    await settle();
+  };
+  return {
+    feed, channels, applied, timers, fireRetry,
+    openChannels: () => channels.filter((c) => c.open),
+    current: () => channels.filter((c) => c.open).at(-1)!,
+    refreshToken: (t: string) => { token = t; },
+    get snapshots() { return snapshots; }, get decays() { return decays; },
+  };
+}
+
+test('live presence: one inbox on screen, none in the background, never duplicated', async () => {
+  const r = inboxRig();
+  r.feed.setActive(true);
+  r.feed.setActive(true); // repeated foreground events
+  await settle();
+  assert.equal(r.channels.length, 1, 'joined once');
+  r.feed.setActive(false);
+  assert.equal(r.openChannels().length, 0, 'left in the background');
+  assert.equal([...r.timers.values()].filter((t) => t.repeat).length, 0, 'no timers in the background');
+  for (let i = 0; i < 5; i++) { r.feed.setActive(true); r.feed.setActive(false); }
+  r.feed.setActive(true);
+  await settle();
+  assert.equal(r.openChannels().length, 1, 'many foreground/background flips: still exactly one open');
+  r.feed.stop();
+  assert.equal(r.openChannels().length, 0);
+  r.feed.setActive(true);
+  await settle();
+  assert.equal(r.openChannels().length, 0, 'never rejoins after stop (sign-out)');
+});
+
+test('live presence: a snapshot after joining, updates held until it lands, then applied live', async () => {
+  let finish!: () => void;
+  const r = inboxRig({ snapshot: () => new Promise<void>((res) => { finish = res; }) });
+  r.feed.setActive(true);
+  await settle();
+  assert.equal(r.snapshots, 0, 'no snapshot before the join is confirmed');
+  r.current().status('subscribed');
+  assert.equal(r.snapshots, 1, 'snapshot right after joining (catches up on anything missed)');
+  r.current().push({ type: 'presence', userId: 'a', status: 'driving', lastSeenAt: null });
+  assert.equal(r.applied.length, 0, 'held while the snapshot loads');
+  finish();
+  await settle();
+  assert.deepEqual(r.applied.map((e) => e.type === 'presence' && e.status), ['driving'], 'applied after it, so it is not overwritten');
+  r.current().push({ type: 'presence', userId: 'a', status: 'online', lastSeenAt: null });
+  r.current().push({ nonsense: true });
+  assert.deepEqual(r.applied.map((e) => e.type === 'presence' && e.status), ['driving', 'online'], 'then applied as they arrive');
+});
+
+test('live presence: an expired token or dropped socket rejoins with a fresh token', async () => {
+  const r = inboxRig();
+  r.feed.setActive(true);
+  await settle();
+  r.current().status('subscribed');
+  await settle();
+  assert.equal(r.feed.isConnected, true);
+  // The token expired while connected: Realtime drops the channel
+  r.refreshToken('token-2');
+  r.current().status('error');
+  assert.equal(r.feed.isConnected, false);
+  assert.equal(r.openChannels().length, 0, 'the broken channel is closed, not left hanging');
+  assert.equal([...r.timers.values()].find((t) => !t.repeat)?.ms, FEED_RETRY_MS[0]);
+  await r.fireRetry();
+  assert.equal(r.current().token, 'token-2', 'rejoined with the refreshed token');
+  r.current().status('subscribed');
+  await settle();
+  assert.equal(r.feed.isConnected, true);
+  assert.equal(r.snapshots, 2, 'and caught up again');
+  // Repeated failures back off; going to the background cancels the retry
+  r.current().status('closed');
+  await r.fireRetry();
+  r.channels.at(-1)!.status('error');
+  assert.equal([...r.timers.values()].find((t) => !t.repeat)?.ms, FEED_RETRY_MS[1]);
+  r.feed.setActive(false);
+  assert.equal([...r.timers.values()].length, 0, 'no retry or timers in the background');
+});
+
+test('live presence: a failed join retries; a join that finishes after leaving is closed', async () => {
+  const r = inboxRig({ openFails: 2 });
+  r.feed.setActive(true);
+  await settle();
+  assert.equal(r.channels.length, 0);
+  await r.fireRetry(); // fails again
+  await r.fireRetry();
+  assert.equal(r.openChannels().length, 1, 'connected on the third try');
+  // Slow join: background before it completes
+  let release!: () => void;
+  const late: { closed: boolean } = { closed: false };
+  const slow = new PresenceFeed({
+    open: () => new Promise((res) => { release = () => res({ close: () => { late.closed = true; } }); }),
+    snapshot: async () => {}, apply: () => {}, decay: () => {},
+    setInterval: () => 1, clearInterval: () => {}, setTimeout: () => 1, clearTimeout: () => {},
+  });
+  slow.setActive(true);
+  slow.setActive(false);
+  release();
+  await settle();
+  assert.equal(late.closed, true, 'not kept open after leaving');
+});
+
+test('live updates merge into the same friend list as the snapshot; they age out when quiet', async () => {
+  const server = new PresenceServer();
+  const viewer = await presencePhone(server, 'B', 'A');
+  await viewer.cloud.refreshFriends();
+  assert.equal(viewer.cloud.data.friends[0]!.status, 'offline', 'A has not opened the app yet');
+  const ev = (e: PresenceEvent) => viewer.cloud.applyPresenceEvent(e);
+  ev({ type: 'presence', userId: 'A', status: 'online', lastSeenAt: '2026-10-07T10:00:00.000Z' });
+  assert.equal(viewer.cloud.data.friends[0]!.status, 'online');
+  assert.equal(viewer.cloud.data.friends[0]!.lastSeenAt, '2026-10-07T10:00:00.000Z');
+  ev({ type: 'presence', userId: 'A', status: 'driving', lastSeenAt: null });
+  assert.equal(viewer.cloud.data.friends[0]!.status, 'driving');
+  // A's phone dies mid-drive: no more messages
+  server.clock.t += 4 * 60_000;
+  viewer.cloud.decayFriendPresence();
+  assert.equal(viewer.cloud.data.friends[0]!.presence, 'driving', 'last thing received');
+  assert.equal(viewer.cloud.data.friends[0]!.status, 'offline', 'shown as no longer driving (Away shows as offline)');
+  ev({ type: 'presence', userId: 'A', status: 'online', lastSeenAt: null });
+  assert.equal(viewer.cloud.data.friends[0]!.status, 'online');
+  ev({ type: 'hidden', userId: 'A' });
+  assert.deepEqual(
+    { status: viewer.cloud.data.friends[0]!.status, presence: viewer.cloud.data.friends[0]!.presence, lastSeenAt: viewer.cloud.data.friends[0]!.lastSeenAt },
+    { status: 'offline', presence: null, lastSeenAt: null }, 'hidden: nothing about A remains');
+  ev({ type: 'presence', userId: 'stranger', status: 'online', lastSeenAt: null });
+  assert.equal(viewer.cloud.data.friends.length, 1, 'updates for someone not in the list are ignored');
+  ev({ type: 'unfriended', userId: 'A' });
+  assert.equal(viewer.cloud.data.friends.length, 0, 'an ex-friend leaves the list at once');
+  viewer.reporter.stop();
+});
+
+test('two phones: B sees A go Online → Driving → Online → Away → hidden → back → signed out, with no refresh', async () => {
+  // The fan-out the database does (0017), for these two friends: each of A's
+  // presence writes reaches B's inbox while B's app is open.
+  const server = new PresenceServer();
+  const inboxB: Array<(p: unknown) => void> = [];
+  let hidden = false;
+  const publish = () => {
+    const r = server.rows.get('A');
+    if (!r) return;
+    const payload = hidden ? { type: 'hidden', userId: 'A' } : { type: 'presence', userId: 'A', status: server.status('A'), lastSeenAt: new Date(r.lastSeen).toISOString() };
+    for (const fn of inboxB) fn(payload);
+  };
+  const viewer = await presencePhone(server, 'B', 'A');
+  const feed = new PresenceFeed({
+    open: async ({ onEvent, onStatus }) => { inboxB.push(onEvent); queueMicrotask(() => onStatus('subscribed')); return { close: () => { inboxB.length = 0; } }; },
+    snapshot: () => viewer.cloud.refreshFriends(),
+    apply: (e) => viewer.cloud.applyPresenceEvent(e),
+    decay: () => viewer.cloud.decayFriendPresence(),
+    setInterval: () => 1, clearInterval: () => {},
+  });
+  feed.setActive(true);
+  await settle(); await settle();
+  const shown = () => viewer.cloud.data.friends[0]?.status;
+  const driverEp = server.ep('A', 'B');
+  const send = async (u: PresenceUpdate) => { await driverEp.updatePresence(u); publish(); await settle(); };
+
+  await send({ appState: 'foreground', driving: false });
+  assert.equal(shown(), 'online', '1. A opens Derwent → Online');
+  await send({ appState: 'foreground', driving: true });
+  assert.equal(shown(), 'driving', '2. A starts a drive → Driving');
+  await send({ appState: 'foreground', driving: false });
+  assert.equal(shown(), 'online', '3. A ends the drive → Online');
+  await send({ appState: 'background', driving: false });
+  assert.equal(shown(), 'offline', '4. A backgrounds → Away (shown as offline)');
+  assert.equal(viewer.cloud.data.friends[0]!.presence, 'away');
+  hidden = true; publish(); await settle();
+  assert.equal(viewer.cloud.data.friends[0]!.presence, null, '5. A hides activity → removed');
+  hidden = false;
+  await send({ appState: 'foreground', driving: false });
+  assert.equal(shown(), 'online', 'shown again once A turns it back on');
+  await send({ appState: 'signed_out' });
+  assert.equal(viewer.cloud.data.friends[0]!.presence, 'offline', 'A signs out → Offline');
+  feed.stop();
+  viewer.reporter.stop();
+});

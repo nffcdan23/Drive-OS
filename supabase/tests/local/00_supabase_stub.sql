@@ -118,3 +118,39 @@ end;
 $$;
 
 grant execute on function storage.foldername(text) to anon, authenticated, service_role;
+
+-- ─── realtime ────────────────────────────────────────────────────────────────
+-- Supabase Realtime authorises private channels with RLS on realtime.messages
+-- (evaluated with realtime.topic() set to the channel's topic), and
+-- realtime.send() publishes a broadcast by inserting a row there (delivered
+-- by Realtime after commit). Same columns, signatures and client grants as
+-- hosted Supabase; nothing is delivered here.
+create schema if not exists realtime;
+grant usage on schema realtime to anon, authenticated, service_role;
+
+create table realtime.messages (
+  id          uuid        not null default gen_random_uuid(),
+  topic       text        not null,
+  extension   text        not null,
+  payload     jsonb,
+  event       text,
+  private     boolean     default false,
+  updated_at  timestamp   not null default now(),
+  inserted_at timestamp   not null default now(),
+  primary key (id, inserted_at)
+);
+alter table realtime.messages enable row level security;
+grant select, insert, update, delete on realtime.messages to anon, authenticated;
+
+create function realtime.topic() returns text language sql stable as $$
+  select nullif(current_setting('realtime.topic', true), '')::text
+$$;
+grant execute on function realtime.topic() to anon, authenticated;
+
+create function realtime.send(payload jsonb, event text, topic text, private boolean default true)
+returns void language plpgsql as $$
+begin
+  insert into realtime.messages (payload, event, topic, private, extension)
+  values (payload, event, topic, private, 'broadcast');
+end;
+$$;

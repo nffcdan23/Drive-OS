@@ -101,6 +101,11 @@ export interface Friend {
   presence: 'online' | 'away' | 'offline' | 'driving' | null;
   /** When they were last active; null if unknown or not shared. */
   lastSeenAt: string | null;
+  /**
+   * When this device received `presence` (ms, device clock), so a status can
+   * age out on screen if the friend's phone goes quiet (see decayPresence).
+   */
+  presenceAt?: number | null;
   location: string;
   avatarUrl?: string | null;
   level?: number;

@@ -62,6 +62,9 @@ select has_table_privilege('auth.users', 'TRIGGER')                             
           from pg_class c where c.oid = 'storage.objects'::regclass)                  as owns_storage_objects,
        coalesce(nullif(current_setting('supautils.policy_grants', true), '')::jsonb
                   -> current_user ? 'storage.objects', false)                         as storage_policy_grant,
+       coalesce(nullif(current_setting('supautils.policy_grants', true), '')::jsonb
+                  -> current_user ? 'realtime.messages', false)                       as realtime_policy_grant,
+       to_regprocedure('realtime.send(jsonb, text, text, boolean)') is not null        as realtime_send_available,
        has_table_privilege('storage.buckets', 'INSERT')                               as can_create_buckets,
        has_schema_privilege('extensions', 'CREATE')                                   as can_use_extensions_schema,
        has_database_privilege(current_database(), 'CREATE')                           as can_create_schemas,
@@ -152,6 +155,15 @@ begin
                         -> current_user ? 'storage.objects', false) then
     problems := array_append(problems,
       'cannot create policies on storage.objects (not its owner, and not granted in supautils.policy_grants)');
+  end if;
+  -- Realtime presence (0017): a policy on realtime.messages and realtime.send().
+  if to_regclass('realtime.messages') is null or to_regprocedure('realtime.send(jsonb, text, text, boolean)') is null then
+    problems := array_append(problems, 'Supabase Realtime (realtime.messages, realtime.send) is not available');
+  elsif not (select pg_has_role(current_user, c.relowner, 'USAGE') from pg_class c where c.oid = 'realtime.messages'::regclass)
+     and not coalesce(nullif(current_setting('supautils.policy_grants', true), '')::jsonb
+                        -> current_user ? 'realtime.messages', false) then
+    problems := array_append(problems,
+      'cannot create policies on realtime.messages (not its owner, and not granted in supautils.policy_grants)');
   end if;
   if not has_table_privilege('storage.buckets', 'INSERT') then
     problems := array_append(problems, 'cannot create Storage buckets');
