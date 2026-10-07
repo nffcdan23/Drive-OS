@@ -25,10 +25,11 @@ import type { PreparedFile } from '@/lib/backend/uploads';
 import { base64ToBytes } from '@/lib/backend/bytes';
 import { initials } from '@/lib/backend/mappers';
 import { UnitSystem, ResolvedUnitSystem, resolveUnitSystem } from '@/lib/units';
-import { api, backendEnv, ep, newId, onConnectionStatus } from '@/lib/backendClient';
+import { api, backendEnv, ep, newId, onConnectionStatus, supabase } from '@/lib/backendClient';
 import { deviceStorage } from '@/lib/secureStorage';
 import { driveTracker } from '@/lib/driveBackgroundLocation';
 import { startPresence, type PresenceSession } from '@/lib/presenceClient';
+import { startRealtimePresence, type RealtimePresenceSession } from '@/lib/realtimePresence';
 import { APP_NAME } from '@/constants/brand';
 
 export type {
@@ -209,6 +210,7 @@ export function AppProvider({ userId, children }: { userId: string; children: Re
 
   const [isLoading, setIsLoading] = useState(true);
   const presenceRef = useRef<PresenceSession | null>(null);
+  const liveFriendsRef = useRef<RealtimePresenceSession | null>(null);
   const [isPassengerMode, setIsPassengerMode] = useState(false);
   const [currentDrive, setCurrentDrive] = useState<ActiveDrive | null>(null);
   const isDriving = currentDrive !== null;
@@ -222,12 +224,15 @@ export function AppProvider({ userId, children }: { userId: string; children: Re
     // background (each once), so it continues while the app is out of view.
     const unsubscribeFixes = cloud.onDriveFix((fix) => setCurrentDrive((prev) => (prev ? appendLiveFix(prev, fix) : prev)));
     let presence: PresenceSession | null = null;
+    let liveFriends: RealtimePresenceSession | null = null;
     (async () => {
       await cloud.start();
       if (cancelled) return;
       // Presence starts once the drive state is known (a recovered drive
       // reports Driving straight away). Failures never affect the app.
       if (ep) presence = presenceRef.current = startPresence(cloud, ep);
+      // Friends' presence, live while the app is on screen (Realtime inbox).
+      if (supabase) liveFriends = liveFriendsRef.current = startRealtimePresence(supabase, cloud, userId);
       // A drive still recording in the background when the app was relaunched
       // carries on, from the points recorded so far.
       const rec = cloud.activeRecord;
@@ -241,6 +246,8 @@ export function AppProvider({ userId, children }: { userId: string; children: Re
       unsubscribeFixes();
       presence?.stop();
       if (presenceRef.current === presence) presenceRef.current = null;
+      liveFriends?.stop();
+      if (liveFriendsRef.current === liveFriends) liveFriendsRef.current = null;
       cloud.dispose();
     };
   }, [cloud]);
@@ -474,12 +481,16 @@ export function AppProvider({ userId, children }: { userId: string; children: Re
       resolveId: (id: string) => cloud.resolveJourneyId(cloud.outbox.resolve(id)),
       hasUnsyncedWork: () => cloud.hasUnsyncedWork,
       clearLocalData: async () => {
+        liveFriendsRef.current?.stop();
+        liveFriendsRef.current = null;
         // Best effort, a few seconds at most: sign-out never waits on it or fails because of it
         await presenceRef.current?.signOut().catch(() => {});
         presenceRef.current = null;
         await cloud.wipeLocal();
       },
       deleteAccount: async () => {
+        liveFriendsRef.current?.stop();
+        liveFriendsRef.current = null;
         presenceRef.current?.stop();
         presenceRef.current = null;
         await ep!.deleteAccount();

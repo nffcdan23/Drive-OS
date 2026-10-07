@@ -47,6 +47,47 @@ export interface PresenceLogEntry {
 }
 
 export const PRESENCE_HEARTBEAT_MS = 60_000;
+
+// ─── Friends' presence, received ────────────────────────────────────────────
+
+export type FriendPresenceStatus = 'online' | 'away' | 'offline' | 'driving';
+
+/** A live update from the user's Realtime inbox (migration 0017). */
+export type PresenceEvent =
+  | { type: 'presence'; userId: string; status: FriendPresenceStatus; lastSeenAt: string | null }
+  | { type: 'hidden'; userId: string }
+  | { type: 'unfriended'; userId: string };
+
+const STATUSES: readonly FriendPresenceStatus[] = ['online', 'away', 'offline', 'driving'];
+
+/** Validates an inbox payload; anything unexpected is ignored (null). */
+export function parsePresenceEvent(payload: unknown): PresenceEvent | null {
+  if (!payload || typeof payload !== 'object') return null;
+  const p = payload as Record<string, unknown>;
+  if (typeof p.userId !== 'string' || !p.userId) return null;
+  if (p.type === 'hidden' || p.type === 'unfriended') return { type: p.type, userId: p.userId };
+  if (p.type !== 'presence' || !STATUSES.includes(p.status as FriendPresenceStatus)) return null;
+  return {
+    type: 'presence', userId: p.userId, status: p.status as FriendPresenceStatus,
+    lastSeenAt: typeof p.lastSeenAt === 'string' ? p.lastSeenAt : null,
+  };
+}
+
+/**
+ * A status as it stands `now`, given when it was received: the server's
+ * rules (0016) applied on the device, so a friend whose phone stops
+ * reporting (crash, no signal) drifts to Away and then Offline on screen
+ * without another message. Timed from receipt, so the two phones' clocks
+ * don't matter.
+ */
+export function decayPresence(status: FriendPresenceStatus | null, receivedAt: number | null | undefined, now: number): FriendPresenceStatus | null {
+  if (status == null || receivedAt == null || status === 'offline') return status;
+  const age = now - receivedAt;
+  if (age > 10 * 60_000) return 'offline';
+  if (status === 'driving') return age <= 3 * 60_000 ? 'driving' : 'away';
+  if (status === 'online') return age <= 2 * 60_000 ? 'online' : 'away';
+  return 'away';
+}
 /** Sign-out waits at most this long for the "signed out" update. */
 export const PRESENCE_SIGN_OUT_WAIT_MS = 3_000;
 

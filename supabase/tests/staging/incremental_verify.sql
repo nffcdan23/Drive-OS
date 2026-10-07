@@ -153,4 +153,77 @@ begin
 end;
 $$;
 
+-- ─── 4. Realtime inbox (0017) ────────────────────────────────────────────────
+\echo '--- realtime presence inbox'
+select pg_temp.ok(
+  exists (select 1 from pg_policies where schemaname = 'realtime' and tablename = 'messages' and policyname = 'driveos_inbox_receive'),
+  'the inbox policy exists on realtime.messages');
+select pg_temp.ok(
+  not exists (select 1 from pg_policies where schemaname = 'realtime' and tablename = 'messages'
+               and policyname like 'driveos%' and cmd in ('INSERT', 'ALL', 'UPDATE', 'DELETE')),
+  'no DriveOS policy lets a client publish');
+
+-- Realtime authorises a join by selecting from realtime.messages as the user
+-- with realtime.topic() set to the channel; a probe row makes the answer visible.
+create function pg_temp.can_join(p_who text, p_topic text) returns boolean language plpgsql as $$
+declare
+  n  bigint;
+  me uuid := pg_temp.id(p_who);
+begin
+  insert into realtime.messages (topic, extension, payload, event, private) values (p_topic, 'broadcast', '{"probe":true}', 'probe', true);
+  perform set_config('request.jwt.claims', json_build_object('sub', me, 'role', 'authenticated')::text, true);
+  perform set_config('role', 'authenticated', true);
+  perform set_config('realtime.topic', p_topic, true);
+  begin
+    select count(*) into n from realtime.messages where topic = p_topic;
+  exception when insufficient_privilege then n := 0;
+  end;
+  reset role; perform set_config('request.jwt.claims', '', true); perform set_config('realtime.topic', '', true);
+  return n > 0;
+end;
+$$;
+select pg_temp.ok(pg_temp.can_join('o', 'inbox:' || pg_temp.id('o')), 'a user can join their own inbox');
+select pg_temp.ok(not pg_temp.can_join('f', 'inbox:' || pg_temp.id('o')), 'a friend cannot join someone else''s inbox');
+select pg_temp.ok(not pg_temp.can_join('s', 'inbox:' || pg_temp.id('o')), 'a stranger cannot join someone else''s inbox');
+do $$
+declare
+  me     uuid := pg_temp.id('o');
+  target text := 'inbox:' || pg_temp.id('f');
+begin
+  perform set_config('request.jwt.claims', json_build_object('sub', me, 'role', 'authenticated')::text, true);
+  perform set_config('role', 'authenticated', true);
+  begin
+    insert into realtime.messages (topic, extension, payload, event, private) values (target, 'broadcast', '{}', 'presence', true);
+    reset role; perform set_config('request.jwt.claims', '', true);
+    raise exception 'FAIL: a client published into someone else''s inbox';
+  exception when insufficient_privilege then
+    reset role; perform set_config('request.jwt.claims', '', true);
+  end;
+  raise notice 'ok   a client cannot publish into an inbox';
+end;
+$$;
+
+-- Fan-out: o's presence reaches friend f (app open), never stranger s or blocked b
+-- Messages for the fixture inboxes published after the last mark_seen().
+create temp table seen_messages (id uuid primary key);
+create function pg_temp.mark_seen() returns void language sql as $$
+  insert into seen_messages select id from realtime.messages
+   where topic like 'inbox:f1e5e0c0-0000-4000-8000-0000000000a%' on conflict do nothing
+$$;
+create function pg_temp.inbox(p text) returns text[] language sql as $$
+  select coalesce(array_agg((payload->>'type') || ':' || coalesce(payload->>'status', '-') order by inserted_at, id), '{}')
+    from realtime.messages m where topic = 'inbox:' || pg_temp.id(p) and event = 'presence'
+     and not exists (select 1 from seen_messages s where s.id = m.id)
+$$;
+update public.user_settings set show_activity_status = true where user_id = pg_temp.id('o');
+update public.user_presence set app_state = 'foreground', driving = false, last_seen_at = now()
+ where user_id in (pg_temp.id('f'), pg_temp.id('s'), pg_temp.id('b'));
+select pg_temp.mark_seen();
+update public.user_presence set driving = true, last_seen_at = now() where user_id = pg_temp.id('o');
+select pg_temp.ok(pg_temp.inbox('f') = array['presence:driving'], 'a friend with the app open receives Driving');
+select pg_temp.ok(pg_temp.inbox('s') = '{}', 'a stranger receives nothing');
+select pg_temp.ok(pg_temp.inbox('b') = '{}', 'a blocked user receives nothing');
+update public.user_settings set show_activity_status = false where user_id = pg_temp.id('o');
+select pg_temp.ok(pg_temp.inbox('f') = array['presence:driving', 'hidden:-'], 'hiding activity tells friends at once');
+
 \echo '=== ALL INCREMENTAL VERIFICATION CHECKS PASSED ==='

@@ -21,13 +21,13 @@ import {
   setRecordPaused, syncJourneyRecord, type FixRef, type GpsFix, type JourneyRecord,
 } from './journeyRecorder';
 import type { BackgroundTracking, DriveTracker } from './driveTracking';
-import type { DriveState } from './presence';
+import { decayPresence, type DriveState, type FriendPresenceStatus, type PresenceEvent } from './presence';
 import {
-  toCategory, toConvoy, toEvent, toFriend, toFriendRequests, toGroup, toJourney, toNearbySpot, toNotification,
+  friendStatus, toCategory, toConvoy, toEvent, toFriend, toFriendRequests, toGroup, toJourney, toNearbySpot, toNotification,
   toPlace, toProfile, toStats, toVehicle, vehicleFields,
 } from './mappers';
 import type {
-  BlockedUser, CachedData, Journey, JourneyCategory, NearbySpot, SavedPlace, UserProfile, Vehicle, VehicleSnapshot,
+  BlockedUser, CachedData, Friend, Journey, JourneyCategory, NearbySpot, SavedPlace, UserProfile, Vehicle, VehicleSnapshot,
 } from './model';
 import { Outbox, isLocalId, type OutboxOp, type OutboxState, type Rejection } from './outbox';
 import { readJson, userKey, writeJson, type KeyValueStore } from './storage';
@@ -68,6 +68,9 @@ export interface CloudSyncDeps {
 
 /** A friends refresh that failed after a successful action is retried after this long. */
 const FRIENDS_RETRY_MS = 3_000;
+
+/** How the friend list shows a presence status (Away as offline for now). */
+const shownAs = (s: FriendPresenceStatus | null) => friendStatus(s ? { status: s, lastSeenAt: null } : null);
 
 export function emptyData(): CachedData {
   return {
@@ -282,7 +285,7 @@ export class CloudSync {
       const j = ok(journeys); if (j) next.journeys = j.map(toJourney);
       const c = ok(categories); if (c) next.categories = c.map(toCategory);
       const p = ok(places); if (p) next.places = p.map(toPlace);
-      const f = ok(friends); if (f && friendsCurrent) next.friends = f.map(toFriend);
+      const f = ok(friends); if (f && friendsCurrent) next.friends = this.friendsFromServer(f);
       const fr = ok(requests); if (fr && friendsCurrent) next.friendRequests = toFriendRequests(fr);
       const b = ok(blocks); if (b) next.blockedUsers = b.map((x): BlockedUser => ({ id: x.id, blockedName: x.displayName }));
       const cv = ok(convoys); if (cv) next.convoys = cv.map(toConvoy);
@@ -951,6 +954,41 @@ export class CloudSync {
     this.update((d) => apply(d, v));
   }
 
+  /** Friends from the API, noting when their presence was received (for decayPresence). */
+  private friendsFromServer(list: Parameters<typeof toFriend>[0][]): Friend[] {
+    const now = this.now();
+    return list.map((f) => ({ ...toFriend(f), presenceAt: f.presence ? now : null }));
+  }
+
+  /**
+   * A live update from the Realtime inbox, merged into the same friend list
+   * the snapshot fills. Updates for anyone not in the list are ignored (the
+   * next snapshot brings new friends).
+   */
+  applyPresenceEvent(e: PresenceEvent): void {
+    if (!this.data.friends.some((f) => f.id === e.userId)) return;
+    const now = this.now();
+    this.update((d) => {
+      if (e.type === 'unfriended') return { ...d, friends: d.friends.filter((f) => f.id !== e.userId) };
+      return {
+        ...d,
+        friends: d.friends.map((f): Friend => {
+          if (f.id !== e.userId) return f;
+          if (e.type === 'hidden') return { ...f, status: 'offline', presence: null, lastSeenAt: null, presenceAt: null };
+          return { ...f, status: shownAs(e.status), presence: e.status, lastSeenAt: e.lastSeenAt, presenceAt: now };
+        }),
+      };
+    });
+  }
+
+  /** Re-derives what each friend's status shows now, as time passes with no update. */
+  decayFriendPresence(): void {
+    const now = this.now();
+    const shown = (f: Friend) => shownAs(decayPresence(f.presence, f.presenceAt, now));
+    if (!this.data.friends.some((f) => f.presence && shown(f) !== f.status)) return;
+    this.update((d) => ({ ...d, friends: d.friends.map((f) => (f.presence && shown(f) !== f.status ? { ...f, status: shown(f) } : f)) }));
+  }
+
   /**
    * Reloads friends, requests and stats.  Whatever loaded is applied in one go,
    * unless a friend action finished meanwhile (then it's older than what the
@@ -964,7 +1002,7 @@ export class CloudSync {
     if (this.friendsVersion === version) {
       this.update((d) => ({
         ...d,
-        ...(friends.status === 'fulfilled' ? { friends: friends.value.map(toFriend) } : {}),
+        ...(friends.status === 'fulfilled' ? { friends: this.friendsFromServer(friends.value) } : {}),
         ...(requests.status === 'fulfilled' ? { friendRequests: toFriendRequests(requests.value) } : {}),
         ...(stats.status === 'fulfilled' ? { profileStats: toStats(stats.value) } : {}),
       }));

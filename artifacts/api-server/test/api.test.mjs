@@ -542,6 +542,41 @@ test("presence: a drive started without a journey id stays Driving through later
   assert.equal((await presenceOf(b, a.id)).status, "driving");
 });
 
+test("presence: changes are pushed to friends' Realtime inboxes, and only theirs", async () => {
+  const a = await newUser("A");
+  const b = await newUser("B");
+  const stranger = await newUser("Stranger");
+  await befriend(a, b);
+  // B and the stranger have the app open (their own heartbeats)
+  await put(b, "/me/presence", { appState: "foreground" });
+  await put(stranger, "/me/presence", { appState: "foreground" });
+  const inbox = async (u) => (await db.query(
+    `select payload from realtime.messages where topic = $1 and event = 'presence' order by inserted_at, id`, [`inbox:${u.id}`])).rows
+    .map((r) => r.payload).filter((p) => p.userId === a.id).map((p) => `${p.type}:${p.status ?? "-"}`);
+
+  await put(a, "/me/presence", { appState: "foreground" });
+  await put(a, "/me/presence", { appState: "foreground", driving: true });
+  await put(a, "/me/presence", { appState: "foreground", driving: false });
+  await put(a, "/me/presence", { appState: "background" });
+  assert.deepEqual(await inbox(b), ["presence:online", "presence:driving", "presence:online", "presence:away"]);
+  assert.deepEqual(await inbox(stranger), [], "a stranger's inbox gets nothing");
+  const last = (await db.query(`select payload from realtime.messages where topic = $1 order by inserted_at desc, id desc limit 1`, [`inbox:${b.id}`])).rows[0].payload;
+  assert.deepEqual(Object.keys(last).sort(), ["lastSeenAt", "status", "type", "userId"], "only what the friend list shows");
+
+  await patch(a, "/me/settings", { showActivityStatus: false });
+  await put(a, "/me/presence", { appState: "foreground" });
+  assert.deepEqual((await inbox(b)).slice(4), ["hidden:-"], "hidden at once, then nothing while hidden");
+  await patch(a, "/me/settings", { showActivityStatus: true });
+  await put(a, "/me/presence", { appState: "signed_out" });
+  assert.deepEqual((await inbox(b)).slice(5), ["presence:online", "presence:offline"], "back on, then signed out");
+
+  expect(await post(a, "/blocks", { userId: b.id }), 204, "block");
+  assert.deepEqual((await inbox(b)).slice(7), ["unfriended:-"], "a block removes A from B's list at once");
+  await put(a, "/me/presence", { appState: "foreground" });
+  assert.deepEqual((await inbox(b)).slice(8), [], "and nothing more reaches B");
+  await del(a, `/blocks/${b.id}`);
+});
+
 test("presence: only friends who are allowed can see it", async () => {
   const a = await newUser("A");
   const friend = await newUser("Friend");

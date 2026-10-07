@@ -42,6 +42,7 @@ schema, Row Level Security, Storage buckets and database functions.
 | 0014 | `geo_functions` | `nearby_spots`, `spots_in_view` |
 | 0015 | `client_write_guards` | Per-table list of the columns clients may change; everything else is server-only |
 | 0016 | `presence` | `user_presence` (one row per user, written by the API), `user_settings.show_activity_status`, `private.presence_status` (online/away/offline/driving derived from timestamps), `private.can_see_presence` (owner, or friends not blocked while the owner shares activity status) |
+| 0017 | `presence_realtime` | Live presence: `realtime.messages` policy (receive on your own private `inbox:<user id>` only; no client publishing), fan-out triggers on `user_presence`, `show_activity_status` and `friendships` that `realtime.send` presence / hidden / unfriended to permitted friends with the app open |
 
 ## Security model (current stage)
 

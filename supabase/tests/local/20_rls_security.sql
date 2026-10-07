@@ -97,6 +97,14 @@ begin
 end;
 $$;
 
+create function pg_temp.ok_bool(p_value boolean, p_expected boolean, p_label text)
+returns void language plpgsql as $$
+begin
+  if p_value is distinct from p_expected then raise exception 'FAIL: % — expected %, got %', p_label, p_expected, p_value; end if;
+  raise notice 'ok   %', p_label;
+end;
+$$;
+
 -- Asserts how many rows a write affects for an actor (RLS filters silently).
 create function pg_temp.check_affects(p_who text, p_sql text, p_expected bigint, p_label text)
 returns void language plpgsql as $$
@@ -678,5 +686,130 @@ select pg_temp.check_affects('alice', $q$delete from public.user_presence$q$, 0,
 
 delete from friendships where 'd0000000-0000-0000-0000-000000000000' in (user_id, friend_id);
 update user_settings set show_activity_status = true where user_id = 'b0000000-0000-0000-0000-000000000000';
+
+\echo '--- realtime presence inbox (0017)'
+-- Realtime authorises joining a private channel by running a select on
+-- realtime.messages as the user, with realtime.topic() set to the channel.
+create function pg_temp.can_join(p_who text, p_topic text)
+returns boolean language plpgsql as $$
+declare n bigint;
+begin
+  insert into realtime.messages (topic, extension, payload, event, private)
+    values (p_topic, 'broadcast', '{"probe":true}', 'probe', true);
+  perform pg_temp.become(p_who);
+  perform set_config('realtime.topic', p_topic, true);
+  begin
+    select count(*) into n from realtime.messages where topic = p_topic;
+  exception when insufficient_privilege then n := 0;
+  end;
+  reset role; perform set_config('request.jwt.claims', '', true); perform set_config('realtime.topic', '', true);
+  return n > 0;
+end;
+$$;
+-- Messages published since the last call, for one inbox (event payloads only).
+create temp table seen_messages (id uuid primary key);
+insert into seen_messages select id from realtime.messages;
+create function pg_temp.new_for(p_who text)
+returns text[] language plpgsql as $$
+declare v text[];
+begin
+  select coalesce(array_agg((payload->>'type') || ':' || coalesce(payload->>'status', '-') order by inserted_at, id), '{}') into v
+    from realtime.messages m
+   where m.topic = 'inbox:' || pg_temp.uid(p_who) and m.event = 'presence'
+     and not exists (select 1 from seen_messages s where s.id = m.id);
+  return v;
+end;
+$$;
+create function pg_temp.mark_seen() returns void language sql as $$
+  insert into seen_messages select id from realtime.messages on conflict do nothing
+$$;
+create function pg_temp.expect_inbox(p_who text, p_expected text[], p_label text)
+returns void language plpgsql as $$
+declare v text[] := pg_temp.new_for(p_who);
+begin
+  if v is distinct from p_expected then raise exception 'FAIL: % — expected %, got %', p_label, p_expected, v; end if;
+  raise notice 'ok   % %', p_label, v;
+end;
+$$;
+
+select pg_temp.ok_bool(pg_temp.can_join('alice', 'inbox:a0000000-0000-0000-0000-000000000000'), true,  'a user can join their own inbox');
+select pg_temp.ok_bool(pg_temp.can_join('bob',   'inbox:a0000000-0000-0000-0000-000000000000'), false, 'a friend cannot join someone else''s inbox');
+select pg_temp.ok_bool(pg_temp.can_join('carol', 'inbox:a0000000-0000-0000-0000-000000000000'), false, 'a stranger cannot join someone else''s inbox');
+select pg_temp.ok_bool(pg_temp.can_join('anon',  'inbox:a0000000-0000-0000-0000-000000000000'), false, 'anonymous callers cannot join any inbox');
+select pg_temp.ok_bool(pg_temp.can_join('alice', 'friends:a0000000-0000-0000-0000-000000000000'), false, 'other topics are not readable');
+select pg_temp.check_denied('alice', $q$insert into realtime.messages (topic, extension, payload, event, private) values ('inbox:b0000000-0000-0000-0000-000000000000', 'broadcast', '{}', 'presence', true)$q$,
+  '42501', '%row-level security%', 'a client cannot publish into someone else''s inbox');
+select pg_temp.check_denied('alice', $q$insert into realtime.messages (topic, extension, payload, event, private) values ('inbox:a0000000-0000-0000-0000-000000000000', 'broadcast', '{}', 'presence', true)$q$,
+  '42501', '%row-level security%', 'a client cannot publish at all, even to their own inbox');
+select pg_temp.check_denied('alice', $q$select private.publish_presence('a0000000-0000-0000-0000-000000000000')$q$,
+  '42501', 'permission denied%', 'clients cannot trigger a fan-out directly');
+
+-- Fan-out (the API writes presence; the database picks the recipients).
+-- bob is alice's friend; carol a stranger; dave blocked by alice but given a
+-- stray friendship row again. Everyone has the app open.
+insert into friendships (user_id, friend_id) values
+  ('a0000000-0000-0000-0000-000000000000', 'd0000000-0000-0000-0000-000000000000'),
+  ('d0000000-0000-0000-0000-000000000000', 'a0000000-0000-0000-0000-000000000000');
+update user_presence set app_state = 'foreground', driving = false, journey_id = null, last_seen_at = now();
+select pg_temp.mark_seen();
+
+update user_presence set driving = false, last_seen_at = now() where user_id = 'a0000000-0000-0000-0000-000000000000';
+select pg_temp.expect_inbox('bob',   array['presence:online'], 'a friend with the app open receives Online');
+select pg_temp.expect_inbox('carol', '{}', 'a stranger receives nothing');
+select pg_temp.expect_inbox('dave',  '{}', 'a blocked user receives nothing, even with a friendship row');
+select pg_temp.expect_inbox('alice', '{}', 'the owner is not sent their own presence');
+select pg_temp.mark_seen();
+
+update user_presence set driving = true, journey_id = 'e2000000-0000-0000-0000-000000000004', last_seen_at = now()
+ where user_id = 'a0000000-0000-0000-0000-000000000000';
+select pg_temp.expect_inbox('bob', array['presence:driving'], 'Online → Driving reaches the friend');
+select pg_temp.mark_seen();
+update user_presence set driving = false, journey_id = null where user_id = 'a0000000-0000-0000-0000-000000000000';
+select pg_temp.expect_inbox('bob', array['presence:online'], 'Driving → Online reaches the friend');
+select pg_temp.mark_seen();
+update user_presence set app_state = 'background' where user_id = 'a0000000-0000-0000-0000-000000000000';
+select pg_temp.expect_inbox('bob', array['presence:away'], 'going to the background reaches the friend as Away');
+select pg_temp.mark_seen();
+update user_presence set app_state = 'signed_out' where user_id = 'a0000000-0000-0000-0000-000000000000';
+select pg_temp.expect_inbox('bob', array['presence:offline'], 'signing out reaches the friend as Offline');
+select pg_temp.mark_seen();
+
+-- A friend without the app open gets nothing (they load a snapshot on opening)
+update user_presence set app_state = 'background' where user_id = 'b0000000-0000-0000-0000-000000000000';
+select pg_temp.mark_seen();
+update user_presence set app_state = 'foreground', last_seen_at = now() where user_id = 'a0000000-0000-0000-0000-000000000000';
+select pg_temp.expect_inbox('bob', '{}', 'nothing is sent to a friend whose app is closed');
+update user_presence set app_state = 'foreground', last_seen_at = now() - interval '5 minutes' where user_id = 'b0000000-0000-0000-0000-000000000000';
+select pg_temp.mark_seen();
+update user_presence set last_seen_at = now() where user_id = 'a0000000-0000-0000-0000-000000000000';
+select pg_temp.expect_inbox('bob', '{}', 'nor to one whose app stopped reporting');
+update user_presence set app_state = 'foreground', last_seen_at = now() where user_id = 'b0000000-0000-0000-0000-000000000000';
+select pg_temp.mark_seen();
+
+-- Revocation: hiding activity tells every friend at once; turning it back on resends it
+select pg_temp.check_affects('alice', $q$update public.user_settings set show_activity_status = false where user_id = 'a0000000-0000-0000-0000-000000000000'$q$, 1,
+  'alice turns off her activity status');
+select pg_temp.expect_inbox('bob', array['hidden:-'], 'friends are told to hide it at once');
+select pg_temp.expect_inbox('carol', '{}', 'strangers are told nothing');
+select pg_temp.mark_seen();
+update user_presence set last_seen_at = now() where user_id = 'a0000000-0000-0000-0000-000000000000';
+select pg_temp.expect_inbox('bob', '{}', 'while hidden, no presence is sent');
+select pg_temp.check_affects('alice', $q$update public.user_settings set show_activity_status = true where user_id = 'a0000000-0000-0000-0000-000000000000'$q$, 1,
+  'alice turns it back on');
+select pg_temp.expect_inbox('bob', array['presence:online'], 'turning it back on sends the current status');
+select pg_temp.mark_seen();
+
+-- Unfriending (and blocking, which removes the friendship) revokes it on both sides
+delete from friendships where user_id in ('a0000000-0000-0000-0000-000000000000', 'b0000000-0000-0000-0000-000000000000')
+                         and friend_id in ('a0000000-0000-0000-0000-000000000000', 'b0000000-0000-0000-0000-000000000000');
+select pg_temp.expect_inbox('bob',   array['unfriended:-'], 'an ex-friend is told to remove them');
+select pg_temp.expect_inbox('alice', array['unfriended:-'], 'and so is the other side');
+select pg_temp.mark_seen();
+update user_presence set last_seen_at = now() where user_id = 'a0000000-0000-0000-0000-000000000000';
+select pg_temp.expect_inbox('bob', '{}', 'nothing more reaches an ex-friend');
+insert into friendships (user_id, friend_id) values
+  ('a0000000-0000-0000-0000-000000000000', 'b0000000-0000-0000-0000-000000000000'),
+  ('b0000000-0000-0000-0000-000000000000', 'a0000000-0000-0000-0000-000000000000');
+delete from friendships where 'd0000000-0000-0000-0000-000000000000' in (user_id, friend_id);
 
 \echo '=== ALL RLS AND SECURITY TESTS PASSED ==='
