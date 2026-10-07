@@ -525,6 +525,23 @@ test("presence: owner updates it; friends see online / away / offline / driving 
   assert.equal((await presenceOf(b, a.id)).status, "offline");
 });
 
+test("presence: a drive started without a journey id stays Driving through later heartbeats", async () => {
+  const a = await newUser("A");
+  const b = await newUser("B");
+  await befriend(a, b);
+  expect(await put(a, "/me/presence", { appState: "foreground" }), 200, "heartbeat");
+  assert.equal((await presenceOf(b, a.id)).status, "online");
+  const start = await put(a, "/me/presence", { appState: "foreground", driving: true });
+  expect(start, 200, "drive start without a journey id");
+  assert.equal(start.body.status, "driving", "Driving at once");
+  // A routine heartbeat that omits driving keeps it
+  expect(await put(a, "/me/presence", { appState: "foreground" }), 200, "heartbeat omitting driving");
+  assert.equal((await presenceOf(b, a.id)).status, "driving", "the friend still sees Driving");
+  // The app's own heartbeat repeats it explicitly
+  expect(await put(a, "/me/presence", { appState: "foreground", driving: true }), 200, "heartbeat while driving");
+  assert.equal((await presenceOf(b, a.id)).status, "driving");
+});
+
 test("presence: only friends who are allowed can see it", async () => {
   const a = await newUser("A");
   const friend = await newUser("Friend");

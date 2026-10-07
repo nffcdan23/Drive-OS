@@ -4152,3 +4152,129 @@ test('CloudSync reports drive start, server journey, end, discard and recovery t
   assert.deepEqual(seen, [true], 'recovered drive reported as driving');
   assert.equal(again.app.driveState.driving, true);
 });
+
+// ─── Presence: a friend sees the drive (real-device regression) ─────────────
+// On two devices the driver reported Driving but the friend's list kept
+// showing Online: Community had no way to reload friends (no pull-to-refresh,
+// nothing on focus), so it showed whatever was loaded at app start.
+import type { PresenceLogEntry } from '@/lib/backend/presence';
+
+/** The presence API as the server implements it (0016), for two users. */
+class PresenceServer {
+  clock = { t: Date.now() };
+  rows = new Map<string, { appState: string; driving: boolean; journeyId: string | null; lastSeen: number }>();
+  status(id: string): 'online' | 'away' | 'offline' | 'driving' {
+    const r = this.rows.get(id);
+    if (!r || r.appState === 'signed_out') return 'offline';
+    const age = this.clock.t - r.lastSeen;
+    if (r.driving && age <= 3 * 60_000) return 'driving';
+    if (age > 10 * 60_000) return 'offline';
+    return r.appState === 'foreground' && age <= 2 * 60_000 ? 'online' : 'away';
+  }
+  ep(me: string, friend: string): Endpoints {
+    const self = this;
+    let journeys = 0;
+    return new Proxy({}, {
+      get: (_t, k) => {
+        if (k === 'then') return undefined;
+        if (k === 'updatePresence') return async (u: PresenceUpdate) => {
+          const prev = self.rows.get(me);
+          const driving = u.appState === 'signed_out' ? false : u.driving ?? prev?.driving ?? false;
+          self.rows.set(me, { appState: u.appState, driving, journeyId: driving ? u.journeyId ?? prev?.journeyId ?? null : null, lastSeen: self.clock.t });
+          return {};
+        };
+        if (k === 'listFriends') return async () => [{
+          id: friend, username: null, displayName: friend, avatarUrl: null, level: 1, since: '2026-10-01T00:00:00Z',
+          presence: { status: self.status(friend), lastSeenAt: self.rows.has(friend) ? new Date(self.rows.get(friend)!.lastSeen).toISOString() : null },
+        }];
+        if (k === 'startJourney') return async (b: { clientRef: string }) => ({ id: `${me}-journey-${++journeys}`, status: 'active', ...b });
+        if (k === 'addRoutePoints') return async () => ({ status: 'active' });
+        if (k === 'getStats') return async () => ({ friends: 1, vehicles: 0, journeys: 0, totalDistanceKm: 0 });
+        if (k === 'listFriendRequests') return async () => ({ incoming: [], outgoing: [] });
+        return async () => [];
+      },
+    }) as Endpoints;
+  }
+}
+
+/** A phone: CloudSync plus the presence reporter, wired as lib/presenceClient does. */
+async function presencePhone(server: PresenceServer, me: string, friend: string) {
+  const store = new MemoryStore();
+  const ep = server.ep(me, friend);
+  const cloud = new CloudSync({
+    ep, store, userId: me, publishableKey: 'k', newId: () => `${me}-${Math.random()}`, timezone: () => 'UTC',
+    now: () => server.clock.t, tracker: new BackgroundDriveRecorder({ store, updates: new FakeUpdates() }),
+    prepareFile: async () => ({ body: new Uint8Array([1]), size: 1, mimeType: 'image/jpeg' }),
+  });
+  await cloud.start();
+  const log: PresenceLogEntry[] = [];
+  const reporter = new PresenceReporter({ send: (u) => ep.updatePresence(u), log: (e) => log.push(e), now: () => server.clock.t });
+  cloud.onDriveChange((d) => reporter.setDrive(d));
+  cloud.onDriveActivity(() => reporter.noteDriveActivity());
+  reporter.start('foreground', cloud.driveState);
+  await settle();
+  return { cloud, reporter, log };
+}
+
+const friendShown = (phone: { cloud: CloudSync }) => phone.cloud.data.friends[0]?.status;
+
+test('a friend sees Online, then Driving when the drive starts, then Online when it ends', async () => {
+  const server = new PresenceServer();
+  const driver = await presencePhone(server, 'A', 'B');
+  const viewer = await presencePhone(server, 'B', 'A');
+  // What the Community screen does on focus and on pull-to-refresh
+  const refresh = () => viewer.cloud.refreshFriends();
+
+  await refresh();
+  assert.equal(friendShown(viewer), 'online');
+
+  await driver.cloud.startDrive(null);
+  await settle(); await settle();
+  assert.equal(server.rows.get('A')?.driving, true, 'drive start reached the server');
+  assert.ok(server.rows.get('A')?.journeyId, 'with its server journey');
+  assert.ok(driver.log.some((e) => e.reason === 'drive-change' && e.update.driving === true && e.outcome === 'ok'));
+  assert.equal(friendShown(viewer), 'online', 'without a refresh the friend still sees the old status');
+  await refresh();
+  assert.equal(friendShown(viewer), 'driving', 'a refresh shows Driving');
+
+  // A minute later the routine heartbeat keeps it Driving
+  server.clock.t += PRESENCE_HEARTBEAT_MS;
+  driver.reporter['report']('heartbeat');
+  await settle();
+  await refresh();
+  assert.equal(friendShown(viewer), 'driving');
+
+  server.clock.t += 15_000;
+  await driver.cloud.endDrive();
+  await settle();
+  await refresh();
+  assert.equal(friendShown(viewer), 'online', 'Driving disappears when the drive ends');
+  driver.reporter.stop(); viewer.reporter.stop();
+});
+
+test('a drive start during a heartbeat still reaches the server, and is logged as the reason', async () => {
+  let release!: () => void;
+  const sent: PresenceUpdate[] = [];
+  const log: PresenceLogEntry[] = [];
+  let hold = true;
+  const reporter = new PresenceReporter({
+    send: async (u) => { sent.push(u); if (hold) { hold = false; await new Promise<void>((r) => { release = r; }); } return {}; },
+    log: (e) => log.push(e),
+    setInterval: () => 1, clearInterval: () => {},
+  });
+  reporter.start('foreground', { driving: false, journeyId: null }); // startup request is held open
+  reporter.setDrive({ driving: true, journeyId: null });             // drive starts meanwhile
+  release();
+  await settle(); await settle();
+  assert.deepEqual(sent.at(-1), { appState: 'foreground', driving: true });
+  assert.deepEqual(log.map((e) => `${e.reason}:${e.update.driving}:${e.outcome}`), ['startup:false:ok', 'drive-change:true:ok']);
+  reporter.stop();
+});
+
+test('the Community screen reloads friends on focus and on pull-to-refresh', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const src = await readFile(fileURLToPath(new URL('../app/(tabs)/community.tsx', import.meta.url)), 'utf8');
+  assert.match(src, /useFocusEffect\(\s*useCallback\(\(\) => \{\s*void refreshProfileStats\(\);/, 'reloads on focus');
+  assert.match(src, /<RefreshControl refreshing=\{pulling\} onRefresh=\{pullToRefresh\}/, 'pull-to-refresh');
+  assert.equal((src.match(/refreshControl=\{friendsRefresh\}/g) ?? []).length, 2, 'on the overview and friends tabs');
+});

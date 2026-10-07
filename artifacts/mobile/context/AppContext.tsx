@@ -268,6 +268,12 @@ export function AppProvider({ userId, children }: { userId: string; children: Re
     return () => { clearInterval(timer); sub.remove(); };
   }, [cloud]);
 
+  // Development only: what each friends refresh returned (status as the server derived it).
+  useEffect(() => {
+    if (!__DEV__ || !data.friends.length) return;
+    console.log(`[presence] friends: ${data.friends.map((f) => `${f.name}=${f.presence ?? 'hidden'}`).join(', ')}`);
+  }, [data.friends]);
+
   const activeVehicle = data.vehicles.find((v) => v.isActive) ?? data.vehicles[0] ?? null;
   const activeVehicleRef = useRef(activeVehicle);
   activeVehicleRef.current = activeVehicle;

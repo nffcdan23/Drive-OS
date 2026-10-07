@@ -23,7 +23,11 @@ export interface PresenceSession {
 export function startPresence(cloud: CloudSync, ep: Endpoints): PresenceSession {
   const reporter = new PresenceReporter({
     send: (update) => ep.updatePresence(update),
-    onError: (err) => { if (__DEV__) console.log('[presence] update failed:', err instanceof Error ? err.message : err); },
+    // Development only: what was sent, why, and whether it reached the server.
+    log: __DEV__
+      ? ({ reason, update, outcome, error }) => console.log(
+        `[presence] ${reason}: appState=${update.appState} driving=${update.driving ?? '-'} journey=${update.journeyId ? 'yes' : 'no'} → ${outcome}${error ? ` (${error})` : ''}`)
+      : undefined,
   });
   const unsubscribeDrive = cloud.onDriveChange((drive) => reporter.setDrive(drive));
   const unsubscribeActivity = cloud.onDriveActivity(() => reporter.noteDriveActivity());

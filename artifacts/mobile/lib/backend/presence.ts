@@ -34,6 +34,18 @@ export interface DriveState {
   journeyId: string | null;
 }
 
+/** Why an update was sent (for development diagnostics). */
+export type PresenceReason = 'startup' | 'heartbeat' | 'app-state' | 'drive-change' | 'drive-activity' | 'journey-retry';
+
+/** One update and its outcome (development diagnostics; never tokens or coordinates). */
+export interface PresenceLogEntry {
+  reason: PresenceReason;
+  update: PresenceUpdate;
+  outcome: 'ok' | 'failed';
+  /** Error code or message when it failed. */
+  error?: string;
+}
+
 export const PRESENCE_HEARTBEAT_MS = 60_000;
 /** Sign-out waits at most this long for the "signed out" update. */
 export const PRESENCE_SIGN_OUT_WAIT_MS = 3_000;
@@ -43,8 +55,8 @@ export interface PresenceDeps {
   now?: () => number;
   setInterval?: (fn: () => void, ms: number) => unknown;
   clearInterval?: (handle: unknown) => void;
-  /** Called with heartbeat failures (development logging only). */
-  onError?: (err: unknown) => void;
+  /** Called with every update sent and whether it succeeded (development diagnostics). */
+  log?: (entry: PresenceLogEntry) => void;
 }
 
 export class PresenceReporter {
@@ -54,7 +66,7 @@ export class PresenceReporter {
   private running = false;
   private lastSentAt = -Infinity;
   private inFlight: Promise<void> | null = null;
-  private again = false;
+  private again: PresenceReason | null = null;
 
   constructor(private readonly deps: PresenceDeps) {}
 
@@ -69,7 +81,7 @@ export class PresenceReporter {
     this.appState = appState;
     this.drive = { ...drive };
     this.updateTimer();
-    this.report();
+    this.report('startup');
   }
 
   /** The app went to the background or came back. Driving is unaffected. */
@@ -77,7 +89,7 @@ export class PresenceReporter {
     if (!this.running || appState === this.appState) return;
     this.appState = appState;
     this.updateTimer();
-    this.report();
+    this.report('app-state');
   }
 
   /** A drive started, ended, was discarded or recovered, or got its server id. */
@@ -87,7 +99,7 @@ export class PresenceReporter {
     if (next.driving === this.drive.driving && next.journeyId === this.drive.journeyId) return;
     this.drive = next;
     this.updateTimer();
-    this.report();
+    this.report('drive-change');
   }
 
   /**
@@ -97,7 +109,7 @@ export class PresenceReporter {
    */
   noteDriveActivity(): void {
     if (!this.running || !this.drive.driving) return;
-    if (this.now() - this.lastSentAt >= PRESENCE_HEARTBEAT_MS) this.report();
+    if (this.now() - this.lastSentAt >= PRESENCE_HEARTBEAT_MS) this.report('drive-activity');
   }
 
   /** Stops all reporting (provider unmounted, account switched). */
@@ -126,7 +138,7 @@ export class PresenceReporter {
     const wanted = this.running && (this.appState === 'foreground' || this.drive.driving);
     if (wanted && this.timer == null) {
       const set = this.deps.setInterval ?? ((fn: () => void, ms: number) => setInterval(fn, ms));
-      this.timer = set(() => this.report(), PRESENCE_HEARTBEAT_MS);
+      this.timer = set(() => this.report('heartbeat'), PRESENCE_HEARTBEAT_MS);
     } else if (!wanted) {
       this.clearTimer();
     }
@@ -140,30 +152,49 @@ export class PresenceReporter {
   }
 
   /** Sends the current state; one request at a time, the latest state wins. */
-  private report(): void {
+  private report(reason: PresenceReason): void {
     if (!this.running) return;
-    if (this.inFlight) { this.again = true; return; }
+    // A state change while a request is out is sent as soon as it returns
+    // (a change outranks a routine heartbeat as the reason).
+    if (this.inFlight) {
+      if (!this.again || this.again === 'heartbeat' || this.again === 'drive-activity') this.again = reason;
+      return;
+    }
     this.lastSentAt = this.now();
-    this.inFlight = this.sendCurrent().finally(() => {
+    this.inFlight = this.sendCurrent(reason).finally(() => {
       this.inFlight = null;
-      if (this.again) { this.again = false; this.report(); }
+      const next = this.again;
+      this.again = null;
+      if (next) this.report(next);
     });
   }
 
-  private async sendCurrent(): Promise<void> {
+  private async sendCurrent(reason: PresenceReason): Promise<void> {
     const update: PresenceUpdate = { appState: this.appState, driving: this.drive.driving };
     if (this.drive.driving && this.drive.journeyId) update.journeyId = this.drive.journeyId;
+    await this.attempt(reason, update);
+  }
+
+  /** Sends one update; true when it succeeded (or was handled). */
+  private async attempt(reason: PresenceReason, update: PresenceUpdate): Promise<boolean> {
     try {
       await this.deps.send(update);
+      this.deps.log?.({ reason, update, outcome: 'ok' });
+      return true;
     } catch (err) {
+      this.deps.log?.({ reason, update, outcome: 'failed', error: describe(err) });
       // The journey ended or was deleted on the server meanwhile: report the
       // drive without it rather than not at all.
       if (err instanceof ApiError && err.code === 'invalid_journey' && update.journeyId) {
         this.drive = { ...this.drive, journeyId: null };
-        await this.deps.send({ appState: this.appState, driving: this.drive.driving, journeyId: null }).catch((e) => this.deps.onError?.(e));
-        return;
+        return this.attempt('journey-retry', { appState: this.appState, driving: this.drive.driving, journeyId: null });
       }
-      this.deps.onError?.(err);
+      return false;
     }
   }
+}
+
+function describe(err: unknown): string {
+  if (err instanceof ApiError) return `${err.status} ${err.code}`;
+  return err instanceof Error ? err.name || err.message : String(err);
 }

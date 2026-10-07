@@ -6,7 +6,7 @@ import {
   SheetScrollView,
 } from "@/components/KeyboardAwareSheet";
 import { ScreenTitle, Disclosure } from "@/components/Cockpit";
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import {
   SectionHeader,
   CommunityPreviewCard,
@@ -26,8 +26,9 @@ import {
   Switch,
   Image,
   ActivityIndicator,
+  RefreshControl,
 } from "react-native";
-import { useRouter, useLocalSearchParams } from "expo-router";
+import { useRouter, useLocalSearchParams, useFocusEffect } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useColors } from "@/hooks/useColors";
@@ -131,7 +132,30 @@ export default function CommunityScreen() {
     rsvpEvent,
     conversations,
     userProfile,
+    refreshProfileStats,
   } = useApp();
+
+  // Friends' status (online, driving, last active) changes on their phones,
+  // so reload it whenever this screen is shown, and on pull-to-refresh.
+  // Until live updates exist this is the only way the list catches up
+  // without leaving the app.
+  useFocusEffect(
+    useCallback(() => {
+      void refreshProfileStats();
+    }, [refreshProfileStats]),
+  );
+  const [pulling, setPulling] = useState(false);
+  const pullToRefresh = useCallback(async () => {
+    setPulling(true);
+    try {
+      await refreshProfileStats();
+    } finally {
+      setPulling(false);
+    }
+  }, [refreshProfileStats]);
+  const friendsRefresh = (
+    <RefreshControl refreshing={pulling} onRefresh={pullToRefresh} tintColor={colors.primary} />
+  );
 
   const [activeTab, setActiveTab] = useState<CommunityTab>("overview");
   const [convoySection, setConvoySection] = useState<ConvoySection>("public");
@@ -1217,6 +1241,7 @@ export default function CommunityScreen() {
 
       {activeTab === "overview" && (
         <ScrollView
+          refreshControl={friendsRefresh}
           showsVerticalScrollIndicator={false}
           keyboardShouldPersistTaps="handled"
           contentContainerStyle={{
@@ -1472,6 +1497,7 @@ export default function CommunityScreen() {
       {/* ── Friends tab ── */}
       {activeTab === "friends" && (
         <ScrollView
+          refreshControl={friendsRefresh}
           style={{ flex: 1 }}
           contentContainerStyle={{
             paddingBottom: Math.max(insets.bottom, 12) + 100,
