@@ -163,6 +163,25 @@ select pg_temp.ok(
                and policyname like 'driveos%' and cmd in ('INSERT', 'ALL', 'UPDATE', 'DELETE')),
   'no DriveOS policy lets a client publish');
 
+-- realtime.messages is partitioned by day, and Realtime creates the
+-- partitions itself once a client has connected to the project. Until then
+-- realtime.send() can't store a message (it warns rather than fails, so
+-- presence writes still succeed, but nothing is delivered). Said plainly
+-- rather than as a partition error further down.
+create function pg_temp.realtime_partition_ready() returns boolean language plpgsql as $$
+begin
+  begin
+    insert into realtime.messages (topic, extension, payload, event, private)
+      values ('inbox:f1e5e0c0-0000-4000-8000-0000000000a0', 'broadcast', '{"probe":true}', 'probe', true);
+  exception when others then
+    return false;
+  end;
+  return true;
+end;
+$$;
+select pg_temp.ok(pg_temp.realtime_partition_ready(),
+  'Realtime has created today''s realtime.messages partition (it does once a client connects; until then broadcasts are not delivered)');
+
 -- Realtime authorises a join by selecting from realtime.messages as the user
 -- with realtime.topic() set to the channel; a probe row makes the answer visible.
 create function pg_temp.can_join(p_who text, p_topic text) returns boolean language plpgsql as $$
