@@ -6,7 +6,7 @@ import {
   SheetScrollView,
 } from "@/components/KeyboardAwareSheet";
 import { ScreenTitle, Disclosure } from "@/components/Cockpit";
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import {
   SectionHeader,
   CommunityPreviewCard,
@@ -133,7 +133,13 @@ export default function CommunityScreen() {
     conversations,
     userProfile,
     refreshProfileStats,
+    sharedLocations,
   } = useApp();
+  // Who is sharing a live location with you right now (no positions shown yet).
+  const sharingWithMe = useMemo(
+    () => new Set(sharedLocations.map((l) => l.userId)),
+    [sharedLocations],
+  );
 
   // Friends' status (online, driving, last active) changes on their phones,
   // so reload it whenever this screen is shown, and on pull-to-refresh.
@@ -918,6 +924,22 @@ export default function CommunityScreen() {
               ]}
             />
             <Text style={styles.statusText}>{STATUS_LABEL[item.status]}</Text>
+            {sharingWithMe.has(item.id) && (
+              <>
+                <Ionicons
+                  name="location"
+                  size={12}
+                  color={colors.primary}
+                  style={{ marginLeft: 6 }}
+                />
+                <Text
+                  style={styles.statusText}
+                  accessibilityLabel={`${item.name} is sharing their live location with you`}
+                >
+                  Sharing location
+                </Text>
+              </>
+            )}
           </View>
         </View>
         {/* No message button until messaging exists */}

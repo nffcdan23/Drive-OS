@@ -25,6 +25,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useColors } from "@/hooks/useColors";
 import { useApp } from "@/context/AppContext";
+import { locationSharingSummary } from "@/components/LocationSharingSettings";
 import { formatDistance, distanceUnit } from "@/lib/units";
 
 export default function ProfileScreen() {
@@ -42,6 +43,7 @@ export default function ProfileScreen() {
     refreshProfileStats,
     updateProfile,
     setAvatar,
+    locationSharing,
   } = useApp();
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState({ name: "", username: "", bio: "" });
@@ -361,7 +363,11 @@ export default function ProfileScreen() {
               <View style={{ flex: 1 }}>
                 <Text style={styles.label}>{label}</Text>
                 <Text style={[styles.muted, { marginTop: 3, fontSize: 12 }]}>
-                  {subtitle}
+                  {section === "privacy" &&
+                  locationSharing &&
+                  locationSharing.mode !== "off"
+                    ? locationSharingSummary(locationSharing)
+                    : subtitle}
                 </Text>
               </View>
               <Ionicons

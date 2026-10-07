@@ -515,6 +515,7 @@ export default function MapScreen() {
     isDrivePaused,
     activeDriveMs,
     updateDriveCoordinate,
+    noteForegroundFix,
     resolvedUnitSystem,
     togglePassengerMode,
   } = useApp();
@@ -1057,6 +1058,17 @@ export default function MapScreen() {
           altitude,
           timestamp: fixTime ?? now,
         });
+      } else if (!isDrivingRef.current) {
+        // Live location "while using Derwent": this same foreground stream,
+        // throttled to about once a minute; ignored unless that sharing is on.
+        noteForegroundFix({
+          latitude: lat,
+          longitude: lon,
+          speedMs,
+          headingDeg: gpsHeading,
+          accuracyM: accuracy,
+          timestamp: fixTime ?? now,
+        });
       }
 
       // ── Heading ──
@@ -1076,7 +1088,7 @@ export default function MapScreen() {
       // ── Draw: marker, heading and follow camera glide from here ──
       wakeFrameLoop();
     },
-    [locationSmoother, headingFilter, updateDriveCoordinate, wakeFrameLoop],
+    [locationSmoother, headingFilter, updateDriveCoordinate, noteForegroundFix, wakeFrameLoop],
   );
 
   // The live head starts from the recorded trail's newest point, as drawn: a

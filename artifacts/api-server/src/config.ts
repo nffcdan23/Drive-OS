@@ -16,6 +16,8 @@
  *   DVLA_TIMEOUT_MS       optional; DVLA request timeout (default 8000)
  *   STORAGE_WORKER        "off" disables the Storage clean-up worker
  *   STORAGE_WORKER_INTERVAL_MS  how often it runs (default 60000)
+ *   LIVE_LOCATION_CLEANUP_INTERVAL_MS  how often expired live positions and
+ *                               delivered live-location messages are removed (default 60000)
  */
 import { readDvlaConfig, type DvlaConfig } from "./lib/dvla";
 
@@ -29,6 +31,7 @@ export interface Config {
   dvla: DvlaConfig;
   storageWorker: boolean;
   storageWorkerIntervalMs: number;
+  liveLocationCleanupIntervalMs: number;
 }
 
 function read(env: NodeJS.ProcessEnv): Config {
@@ -51,6 +54,7 @@ function read(env: NodeJS.ProcessEnv): Config {
     dvla: readDvlaConfig(env),
     storageWorker: env.STORAGE_WORKER !== "off",
     storageWorkerIntervalMs: Math.max(200, Number(env.STORAGE_WORKER_INTERVAL_MS) || 60_000),
+    liveLocationCleanupIntervalMs: Math.max(200, Number(env.LIVE_LOCATION_CLEANUP_INTERVAL_MS) || 60_000),
   };
 
   if (!config.supabaseUrl) {

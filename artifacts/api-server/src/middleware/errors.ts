@@ -19,6 +19,26 @@ const CLIENT_PG_ERRORS: Record<string, [number, string]> = {
 };
 
 /**
+ * What is logged for an unexpected error. A failed database query's error
+ * repeats the SQL and its bound parameters (and Postgres's `detail` can quote
+ * a row), which may be personal data such as a position: those are dropped,
+ * keeping the error type, the SQLSTATE and the driver's own message.
+ */
+function loggable(err: unknown): Record<string, unknown> {
+  if (!(err instanceof Error)) return { value: typeof err };
+  const cause = (err as { cause?: unknown }).cause;
+  const isQuery = "params" in err || "query" in err;
+  const pg = (isQuery ? cause : err) as { code?: unknown; message?: unknown; routine?: unknown } | undefined;
+  return {
+    type: err.name,
+    code: typeof pg?.code === "string" ? pg.code : undefined,
+    message: isQuery ? (typeof pg?.message === "string" ? pg.message : undefined) : err.message,
+    routine: typeof pg?.routine === "string" ? pg.routine : undefined,
+    stack: isQuery ? undefined : err.stack,
+  };
+}
+
+/**
  * Converts every error into a JSON response. Messages from HttpError are
  * shown to the client; anything unexpected is logged and reported only as
  * "internal_error" — never a stack trace, SQL or internal detail.
@@ -50,6 +70,6 @@ export function errorHandler(err: unknown, req: Request, res: Response, _next: N
     return;
   }
 
-  logger.error({ err, method: req.method, url: req.originalUrl?.split("?")[0] }, "Unhandled error");
+  logger.error({ err: loggable(err), method: req.method, url: req.originalUrl?.split("?")[0] }, "Unhandled error");
   res.status(500).json({ error: "internal_error", message: "Something went wrong." });
 }

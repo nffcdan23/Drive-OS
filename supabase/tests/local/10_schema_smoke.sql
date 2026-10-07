@@ -45,10 +45,11 @@ select pg_temp.ok(
   (select array_agg(tablename::text order by tablename) from pg_tables where schemaname = 'public') =
   array['achievements','content_reports','convoy_participants','convoys','event_rsvps','events',
         'friend_requests','friendships','group_members','groups','journey_categories',
-        'journey_route_points','journey_routes','journeys','notifications','photos','profiles','push_devices',
+        'journey_route_points','journey_routes','journeys','live_locations','location_share_convoys',
+        'location_share_friends','notifications','photos','profiles','push_devices',
         'saved_locations','user_achievements','user_blocks','user_presence','user_settings','vehicle_documents',
         'vehicle_modifications','vehicle_service_records','vehicles'],
-  'public schema contains exactly the 27 DriveOS tables');
+  'public schema contains exactly the 30 DriveOS tables');
 
 select pg_temp.ok(
   not exists (select 1 from pg_class c join pg_namespace n on n.oid = c.relnamespace

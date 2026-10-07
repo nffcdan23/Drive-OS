@@ -101,6 +101,7 @@ function startApi() {
       PATH: process.env.PATH, NODE_ENV: 'production', PORT: String(PORT), LOG_LEVEL: 'warn',
       DATABASE_URL: DB_URL, DATABASE_POOL_MAX: '5',
       SUPABASE_URL: BASE, SUPABASE_SECRET_KEY: SEC_KEY, STORAGE_WORKER_INTERVAL_MS: '1000',
+      LIVE_LOCATION_CLEANUP_INTERVAL_MS: '2000',
     },
     stdio: ['ignore', 'inherit', 'inherit'],
   });
@@ -204,6 +205,20 @@ async function run() {
   const full = await api(b, 'POST', '/convoys/join', { code: jc });
   check('participant limit enforced', full.status === 409 && full.json?.error === 'convoy_full', `HTTP ${full.status}`);
 
+  // Live location with a Convoy: only when turned on for it, only for its members
+  await api(a, 'PATCH', '/me/location-sharing', { mode: 'while_using' });
+  await api(a, 'PUT', '/me/presence', { appState: 'foreground' });
+  await api(a, 'PUT', '/me/live-location', { latitude: 51.5, longitude: -0.1 });
+  const seesA = async (u) => ((await api(u, 'GET', '/live-locations')).json ?? []).some((l) => l.userId === a.id);
+  check('live location: joining a Convoy shares nothing by itself', !(await seesA(c)));
+  const conv = await api(a, 'PUT', `/me/location-sharing/convoys/${convoy.json?.id}`);
+  check('live location: shared with a private Convoy', conv.status === 200, `HTTP ${conv.status}`);
+  check('live location: its member sees it', await seesA(c));
+  check('live location: a non-member friend does not', !(await seesA(b)));
+  await api(a, 'DELETE', `/me/location-sharing/convoys/${convoy.json?.id}`);
+  check('live location: turning the Convoy off ends it', !(await seesA(c)));
+  await api(a, 'PATCH', '/me/location-sharing', { mode: 'off' });
+
   // ─── Storage through the API ─────────────────────────────────────────────
   const up = await api(a, 'POST', '/uploads', { kind: 'vehicle-photo', parentId: v.json?.id, sizeBytes: JPEG.length, mimeType: 'image/jpeg' });
   check('signed upload URL issued for a server-chosen path', up.status === 201 && up.json?.path?.startsWith(`${a.id}/${v.json?.id}/`), `HTTP ${up.status}`);
@@ -236,6 +251,19 @@ async function run() {
   }
   check('the Storage worker removed the deleted photo\'s file', gone);
 
+  // Live-location broadcasts carry positions; the API deletes them from
+  // realtime.messages a minute after sending (no trail of positions kept).
+  const testInboxes = Object.values(users).map((u) => `'inbox:${u.id}'`).join(',');
+  const liveMessages = () => sql(`select count(*) from realtime.messages where event = 'live_location' and topic in (${testInboxes})`);
+  const sentLive = liveMessages();
+  let purgedLive = false;
+  for (let i = 0; i < 50 && !purgedLive; i++) {
+    purgedLive = liveMessages() === '0';
+    if (!purgedLive) await sleep(2000);
+  }
+  check('live location: delivered messages are removed from realtime.messages', sentLive !== '0' && purgedLive,
+    `${sentLive} sent, ${liveMessages()} left`);
+
   // ─── Account deletion ────────────────────────────────────────────────────
   check('account deletion needs confirmation', (await api(c, 'DELETE', '/me', {})).status === 400);
   const delC = await api(c, 'DELETE', '/me', { confirm: 'DELETE' });
@@ -260,6 +288,7 @@ async function liveInboxChecks(a, b, c) {
       const timer = setTimeout(() => resolve('NO_ANSWER'), 15_000);
       client.channel(topic, { config: { private: true } })
         .on('broadcast', { event: 'presence' }, (m) => received.push(m.payload))
+        .on('broadcast', { event: 'live_location' }, (m) => received.push(m.payload))
         .subscribe((s) => { if (s !== 'CLOSED') { clearTimeout(timer); resolve(s); } });
     });
     return { status, received };
@@ -300,6 +329,30 @@ async function liveInboxChecks(a, b, c) {
     check('realtime: hiding activity is pushed at once',
       await waitFor(inboxB.received, (p) => p.userId === a.id && p.type === 'hidden'));
     await api(a, 'PATCH', '/me/settings', { showActivityStatus: true });
+
+    // ─── Private live location (migration 0018) ──────────────────────────
+    const sharing = await api(a, 'PATCH', '/me/location-sharing', { mode: 'while_driving', friendAudience: 'selected' });
+    check('live location: sharing settings saved', sharing.status === 200 && sharing.json?.sharingWithCount === 0, `HTTP ${sharing.status}`);
+    const chosen = await api(a, 'PUT', `/me/location-sharing/friends/${b.id}`);
+    check('live location: a friend chosen', chosen.status === 200 && chosen.json?.sharingWithCount === 1, `HTTP ${chosen.status}`);
+    check('live location: a stranger cannot be chosen', (await api(a, 'PUT', `/me/location-sharing/friends/${c.id}`)).status === 404);
+    await api(a, 'PUT', '/me/presence', { appState: 'foreground', driving: true });
+    const pub = await api(a, 'PUT', '/me/live-location', { latitude: 51.50101, longitude: -0.14189, speedMps: 12, headingDeg: 90, accuracyM: 8 });
+    check('live location: published while driving', pub.status === 200 && pub.json?.driving === true, `HTTP ${pub.status}`);
+    check('live location: the chosen friend receives it live',
+      await waitFor(inboxB.received, (p) => p.userId === a.id && p.type === 'live_location' && p.latitude === 51.50101));
+    const snapB = (await api(b, 'GET', '/live-locations')).json ?? [];
+    check('live location: and in their snapshot', snapB.some((l) => l.userId === a.id));
+    check('live location: a stranger\'s snapshot does not include it', !((await api(c, 'GET', '/live-locations')).json ?? []).some((l) => l.userId === a.id));
+    check('live location: no per-user lookup exists', (await api(c, 'GET', `/users/${a.id}/live-location`)).status === 404);
+    await api(a, 'DELETE', `/me/location-sharing/friends/${b.id}`);
+    check('live location: removing the friend tells them to drop it at once',
+      await waitFor(inboxB.received, (p) => p.userId === a.id && p.type === 'live_location_hidden'));
+    check('live location: and it is gone from their snapshot', !((await api(b, 'GET', '/live-locations')).json ?? []).some((l) => l.userId === a.id));
+    await api(a, 'PATCH', '/me/location-sharing', { mode: 'off', friendAudience: 'none' });
+    await api(a, 'PUT', '/me/presence', { appState: 'foreground', driving: false });
+    check('live location: nothing is stored once sharing is off',
+      sql(`select count(*) from public.live_locations where user_id = '${a.id}'`) === '0');
     check('realtime: the stranger received nothing', spy.received.length === 0, `${spy.received.length} messages`);
   } finally {
     for (const client of clients) await client.removeAllChannels().catch(() => {});
@@ -348,8 +401,10 @@ const leftovers = sql(`
   select (select count(*) from auth.users where email like 'driveos-api-${RUN}-%@example.com')
        + (select count(*) from public.profiles where id in (${idList}))
        + (select count(*) from storage.objects where split_part(name, '/', 1) in (${idList}))
-       + (select count(*) from private.storage_delete_queue where split_part(path, '/', 1) in (${idList}))`);
-check('nothing left behind (users, profiles, files, delete queue)', leftovers === '0', `${leftovers} leftover rows`);
+       + (select count(*) from private.storage_delete_queue where split_part(path, '/', 1) in (${idList}))
+       + (select count(*) from public.live_locations where user_id in (${idList}))
+       + (select count(*) from public.location_share_friends where owner_id in (${idList}) or friend_id in (${idList}))`);
+check('nothing left behind (users, profiles, files, delete queue, live locations)', leftovers === '0', `${leftovers} leftover rows`);
 
 const bad = results.filter((r) => !r.ok);
 console.log(`\n${results.length - bad.length}/${results.length} staging API checks passed`);

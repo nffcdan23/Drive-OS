@@ -1,12 +1,16 @@
 /**
- * Live friend presence: the user's private Realtime inbox (`inbox:<user id>`,
- * migration 0017), kept open only while the app is on screen.
+ * Live friend presence and shared live locations: the user's private
+ * Realtime inbox (`inbox:<user id>`, migrations 0017 and 0018), kept open
+ * only while the app is on screen.
  *
  *  - On screen: join the inbox; once joined, load a fresh friends snapshot
  *    (so nothing sent while the app was closed is missed), then apply each
  *    update as it arrives. Updates that arrive while the snapshot loads are
  *    held and applied after it, so an older snapshot never overwrites them.
- *  - In the background: leave the inbox (no socket kept open).
+ *  - In the background: leave the inbox (no socket kept open), and drop
+ *    every shared live location (onLeave): positions are never kept while
+ *    nothing can tell us they were revoked. The snapshot on return reloads
+ *    the ones still shared.
  *  - On a dropped or refused connection (network, expired token): rejoin
  *    with backoff while on screen. The join fetches a current token first.
  *  - Every 30 s on screen, statuses that have gone quiet age out
@@ -19,6 +23,10 @@
  * so it is unit-tested under node.
  */
 import { parsePresenceEvent, type PresenceEvent } from './presence';
+import { parseLiveLocationEvent, type LiveLocationEvent } from './liveLocation';
+
+/** Anything the inbox delivers: presence (0017) or live location (0018). */
+export type InboxEvent = PresenceEvent | LiveLocationEvent;
 
 export interface InboxConnection {
   close(): void;
@@ -29,12 +37,22 @@ export type InboxStatus = 'subscribed' | 'error' | 'closed';
 export interface PresenceFeedDeps {
   /** Joins the inbox with a current token; status callbacks report the join and any drop. */
   open(handlers: { onEvent: (payload: unknown) => void; onStatus: (status: InboxStatus) => void }): Promise<InboxConnection>;
-  /** Loads the friends snapshot (GET /friends). */
-  snapshot(): Promise<void>;
-  /** Merges one update into the friend list. */
-  apply(event: PresenceEvent): void;
-  /** Ages out statuses that have gone quiet. */
+  /**
+   * Loads the snapshot (GET /friends, GET /live-locations). `isCurrent()`
+   * turns false if the app left the screen meanwhile: a late result must not
+   * bring back positions that were dropped.
+   */
+  snapshot(isCurrent: () => boolean): Promise<void>;
+  /** Merges one update into the friend list or the shared locations. */
+  apply(event: InboxEvent): void;
+  /** Ages out statuses and positions that have gone quiet. */
   decay(): void;
+  /**
+   * The inbox was left (app off screen) or lost (connection dropped): drop
+   * whatever can't be kept up to date without it, such as shared positions
+   * a revocation might have been sent for meanwhile.
+   */
+  onLeave?(): void;
   setTimeout?: (fn: () => void, ms: number) => unknown;
   clearTimeout?: (handle: unknown) => void;
   setInterval?: (fn: () => void, ms: number) => unknown;
@@ -58,7 +76,7 @@ export class PresenceFeed {
   private retries = 0;
   private decayTimer: unknown = null;
   private snapshotting = false;
-  private held: PresenceEvent[] = [];
+  private held: InboxEvent[] = [];
 
   constructor(private readonly deps: PresenceFeedDeps) {}
 
@@ -76,6 +94,7 @@ export class PresenceFeed {
       void this.join();
     } else {
       this.leave();
+      this.deps.onLeave?.();
       if (this.decayTimer != null) {
         (this.deps.clearInterval ?? ((h: unknown) => clearInterval(h as ReturnType<typeof setInterval>)))(this.decayTimer);
         this.decayTimer = null;
@@ -112,6 +131,10 @@ export class PresenceFeed {
   private leave(): void {
     this.generation++;
     this.joined = false;
+    // Updates held for a snapshot that will no longer be applied are dropped
+    // with it; the next join takes a fresh snapshot.
+    this.snapshotting = false;
+    this.held = [];
     if (this.retryTimer != null) {
       (this.deps.clearTimeout ?? ((h: unknown) => clearTimeout(h as ReturnType<typeof setTimeout>)))(this.retryTimer);
       this.retryTimer = null;
@@ -135,6 +158,7 @@ export class PresenceFeed {
   private retryLater(): void {
     if (!this.active || this.stopped) return;
     this.leave();
+    this.deps.onLeave?.();
     const wait = FEED_RETRY_MS[Math.min(this.retries, FEED_RETRY_MS.length - 1)]!;
     this.retries++;
     const later = this.deps.setTimeout ?? ((fn: () => void, ms: number) => setTimeout(fn, ms));
@@ -146,12 +170,16 @@ export class PresenceFeed {
 
   /** A snapshot right after joining, with updates held until it lands. */
   private async catchUp(): Promise<void> {
+    const generation = this.generation;
+    const isCurrent = () => generation === this.generation && this.active && !this.stopped;
     this.snapshotting = true;
     try {
-      await this.deps.snapshot();
+      await this.deps.snapshot(isCurrent);
     } catch {
       // Keep the friend list as it was; updates still apply.
     } finally {
+      // Left (or rejoined) meanwhile: that attempt owns the state now.
+      if (!isCurrent()) return;
       this.snapshotting = false;
       const held = this.held;
       this.held = [];
@@ -160,7 +188,7 @@ export class PresenceFeed {
   }
 
   private receive(payload: unknown): void {
-    const event = parsePresenceEvent(payload);
+    const event = parsePresenceEvent(payload) ?? parseLiveLocationEvent(payload);
     if (!event) return;
     if (this.snapshotting) this.held.push(event);
     else this.deps.apply(event);

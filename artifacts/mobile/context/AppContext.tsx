@@ -16,7 +16,8 @@ import { CloudSync, type SyncStatus } from '@/lib/backend/cloudSync';
 import { describeError } from '@/lib/backend/http';
 import type { GpsFix } from '@/lib/backend/journeyRecorder';
 import { appendLiveFix, liveDriveFromRecord, newLiveDrive } from '@/lib/backend/liveDrive';
-import type { LocationKind, SpotCategory, Visibility } from '@/lib/backend/endpoints';
+import type { LocationKind, ServerLocationSharing, SpotCategory, Visibility } from '@/lib/backend/endpoints';
+import { LiveLocationStore, type LiveLocation, type LocationFriendAudience, type LocationSharingMode } from '@/lib/backend/liveLocation';
 import type {
   ActiveDrive, BlockedUser, Conversation, Convoy, Coordinate, DriveOSEvent, Friend, FriendRequest, Group, Journey,
   JourneyCategory, Message, NearbySpot, Notification, ProfileStats, SavedPlace, UserProfile, Vehicle,
@@ -30,6 +31,7 @@ import { deviceStorage } from '@/lib/secureStorage';
 import { driveTracker } from '@/lib/driveBackgroundLocation';
 import { startPresence, type PresenceSession } from '@/lib/presenceClient';
 import { startRealtimePresence, type RealtimePresenceSession } from '@/lib/realtimePresence';
+import { startLiveLocation, type LiveLocationSession } from '@/lib/liveLocationClient';
 import { APP_NAME } from '@/constants/brand';
 
 export type {
@@ -145,6 +147,18 @@ interface AppContextValue {
   profileStats: ProfileStats;
   refreshProfileStats: () => Promise<void>;
 
+  // ── Private live location (no map display yet) ──
+  /** Positions friends and Convoy members currently share with you (memory only). */
+  sharedLocations: LiveLocation[];
+  /** Your sharing settings (WHO and WHEN); null until loaded or when offline. */
+  locationSharing: ServerLocationSharing | null;
+  refreshLocationSharing: () => Promise<ServerLocationSharing>;
+  updateLocationSharing: (fields: { mode?: LocationSharingMode; friendAudience?: LocationFriendAudience }) => Promise<void>;
+  setLocationShareFriend: (userId: string, shared: boolean) => Promise<void>;
+  setLocationShareConvoy: (convoyId: string, shared: boolean) => Promise<void>;
+  /** The Drive screen's foreground fixes (used only while sharing "while using" outside a drive). */
+  noteForegroundFix: (fix: GpsFix) => void;
+
   /** Members of a group (admins also see pending requests). Online only. */
   loadGroupMembers: (groupId: string) => Promise<Array<{ id: string; name: string; initials: string; role: string; status: string }>>;
   /** People in a convoy. Online only. */
@@ -211,6 +225,14 @@ export function AppProvider({ userId, children }: { userId: string; children: Re
   const [isLoading, setIsLoading] = useState(true);
   const presenceRef = useRef<PresenceSession | null>(null);
   const liveFriendsRef = useRef<RealtimePresenceSession | null>(null);
+  const liveLocationRef = useRef<LiveLocationSession | null>(null);
+  // Shared positions live in memory only and belong to this signed-in user.
+  const liveLocations = useMemo(() => new LiveLocationStore(), [userId]);
+  const sharedLocations = useSyncExternalStore(
+    useCallback((fn: () => void) => liveLocations.subscribe(fn), [liveLocations]),
+    () => liveLocations.list,
+  );
+  const [locationSharing, setLocationSharing] = useState<ServerLocationSharing | null>(null);
   const [isPassengerMode, setIsPassengerMode] = useState(false);
   const [currentDrive, setCurrentDrive] = useState<ActiveDrive | null>(null);
   const isDriving = currentDrive !== null;
@@ -225,6 +247,7 @@ export function AppProvider({ userId, children }: { userId: string; children: Re
     const unsubscribeFixes = cloud.onDriveFix((fix) => setCurrentDrive((prev) => (prev ? appendLiveFix(prev, fix) : prev)));
     let presence: PresenceSession | null = null;
     let liveFriends: RealtimePresenceSession | null = null;
+    let liveLocation: LiveLocationSession | null = null;
     (async () => {
       await cloud.start();
       if (cancelled) return;
@@ -232,7 +255,17 @@ export function AppProvider({ userId, children }: { userId: string; children: Re
       // reports Driving straight away). Failures never affect the app.
       if (ep) presence = presenceRef.current = startPresence(cloud, ep);
       // Friends' presence, live while the app is on screen (Realtime inbox).
-      if (supabase) liveFriends = liveFriendsRef.current = startRealtimePresence(supabase, cloud, userId);
+      if (supabase && ep) liveFriends = liveFriendsRef.current = startRealtimePresence(supabase, cloud, ep, liveLocations, userId);
+      // Your own live location: off unless the server says otherwise (fail closed).
+      if (ep) {
+        const sharing = await ep.getLocationSharing().catch(() => null);
+        if (cancelled) return;
+        setLocationSharing(sharing);
+        liveLocation = liveLocationRef.current = startLiveLocation(cloud, ep, {
+          initialMode: sharing?.mode ?? 'off',
+          onSharingOff: () => setLocationSharing((prev) => (prev ? { ...prev, mode: 'off', live: false } : prev)),
+        });
+      }
       // A drive still recording in the background when the app was relaunched
       // carries on, from the points recorded so far.
       const rec = cloud.activeRecord;
@@ -248,9 +281,12 @@ export function AppProvider({ userId, children }: { userId: string; children: Re
       if (presenceRef.current === presence) presenceRef.current = null;
       liveFriends?.stop();
       if (liveFriendsRef.current === liveFriends) liveFriendsRef.current = null;
+      void liveLocation?.stop();
+      if (liveLocationRef.current === liveLocation) liveLocationRef.current = null;
+      liveLocations.clear();
       cloud.dispose();
     };
-  }, [cloud]);
+  }, [cloud, liveLocations]);
 
   // Keep retrying while something is waiting or the server was unreachable,
   // and whenever the app comes back to the foreground.
@@ -483,6 +519,11 @@ export function AppProvider({ userId, children }: { userId: string; children: Re
       clearLocalData: async () => {
         liveFriendsRef.current?.stop();
         liveFriendsRef.current = null;
+        // Stop showing this user's position (best effort, a few seconds at
+        // most; the server also removes it when presence reports sign-out).
+        const live = liveLocationRef.current;
+        liveLocationRef.current = null;
+        await Promise.race([live?.stop(), new Promise((r) => setTimeout(r, 3_000))]).catch(() => {});
         // Best effort, a few seconds at most: sign-out never waits on it or fails because of it
         await presenceRef.current?.signOut().catch(() => {});
         presenceRef.current = null;
@@ -491,6 +532,9 @@ export function AppProvider({ userId, children }: { userId: string; children: Re
       deleteAccount: async () => {
         liveFriendsRef.current?.stop();
         liveFriendsRef.current = null;
+        // Deleting the account deletes the position and tells viewers (server side).
+        void liveLocationRef.current?.stop();
+        liveLocationRef.current = null;
         presenceRef.current?.stop();
         presenceRef.current = null;
         await ep!.deleteAccount();
@@ -498,6 +542,27 @@ export function AppProvider({ userId, children }: { userId: string; children: Re
       },
     };
   }, [cloud]);
+
+  // ── Live location sharing (settings change on the server; the publisher follows) ──
+  const applySharing = useCallback((next: ServerLocationSharing) => {
+    setLocationSharing(next);
+    liveLocationRef.current?.setMode(next.mode);
+  }, []);
+  const refreshLocationSharing = useCallback(async () => {
+    const next = await ep!.getLocationSharing();
+    applySharing(next);
+    return next;
+  }, [applySharing]);
+  const updateLocationSharing = useCallback(async (fields: { mode?: LocationSharingMode; friendAudience?: LocationFriendAudience }) => {
+    applySharing(await ep!.updateLocationSharing(fields));
+  }, [applySharing]);
+  const setLocationShareFriend = useCallback(async (friendId: string, shared: boolean) => {
+    applySharing(await (shared ? ep!.shareLocationWithFriend(friendId) : ep!.stopSharingLocationWithFriend(friendId)));
+  }, [applySharing]);
+  const setLocationShareConvoy = useCallback(async (convoyId: string, shared: boolean) => {
+    applySharing(await (shared ? ep!.shareLocationWithConvoy(convoyId) : ep!.stopSharingLocationWithConvoy(convoyId)));
+  }, [applySharing]);
+  const noteForegroundFix = useCallback((fix: GpsFix) => { liveLocationRef.current?.noteForegroundFix(fix); }, []);
 
   const value: AppContextValue = {
     ...actions,
@@ -525,6 +590,8 @@ export function AppProvider({ userId, children }: { userId: string; children: Re
     unitSystem: data.unitSystem,
     resolvedUnitSystem: resolveUnitSystem(data.unitSystem),
     profileStats: data.profileStats,
+    sharedLocations, locationSharing, refreshLocationSharing, updateLocationSharing,
+    setLocationShareFriend, setLocationShareConvoy, noteForegroundFix,
   };
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;

@@ -114,7 +114,7 @@ async function run() {
   check('Auth issues tokens for the authenticated role with the user id', payload.role === 'authenticated' && payload.sub === a.id);
 
   // ─── 2. Data API exposes nothing yet ──────────────────────────────────────
-  for (const table of ['profiles', 'user_settings', 'vehicles', 'vehicle_documents', 'journeys', 'journey_route_points', 'saved_locations', 'notifications']) {
+  for (const table of ['profiles', 'user_settings', 'vehicles', 'vehicle_documents', 'journeys', 'journey_route_points', 'saved_locations', 'notifications', 'user_presence', 'live_locations', 'location_share_friends', 'location_share_convoys']) {
     const asUser = await http('GET', `/rest/v1/${table}?select=*&limit=1`, { headers: userHeaders(users.a.token) });
     const asAnon = await http('GET', `/rest/v1/${table}?select=*&limit=1`, { headers: anonHeaders });
     check(`Data API: ${table} not readable by a signed-in user`, !is2xx(asUser), `HTTP ${asUser.status} ${asUser.json?.code ?? ''}`.trim());
