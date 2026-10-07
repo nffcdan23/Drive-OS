@@ -198,7 +198,7 @@ before(async () => {
     env: {
       PATH: process.env.PATH, NODE_ENV: "test", PORT: String(API_PORT), DATABASE_URL: DB_URL,
       SUPABASE_URL: supabaseUrl, SUPABASE_SECRET_KEY: SECRET_KEY, SUPABASE_JWT_SECRET: JWT_SECRET,
-      STORAGE_WORKER_INTERVAL_MS: "300", LOG_LEVEL: "warn",
+      STORAGE_WORKER_INTERVAL_MS: "300", LIVE_LOCATION_CLEANUP_INTERVAL_MS: "300", LOG_LEVEL: "warn",
       DVLA_API_KEY: DVLA_KEY, DVLA_VES_URL: dvlaUrl, DVLA_TIMEOUT_MS: "300",
     },
     stdio: ["ignore", "pipe", "pipe"],
@@ -677,7 +677,8 @@ test("live location: off by default; WHEN and WHO are enforced by the server", a
   const seen = (await get(f, "/live-locations")).body;
   assert.equal(seen.length, 1);
   assert.deepEqual(Object.keys(seen[0]).sort(),
-    ["accuracyM", "driving", "expiresAt", "headingDeg", "latitude", "longitude", "recordedAt", "speedKmh", "userId"]);
+    ["accuracyM", "driving", "expiresAt", "expiresInMs", "headingDeg", "latitude", "longitude", "recordedAt", "speedKmh", "userId"]);
+  assert.ok(seen[0].expiresInMs > 150_000 && seen[0].expiresInMs <= 180_000, "remaining lifetime by the server's clock");
   assert.equal(seen[0].latitude, 54.32199, "rounded to 5 decimal places");
   assert.equal(seen[0].longitude, -2.87654);
   assert.equal(seen[0].speedKmh, 48.2);
@@ -689,7 +690,7 @@ test("live location: off by default; WHEN and WHO are enforced by the server", a
   assert.deepEqual(await liveInbox(stranger, a), []);
   const msg = (await db.query(`select payload from realtime.messages where topic = $1 and event = 'live_location' order by inserted_at desc limit 1`, [`inbox:${f.id}`])).rows[0].payload;
   assert.deepEqual(Object.keys(msg).sort(),
-    ["accuracyM", "driving", "expiresAt", "headingDeg", "latitude", "longitude", "recordedAt", "speedKmh", "type", "userId"], "a minimal payload");
+    ["accuracyM", "driving", "expiresAt", "headingDeg", "latitude", "longitude", "recordedAt", "sentAt", "speedKmh", "type", "userId"], "a minimal payload");
 
   // Removing the friend: gone at once, live and from the snapshot
   expect(await del(a, `/me/location-sharing/friends/${f.id}`), 200, "remove the friend");
@@ -875,6 +876,58 @@ test("live location: input is validated; no arbitrary lookups; nothing in the lo
 
   await new Promise((r) => setTimeout(r, 200));
   for (const v of ["54.32", "-2.87"]) assert.ok(!serverOutput.includes(v), `coordinates are never logged (${v})`);
+});
+
+
+test("live location: a Convoy opened up loses its grants; making it private again shares nothing", async () => {
+  const a = await newUser("Leader");
+  const m = await newUser("Member");
+  const x = await newUser("Joined while public");
+  for (const u of [a, m, x]) await appOpen(u);
+  const trip = (await post(a, "/convoys", { name: "Trip", visibility: "private", startsAt: future(60) })).body.id;
+  const code = (await post(a, `/convoys/${trip}/code`)).body.code;
+  await post(m, "/convoys/join", { code });
+  await share(a, { mode: "while_using" });
+  expect(await put(a, `/me/location-sharing/convoys/${trip}`), 200, "share with the trip");
+  expect(await put(a, "/me/live-location", HERE), 200, "publish");
+  assert.deepEqual(await sharedWith(m), [a.id]);
+
+  expect(await patch(a, `/convoys/${trip}`, { visibility: "public" }), 200, "opened up");
+  assert.deepEqual(await sharedWith(m), [], "a public Convoy grants nothing");
+  assert.equal((await liveInbox(m, a)).at(-1), "live_location_hidden");
+  expect(await post(x, `/convoys/${trip}/join`), 200, "someone joins without a code");
+  expect(await patch(a, `/convoys/${trip}`, { visibility: "private" }), 200, "private again");
+  assert.deepEqual(await sharedWith(x), [], "whoever joined while it was open sees nothing");
+  assert.deepEqual(await sharedWith(m), [], "nor does anyone else until it is turned on again");
+  assert.equal((await get(a, "/me/location-sharing")).body.convoys.find((c) => c.id === trip).shared, false, "the switch shows off");
+});
+
+test("live location: expired positions and delivered messages are cleaned up", async () => {
+  const a = await newUser("A");
+  const b = await newUser("B");
+  await befriend(a, b);
+  await appOpen(a);
+  await appOpen(b);
+  await share(a, { mode: "while_using", friendAudience: "all" });
+  expect(await put(a, "/me/live-location", HERE), 200, "publish");
+  assert.deepEqual(await liveInbox(b, a), ["live_location"]);
+  // Expired (and so already unreadable): the clean-up deletes it and tells viewers
+  await db.query("update public.live_locations set recorded_at = now() - interval '4 minutes', expires_at = now() - interval '1 second' where user_id = $1", [a.id]);
+  let gone = false;
+  for (let i = 0; i < 40 && !gone; i++) {
+    await new Promise((r) => setTimeout(r, 100));
+    gone = (await db.query("select count(*)::int n from public.live_locations where user_id = $1", [a.id])).rows[0].n === 0;
+  }
+  assert.ok(gone, "expired row deleted");
+  assert.equal((await liveInbox(b, a)).at(-1), "live_location_hidden", "viewers told to drop it");
+  // Delivered messages with positions do not stay in realtime.messages
+  await db.query("update realtime.messages set inserted_at = now() - interval '2 minutes' where topic = $1 and event = 'live_location'", [`inbox:${b.id}`]);
+  let purged = false;
+  for (let i = 0; i < 40 && !purged; i++) {
+    await new Promise((r) => setTimeout(r, 100));
+    purged = (await liveInbox(b, a)).length === 0;
+  }
+  assert.ok(purged, "no trail of positions is kept in realtime.messages");
 });
 
 // ─── Convoys ────────────────────────────────────────────────────────────────

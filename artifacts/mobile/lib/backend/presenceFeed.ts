@@ -47,7 +47,11 @@ export interface PresenceFeedDeps {
   apply(event: InboxEvent): void;
   /** Ages out statuses and positions that have gone quiet. */
   decay(): void;
-  /** The app left the screen: drop whatever can't be kept up to date. */
+  /**
+   * The inbox was left (app off screen) or lost (connection dropped): drop
+   * whatever can't be kept up to date without it, such as shared positions
+   * a revocation might have been sent for meanwhile.
+   */
   onLeave?(): void;
   setTimeout?: (fn: () => void, ms: number) => unknown;
   clearTimeout?: (handle: unknown) => void;
@@ -154,6 +158,7 @@ export class PresenceFeed {
   private retryLater(): void {
     if (!this.active || this.stopped) return;
     this.leave();
+    this.deps.onLeave?.();
     const wait = FEED_RETRY_MS[Math.min(this.retries, FEED_RETRY_MS.length - 1)]!;
     this.retries++;
     const later = this.deps.setTimeout ?? ((fn: () => void, ms: number) => setTimeout(fn, ms));

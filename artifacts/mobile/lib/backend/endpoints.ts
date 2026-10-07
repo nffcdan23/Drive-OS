@@ -208,7 +208,7 @@ export interface ServerLocationSharing {
   /** Whether a position is being shown right now. */
   live: boolean;
   friends: Array<UserCard & { selected: boolean }>;
-  /** Convoys you're in that haven't ended; only `eligible` ones (private, joined by code) can be chosen. */
+  /** Convoys you're in that haven't ended; only `eligible` ones (private, not part of a Community) can be chosen. */
   convoys: Array<{
     id: string; name: string; status: string; visibility: Visibility; startsAt: string;
     eligible: boolean; shared: boolean; otherMembers: number;

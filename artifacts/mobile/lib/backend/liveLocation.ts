@@ -40,16 +40,23 @@ export interface LiveLocation {
   expiresAt: string;
 }
 
+/**
+ * `sentAt` is the server's time of sending: an update sent before a removal
+ * the app already has is ignored, whatever order they arrive in.
+ */
 export type LiveLocationEvent =
-  | ({ type: 'live_location' } & LiveLocation)
-  | { type: 'live_location_hidden'; userId: string };
+  | ({ type: 'live_location'; sentAt?: string } & LiveLocation)
+  | { type: 'live_location_hidden'; userId: string; sentAt?: string };
+
+/** A snapshot entry may also say how long it has left, by the server's clock. */
+type Received = LiveLocation & { expiresInMs?: number };
 
 const finite = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
 const optionalNumber = (v: unknown, min: number, max: number): number | null | undefined =>
   v == null ? null : finite(v) && v >= min && v <= max ? v : undefined;
 
 /** Validates one position from the API or the inbox; anything malformed is null (ignored). */
-export function parseLiveLocation(p: unknown): LiveLocation | null {
+export function parseLiveLocation(p: unknown): Received | null {
   if (!p || typeof p !== 'object') return null;
   const o = p as Record<string, unknown>;
   if (typeof o.userId !== 'string' || !o.userId) return null;
@@ -63,22 +70,31 @@ export function parseLiveLocation(p: unknown): LiveLocation | null {
   const speedKmh = optionalNumber(o.speedKmh, 0, 400);
   const accuracyM = optionalNumber(o.accuracyM, 0, 100_000);
   if (headingDeg === undefined || speedKmh === undefined || accuracyM === undefined) return null;
-  return {
+  const loc: Received = {
     userId: o.userId, latitude: o.latitude, longitude: o.longitude, headingDeg, speedKmh, accuracyM,
     driving: o.driving === true, recordedAt: o.recordedAt, expiresAt: o.expiresAt,
   };
+  if (finite(o.expiresInMs) && o.expiresInMs >= 0) loc.expiresInMs = o.expiresInMs;
+  return loc;
 }
+
+const sentAtOf = (v: unknown): string | undefined =>
+  typeof v === 'string' && !Number.isNaN(Date.parse(v)) ? v : undefined;
 
 /** Validates an inbox payload (event 'live_location'); anything unexpected is null. */
 export function parseLiveLocationEvent(payload: unknown): LiveLocationEvent | null {
   if (!payload || typeof payload !== 'object') return null;
   const p = payload as Record<string, unknown>;
+  const sentAt = sentAtOf(p.sentAt);
   if (p.type === 'live_location_hidden') {
-    return typeof p.userId === 'string' && p.userId ? { type: 'live_location_hidden', userId: p.userId } : null;
+    if (typeof p.userId !== 'string' || !p.userId) return null;
+    return sentAt ? { type: 'live_location_hidden', userId: p.userId, sentAt } : { type: 'live_location_hidden', userId: p.userId };
   }
   if (p.type !== 'live_location') return null;
-  const loc = parseLiveLocation(p);
-  return loc ? { type: 'live_location', ...loc } : null;
+  const parsed = parseLiveLocation(p);
+  if (!parsed) return null;
+  const { expiresInMs: _ignored, ...loc } = parsed;
+  return sentAt ? { type: 'live_location', ...loc, sentAt } : { type: 'live_location', ...loc };
 }
 
 // ─── Positions shared with this user ─────────────────────────────────────────
@@ -100,6 +116,8 @@ export interface LiveLocationStoreDeps {
 
 export class LiveLocationStore {
   private items = new Map<string, Held>();
+  /** When each sharer's position was last removed (server time, ms). */
+  private removedAt = new Map<string, number>();
   private listeners = new Set<() => void>();
   private cached: LiveLocation[] | null = [];
   private timer: unknown = null;
@@ -128,19 +146,26 @@ export class LiveLocationStore {
   replaceAll(locations: readonly unknown[]): void {
     const next = new Map<string, Held>();
     for (const raw of locations) {
-      const loc = parseLiveLocation(raw);
-      if (loc) next.set(loc.userId, this.hold(loc));
+      const parsed = parseLiveLocation(raw);
+      if (!parsed) continue;
+      const { expiresInMs, ...loc } = parsed;
+      next.set(loc.userId, this.hold(loc, expiresInMs));
     }
     this.items = next;
     this.changed();
   }
 
   apply(event: LiveLocationEvent): void {
+    const sent = event.sentAt ? Date.parse(event.sentAt) : null;
     if (event.type === 'live_location_hidden') {
+      if (sent != null) this.removedAt.set(event.userId, Math.max(sent, this.removedAt.get(event.userId) ?? -Infinity));
       this.remove(event.userId);
       return;
     }
-    const { type: _type, ...loc } = event;
+    const { type: _type, sentAt: _sentAt, ...loc } = event;
+    // Sent before a removal we already have (delivered late): ignored.
+    const removed = this.removedAt.get(loc.userId);
+    if (removed != null && (sent == null || sent <= removed)) return;
     const current = this.items.get(loc.userId);
     // An older update arriving late never replaces a newer one.
     if (current && Date.parse(current.loc.recordedAt) > Date.parse(loc.recordedAt)) return;
@@ -165,13 +190,16 @@ export class LiveLocationStore {
 
   /** Drop everything (app left the screen, sign-out). */
   clear(): void {
+    this.removedAt.clear();
     if (!this.items.size) return;
     this.items.clear();
     this.changed();
   }
 
-  private hold(loc: LiveLocation): Held {
-    const ttl = Math.min(Math.max(Date.parse(loc.expiresAt) - Date.parse(loc.recordedAt), 0), MAX_TTL_MS);
+  /** Held for what's left of its life: the server's remaining time when known (snapshot), else its full lifetime (just sent). */
+  private hold(loc: LiveLocation, remainingMs?: number): Held {
+    const lifetime = Math.max(Date.parse(loc.expiresAt) - Date.parse(loc.recordedAt), 0);
+    const ttl = Math.min(remainingMs ?? lifetime, lifetime, MAX_TTL_MS);
     return { loc, dropAt: this.now() + ttl };
   }
 

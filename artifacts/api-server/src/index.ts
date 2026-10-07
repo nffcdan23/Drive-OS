@@ -19,7 +19,7 @@ if (config.supabaseSecretKey && config.storageWorker) {
 }
 
 // Expired live positions are already unreadable; this only tidies the table.
-startLiveLocationCleanup();
+startLiveLocationCleanup(config.liveLocationCleanupIntervalMs);
 
 for (const signal of ["SIGTERM", "SIGINT"] as const) {
   process.on(signal, () => {

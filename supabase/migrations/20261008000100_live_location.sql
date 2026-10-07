@@ -151,6 +151,8 @@ as $$
       where l.user_id = p_owner and l.expires_at > now()
         and (s.location_sharing = 'while_using' or l.driving)
     )
+    -- Signed out: nothing is current, whatever is stored.
+    and not exists (select 1 from public.user_presence p where p.user_id = p_owner and p.app_state = 'signed_out')
 $$;
 
 -- People who might be granted: friends and fellow members of the owner's
@@ -166,6 +168,20 @@ as $$
     from public.location_share_convoys g
     join public.convoy_participants pv on pv.convoy_id = g.convoy_id
    where g.owner_id = p_owner and pv.user_id <> p_owner
+$$;
+
+-- ─── One sharer at a time ────────────────────────────────────────────────────
+-- Publishing a sharer's position and re-checking their viewers after a grant
+-- changes are serialised per sharer (a transaction-scoped advisory lock), so
+-- a publish can never be decided on a grant that a concurrent revocation has
+-- just removed and then delivered after its "remove". Callers that also lock
+-- rows take the row locks first.
+create function private.lock_live_owner(p_owner uuid)
+returns void
+language sql
+set search_path = ''
+as $$
+  select pg_advisory_xact_lock(hashtextextended('driveos.live_location:' || p_owner::text, 0))
 $$;
 
 -- ─── Fan-out over the private inbox (0017) ───────────────────────────────────
@@ -190,6 +206,7 @@ declare
   payload jsonb;
   viewer  uuid;
 begin
+  perform private.lock_live_owner(p_owner);
   select * into l from public.live_locations where user_id = p_owner and expires_at > now();
   if not found then return; end if;
   payload := jsonb_build_object(
@@ -198,7 +215,9 @@ begin
     'headingDeg', l.heading_deg, 'speedKmh', l.speed_kmh, 'accuracyM', l.accuracy_m,
     'driving', l.driving,
     'recordedAt', to_char(l.recorded_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
-    'expiresAt', to_char(l.expires_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'));
+    'expiresAt', to_char(l.expires_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+    -- When this was sent: the app ignores anything sent before a removal it already has.
+    'sentAt', to_char(clock_timestamp() at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'));
   for viewer in
     select c from private.live_location_candidates(p_owner) c
       join public.user_presence vp on vp.user_id = c
@@ -222,9 +241,11 @@ as $$
 declare
   viewer uuid;
 begin
+  perform private.lock_live_owner(p_owner);
   foreach viewer in array coalesce(p_viewers, '{}') loop
     if viewer is not null and viewer <> p_owner and not private.can_see_live_location(p_owner, viewer) then
-      perform private.inbox_send_live(viewer, jsonb_build_object('type', 'live_location_hidden', 'userId', p_owner));
+      perform private.inbox_send_live(viewer, jsonb_build_object('type', 'live_location_hidden', 'userId', p_owner,
+        'sentAt', to_char(clock_timestamp() at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')));
     end if;
   end loop;
 end;
@@ -358,19 +379,20 @@ create trigger convoy_participants_live_location
   after delete on public.convoy_participants
   for each row execute function private.on_convoy_participant_removed();
 
--- A Convoy made public, linked to a Community, completed or cancelled stops granting.
+-- A Convoy made public or friends-only, linked to a Community, completed or
+-- cancelled stops granting, and its grants are DELETED (each delete re-checks
+-- and tells the members): people may join it without a code while it is
+-- open, so making it private again must not quietly share with them. Each
+-- sharer has to turn it on again.
 create function private.on_convoy_access_change()
 returns trigger
 language plpgsql security definer
 set search_path = ''
 as $$
-declare
-  member uuid;
 begin
-  for member in select g.owner_id from public.location_share_convoys g where g.convoy_id = new.id loop
-    perform private.revoke_live_location(member, array(
-      select pv.user_id from public.convoy_participants pv where pv.convoy_id = new.id));
-  end loop;
+  if not (new.visibility = 'private' and new.group_id is null and new.status in ('forming', 'active')) then
+    delete from public.location_share_convoys where convoy_id = new.id;
+  end if;
   return null;
 end;
 $$;
@@ -443,6 +465,10 @@ language plpgsql security definer
 set search_path = ''
 as $$
 begin
+  -- Both sharers' locks, always in the same order (no deadlock between two
+  -- people blocking each other at once).
+  perform private.lock_live_owner(least(new.blocker_id, new.blocked_id));
+  perform private.lock_live_owner(greatest(new.blocker_id, new.blocked_id));
   delete from public.location_share_friends
    where (owner_id = new.blocker_id and friend_id = new.blocked_id)
       or (owner_id = new.blocked_id and friend_id = new.blocker_id);
@@ -487,8 +513,41 @@ create trigger user_presence_live_location
   for each row when (old.app_state is distinct from new.app_state or old.driving is distinct from new.driving)
   execute function private.on_presence_live_location();
 
+-- ─── Relationship rows are never re-pointed ──────────────────────────────────
+-- Every revocation above runs on DELETE. Nothing updates these keys today; a
+-- future UPDATE that re-pointed one would skip revocation, so it is refused.
+create function private.reject_key_update()
+returns trigger
+language plpgsql
+set search_path = ''
+as $$
+begin
+  raise exception 'changing % on %.% is not allowed; delete and insert instead', tg_argv[0], tg_table_schema, tg_table_name
+    using errcode = '42501';
+end;
+$$;
+create trigger friendships_keys_fixed before update of user_id, friend_id on public.friendships
+  for each row when (old.user_id is distinct from new.user_id or old.friend_id is distinct from new.friend_id)
+  execute function private.reject_key_update('user_id/friend_id');
+create trigger user_blocks_keys_fixed before update of blocker_id, blocked_id on public.user_blocks
+  for each row when (old.blocker_id is distinct from new.blocker_id or old.blocked_id is distinct from new.blocked_id)
+  execute function private.reject_key_update('blocker_id/blocked_id');
+create trigger convoy_participants_keys_fixed before update of convoy_id, user_id on public.convoy_participants
+  for each row when (old.convoy_id is distinct from new.convoy_id or old.user_id is distinct from new.user_id)
+  execute function private.reject_key_update('convoy_id/user_id');
+create trigger location_share_friends_keys_fixed before update of owner_id, friend_id on public.location_share_friends
+  for each row when (old.owner_id is distinct from new.owner_id or old.friend_id is distinct from new.friend_id)
+  execute function private.reject_key_update('owner_id/friend_id');
+create trigger location_share_convoys_keys_fixed before update of owner_id, convoy_id on public.location_share_convoys
+  for each row when (old.owner_id is distinct from new.owner_id or old.convoy_id is distinct from new.convoy_id)
+  execute function private.reject_key_update('owner_id/convoy_id');
+create trigger live_locations_owner_fixed before update of user_id on public.live_locations
+  for each row when (old.user_id is distinct from new.user_id)
+  execute function private.reject_key_update('user_id');
+
 -- ─── Privileges and policies ─────────────────────────────────────────────────
 revoke execute on function
+  private.lock_live_owner(uuid), private.reject_key_update(),
   private.live_location_granted(uuid, uuid), private.can_see_live_location(uuid, uuid),
   private.live_location_candidates(uuid), private.inbox_send_live(uuid, jsonb),
   private.publish_live_location(uuid), private.revoke_live_location(uuid, uuid[]),

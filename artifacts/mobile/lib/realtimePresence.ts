@@ -35,12 +35,11 @@ export function startRealtimePresence(
   const feed = new PresenceFeed({
     log,
     snapshot: async (isCurrent) => {
-      const [, shared] = await Promise.all([
-        cloud.refreshFriends(),
-        // On failure, keep nothing rather than something possibly revoked.
-        ep.listLiveLocations().catch(() => []),
-      ]);
-      if (isCurrent()) liveLocations.replaceAll(shared);
+      const [friends, shared] = await Promise.allSettled([cloud.refreshFriends(), ep.listLiveLocations()]);
+      // Shared positions are replaced on their own; if they couldn't be
+      // loaded, keep none rather than some that may have been revoked.
+      if (isCurrent()) liveLocations.replaceAll(shared.status === 'fulfilled' ? shared.value : []);
+      if (friends.status === 'rejected') throw friends.reason;
     },
     apply: (event) => {
       // Never the coordinates: who and what kind of update only.

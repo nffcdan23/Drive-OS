@@ -101,6 +101,7 @@ function startApi() {
       PATH: process.env.PATH, NODE_ENV: 'production', PORT: String(PORT), LOG_LEVEL: 'warn',
       DATABASE_URL: DB_URL, DATABASE_POOL_MAX: '5',
       SUPABASE_URL: BASE, SUPABASE_SECRET_KEY: SEC_KEY, STORAGE_WORKER_INTERVAL_MS: '1000',
+      LIVE_LOCATION_CLEANUP_INTERVAL_MS: '2000',
     },
     stdio: ['ignore', 'inherit', 'inherit'],
   });
@@ -249,6 +250,19 @@ async function run() {
       && sql(`select count(*) from private.storage_delete_queue where path = '${up.json?.path}'`) === '0';
   }
   check('the Storage worker removed the deleted photo\'s file', gone);
+
+  // Live-location broadcasts carry positions; the API deletes them from
+  // realtime.messages a minute after sending (no trail of positions kept).
+  const testInboxes = Object.values(users).map((u) => `'inbox:${u.id}'`).join(',');
+  const liveMessages = () => sql(`select count(*) from realtime.messages where event = 'live_location' and topic in (${testInboxes})`);
+  const sentLive = liveMessages();
+  let purgedLive = false;
+  for (let i = 0; i < 50 && !purgedLive; i++) {
+    purgedLive = liveMessages() === '0';
+    if (!purgedLive) await sleep(2000);
+  }
+  check('live location: delivered messages are removed from realtime.messages', sentLive !== '0' && purgedLive,
+    `${sentLive} sent, ${liveMessages()} left`);
 
   // ─── Account deletion ────────────────────────────────────────────────────
   check('account deletion needs confirmation', (await api(c, 'DELETE', '/me', {})).status === 400);

@@ -63,7 +63,23 @@ interface LiveRow {
   expires_at: Date | string;
 }
 
-const presentLive = (r: LiveRow) => ({
+/**
+ * A database error from a statement carrying a position would carry the
+ * coordinates too (the driver includes bound parameters in its message), and
+ * unexpected errors are logged: keep only the error code.
+ */
+async function withoutValues<T>(work: Promise<T>): Promise<T> {
+  try {
+    return await work;
+  } catch (err) {
+    const code = (err as { code?: unknown; cause?: { code?: unknown } })?.cause?.code ?? (err as { code?: unknown })?.code;
+    const safe = new Error(`live location write failed (${typeof code === "string" ? code : "unknown"})`);
+    if (typeof code === "string") Object.assign(safe, { code });
+    throw safe;
+  }
+}
+
+const presentLive = (r: LiveRow & { expires_in_ms?: number }) => ({
   userId: r.user_id,
   latitude: r.latitude,
   longitude: r.longitude,
@@ -73,6 +89,9 @@ const presentLive = (r: LiveRow) => ({
   driving: r.driving,
   recordedAt: new Date(r.recorded_at).toISOString(),
   expiresAt: new Date(r.expires_at).toISOString(),
+  // Remaining lifetime by the server's clock, so the app never keeps a
+  // position past its expiry whatever its own clock says.
+  ...(r.expires_in_ms !== undefined ? { expiresInMs: Math.max(0, Math.floor(Number(r.expires_in_ms))) } : {}),
 });
 
 // ─── Publishing your own position ────────────────────────────────────────────
@@ -100,21 +119,25 @@ router.put("/me/live-location", requireUser, publishLimit, handler(async (req, r
   if (capturedAt && Date.now() - capturedAt.getTime() > MAX_FIX_AGE_MS) throw conflict("stale_fix", "That position is too old to share as live.");
 
   const row = await asUser(req.userId, async (tx) => {
-    const state = first<{ mode: string; app_state: string | null; driving: boolean | null; fresh: boolean | null }>(await tx.execute(sql`
-      select s.location_sharing as mode, p.app_state, p.driving,
-             p.last_seen_at > now() - interval '3 minutes' as fresh
-      from public.user_settings s
-      left join public.user_presence p on p.user_id = s.user_id
-      where s.user_id = ${req.userId}`));
-    const mode = state?.mode ?? "off";
-    const live = state?.fresh === true && state.app_state !== "signed_out";
-    const driving = live && state?.driving === true;
-    const using = live && (driving || state?.app_state === "foreground");
+    // Read WHEN and presence with share locks: a concurrent "sharing off",
+    // drive end, sign-out or backgrounding either finishes first (and this
+    // is refused) or waits for this to commit (and its trigger then removes
+    // the position). Row locks first, then the sharer's fan-out lock.
+    const settings = first<{ mode: string }>(await tx.execute(sql`
+      select location_sharing as mode from public.user_settings where user_id = ${req.userId} for share`));
+    const presence = first<{ app_state: string; driving: boolean; fresh: boolean }>(await tx.execute(sql`
+      select app_state, driving, last_seen_at > now() - interval '3 minutes' as fresh
+      from public.user_presence where user_id = ${req.userId} for share`));
+    await tx.execute(sql`select private.lock_live_owner(${req.userId})`);
+    const mode = settings?.mode ?? "off";
+    const live = presence?.fresh === true && presence.app_state !== "signed_out";
+    const driving = live && presence?.driving === true;
+    const using = live && (driving || presence?.app_state === "foreground");
     if (mode === "off") throw conflict("sharing_off", "Location sharing is off.");
     if (mode === "while_driving" && !driving) throw conflict("not_driving", "Location is shared only while driving.");
     if (mode === "while_using" && !using) throw conflict("not_in_use", "Location is shared only while Derwent is open.");
 
-    return first<LiveRow>(await tx.execute(sql`
+    return first<LiveRow>(await withoutValues(tx.execute(sql`
       insert into public.live_locations
         (user_id, latitude, longitude, heading_deg, speed_kmh, accuracy_m, driving, recorded_at, expires_at)
       values (${req.userId}, ${latitude}, ${longitude}, ${headingDeg}, ${speedKmh}, ${accuracy}, ${driving},
@@ -123,7 +146,7 @@ router.put("/me/live-location", requireUser, publishLimit, handler(async (req, r
         set latitude = excluded.latitude, longitude = excluded.longitude, heading_deg = excluded.heading_deg,
             speed_kmh = excluded.speed_kmh, accuracy_m = excluded.accuracy_m, driving = excluded.driving,
             recorded_at = excluded.recorded_at, expires_at = excluded.expires_at
-      returning *`))!;
+      returning *`)))!;
   });
   res.json({ driving: row.driving, expiresAt: new Date(row.expires_at).toISOString() });
 }));
@@ -143,7 +166,8 @@ router.delete("/me/live-location", requireUser, handler(async (req, res) => {
 // canonical rule.
 router.get("/live-locations", requireUser, handler(async (req, res) => {
   const rows = await asUser(req.userId, async (tx) => (await tx.execute(sql`
-    select l.* from public.live_locations l
+    select l.*, (extract(epoch from (l.expires_at - now())) * 1000)::float8 as expires_in_ms
+    from public.live_locations l
     where l.expires_at > now()
       and l.user_id in (
         select f.friend_id from public.friendships f where f.user_id = ${req.userId}
@@ -259,7 +283,7 @@ router.put("/me/location-sharing/convoys/:id", requireUser, settingsLimit, handl
       where c.id = ${convoyId}`));
     if (!c) throw notFound();
     if (!c.eligible) {
-      throw conflict("convoy_not_eligible", "Location can be shared only with private Convoys joined by invitation code.");
+      throw conflict("convoy_not_eligible", "Location can be shared only with private Convoys that aren't part of a Community.");
     }
     await tx.execute(sql`
       insert into public.location_share_convoys (owner_id, convoy_id) values (${req.userId}, ${convoyId})

@@ -13,6 +13,26 @@ export async function purgeExpiredLiveLocations(): Promise<number> {
   return r.rows.length;
 }
 
+/**
+ * Realtime stores every broadcast in realtime.messages (kept for days) so it
+ * can deliver it. Live-location messages carry positions, so once delivered
+ * (a minute is ample) they are deleted: no trail of positions is kept there.
+ */
+export async function purgeDeliveredLiveLocationMessages(): Promise<number> {
+  const r = await db.execute(sql`
+    delete from realtime.messages
+    where event = 'live_location' and inserted_at < now() - interval '1 minute'
+    returning 1`);
+  return r.rows.length;
+}
+
+/** Only the error code: a message could quote the statement's values. */
+function errorCode(err: unknown): string {
+  const e = err as { code?: unknown; cause?: { code?: unknown } };
+  const code = e?.cause?.code ?? e?.code;
+  return typeof code === "string" ? code : err instanceof Error ? err.name : "unknown";
+}
+
 export function startLiveLocationCleanup(intervalMs = 60_000): () => void {
   let running = false;
   const tick = async () => {
@@ -22,7 +42,13 @@ export function startLiveLocationCleanup(intervalMs = 60_000): () => void {
       const removed = await purgeExpiredLiveLocations();
       if (removed) logger.debug({ removed }, "Expired live locations removed");
     } catch (err) {
-      logger.warn({ err: err instanceof Error ? err.message : String(err) }, "Live location clean-up failed");
+      logger.warn({ code: errorCode(err) }, "Live location clean-up failed");
+    }
+    try {
+      const purged = await purgeDeliveredLiveLocationMessages();
+      if (purged) logger.debug({ purged }, "Delivered live location messages removed");
+    } catch (err) {
+      logger.warn({ code: errorCode(err) }, "Live location message clean-up failed");
     } finally {
       running = false;
     }

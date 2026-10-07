@@ -4852,3 +4852,43 @@ test('live location publishing: one request at a time, the newest fix next; stop
   await never.publisher.stop();
   assert.equal(never.removed, 0, 'nothing to remove if nothing was shared');
 });
+
+test('live location: a snapshot position is kept only for what is left of its life; a late update after a removal is ignored', () => {
+  const { store, advance } = liveStoreRig();
+  // Recorded almost 3 minutes ago: 10 s left by the server's clock
+  store.replaceAll([{ ...LIVE, expiresInMs: 10_000 }]);
+  advance(9_000);
+  assert.equal(store.list.length, 1);
+  advance(2_000);
+  assert.equal(store.list.length, 0, 'dropped when the server says it expires, not 3 minutes after loading');
+
+  // Removed at 10:00:05; an update sent at 10:00:04 arrives afterwards
+  store.apply(parseLiveLocationEvent({ ...LIVE, sentAt: '2026-10-07T10:00:01.000000Z' })!);
+  store.apply(parseLiveLocationEvent({ type: 'live_location_hidden', userId: 'A', sentAt: '2026-10-07T10:00:05.000000Z' })!);
+  store.apply(parseLiveLocationEvent({ ...LIVE, sentAt: '2026-10-07T10:00:04.000000Z' })!);
+  assert.equal(store.get('A'), null, 'not shown again by an update that was overtaken');
+  store.apply(parseLiveLocationEvent({ ...LIVE, sentAt: '2026-10-07T10:01:00.000000Z' })!);
+  assert.ok(store.get('A'), 'a later share (granted again) is shown');
+});
+
+test('live location: a dropped inbox connection drops shared positions until the next snapshot', async () => {
+  const store = new LiveLocationStore({ setTimeout: () => 0, clearTimeout: () => {} });
+  const channels: Array<{ push: (p: unknown) => void; status: (s: InboxStatus) => void }> = [];
+  const feed = new PresenceFeed({
+    open: async ({ onEvent, onStatus }) => { channels.push({ push: onEvent, status: onStatus }); return { close: () => {} }; },
+    snapshot: async () => {},
+    apply: (e) => { if (e.type === 'live_location' || e.type === 'live_location_hidden') store.apply(e); },
+    decay: () => {},
+    onLeave: () => store.clear(),
+    setInterval: () => 1, clearInterval: () => {}, setTimeout: () => 1, clearTimeout: () => {},
+  });
+  feed.setActive(true);
+  await settle();
+  channels.at(-1)!.status('subscribed');
+  await settle();
+  channels.at(-1)!.push(LIVE);
+  assert.equal(store.list.length, 1);
+  channels.at(-1)!.status('error');
+  assert.equal(store.list.length, 0, 'a removal could be missed while disconnected: nothing kept');
+  feed.stop();
+});

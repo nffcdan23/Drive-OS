@@ -1012,15 +1012,39 @@ delete from location_share_convoys where owner_id = pg_temp.lu('O') and convoy_i
 select pg_temp.expect_viewers('{}', 'turning the Convoy off removes access');
 select pg_temp.expect_live_inbox('K', array['live_location_hidden'], 'at once');
 insert into location_share_convoys (owner_id, convoy_id) values (pg_temp.lu('O'), '1c000000-0000-4000-8000-000000000001');
+select pg_temp.expect_viewers(array['K'], 'turned on again');
+select pg_temp.live_mark();
 update convoys set visibility = 'public' where id = '1c000000-0000-4000-8000-000000000001';
 select pg_temp.expect_viewers('{}', 'a Convoy made public stops granting');
+select pg_temp.expect_live_inbox('K', array['live_location_hidden'], 'its members are told at once');
+select pg_temp.ok_bool(exists (select 1 from location_share_convoys where convoy_id = '1c000000-0000-4000-8000-000000000001'), false,
+  'and the grant is removed, not just suspended');
+-- While it is public a stranger joins without a code; making it private again shares nothing
+insert into convoy_participants (convoy_id, user_id, role) values ('1c000000-0000-4000-8000-000000000001', pg_temp.lu('X'), 'member');
 update convoys set visibility = 'private' where id = '1c000000-0000-4000-8000-000000000001';
+select pg_temp.expect_viewers('{}', 'made private again: nobody, including whoever joined while it was open, sees anything until O turns it on again');
+select pg_temp.ok_bool(private.can_see_live_location(pg_temp.lu('O'), pg_temp.lu('X')), false, 'the canonical rule agrees for the stranger who joined');
+delete from convoy_participants where convoy_id = '1c000000-0000-4000-8000-000000000001' and user_id = pg_temp.lu('X');
+update convoys set visibility = 'friends' where id = '1c000000-0000-4000-8000-000000000001';
+update convoys set visibility = 'private' where id = '1c000000-0000-4000-8000-000000000001';
+insert into location_share_convoys (owner_id, convoy_id) values (pg_temp.lu('O'), '1c000000-0000-4000-8000-000000000001');
+update convoys set group_id = '1e000000-0000-4000-8000-000000000001' where id = '1c000000-0000-4000-8000-000000000001';
+select pg_temp.expect_viewers('{}', 'a Convoy linked to a Community stops granting');
+update convoys set group_id = null where id = '1c000000-0000-4000-8000-000000000001';
+select pg_temp.expect_viewers('{}', 'and unlinking it does not restore anything');
+insert into location_share_convoys (owner_id, convoy_id) values (pg_temp.lu('O'), '1c000000-0000-4000-8000-000000000001');
 update convoys set status = 'cancelled' where id = '1c000000-0000-4000-8000-000000000001';
 select pg_temp.expect_viewers('{}', 'a cancelled Convoy stops granting');
+update convoys set status = 'forming' where id = '1c000000-0000-4000-8000-000000000001';
+insert into location_share_convoys (owner_id, convoy_id) values (pg_temp.lu('O'), '1c000000-0000-4000-8000-000000000001');
+update convoys set status = 'active' where id = '1c000000-0000-4000-8000-000000000001';
+select pg_temp.expect_viewers(array['K'], 'forming → active keeps it');
 update convoys set status = 'completed' where id = '1c000000-0000-4000-8000-000000000001';
 select pg_temp.expect_viewers('{}', 'nor does a completed one');
 update convoys set status = 'forming' where id = '1c000000-0000-4000-8000-000000000001';
-select pg_temp.expect_viewers(array['K'], 'back to private and forming: granted again');
+select pg_temp.expect_viewers('{}', 'reopened: still nothing until turned on again');
+insert into location_share_convoys (owner_id, convoy_id) values (pg_temp.lu('O'), '1c000000-0000-4000-8000-000000000001');
+select pg_temp.expect_viewers(array['K'], 'turned on again explicitly: granted');
 select pg_temp.live_mark();
 
 -- Grants are a union: losing one keeps any other
@@ -1091,6 +1115,10 @@ select pg_temp.expect_error_sql($$insert into live_locations (user_id, latitude,
 select pg_temp.expect_error_sql($$insert into live_locations (user_id, latitude, longitude, heading_deg, expires_at) values (pg_temp.lu('X'), 0, 0, 360, now() + interval '1 minute')$$, '23514', 'heading outside 0–360 rejected');
 select pg_temp.expect_error_sql($$insert into live_locations (user_id, latitude, longitude, expires_at) values (pg_temp.lu('X'), 0, 0, now() + interval '1 day')$$, '23514', 'an expiry more than 10 minutes ahead is rejected');
 select pg_temp.expect_error_sql($$update user_settings set location_sharing = 'always' where user_id = pg_temp.lu('X')$$, '23514', 'always-on (background) sharing cannot be turned on');
+select pg_temp.expect_error_sql($$update friendships set friend_id = pg_temp.lu('X') where user_id = pg_temp.lu('O') and friend_id = pg_temp.lu('F')$$, '42501', 'a friendship cannot be re-pointed (revocation runs on delete)');
+select pg_temp.expect_error_sql($$update convoy_participants set user_id = pg_temp.lu('X') where user_id = pg_temp.lu('K')$$, '42501', 'nor a Convoy membership');
+insert into location_share_friends (owner_id, friend_id) values (pg_temp.lu('O'), pg_temp.lu('G')) on conflict do nothing;
+select pg_temp.expect_error_sql($$update location_share_friends set friend_id = pg_temp.lu('X') where owner_id = pg_temp.lu('O') and friend_id = pg_temp.lu('G')$$, '42501', 'nor a grant');
 
 -- Deleting a Convoy ends what it granted
 update user_settings set location_sharing = 'while_using', location_friend_audience = 'all' where user_id = pg_temp.lu('O');
