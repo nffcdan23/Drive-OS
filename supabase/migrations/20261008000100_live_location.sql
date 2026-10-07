@@ -21,8 +21,9 @@
 -- A block in either direction overrides every grant.
 --
 -- One canonical rule, private.can_see_live_location(owner, viewer), is used
--- by the RLS policy, by the API's snapshot (which connects as the table
--- owner, so it calls the function explicitly) and by the Realtime fan-out.
+-- by the RLS policy (through a wrapper fixed to the signed-in user), by the
+-- API's snapshot (which connects as the table owner, so it calls the function
+-- explicitly) and by the Realtime fan-out.
 --
 -- live_locations holds one row per user, overwritten on every update, with
 -- an expiry: reads treat an expired row as absent whether or not the clean-up
@@ -497,9 +498,21 @@ revoke execute on function
   private.on_convoy_access_change(), private.on_convoy_deleting(), private.on_profile_deleting_live(), private.on_friendship_removed_live(), private.on_block_live(),
   private.on_presence_live_location()
 from public, anon, authenticated;
--- The read policy runs as the querying role.
-grant execute on function private.can_see_live_location(uuid, uuid), private.live_location_granted(uuid, uuid)
-  to authenticated;
+
+-- The read policy runs as the querying role, so that role needs EXECUTE on
+-- what it calls. It gets only this wrapper, which always asks about the
+-- signed-in user themselves: nobody can ask the canonical rule about some
+-- other pair of people (who shares with whom).
+create function private.can_see_live_location_as_me(p_owner uuid)
+returns boolean
+language sql stable security definer
+set search_path = ''
+as $$
+  select (select auth.uid()) is not null
+     and private.can_see_live_location(p_owner, (select auth.uid()))
+$$;
+revoke execute on function private.can_see_live_location_as_me(uuid) from public, anon, authenticated;
+grant execute on function private.can_see_live_location_as_me(uuid) to authenticated;
 
 revoke all on public.live_locations, public.location_share_friends, public.location_share_convoys from anon, authenticated;
 
@@ -510,7 +523,7 @@ create policy live_locations_select on public.live_locations
   for select to authenticated
   using (
     (user_id = (select auth.uid()) and expires_at > now())
-    or private.can_see_live_location(user_id, (select auth.uid()))
+    or private.can_see_live_location_as_me(user_id)
   );
 
 -- Grants are private to their owner; writes go through the API, which

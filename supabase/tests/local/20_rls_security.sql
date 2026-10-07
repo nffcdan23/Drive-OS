@@ -1079,6 +1079,12 @@ select pg_temp.check_denied('alice', $q$insert into public.live_locations (user_
 select pg_temp.check_denied('alice', $q$insert into public.location_share_friends (owner_id, friend_id) values ('a0000000-0000-0000-0000-000000000000', 'b0000000-0000-0000-0000-000000000000')$q$,
   '42501', '%row-level security%', 'grants are written only through the API');
 select pg_temp.check_rows('carol', $q$select * from public.location_share_friends$q$, 0, 'nobody can read someone else''s grants');
+select pg_temp.check_denied('alice', $q$select private.can_see_live_location('10000000-0000-4000-8000-000000000001', '10000000-0000-4000-8000-000000000002')$q$,
+  '42501', '%permission denied%', 'a client cannot ask the rule about other people (who shares with whom)');
+select pg_temp.check_denied('alice', $q$select private.live_location_granted('10000000-0000-4000-8000-000000000001', '10000000-0000-4000-8000-000000000002')$q$,
+  '42501', '%permission denied%', 'nor whether a grant exists between them');
+select pg_temp.check_denied('alice', $q$select private.publish_live_location('10000000-0000-4000-8000-000000000001')$q$,
+  '42501', '%permission denied%', 'nor trigger a fan-out');
 select pg_temp.expect_error_sql($$insert into live_locations (user_id, latitude, longitude, expires_at) values (pg_temp.lu('X'), 91, 0, now() + interval '1 minute')$$, '23514', 'latitude out of range rejected');
 select pg_temp.expect_error_sql($$insert into live_locations (user_id, latitude, longitude, expires_at) values (pg_temp.lu('X'), 0, 181, now() + interval '1 minute')$$, '23514', 'longitude out of range rejected');
 select pg_temp.expect_error_sql($$insert into live_locations (user_id, latitude, longitude, speed_kmh, expires_at) values (pg_temp.lu('X'), 0, 0, -1, now() + interval '1 minute')$$, '23514', 'negative speed rejected');

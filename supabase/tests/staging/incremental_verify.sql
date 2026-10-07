@@ -246,7 +246,10 @@ select pg_temp.ok(pg_temp.inbox('f') = array['presence:driving'], 'a friend with
 select pg_temp.ok(pg_temp.inbox('s') = '{}', 'a stranger receives nothing');
 select pg_temp.ok(pg_temp.inbox('b') = '{}', 'a blocked user receives nothing');
 update public.user_settings set show_activity_status = false where user_id = pg_temp.id('o');
-select pg_temp.ok(pg_temp.inbox('f') = array['presence:driving', 'hidden:-'], 'hiding activity tells friends at once');
+-- Both messages are in this one transaction, so they share inserted_at and
+-- their order is not defined: compare them as a set.
+select pg_temp.ok((select array_agg(x order by x) from unnest(pg_temp.inbox('f')) x) = array['hidden:-', 'presence:driving'],
+  'hiding activity tells friends at once');
 
 -- ─── 5. Private live location (0018) ─────────────────────────────────────────
 \echo '--- live location schema (0018)'
@@ -271,10 +274,12 @@ select pg_temp.ok(
                    and tablename in ('live_locations', 'location_share_friends', 'location_share_convoys') and cmd <> 'SELECT'),
   'live location tables are read-only to clients (no write policies)');
 select pg_temp.ok(
-  not has_function_privilege('anon', 'private.can_see_live_location(uuid, uuid)', 'EXECUTE')
+  not has_function_privilege('anon', 'private.can_see_live_location_as_me(uuid)', 'EXECUTE')
+  and not has_function_privilege('authenticated', 'private.can_see_live_location(uuid, uuid)', 'EXECUTE')
+  and not has_function_privilege('authenticated', 'private.live_location_granted(uuid, uuid)', 'EXECUTE')
   and not has_function_privilege('authenticated', 'private.publish_live_location(uuid)', 'EXECUTE')
   and not has_function_privilege('authenticated', 'private.revoke_live_location(uuid, uuid[])', 'EXECUTE'),
-  'clients cannot evaluate visibility anonymously or trigger a fan-out');
+  'clients cannot ask about other people''s sharing, evaluate it anonymously, or trigger a fan-out');
 select pg_temp.ok(
   (select count(*) from pg_trigger where not tgisinternal and tgname in (
      'live_locations_publish', 'user_settings_live_location', 'location_share_friends_publish', 'location_share_convoys_publish',
