@@ -217,6 +217,21 @@ async function run() {
   check('live location: a non-member friend does not', !(await seesA(b)));
   await api(a, 'DELETE', `/me/location-sharing/convoys/${convoy.json?.id}`);
   check('live location: turning the Convoy off ends it', !(await seesA(c)));
+  // While Using is foreground only, even during a drive (0019)
+  await api(a, 'PUT', `/me/location-sharing/convoys/${convoy.json?.id}`);
+  await api(a, 'PUT', '/me/presence', { appState: 'foreground', driving: true });
+  await api(a, 'PUT', '/me/live-location', { latitude: 51.5, longitude: -0.1 });
+  check('live location: while using, on screen during a drive: shared', await seesA(c));
+  await api(a, 'PUT', '/me/presence', { appState: 'background' });
+  check('live location: while using, backgrounded mid-drive: hidden at once', !(await seesA(c)));
+  const bg = await api(a, 'PUT', '/me/live-location', { latitude: 51.5, longitude: -0.1 });
+  check('live location: and refused from the background', bg.status === 409 && bg.json?.error === 'not_in_use', `HTTP ${bg.status}`);
+  await api(a, 'PATCH', '/me/location-sharing', { mode: 'while_driving' });
+  await api(a, 'PUT', '/me/live-location', { latitude: 51.5, longitude: -0.1 });
+  check('live location: while driving, backgrounded during a drive: shared', await seesA(c));
+  await api(a, 'PUT', '/me/presence', { appState: 'background', driving: false });
+  check('live location: while driving, the drive ends: hidden', !(await seesA(c)));
+  await api(a, 'PUT', '/me/presence', { appState: 'foreground' });
   await api(a, 'PATCH', '/me/location-sharing', { mode: 'off' });
 
   // ─── Storage through the API ─────────────────────────────────────────────
