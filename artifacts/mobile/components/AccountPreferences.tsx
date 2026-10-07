@@ -12,6 +12,7 @@ import { type ServerSettings, type Visibility } from "@/lib/backend/endpoints";
 import { describeError } from "@/lib/backend/http";
 import { showsActivityStatus } from "@/lib/backend/mappers";
 import { GlassSurface, GlassButton } from "@/components/Glass";
+import { LocationSharingSettings } from "@/components/LocationSharingSettings";
 import { Ionicons } from "@expo/vector-icons";
 import colors, { sectionAccent } from "@/constants/colors";
 const c = colors.dark;
@@ -169,23 +170,6 @@ export function AccountPreferences({
                 }
               />
             </View>
-            <View style={s.toggle}>
-              <View style={{ flex: 1 }}>
-                <Text style={s.label}>Live Location in Convoys</Text>
-                <Text style={s.note}>
-                  Your permission for live sharing when available.
-                </Text>
-              </View>
-              <Switch
-                accessibilityLabel="Live Location in Convoys"
-                disabled={saving}
-                value={settings.shareLiveLocationInConvoys}
-                trackColor={{ true: sectionAccent.profile }}
-                onValueChange={(value) =>
-                  void update({ shareLiveLocationInConvoys: value })
-                }
-              />
-            </View>
             <GlassButton
               style={s.permission}
               onPress={() => {
@@ -204,6 +188,7 @@ export function AccountPreferences({
               </Text>
             </GlassButton>
           </GlassSurface>
+          <LocationSharingSettings />
         </>
       )}
       {settings && section === "notifications" && (

@@ -4506,3 +4506,349 @@ test('two phones: B sees A go Online → Driving → Online → Away → hidden 
   feed.stop();
   viewer.reporter.stop();
 });
+
+// ─── Private live location (Phase 4A) ───────────────────────────────────────
+import {
+  DRIVE_MIN_INTERVAL_MS, FAILURE_BACKOFF_MS, LiveLocationPublisher, LiveLocationStore, REFUSED_BACKOFF_MS,
+  USING_INTERVAL_MS, USING_MIN_INTERVAL_MS, parseLiveLocationEvent, toUpdate, type LiveLocationUpdate,
+} from '@/lib/backend/liveLocation';
+
+const LIVE = {
+  type: 'live_location', userId: 'A', latitude: 54.5, longitude: -2.9, headingDeg: 90, speedKmh: 48, accuracyM: 5,
+  driving: true, recordedAt: '2026-10-07T10:00:00.000Z', expiresAt: '2026-10-07T10:03:00.000Z',
+};
+
+test('live location: inbox payloads are validated; anything malformed is ignored', () => {
+  assert.deepEqual(parseLiveLocationEvent(LIVE), LIVE);
+  assert.deepEqual(parseLiveLocationEvent({ type: 'live_location_hidden', userId: 'A' }), { type: 'live_location_hidden', userId: 'A' });
+  assert.deepEqual(parseLiveLocationEvent({ ...LIVE, headingDeg: null, speedKmh: null, accuracyM: null }),
+    { ...LIVE, headingDeg: null, speedKmh: null, accuracyM: null }, 'unknown speed and heading are fine');
+  for (const bad of [null, 'x', {}, { type: 'live_location' }, { ...LIVE, userId: '' }, { ...LIVE, latitude: 91 },
+    { ...LIVE, longitude: '1' }, { ...LIVE, latitude: Number.NaN }, { ...LIVE, speedKmh: -3 }, { ...LIVE, headingDeg: 400 },
+    { ...LIVE, expiresAt: LIVE.recordedAt }, { ...LIVE, recordedAt: 'yesterday' }, { type: 'live_location_hidden' },
+    { type: 'presence', userId: 'A', status: 'online' }]) {
+    assert.equal(parseLiveLocationEvent(bad), null, JSON.stringify(bad));
+  }
+  // A presence payload is not mistaken for a live one, nor the other way round.
+  assert.equal(parsePresenceEvent(LIVE), null);
+});
+
+/** A store on a fake clock with fake timers. */
+function liveStoreRig() {
+  const clock = { t: 1_000_000 };
+  const timers = new Map<number, { fn: () => void; at: number }>();
+  let id = 0;
+  const store = new LiveLocationStore({
+    now: () => clock.t,
+    setTimeout: (fn, ms) => { timers.set(++id, { fn, at: clock.t + ms }); return id; },
+    clearTimeout: (h) => { timers.delete(h as number); },
+  });
+  const advance = (ms: number) => {
+    clock.t += ms;
+    for (const [k, tm] of [...timers]) if (tm.at <= clock.t) { timers.delete(k); tm.fn(); }
+  };
+  return { store, clock, advance, timers };
+}
+
+test('live location: shared positions come from the snapshot and the inbox, and go when revoked or expired', () => {
+  const { store, advance, timers } = liveStoreRig();
+  let changes = 0;
+  store.subscribe(() => { changes++; });
+  store.replaceAll([LIVE, { ...LIVE, userId: 'C' }, { bogus: true }]);
+  assert.deepEqual(store.list.map((l) => l.userId).sort(), ['A', 'C'], 'snapshot, malformed entries dropped');
+  assert.equal(store.list, store.list, 'a stable array between changes');
+  store.replaceAll([LIVE]);
+  assert.deepEqual(store.list.map((l) => l.userId), ['A'], 'anyone missing from a new snapshot is dropped');
+
+  const newer = { ...LIVE, latitude: 54.6, recordedAt: '2026-10-07T10:00:10.000Z', expiresAt: '2026-10-07T10:03:10.000Z' };
+  store.apply(parseLiveLocationEvent(newer)!);
+  assert.equal(store.get('A')!.latitude, 54.6);
+  store.apply(parseLiveLocationEvent(LIVE)!);
+  assert.equal(store.get('A')!.latitude, 54.6, 'an older update arriving late does not replace a newer one');
+
+  store.apply({ type: 'live_location_hidden', userId: 'A' });
+  assert.equal(store.get('A'), null, 'revoked: gone at once');
+  assert.equal(store.list.length, 0);
+  assert.equal(timers.size, 0, 'no timer left with nothing to expire');
+
+  // Expiry is timed from receipt (3 minutes here), whatever the phone clocks say
+  store.apply(parseLiveLocationEvent(LIVE)!);
+  advance(179_000);
+  assert.equal(store.list.length, 1);
+  advance(2_000);
+  assert.equal(store.list.length, 0, 'dropped as it expires, without waiting for a server message');
+  // A position claiming a very long life is held 10 minutes at most
+  store.apply(parseLiveLocationEvent({ ...LIVE, expiresAt: '2026-10-08T10:00:00.000Z' })!);
+  advance(10 * 60_000 + 100);
+  assert.equal(store.get('A'), null);
+  store.apply(parseLiveLocationEvent(LIVE)!);
+  store.clear();
+  assert.equal(store.list.length, 0, 'clear drops everything (background, sign-out)');
+  assert.ok(changes > 5);
+});
+
+test('live location: the inbox feed routes live updates, holds them during the snapshot, and drops them in the background', async () => {
+  const store = new LiveLocationStore({ setTimeout: () => 0, clearTimeout: () => {} });
+  const channels: Array<{ push: (p: unknown) => void; status: (s: InboxStatus) => void }> = [];
+  let finish!: () => void;
+  let snapshotResult: unknown[] = [];
+  let lastIsCurrent: (() => boolean) | null = null;
+  const presence: PresenceEvent[] = [];
+  const feed = new PresenceFeed({
+    open: async ({ onEvent, onStatus }) => { channels.push({ push: onEvent, status: onStatus }); return { close: () => {} }; },
+    snapshot: async (isCurrent) => {
+      lastIsCurrent = isCurrent;
+      await new Promise<void>((res) => { finish = res; });
+      if (isCurrent()) store.replaceAll(snapshotResult);
+    },
+    apply: (e) => {
+      if (e.type === 'live_location' || e.type === 'live_location_hidden') store.apply(e);
+      else presence.push(e);
+    },
+    decay: () => store.prune(),
+    onLeave: () => store.clear(),
+    setInterval: () => 1, clearInterval: () => {}, setTimeout: () => 1, clearTimeout: () => {},
+  });
+  feed.setActive(true);
+  await settle();
+  channels.at(-1)!.status('subscribed');
+  const later = { ...LIVE, recordedAt: '2026-10-07T10:00:20.000Z', expiresAt: '2026-10-07T10:03:20.000Z', latitude: 54.7 };
+  channels.at(-1)!.push(later);
+  assert.equal(store.list.length, 0, 'held while the snapshot loads');
+  snapshotResult = [LIVE];
+  finish();
+  await settle();
+  assert.equal(store.get('A')!.latitude, 54.7, 'the live update wins over the older snapshot');
+  channels.at(-1)!.push({ type: 'presence', userId: 'A', status: 'driving', lastSeenAt: null });
+  assert.equal(presence.length, 1, 'presence still reaches the friend list');
+
+  // A removes B: B's cached position disappears at once
+  channels.at(-1)!.push({ type: 'live_location_hidden', userId: 'A' });
+  assert.equal(store.get('A'), null);
+
+  // Back in the background: everything shared is dropped (nothing can revoke it there)
+  channels.at(-1)!.push(LIVE);
+  assert.equal(store.list.length, 1);
+  feed.setActive(false);
+  assert.equal(store.list.length, 0, 'dropped on leaving the screen');
+
+  // A snapshot that finishes after the app left must not bring positions back
+  feed.setActive(true);
+  await settle();
+  channels.at(-1)!.status('subscribed');
+  snapshotResult = [LIVE];
+  feed.setActive(false);
+  assert.equal(lastIsCurrent!(), false);
+  finish();
+  await settle();
+  assert.equal(store.list.length, 0, 'a late snapshot is not applied in the background');
+  feed.stop();
+});
+
+/** A publisher on a fake clock with a scripted server. */
+function publisherRig(mode: 'off' | 'while_driving' | 'while_using', opts: { onScreen?: boolean; driving?: boolean } = {}) {
+  const clock = { t: 5_000_000 };
+  const sent: LiveLocationUpdate[] = [];
+  let removed = 0;
+  let sharingOff = 0;
+  let respond: (u: LiveLocationUpdate) => Promise<unknown> = async () => ({});
+  const publisher = new LiveLocationPublisher({
+    now: () => clock.t,
+    send: (u) => { sent.push(u); return respond(u); },
+    remove: async () => { removed++; },
+    onSharingOff: () => { sharingOff++; },
+  });
+  publisher.start({ mode, onScreen: opts.onScreen ?? true, driving: opts.driving ?? false });
+  // A fix moving north by `metres` from the last one, taken now
+  let lat = 54.5;
+  const fix = (metres = 0, extra: Partial<GpsFix> = {}): GpsFix => {
+    lat += metres / 111_195;
+    return { latitude: lat, longitude: -2.9, speedMs: 13, headingDeg: 10, accuracyM: 5, timestamp: clock.t, ...extra };
+  };
+  return {
+    publisher, clock, sent, fix,
+    get removed() { return removed; }, get sharingOff() { return sharingOff; },
+    respondWith: (fn: (u: LiveLocationUpdate) => Promise<unknown>) => { respond = fn; },
+  };
+}
+
+test('live location publishing: nothing while sharing is off; no position outside a drive when sharing while driving', async () => {
+  const off = publisherRig('off', { driving: true });
+  off.publisher.noteDriveFix(off.fix());
+  off.publisher.noteForegroundFix(off.fix());
+  assert.equal(off.sent.length, 0, 'off: nothing is sent, ever');
+
+  const r = publisherRig('while_driving');
+  r.publisher.noteForegroundFix(r.fix());
+  r.publisher.noteDriveFix(r.fix());
+  assert.equal(r.sent.length, 0, 'not driving: nothing');
+  r.publisher.setDriving(true);
+  r.publisher.noteForegroundFix(r.fix());
+  assert.equal(r.sent.length, 0, 'the foreground stream is never used during a drive (the drive pipeline is)');
+  r.publisher.noteDriveFix(r.fix());
+  await settle();
+  assert.equal(r.sent.length, 1, 'the first drive fix is sent');
+});
+
+test('live location publishing: during a drive about every 10 s, sooner after 50 m, never more than every 5 s', async () => {
+  const r = publisherRig('while_driving', { driving: true });
+  r.publisher.noteDriveFix(r.fix());
+  await settle();
+  r.clock.t += 3_000;
+  r.publisher.noteDriveFix(r.fix(80));
+  await settle();
+  assert.equal(r.sent.length, 1, 'under 5 s: not even after 80 m');
+  r.clock.t += DRIVE_MIN_INTERVAL_MS - 3_000;
+  r.publisher.noteDriveFix(r.fix(10));
+  await settle();
+  assert.equal(r.sent.length, 2, '5 s and 90 m from the last sent: sent');
+  r.clock.t += 6_000;
+  r.publisher.noteDriveFix(r.fix(5));
+  await settle();
+  assert.equal(r.sent.length, 2, '6 s and 5 m: not yet');
+  r.clock.t += 4_000;
+  r.publisher.noteDriveFix(r.fix(5));
+  await settle();
+  assert.equal(r.sent.length, 3, '10 s: sent even when barely moving');
+  // Drive fixes in the background (phone locked) still publish
+  r.publisher.setOnScreen(false);
+  r.clock.t += 10_000;
+  r.publisher.noteDriveFix(r.fix(5));
+  await settle();
+  assert.equal(r.sent.length, 4, 'locked phone during a drive: still shared');
+  assert.equal(r.removed, 0);
+  // The drive ends: the position is withdrawn at once
+  r.publisher.setDriving(false);
+  assert.equal(r.removed, 1, 'drive ended: removed');
+  r.clock.t += 60_000;
+  r.publisher.noteDriveFix(r.fix(500));
+  await settle();
+  assert.equal(r.sent.length, 4);
+});
+
+test('live location publishing: while using, on screen only, about once a minute', async () => {
+  const r = publisherRig('while_using');
+  r.publisher.noteForegroundFix(r.fix());
+  await settle();
+  assert.equal(r.sent.length, 1);
+  r.clock.t += USING_MIN_INTERVAL_MS - 1_000;
+  r.publisher.noteForegroundFix(r.fix(500));
+  await settle();
+  assert.equal(r.sent.length, 1, 'never within 30 s');
+  r.clock.t += 2_000;
+  r.publisher.noteForegroundFix(r.fix(10));
+  await settle();
+  assert.equal(r.sent.length, 2, 'after 30 s, having moved over 100 m: sent');
+  r.clock.t += 40_000;
+  r.publisher.noteForegroundFix(r.fix(10));
+  await settle();
+  assert.equal(r.sent.length, 2, 'standing nearly still: waits for the minute');
+  r.clock.t += USING_INTERVAL_MS - 40_000;
+  r.publisher.noteForegroundFix(r.fix(0));
+  await settle();
+  assert.equal(r.sent.length, 3, 'a minute: refreshed so it does not expire');
+
+  // Leaving the screen (not driving) withdraws it and stops sharing
+  r.publisher.setOnScreen(false);
+  assert.equal(r.removed, 1, 'removed on leaving the app');
+  r.clock.t += 120_000;
+  r.publisher.noteForegroundFix(r.fix(500));
+  await settle();
+  assert.equal(r.sent.length, 3, 'nothing from the background outside a drive');
+  // A drive while sharing "while using" publishes from the drive pipeline, screen or not
+  r.publisher.setDriving(true);
+  r.publisher.noteDriveFix(r.fix(10));
+  await settle();
+  assert.equal(r.sent.length, 4);
+});
+
+test('live location publishing: bad, stale or invalid fixes are not shared; unknown values are dropped', async () => {
+  const now = 5_000_000;
+  assert.equal(toUpdate({ latitude: 54, longitude: -2, speedMs: 10, accuracyM: 500, timestamp: now }, now), null, 'poor accuracy');
+  assert.equal(toUpdate({ latitude: 54, longitude: -2, speedMs: 10, accuracyM: 5, timestamp: now - 120_000 }, now), null, 'stale');
+  assert.equal(toUpdate({ latitude: Number.NaN, longitude: -2, speedMs: 10, timestamp: now }, now), null, 'not a number');
+  assert.equal(toUpdate({ latitude: 95, longitude: -2, speedMs: 10, timestamp: now }, now), null, 'out of range');
+  const u = toUpdate({ latitude: 54, longitude: -2, speedMs: -1, headingDeg: -1, accuracyM: 5, timestamp: now + 5_000 }, now)!;
+  assert.equal(u.speedMps, null, 'iOS reports -1 for unknown speed');
+  assert.equal(u.headingDeg, null, 'and for unknown heading');
+  assert.equal(u.capturedAt, new Date(now).toISOString(), 'never claims a fix from the future');
+  assert.equal(toUpdate({ latitude: 54, longitude: -2, speedMs: 0, headingDeg: 370, timestamp: now }, now)!.headingDeg, 10);
+  assert.deepEqual(Object.keys(u).sort(), ['accuracyM', 'capturedAt', 'headingDeg', 'latitude', 'longitude', 'speedMps'],
+    'only the position and its quality; the server decides who sees it, when, and whether driving');
+
+  const r = publisherRig('while_driving', { driving: true });
+  r.publisher.noteDriveFix(r.fix(0, { accuracyM: 300 }));
+  r.publisher.noteDriveFix(r.fix(0, { timestamp: r.clock.t - 90_000 }));
+  await settle();
+  assert.equal(r.sent.length, 0);
+});
+
+test('live location publishing: the server has the last word; failures never escape', async () => {
+  // Turned off elsewhere: stop at once
+  const off = publisherRig('while_using');
+  off.respondWith(async () => { throw new ApiError(409, 'sharing_off', 'off'); });
+  off.publisher.noteForegroundFix(off.fix());
+  await settle();
+  assert.equal(off.sharingOff, 1, 'told the app');
+  assert.equal(off.publisher.sharingMode, 'off');
+  off.clock.t += 120_000;
+  off.publisher.noteForegroundFix(off.fix(200));
+  await settle();
+  assert.equal(off.sent.length, 1, 'nothing more is sent');
+
+  // Presence hasn't caught up with the drive yet: wait, then try again
+  const early = publisherRig('while_driving', { driving: true });
+  early.respondWith(async () => { throw new ApiError(409, 'not_driving', 'not yet'); });
+  early.publisher.noteDriveFix(early.fix());
+  await settle();
+  early.respondWith(async () => ({}));
+  early.clock.t += REFUSED_BACKOFF_MS - 1_000;
+  early.publisher.noteDriveFix(early.fix(100));
+  await settle();
+  assert.equal(early.sent.length, 1, 'backs off after a refusal');
+  early.clock.t += 2_000;
+  early.publisher.noteDriveFix(early.fix(100));
+  await settle();
+  assert.equal(early.sent.length, 2, 'then tries again');
+
+  // Network or server failures are swallowed, with a back-off
+  const flaky = publisherRig('while_driving', { driving: true });
+  flaky.respondWith(async () => { throw new NetworkError(); });
+  flaky.publisher.noteDriveFix(flaky.fix());
+  await settle();
+  flaky.clock.t += FAILURE_BACKOFF_MS - 1_000;
+  flaky.publisher.noteDriveFix(flaky.fix(100));
+  await settle();
+  assert.equal(flaky.sent.length, 1, 'no hammering while the server is unreachable');
+  flaky.clock.t += 2_000;
+  flaky.respondWith(async () => ({}));
+  flaky.publisher.noteDriveFix(flaky.fix(100));
+  await settle();
+  assert.equal(flaky.sent.length, 2);
+});
+
+test('live location publishing: one request at a time, the newest fix next; stopping removes the position', async () => {
+  const r = publisherRig('while_driving', { driving: true });
+  let release!: () => void;
+  r.respondWith(() => new Promise((res) => { release = () => res({}); }));
+  r.publisher.noteDriveFix(r.fix());
+  r.clock.t += 6_000;
+  r.publisher.noteDriveFix(r.fix(60));
+  r.clock.t += 6_000;
+  const newest = r.fix(60);
+  r.publisher.noteDriveFix(newest);
+  assert.equal(r.sent.length, 1, 'one in flight');
+  r.respondWith(async () => ({}));
+  release();
+  await settle();
+  assert.equal(r.sent.length, 2, 'then the newest waiting fix');
+  assert.equal(r.sent[1]!.latitude, newest.latitude);
+  await r.publisher.stop();
+  assert.equal(r.removed, 1, 'sign-out removes the position');
+  r.publisher.noteDriveFix(r.fix(500));
+  await settle();
+  assert.equal(r.sent.length, 2, 'and nothing is sent after stopping');
+  const never = publisherRig('while_driving');
+  await never.publisher.stop();
+  assert.equal(never.removed, 0, 'nothing to remove if nothing was shared');
+});

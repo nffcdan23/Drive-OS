@@ -1086,12 +1086,22 @@ select pg_temp.expect_error_sql($$insert into live_locations (user_id, latitude,
 select pg_temp.expect_error_sql($$insert into live_locations (user_id, latitude, longitude, expires_at) values (pg_temp.lu('X'), 0, 0, now() + interval '1 day')$$, '23514', 'an expiry more than 10 minutes ahead is rejected');
 select pg_temp.expect_error_sql($$update user_settings set location_sharing = 'always' where user_id = pg_temp.lu('X')$$, '23514', 'always-on (background) sharing cannot be turned on');
 
--- Account deletion removes the position and tells viewers
+-- Deleting a Convoy ends what it granted
 update user_settings set location_sharing = 'while_using', location_friend_audience = 'all' where user_id = pg_temp.lu('O');
 select pg_temp.publish_o(false);
+select pg_temp.expect_viewers(array['B','F','G','K'], 'while using, all friends and the shared Convoy');
+select pg_temp.live_mark();
+delete from convoys where id = '1c000000-0000-4000-8000-000000000001';
+select pg_temp.expect_viewers(array['B','F','G'], 'deleting the Convoy ends its grant');
+select pg_temp.expect_live_inbox('K', array['live_location_hidden'], 'and its members are told');
+select pg_temp.ok_bool(exists (select 1 from location_share_convoys where convoy_id = '1c000000-0000-4000-8000-000000000001'), false,
+  'no grant outlives the Convoy');
+
+-- Account deletion removes the position and tells viewers
 select pg_temp.live_mark();
 delete from auth.users where id = pg_temp.lu('O');
 select pg_temp.ok_bool(exists (select 1 from live_locations where user_id = pg_temp.lu('O')), false, 'deleting the account deletes the position');
 select pg_temp.expect_live_inbox('F', array['live_location_hidden'], 'and viewers are told to remove it');
+select pg_temp.expect_live_inbox('G', array['live_location_hidden'], 'every one of them');
 
 \echo '=== ALL RLS AND SECURITY TESTS PASSED ==='

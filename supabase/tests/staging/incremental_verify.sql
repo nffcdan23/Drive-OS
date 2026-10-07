@@ -279,7 +279,7 @@ select pg_temp.ok(
   (select count(*) from pg_trigger where not tgisinternal and tgname in (
      'live_locations_publish', 'user_settings_live_location', 'location_share_friends_publish', 'location_share_convoys_publish',
      'convoy_participants_live_location', 'convoys_live_location', 'friendships_live_location', 'user_blocks_live_location',
-     'user_presence_live_location')) = 9,
+     'user_presence_live_location', 'convoys_live_location_delete', 'profiles_live_location_delete')) = 11,
   'every revocation trigger is installed');
 
 \echo '--- live location visibility and fan-out'

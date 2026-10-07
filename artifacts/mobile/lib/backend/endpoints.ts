@@ -4,6 +4,7 @@
  */
 import type { ApiClient } from './http';
 import type { PresenceUpdate } from './presence';
+import type { LiveLocation, LiveLocationUpdate, LocationFriendAudience, LocationSharingMode } from './liveLocation';
 
 export type Visibility = 'private' | 'friends' | 'public';
 
@@ -13,6 +14,7 @@ export interface ServerSettings {
   defaultJourneyVisibility: Visibility;
   defaultLocationVisibility: Visibility;
   allowFriendRequests: 'everyone' | 'nobody';
+  /** Deprecated: never used to share anything. Live location has its own settings (ServerLocationSharing). */
   shareLiveLocationInConvoys: boolean;
   notificationPrefs: Record<string, boolean>;
   /** Friends may see when you're online, driving or last active (absent from older servers: on). */
@@ -197,6 +199,22 @@ export interface ServerOwnPresence {
   lastSeenAt: string | null;
 }
 
+/** Your live-location sharing: WHEN (mode) and WHO (friends, Convoys). */
+export interface ServerLocationSharing {
+  mode: LocationSharingMode;
+  friendAudience: LocationFriendAudience;
+  /** How many people would see your position whenever it is being shared. */
+  sharingWithCount: number;
+  /** Whether a position is being shown right now. */
+  live: boolean;
+  friends: Array<UserCard & { selected: boolean }>;
+  /** Convoys you're in that haven't ended; only `eligible` ones (private, joined by code) can be chosen. */
+  convoys: Array<{
+    id: string; name: string; status: string; visibility: Visibility; startsAt: string;
+    eligible: boolean; shared: boolean; otherMembers: number;
+  }>;
+}
+
 export interface ServerConvoy {
   id: string; ownerId: string; groupId: string | null; name: string; description: string;
   destinationName: string; destinationLat: number | null; destinationLng: number | null;
@@ -301,6 +319,20 @@ export const endpoints = (api: ApiClient) => ({
   updatePresence: (update: PresenceUpdate) =>
     api.request<ServerOwnPresence>('PUT', '/me/presence', update, { quiet: true }),
   removeFriend: (userId: string) => api.delete(`/friends/${userId}`),
+
+  // Live location (quiet: sharing never raises the app-wide server banner)
+  publishLiveLocation: (update: LiveLocationUpdate) =>
+    api.request<{ driving: boolean; expiresAt: string }>('PUT', '/me/live-location', update, { quiet: true }),
+  removeLiveLocation: () => api.request<void>('DELETE', '/me/live-location', undefined, { quiet: true }),
+  /** Positions currently shared with you (there is no per-user lookup). */
+  listLiveLocations: () => api.request<LiveLocation[]>('GET', '/live-locations', undefined, { quiet: true }),
+  getLocationSharing: () => api.get<ServerLocationSharing>('/me/location-sharing'),
+  updateLocationSharing: (fields: { mode?: LocationSharingMode; friendAudience?: LocationFriendAudience }) =>
+    api.patch<ServerLocationSharing>('/me/location-sharing', fields),
+  shareLocationWithFriend: (userId: string) => api.put<ServerLocationSharing>(`/me/location-sharing/friends/${userId}`, {}),
+  stopSharingLocationWithFriend: (userId: string) => api.delete<ServerLocationSharing>(`/me/location-sharing/friends/${userId}`),
+  shareLocationWithConvoy: (convoyId: string) => api.put<ServerLocationSharing>(`/me/location-sharing/convoys/${convoyId}`, {}),
+  stopSharingLocationWithConvoy: (convoyId: string) => api.delete<ServerLocationSharing>(`/me/location-sharing/convoys/${convoyId}`),
   listFriendRequests: () => api.get<{
     incoming: Array<{ id: string; createdAt: string; user: UserCard }>;
     outgoing: Array<{ id: string; createdAt: string; user: UserCard }>;

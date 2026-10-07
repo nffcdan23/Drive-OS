@@ -380,6 +380,41 @@ create trigger convoys_live_location
                      or old.status is distinct from new.status)
   execute function private.on_convoy_access_change();
 
+-- A Convoy deleted outright: its grants are removed first, while its members
+-- are still listed, so each member is re-checked and told. (Left to the
+-- cascades, the grants and members could go in either order and nobody
+-- would be told.)
+create function private.on_convoy_deleting()
+returns trigger
+language plpgsql security definer
+set search_path = ''
+as $$
+begin
+  delete from public.location_share_convoys where convoy_id = old.id;
+  return old;
+end;
+$$;
+create trigger convoys_live_location_delete
+  before delete on public.convoys
+  for each row execute function private.on_convoy_deleting();
+
+-- An account deleted: its position goes first, while its friendships and
+-- Convoys are still there to say who must be told (not left to the order in
+-- which the cascades happen to run).
+create function private.on_profile_deleting_live()
+returns trigger
+language plpgsql security definer
+set search_path = ''
+as $$
+begin
+  delete from public.live_locations where user_id = old.id;
+  return old;
+end;
+$$;
+create trigger profiles_live_location_delete
+  before delete on public.profiles
+  for each row execute function private.on_profile_deleting_live();
+
 -- A friendship ended: the selected-friend grant goes with it (it never
 -- outlives the friendship), and the ex-friend is re-checked (a shared Convoy
 -- may still grant access).
@@ -459,7 +494,7 @@ revoke execute on function
   private.reconcile_live_location(uuid), private.on_live_location_change(),
   private.on_location_settings_change(), private.on_location_share_friend_change(),
   private.on_location_share_convoy_change(), private.on_convoy_participant_removed(),
-  private.on_convoy_access_change(), private.on_friendship_removed_live(), private.on_block_live(),
+  private.on_convoy_access_change(), private.on_convoy_deleting(), private.on_profile_deleting_live(), private.on_friendship_removed_live(), private.on_block_live(),
   private.on_presence_live_location()
 from public, anon, authenticated;
 -- The read policy runs as the querying role.
