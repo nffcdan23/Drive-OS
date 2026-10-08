@@ -101,6 +101,11 @@ export interface MapboxDriveMapProps {
    * whenever the Drive screen's frame loop says, without re-rendering the map
    */
   trailHead?: TrailHeadSubscribe;
+  /**
+   * Friends' live positions (FriendMarkersMapbox): drawn beneath the user's
+   * own arrow, and never touching the camera
+   */
+  friendLayer?: ReactElement | null;
   /** Logo and attribution sit this far above the bottom edge */
   ornamentBottom: number;
   ornamentLeft: number;
@@ -271,6 +276,7 @@ const MapboxDriveMap = forwardRef<MapboxDriveMapHandle, MapboxDriveMapProps>(
       trail,
       trailColor,
       trailHead,
+      friendLayer,
       ornamentBottom,
       ornamentLeft,
       onUserGesture,
@@ -426,6 +432,7 @@ const MapboxDriveMap = forwardRef<MapboxDriveMapHandle, MapboxDriveMapProps>(
               }}
             />
           </ShapeSource>
+          {friendLayer}
           {showMarker && (
             <MarkerFeeder
               ref={markerRef}

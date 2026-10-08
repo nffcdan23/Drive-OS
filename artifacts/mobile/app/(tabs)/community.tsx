@@ -34,6 +34,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useColors } from "@/hooks/useColors";
 import {
   useApp,
+  useSharedLocations,
   Friend,
   Convoy,
   Group,
@@ -133,8 +134,8 @@ export default function CommunityScreen() {
     conversations,
     userProfile,
     refreshProfileStats,
-    sharedLocations,
   } = useApp();
+  const sharedLocations = useSharedLocations();
   // Who is sharing a live location with you right now (no positions shown yet).
   const sharingWithMe = useMemo(
     () => new Set(sharedLocations.map((l) => l.userId)),
