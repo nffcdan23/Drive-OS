@@ -195,6 +195,8 @@ class FakeServer {
   locations: ServerLocation[] = [];
   journeys: ServerJourney[] = [];
   points = new Map<string, number>();
+  /** Each journey's stored point times, as the server keeps them (duplicates ignored) */
+  pointTimes = new Map<string, Set<string>>();
   deletedJourneys: string[] = [];
   loseNextStartReply = false;
   private n = 0;
@@ -241,7 +243,17 @@ class FakeServer {
         self.deletedJourneys.push(id);
         self.journeys = self.journeys.filter((j) => j.id !== id);
       },
-      addRoutePoints: async (id: string, pts: unknown[]) => { self.guard(); self.points.set(id, (self.points.get(id) ?? 0) + pts.length); return { saved: pts.length, status: 'active' }; },
+      addRoutePoints: async (id: string, pts: { recordedAt: string }[]) => {
+        self.guard();
+        self.points.set(id, (self.points.get(id) ?? 0) + pts.length);
+        const times = self.pointTimes.get(id) ?? new Set<string>();
+        for (const p of pts) times.add(p.recordedAt);
+        self.pointTimes.set(id, times);
+        const j = self.journeys.find((x) => x.id === id);
+        return { saved: pts.length, status: j?.status ?? 'active' };
+      },
+      listActiveJourneys: async () => { self.guard(); return self.journeys.filter((j) => j.status === 'active'); },
+      getJourneyPoints: async (id: string) => { self.guard(); return [...(self.pointTimes.get(id) ?? [])].sort().map((recordedAt) => ({ recordedAt })); },
       completeJourney: async (id: string, i: { endedAt: string; distanceKm: number; name?: string }) => {
         self.guard();
         const j = self.journeys.find((x) => x.id === id)!;
@@ -1662,7 +1674,7 @@ test('a short drive leaves nothing behind even offline, or after a lost server r
   assert.equal(d.result.saved, true);
 });
 
-test('a short drive cut off by the app being killed is discarded on restart', async () => {
+test('a short drive cut off by the app being killed is not saved on restart, and its server journey is left alone', async () => {
   const server = new FakeServer();
   const store = new MemoryStore();
   const clock = { t: Date.now() - 60_000 };
@@ -1678,7 +1690,13 @@ test('a short drive cut off by the app being killed is discarded on restart', as
   await again.outbox.flush();
   assert.equal(again.status.pendingJourneys, 0);
   assert.equal(again.data.journeys.length, 0);
-  assert.equal(server.journeys.length, 0);
+  // Recovery can't prove from the device's copy (which may be missing its
+  // last seconds) that the drive was short, so it deletes nothing on the
+  // server: the journey is left for the orphan check, which only finishes it
+  // if its own points show a real drive (here they don't)
+  assert.equal(server.deletedJourneys.length, 0, 'nothing deleted during recovery');
+  assert.equal(server.journeys.length, 1);
+  assert.equal(server.journeys[0]!.status, 'active');
 });
 
 test('paused time does not count toward the 10-second minimum', async () => {
@@ -1736,10 +1754,13 @@ test('the save backstop and crash recovery also count only active time', async (
   drive(c, 4000); c.setDrivePaused(true); clock.t += 20_000; c.setDrivePaused(false); drive(c, 3000);
   await new Promise((r) => setTimeout(r, 5));
   const restarted = makeSync(server, store, clock);
+  const deletedBefore = server.deletedJourneys.length;
   await restarted.start();
   await restarted.outbox.flush();
   assert.equal(restarted.status.pendingJourneys, 0);
-  assert.equal(server.journeys.length, 0);
+  // Not saved, but not deleted from the server during recovery either
+  assert.equal(server.deletedJourneys.length, deletedBefore);
+  assert.ok(server.journeys.every((j) => j.status === 'active'));
   // ...while 14 s of driving with the same pause is kept.  (Recovery can only
   // count up to the last point saved on the device, every 5 s while driving.)
   const store2 = new MemoryStore();
@@ -2305,7 +2326,7 @@ test('the background task is defined at the app entry, before any screen loads',
   assert.equal(pkg.main, 'index.js');
   const entry = await readFile(`${root}/index.js`, 'utf8');
   const lines = entry.split('\n').filter((l) => l.startsWith('import '));
-  assert.deepEqual(lines, ["import './lib/driveBackgroundLocation';", "import 'expo-router/entry';"]);
+  assert.deepEqual(lines, ["import './lib/diagnostics';", "import './lib/driveBackgroundLocation';", "import 'expo-router/entry';"]);
   const task = await readFile(`${root}/lib/driveBackgroundLocation.ts`, 'utf8');
   assert.match(task, /^\s*TaskManager\.defineTask/m, 'defineTask at module scope');
   assert.match(task, /pausesUpdatesAutomatically: false/);
@@ -4086,4 +4107,587 @@ test('speeds change unit in one place, and the app passes the phone region to "A
   const server = readFileSync(join(MOBILE, '../api-server/src/routes/journeys.ts'), 'utf8');
   assert.ok(/speed_kmh: Math\.min\(p\.num\("speedKmh"/.test(server));
   assert.ok(/if \(p\.speed_kmh > topSpeedKmh\) topSpeedKmh = p\.speed_kmh;/.test(server));
+});
+
+// ─── Crash recovery: a drive is never lost ───────────────────────────────────
+//
+// A drive lives on the device as "active" while recorded and moves to
+// "pending" when finished, until the server has it.  These tests kill the app
+// at every step of that move, make storage fail the ways a phone's can, and
+// leave journeys behind on the server, and check the drive always survives.
+
+import { DiagnosticsJournal, JOURNAL_KEY, fatalErrorRecord } from '@/lib/backend/journal';
+import { dedupeDrives, lastActivityMs, newJourneyRecord as newRecord, type JourneyRecord } from '@/lib/backend/journeyRecorder';
+import { ORPHAN_IDLE_MS, ORPHAN_CHECK_EVERY_MS } from '@/lib/backend/cloudSync';
+import { HELD_FIXES_MAX } from '@/lib/backend/driveTracking';
+
+const ACTIVE_KEY = userKey('u1', 'journey/active');
+const PENDING_KEY = userKey('u1', 'journey/pending');
+
+/** Storage that fails the ways a phone's can: reads or writes of chosen keys, or every write once the app is "killed". */
+class FlakyStore extends MemoryStore {
+  failReads: string[] = [];
+  failWrites: string[] = [];
+  /** Writes allowed before the app is killed; every later write fails. */
+  writesLeft = Infinity;
+  failedWrites = 0;
+  async getItem(key: string) {
+    if (this.failReads.some((k) => key.endsWith(k))) throw new Error(`read failed: ${key}`);
+    return super.getItem(key);
+  }
+  async setItem(key: string, value: string) { this.write(key); return super.setItem(key, value); }
+  async removeItem(key: string) { this.write(key); return super.removeItem(key); }
+  private write(key: string) {
+    if (this.failWrites.some((k) => key.endsWith(k))) { this.failedWrites++; throw new Error(`write failed: ${key}`); }
+    if (this.writesLeft <= 0) { this.failedWrites++; throw new Error('the app was killed'); }
+    this.writesLeft--;
+  }
+}
+
+function recoveryApp(store: MemoryStore, clock: { t: number }, updates = new FakeUpdates(), server = new FakeServer(),
+  journal = new DiagnosticsJournal({ store: new MemoryStore(), now: () => clock.t })) {
+  const tracker = new BackgroundDriveRecorder({ store, updates, now: () => clock.t, journal });
+  let n = 0;
+  const app = new CloudSync({
+    ep: server.ep(), store, userId: 'u1', publishableKey: 'sb_publishable_x', newId: () => `drive-${++n}-${Math.random().toString(36).slice(2)}`,
+    timezone: () => 'UTC', now: () => clock.t, tracker, journal,
+    prepareFile: async () => ({ body: new Uint8Array([1]), size: 1, mimeType: 'image/jpeg' }),
+  });
+  return { app, tracker, updates, server, store, clock, journal };
+}
+type RecoveryApp = ReturnType<typeof recoveryApp>;
+
+/** A winding A-road at 27 m/s (about 60 mph): it bends, so a point is kept every 3 s. */
+function aRoadFix(s: number, t: number, accuracyM = 5): GpsFix {
+  return {
+    latitude: 53.23 + (s * 27 * Math.cos(s / 300)) / 111_320, longitude: -0.54 + (s * 27 * Math.sin(s / 300)) / 66_000,
+    speedMs: 27, headingDeg: 0, accuracyM, altitudeM: 20, timestamp: t,
+  };
+}
+
+/**
+ * Drives seconds fromS+1 … fromS+seconds the way the app is fed: the
+ * background task delivers fixes in batches of five, and while the phone is
+ * unlocked (five minutes in every ten) the screen's watcher delivers each fix
+ * too.  Optionally offline, paused, or with vague fixes for a while.
+ */
+async function longDrive(b: RecoveryApp, fromS: number, seconds: number, opts: {
+  offline?: [number, number]; pause?: [number, number]; accuracyM?: (s: number) => number;
+} = {}) {
+  let batch: GpsFix[] = [];
+  for (let s = fromS + 1; s <= fromS + seconds; s++) {
+    b.clock.t += 1000;
+    b.server.offline = !!opts.offline && s >= opts.offline[0] && s < opts.offline[1];
+    if (opts.pause?.[0] === s) b.app.setDrivePaused(true);
+    if (opts.pause?.[1] === s) b.app.setDrivePaused(false);
+    const fix = aRoadFix(s, b.clock.t, opts.accuracyM?.(s));
+    batch.push(fix);
+    if (batch.length === 5) { await b.tracker.deliver(batch); batch = []; }
+    if (s % 600 < 300) b.app.addFix(fix);
+    if (s % 60 === 0) await settle();
+  }
+  if (batch.length) await b.tracker.deliver(batch);
+  b.server.offline = false;
+  await settle();
+}
+
+const savedActive = async (store: MemoryStore) => JSON.parse((await store.getItem(ACTIVE_KEY))!) as JourneyRecord;
+const events = async (b: RecoveryApp) => (await b.journal.read()).map((e) => e.event);
+
+test('a 2 h 10 min drive (locked and unlocked, offline for 15 min, paused) uploads every recorded point and finishes once', async () => {
+  const b = recoveryApp(new MemoryStore(), { t: Date.parse('2026-10-05T13:00:00Z') });
+  await b.app.start();
+  await b.app.startDrive(null);
+  await settle();
+  await longDrive(b, 0, 130 * 60, { offline: [1800, 2700], pause: [4000, 4300] });
+  const recorded = b.app.activeRecord!.points.length;
+  assert.ok(recorded > 2400, `${recorded} points`);
+  assert.ok(await b.app.endDrive());
+  await b.app.sync();
+  assert.equal(b.server.journeys.length, 1);
+  assert.equal(b.server.journeys[0]!.status, 'completed');
+  assert.equal(b.server.pointTimes.get(b.server.journeys[0]!.id)!.size, recorded, 'every recorded point reached the server');
+  assert.equal(b.app.status.pendingJourneys, 0);
+  assert.equal(await b.store.getItem(ACTIVE_KEY), null);
+  assert.equal(b.app.unsettled, false);
+});
+
+for (const [gapMin, running, expected] of [
+  [2, true, 'carried on'], [40, true, 'finished'], [40, false, 'finished'], [6 * 60, true, 'finished'],
+] as const) {
+  test(`a crash 1 h 38 min into a drive, reopened ${gapMin} min later with updates ${running ? 'still running' : 'gone'}: ${expected} with every saved point`, async () => {
+    const store = new MemoryStore();
+    const clock = { t: Date.parse('2026-10-05T13:00:00Z') };
+    const updates = new FakeUpdates();
+    const server = new FakeServer();
+    const first = recoveryApp(store, clock, updates, server);
+    await first.app.start();
+    await first.app.startDrive(null);
+    await settle();
+    await longDrive(first, 0, 98 * 60);
+    const saved = await savedActive(store);
+    assert.ok(saved.points.length > 1900);
+    first.app.dispose(); // the crash: only what was saved survives
+    clock.t += gapMin * 60_000;
+    updates.running = running;
+    const again = recoveryApp(store, clock, updates, server, first.journal);
+    await again.app.start();
+    if (expected === 'carried on') {
+      assert.equal(again.app.isDriving, true);
+      assert.equal(again.app.activeRecord!.clientRef, saved.clientRef);
+      assert.equal(again.app.activeRecord!.points.length, saved.points.length);
+      assert.ok(again.app.activeDriveMs()! > 98 * 60_000, 'counted from its start: never "too short"');
+      assert.ok(await again.app.endDrive());
+    } else {
+      assert.equal(again.app.isDriving, false);
+      assert.equal(again.app.status.pendingJourneys, 1);
+      assert.equal(updates.running, false, 'background updates stopped (last)');
+      const finish = (await first.journal.read()).find((e) => e.event === 'recovery_finish')!;
+      assert.equal(finish.kept, true);
+      assert.ok((finish.drivenS as number) >= 97 * 60, `finished at its last activity (${finish.drivenS} s)`);
+    }
+    await again.app.sync();
+    assert.equal(server.journeys.length, 1, 'one journey, finished once');
+    assert.equal(server.journeys[0]!.status, 'completed');
+    assert.ok(server.pointTimes.get(server.journeys[0]!.id)!.size >= saved.points.length);
+    assert.equal(again.app.status.pendingJourneys, 0);
+    assert.equal(server.deletedJourneys.length, 0);
+    again.app.dispose();
+  });
+}
+
+test('killed at any write while recovering an interrupted 45 min drive, the drive is never lost: the next launch finishes it once', async () => {
+  let crashPoints = 0;
+  for (let k = 0; ; k++) {
+    const store = new FlakyStore();
+    const clock = { t: Date.parse('2026-10-05T13:00:00Z') };
+    const updates = new FakeUpdates();
+    const server = new FakeServer();
+    const first = recoveryApp(store, clock, updates, server);
+    await first.app.start();
+    await first.app.startDrive(null);
+    await settle();
+    await longDrive(first, 0, 45 * 60);
+    const saved = await savedActive(store);
+    first.app.dispose();
+    // Reopened 40 min later: recovery finishes the drive... and the app is
+    // killed after its k-th write (every write after that fails)
+    clock.t += 40 * 60_000;
+    store.writesLeft = k;
+    const second = recoveryApp(store, clock, updates, server);
+    await second.app.start();
+    second.app.dispose();
+    const killedDuringRecovery = store.failedWrites > 0;
+    if (killedDuringRecovery) crashPoints++;
+    // The next launch, with storage working
+    store.writesLeft = Infinity;
+    const third = recoveryApp(store, clock, updates, server);
+    await third.app.start();
+    await third.app.sync();
+    assert.equal(server.journeys.length, 1, `k=${k}: one journey`);
+    assert.equal(server.journeys[0]!.status, 'completed', `k=${k}: finished`);
+    assert.ok(server.pointTimes.get(server.journeys[0]!.id)!.size >= saved.points.length, `k=${k}: every saved point`);
+    assert.equal(third.app.status.pendingJourneys, 0, `k=${k}: nothing left waiting`);
+    assert.equal(await store.getItem(ACTIVE_KEY), null, `k=${k}: nothing left in "active"`);
+    assert.equal(third.app.data.journeys.length, 1, `k=${k}: shown once`);
+    third.app.dispose();
+    if (!killedDuringRecovery) break;
+  }
+  assert.ok(crashPoints >= 3, `killed at ${crashPoints} different writes (pending saved, active cleared, session cleared...)`);
+});
+
+test('killed after saving the finished drive to pending but before clearing "active": both copies merge into one', async () => {
+  const store = new FlakyStore();
+  const clock = { t: Date.parse('2026-10-05T13:00:00Z') };
+  const updates = new FakeUpdates();
+  const server = new FakeServer();
+  const first = recoveryApp(store, clock, updates, server);
+  await first.app.start();
+  await first.app.startDrive(null);
+  await settle();
+  await longDrive(first, 0, 20 * 60);
+  first.app.dispose();
+  clock.t += 40 * 60_000;
+  store.failWrites = ['journey/active']; // clearing "active" fails, as if killed right there
+  const second = recoveryApp(store, clock, updates, server);
+  await second.app.start();
+  second.app.dispose();
+  assert.ok(await store.getItem(ACTIVE_KEY), 'still in "active"');
+  assert.equal((JSON.parse((await store.getItem(PENDING_KEY))!) as JourneyRecord[]).length, 1, '...and in pending');
+  assert.equal(updates.running, true, 'updates not stopped before the drive was safe');
+  store.failWrites = [];
+  const third = recoveryApp(store, clock, updates, server);
+  await third.app.start();
+  assert.equal(third.app.status.pendingJourneys, 1, 'one drive, not two');
+  await third.app.sync();
+  assert.equal(server.journeys.length, 1);
+  assert.equal(server.journeys[0]!.status, 'completed');
+  assert.equal(await store.getItem(ACTIVE_KEY), null);
+  assert.equal(updates.running, false);
+  third.app.dispose();
+  // dedupeDrives keeps the fuller copy and what either knew about its upload
+  const a = { ...newRecord({ clientRef: 'x', startedAt: new Date(0), timezone: 'UTC', vehicleId: null, vehicleSnapshot: null }), serverId: 's1' };
+  const fuller = { ...a, serverId: null, points: [{ recordedAt: new Date(1000).toISOString(), latitude: 0, longitude: 0, speedKmh: 0, headingDeg: null, accuracyM: 5, altitudeM: null }] };
+  const merged = dedupeDrives([a, fuller]);
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0]!.points.length, 1);
+  assert.equal(merged[0]!.serverId, 's1');
+});
+
+test('a saved drive that can\'t be read is never taken for "no drive": tracking goes on, nothing overwrites it, and it carries on once readable', async () => {
+  const store = new FlakyStore();
+  const clock = { t: Date.parse('2026-10-05T13:00:00Z') };
+  const updates = new FakeUpdates();
+  const server = new FakeServer();
+  const first = recoveryApp(store, clock, updates, server);
+  await first.app.start();
+  await first.app.startDrive(null);
+  await settle();
+  await longDrive(first, 0, 20 * 60);
+  const raw = await store.getItem(ACTIVE_KEY);
+  const clientRef = (await savedActive(store)).clientRef;
+  first.app.dispose();
+  clock.t += 60_000;
+  store.failReads = ['journey/active'];
+  const again = recoveryApp(store, clock, updates, server, first.journal);
+  await again.app.start();
+  assert.equal(again.app.isDriving, false, 'nothing decided yet');
+  assert.equal(again.app.unsettled, true);
+  assert.equal(updates.running, true, 'background tracking not stopped');
+  // Fixes keep coming, from the background and the screen: held, not dropped
+  for (let s = 1261; s <= 1320; s++) {
+    clock.t += 1000;
+    again.app.addFix(aRoadFix(s, clock.t));
+    if (s % 5 === 0) await again.tracker.deliver([aRoadFix(s, clock.t)]);
+  }
+  // A new drive can't take its place
+  await assert.rejects(again.app.startDrive(null), /couldn't be read/);
+  assert.equal(again.app.isDriving, false);
+  store.failReads = [];
+  assert.equal(await store.getItem(ACTIVE_KEY), raw, 'left exactly as it was');
+  // Readable again: picked up where it was, held fixes included
+  await again.app.settleNow();
+  assert.equal(again.app.isDriving, true);
+  assert.equal(again.app.activeRecord!.clientRef, clientRef);
+  assert.ok(lastActivityMs(again.app.activeRecord!) >= clock.t - 1000, 'the held fixes were recorded');
+  assert.equal(again.app.unsettled, false);
+  const ev = await events(again);
+  assert.ok(ev.includes('storage_read_failed') && ev.includes('storage_read_recovered') && ev.includes('recovery_resume'), ev.join(','));
+  assert.ok(await again.app.endDrive());
+  await again.app.sync();
+  assert.equal(server.journeys[0]!.status, 'completed');
+  again.app.dispose();
+});
+
+test('a corrupt saved drive is copied aside byte for byte, its server journey is kept, and the server copy is recovered later', async () => {
+  const store = new MemoryStore();
+  const clock = { t: Date.parse('2026-10-05T13:00:00Z') };
+  const updates = new FakeUpdates();
+  const server = new FakeServer();
+  const first = recoveryApp(store, clock, updates, server);
+  await first.app.start();
+  await first.app.startDrive(null);
+  await settle();
+  await longDrive(first, 0, 30 * 60);
+  first.app.dispose();
+  const corrupt = (await store.getItem(ACTIVE_KEY))!.slice(0, -37);
+  await store.setItem(ACTIVE_KEY, corrupt);
+  clock.t += 40 * 60_000;
+  updates.running = false;
+  const again = recoveryApp(store, clock, updates, server, first.journal);
+  await again.app.start();
+  const quarantined = JSON.parse((await store.getItem(userKey('u1', 'journey/quarantine')))!) as string[];
+  assert.equal(quarantined.length, 1);
+  assert.equal(await store.getItem(quarantined[0]!), corrupt, 'kept byte for byte');
+  assert.ok((await events(again)).includes('storage_quarantined'));
+  assert.equal(server.deletedJourneys.length, 0);
+  assert.equal(server.journeys[0]!.status, 'active', 'the server copy is untouched');
+  // New drives aren't blocked by it
+  await again.app.startDrive(null);
+  assert.equal(again.app.isDriving, true);
+  await again.app.discardDrive();
+  // Hours later, the server copy (uploaded every 30 s while driving) is finished from its own points
+  clock.t += ORPHAN_IDLE_MS;
+  await again.app.sync();
+  const recovered = server.journeys.find((j) => j.name === 'Recovered drive')!;
+  assert.equal(recovered.status, 'completed');
+  assert.ok(server.pointTimes.get(recovered.id)!.size > 500);
+  assert.ok(again.app.data.journeys.some((j) => j.id === recovered.id), 'shown in the drive history');
+  again.app.dispose();
+});
+
+test('finished drives that can\'t be read are never overwritten: new drives wait beside them and both upload once readable', async () => {
+  const store = new FlakyStore();
+  const clock = { t: Date.parse('2026-10-05T13:00:00Z') };
+  const updates = new FakeUpdates();
+  const server = new FakeServer();
+  server.offline = true;
+  const first = recoveryApp(store, clock, updates, server);
+  await first.app.start();
+  await first.app.startDrive(null);
+  await settle();
+  first.server.offline = true;
+  for (let s = 1; s <= 600; s++) { clock.t += 1000; first.app.addFix(aRoadFix(s, clock.t)); }
+  await first.app.endDrive(); // offline: waits on the phone
+  first.app.dispose();
+  const pendingRaw = await store.getItem(PENDING_KEY);
+  assert.equal((JSON.parse(pendingRaw!) as JourneyRecord[]).length, 1);
+  store.failReads = ['journey/pending'];
+  const again = recoveryApp(store, clock, updates, server, first.journal);
+  await again.app.start();
+  assert.equal(again.app.unsettled, true);
+  // A new drive is allowed (it doesn't touch the list)...
+  await again.app.startDrive(null);
+  for (let s = 1; s <= 120; s++) { clock.t += 1000; again.app.addFix(aRoadFix(5000 + s, clock.t)); }
+  await again.app.endDrive();
+  // ...but finishing it can't replace the unreadable list: it stays in "active" meanwhile
+  store.failReads = [];
+  assert.equal(await store.getItem(PENDING_KEY), pendingRaw, 'the unreadable list was never overwritten');
+  assert.ok(await store.getItem(ACTIVE_KEY), 'the new drive is still safe in "active"');
+  await again.app.settleNow();
+  assert.equal((JSON.parse((await store.getItem(PENDING_KEY))!) as JourneyRecord[]).length, 2, 'both drives');
+  assert.equal(await store.getItem(ACTIVE_KEY), null);
+  server.offline = false;
+  await again.app.sync();
+  assert.equal(server.journeys.filter((j) => j.status === 'completed').length, 2);
+  // A corrupt list is copied aside before anything replaces it
+  await store.setItem(PENDING_KEY, '[{"clientRef":');
+  const third = recoveryApp(store, clock, updates, server);
+  await third.app.start();
+  const quarantined = JSON.parse((await store.getItem(userKey('u1', 'journey/quarantine')))!) as string[];
+  assert.equal(await store.getItem(quarantined.at(-1)!), '[{"clientRef":');
+  assert.equal(third.app.unsettled, false);
+  again.app.dispose();
+  third.app.dispose();
+});
+
+test('the background task never stops recording because the drive or its session couldn\'t be read: it holds the fixes and records them later', async () => {
+  for (const unreadable of ['background-session', 'journey/active']) {
+    const store = new FlakyStore();
+    const clock = { t: Date.parse('2026-10-05T13:00:00Z') };
+    const updates = new FakeUpdates();
+    const first = recoveryApp(store, clock, updates);
+    await first.app.start();
+    await first.app.startDrive(null);
+    await settle();
+    await longDrive(first, 0, 5 * 60);
+    await first.app.saveActiveNow();
+    first.app.dispose(); // iOS ended the app; it relaunches it in the background
+    const journal = new DiagnosticsJournal({ store: new MemoryStore(), now: () => clock.t });
+    const headless = new BackgroundDriveRecorder({ store, updates, now: () => clock.t, journal });
+    store.failReads = [unreadable];
+    const heldFrom = clock.t;
+    for (let s = 301; s <= 360; s += 5) {
+      const batch = [];
+      for (let k = 0; k < 5; k++) { clock.t += 1000; batch.push(aRoadFix(s + k, clock.t)); }
+      await headless.deliver(batch);
+    }
+    assert.equal(updates.running, true, `${unreadable}: updates not stopped`);
+    assert.ok((await journal.read()).some((e) => e.event === 'background_fixes_held'), unreadable);
+    store.failReads = [];
+    for (let s = 361; s <= 400; s += 5) {
+      const batch = [];
+      for (let k = 0; k < 5; k++) { clock.t += 1000; batch.push(aRoadFix(s + k, clock.t)); }
+      await headless.deliver(batch);
+    }
+    await headless.attach('u1', () => {}); // hands over: saves what it recorded
+    const rec = await savedActive(store);
+    const held = rec.points.filter((p) => Date.parse(p.recordedAt) > heldFrom && Date.parse(p.recordedAt) <= heldFrom + 60_000);
+    assert.ok(held.length >= 15, `${unreadable}: fixes from while it couldn't be read are in the drive (${held.length})`);
+    assert.ok(Date.parse(rec.lastFixAt!) >= clock.t - 1000);
+    assert.equal(updates.running, true);
+  }
+  assert.ok(HELD_FIXES_MAX >= 7200, 'about two hours of fixes can be held');
+});
+
+test('server journeys left "active" with no drive on the phone are found, finished from their own points once quiet, and never deleted', async () => {
+  const clock = { t: Date.parse('2026-10-08T12:00:00Z') };
+  const server = new FakeServer();
+  const iso = (ms: number) => new Date(ms).toISOString();
+  const seed = (id: string, clientRef: string, startedAt: number, times: number[], status = 'active') => {
+    server.journeys.push({ id, clientRef, status, startedAt: iso(startedAt), name: 'Active Journey', route: null } as unknown as ServerJourney);
+    server.pointTimes.set(id, new Set(times.map(iso)));
+  };
+  const twoDaysAgo = clock.t - 2 * 24 * 3600_000;
+  const every3s = (from: number, seconds: number) => Array.from({ length: Math.floor(seconds / 3) }, (_, i) => from + i * 3000);
+  seed('lost', 'lost-ref', twoDaysAgo, every3s(twoDaysAgo, 100 * 60)); // 1 h 40 min, two days ago
+  seed('recent', 'other-phone', clock.t - 60 * 60_000, every3s(clock.t - 60 * 60_000, 30 * 60)); // quiet for 30 min
+  seed('tiny', 'tiny-ref', twoDaysAgo, [twoDaysAgo + 1000]);
+  seed('short', 'short-ref', twoDaysAgo, [twoDaysAgo, twoDaysAgo + 4000]);
+  seed('done', 'done-ref', twoDaysAgo, every3s(twoDaysAgo, 600), 'completed');
+  seed('mine', 'mine-ref', twoDaysAgo, every3s(twoDaysAgo, 600));
+  // 'mine' is still on this phone: a finished drive the server rejected, kept for the user
+  const store = new MemoryStore();
+  const mine = { ...newRecord({ clientRef: 'mine-ref', startedAt: new Date(twoDaysAgo), timezone: 'UTC', vehicleId: null, vehicleSnapshot: null }),
+    serverId: 'mine', endedAt: iso(twoDaysAgo + 600_000), rejected: true };
+  await store.setItem(PENDING_KEY, JSON.stringify([mine]));
+  const b = recoveryApp(store, clock, undefined, server);
+  await b.app.start();
+  const found = await b.app.recoverOrphans();
+  const outcome = Object.fromEntries(found.map((o) => [o.serverId, o.outcome]));
+  assert.deepEqual(outcome, { lost: 'finalized', recent: 'recent', tiny: 'too-few-points', short: 'too-few-points' });
+  const lost = server.journeys.find((j) => j.id === 'lost')!;
+  assert.equal(lost.status, 'completed');
+  assert.equal(lost.endedAt, iso(Math.max(...every3s(twoDaysAgo, 100 * 60))), 'ended at its last point');
+  assert.equal(lost.name, 'Recovered drive');
+  for (const id of ['recent', 'tiny', 'short', 'mine']) assert.equal(server.journeys.find((j) => j.id === id)!.status, 'active', `${id} untouched`);
+  assert.equal(server.deletedJourneys.length, 0, 'nothing deleted');
+  const found2 = found.find((o) => o.serverId === 'lost')!;
+  assert.equal(found2.pointCount, 2000);
+  // Every one is in the journal (times and ids only)
+  const entries = await b.journal.read();
+  assert.equal(entries.filter((e) => e.event === 'orphan_found').length, 4);
+  assert.equal(entries.filter((e) => e.event === 'orphan_finalized').length, 1);
+  // Checked at most hourly; the recovered drive shows in the history after a sync
+  assert.deepEqual(await b.app.recoverOrphans(), []);
+  clock.t += ORPHAN_CHECK_EVERY_MS;
+  await b.app.sync();
+  assert.ok(b.app.data.journeys.some((j) => j.id === 'lost'));
+  b.app.dispose();
+});
+
+test('the orphan check leaves journeys alone while a saved drive is unreadable, or when a change to them is queued', async () => {
+  const clock = { t: Date.parse('2026-10-08T12:00:00Z') };
+  const server = new FakeServer();
+  const old = clock.t - 24 * 3600_000;
+  server.journeys.push({ id: 'old', clientRef: 'old-ref', status: 'active', startedAt: new Date(old).toISOString(), name: 'Active Journey', route: null } as unknown as ServerJourney);
+  server.pointTimes.set('old', new Set([old, old + 60_000].map((t) => new Date(t).toISOString())));
+  // An unreadable drive on the phone might be that journey: nothing is touched
+  const store = new FlakyStore();
+  await store.setItem(ACTIVE_KEY, JSON.stringify(newRecord({ clientRef: 'old-ref', startedAt: new Date(old), timezone: 'UTC', vehicleId: null, vehicleSnapshot: null })));
+  store.failReads = ['journey/active'];
+  const b = recoveryApp(store, clock, undefined, server);
+  await b.app.start();
+  assert.deepEqual(await b.app.recoverOrphans(), []);
+  assert.equal(server.journeys[0]!.status, 'active');
+  b.app.dispose();
+  // A delete queued for it (the user removed it while it couldn't be sent): not finished behind their back
+  const ep = server.ep();
+  ep.deleteJourney = async () => { throw new NetworkError(); };
+  const c = new CloudSync({
+    ep, store: new MemoryStore(), userId: 'u1', publishableKey: 'x', newId: () => 'n', timezone: () => 'UTC', now: () => clock.t,
+    prepareFile: async () => ({ body: new Uint8Array([1]), size: 1, mimeType: 'image/jpeg' }),
+  });
+  await c.start();
+  await c.deleteJourney('old');
+  const found = await c.recoverOrphans();
+  assert.deepEqual(found.map((o) => o.outcome), ['change-queued']);
+  assert.equal(server.journeys[0]!.status, 'active');
+  c.dispose();
+});
+
+test('a long drive is never discarded as "too short" after a crash, even when its last fixes weren\'t kept as points', async () => {
+  for (const [label, vagueFromS, minutes] of [
+    ['the last 20 min too vague to keep (urban canyon)', 40 * 60, 60],
+    ['no fix ever precise enough to keep', 0, 30],
+  ] as const) {
+    const store = new MemoryStore();
+    const clock = { t: Date.parse('2026-10-05T13:00:00Z') };
+    const updates = new FakeUpdates();
+    const server = new FakeServer();
+    const first = recoveryApp(store, clock, updates, server);
+    await first.app.start();
+    await first.app.startDrive(null);
+    await settle();
+    await longDrive(first, 0, minutes * 60, { accuracyM: (s) => (s > vagueFromS ? 150 : 5) });
+    await first.app.saveActiveNow();
+    first.app.dispose();
+    clock.t += 40 * 60_000;
+    updates.running = false;
+    const again = recoveryApp(store, clock, updates, server, first.journal);
+    await again.app.start();
+    assert.equal(again.app.status.pendingJourneys, 1, `${label}: kept`);
+    const finish = (await first.journal.read()).find((e) => e.event === 'recovery_finish')!;
+    assert.ok((finish.drivenS as number) >= minutes * 60 - 70, `${label}: finished at its last fix (${finish.drivenS} s)`);
+    assert.equal(server.deletedJourneys.length, 0);
+    await again.app.sync();
+    assert.equal(server.journeys[0]!.status, 'completed', label);
+    again.app.dispose();
+  }
+  // The End Drive button checks the drive's own timestamps, not the on-screen timer
+  const screen = readFileSync(join(MOBILE, 'app/(tabs)/(drive)/index.tsx'), 'utf8');
+  assert.ok(/const drivenMs = activeDriveMs\(\) \?\? driveSecondsRef\.current \* 1000;\s*if \(!isLongEnoughToSave\(drivenMs\)\)/.test(screen));
+  // ...and recovery never deletes a server journey
+  const sync = readFileSync(join(MOBILE, 'lib/backend/cloudSync.ts'), 'utf8');
+  const recovery = sync.slice(sync.indexOf('private async recoverActive'), sync.indexOf('private async persistPending'));
+  assert.ok(!/journey\.delete|deleteJourney/.test(recovery), 'no deletion during recovery');
+});
+
+test('the diagnostics journal: kept on the device, capped, never with a location, never failing', async () => {
+  const store = new MemoryStore();
+  let t = Date.parse('2026-10-08T09:00:00Z');
+  const j = new DiagnosticsJournal({ store, now: () => t, max: 5 });
+  j.log('launch', { appState: 'background' });
+  j.log('drive_start', { clientRef: 'abc', latitude: 53.2, longitude: -0.5, lat: 1, lng: 2, points: 3, route: 'x', coordinates: 'y', pointCount: 3 });
+  await j.flush();
+  const [launch, drive] = await j.read();
+  assert.deepEqual(launch, { t: '2026-10-08T09:00:00.000Z', event: 'launch', appState: 'background' });
+  assert.deepEqual(drive, { t: '2026-10-08T09:00:00.000Z', event: 'drive_start', clientRef: 'abc', pointCount: 3 });
+  for (let i = 0; i < 10; i++) { t += 1000; j.log('tick', { i }); }
+  await j.flush();
+  const kept = await j.read();
+  assert.equal(kept.length, 5);
+  assert.equal(kept.at(-1)!.i, 9);
+  // Saved: a later launch reads it back, then adds to it
+  const later = new DiagnosticsJournal({ store, now: () => t, max: 5 });
+  later.log('launch', { appState: 'active' });
+  await later.flush();
+  assert.deepEqual((await later.read()).map((e) => e.event), ['tick', 'tick', 'tick', 'tick', 'launch']);
+  assert.match(await later.text(), /^2026-10-08T09:00:10\.000Z launch appState="active"$/m);
+  // Storage failing never makes logging fail
+  const broken = new DiagnosticsJournal({ store: { getItem: async () => { throw new Error('x'); }, setItem: async () => { throw new Error('x'); }, removeItem: async () => {} } });
+  broken.log('anything', { a: 1 });
+  await broken.flush();
+  assert.equal((await broken.read()).length, 1);
+  assert.ok(JOURNAL_KEY.startsWith('@driveos/'));
+  // A fatal error is saved small enough to write synchronously as the app dies
+  const err = new TypeError('Cannot read property x of undefined');
+  err.stack = 'a'.repeat(5000);
+  const fatal = fatalErrorRecord(err, Date.parse('2026-10-08T09:00:00Z'), 'background');
+  assert.equal(fatal.message, 'TypeError: Cannot read property x of undefined');
+  assert.equal(fatal.stack!.length, 1200);
+  assert.equal(fatal.appState, 'background');
+  assert.ok(JSON.stringify(fatal).length < 2048);
+});
+
+test('a drive, a crash and its recovery are all journaled, with no route or position anywhere in it', async () => {
+  const store = new FlakyStore();
+  const clock = { t: Date.parse('2026-10-05T13:00:00Z') };
+  const updates = new FakeUpdates();
+  const server = new FakeServer();
+  const first = recoveryApp(store, clock, updates, server);
+  await first.app.start();
+  await first.app.startDrive(null);
+  await settle();
+  await longDrive(first, 0, 10 * 60);
+  const clientRef = first.app.activeRecord!.clientRef;
+  first.app.dispose();
+  clock.t += 40 * 60_000;
+  updates.running = false;
+  store.failWrites = ['journey/pending'];
+  const again = recoveryApp(store, clock, updates, server, first.journal);
+  await again.app.start();
+  store.failWrites = [];
+  await again.app.sync();
+  const entries = await first.journal.read();
+  const ev = entries.map((e) => e.event);
+  for (const e of ['sync_start', 'drive_start', 'tracking_start', 'drive_server_id', 'sync_started', 'storage_write_failed', 'recovery_finish', 'tracking_stop', 'recovery_settled']) {
+    assert.ok(ev.includes(e), `${e} missing from ${ev.join(',')}`);
+  }
+  assert.ok(entries.some((e) => e.event === 'drive_start' && e.clientRef === clientRef), 'the drive is identified by its clientRef');
+  assert.ok(entries.every((e) => /^\d{4}-\d\d-\d\dT/.test(e.t)), 'every entry timestamped');
+  const all = JSON.stringify(entries) + (await first.journal.text());
+  assert.ok(!/latitude|longitude|"lat"|"lng"/.test(all), 'no position fields');
+  assert.ok(!/53\.2\d|-0\.5\d|0\.54\d/.test(all), 'no coordinates');
+  again.app.dispose();
+});
+
+test('the journal is wired in: launch noted first, fatal JS errors saved synchronously, recorders given it', () => {
+  const diag = readFileSync(join(MOBILE, 'lib/diagnostics.ts'), 'utf8');
+  assert.match(diag, /journal\.log\('launch', \{ appState: AppState\.currentState/);
+  assert.match(diag, /setGlobalHandler\(\(error, isFatal\) => \{\s*if \(isFatal\) \{\s*try \{\s*SecureStore\.setItem\(LAST_FATAL_KEY/);
+  assert.match(diag, /previous\(error, isFatal\);/);
+  assert.match(diag, /journal\.log\('fatal_js_error'/);
+  assert.match(readFileSync(join(MOBILE, 'lib/driveBackgroundLocation.ts'), 'utf8'), /new BackgroundDriveRecorder\(\{ store: deviceStorage, updates, journal \}\)/);
+  assert.match(readFileSync(join(MOBILE, 'context/AppContext.tsx'), 'utf8'), /tracker: driveTracker, journal,/);
 });

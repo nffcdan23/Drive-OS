@@ -1433,10 +1433,12 @@ export default function MapScreen() {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     // Under 10 s of active driving, by the on-screen drive timer (paused time
     // doesn't count): thrown away, not saved.  The summary screen saves on
-    // open, so the check has to happen before going there.  Read through a
-    // ref: this runs from the End Drive confirmation, which may have been
-    // open for a while since the button was pressed.
-    if (!isLongEnoughToSave(driveSecondsRef.current * 1000)) {
+    // open, so the check has to happen before going there.  Read from the
+    // drive's own timestamps at the moment of confirming (the confirmation
+    // may have been open a while), not the on-screen timer, which can lag
+    // just after the app was relaunched and a drive picked up.
+    const drivenMs = activeDriveMs() ?? driveSecondsRef.current * 1000;
+    if (!isLongEnoughToSave(drivenMs)) {
       void discardDrive();
       Alert.alert(
         "Drive too short to save",

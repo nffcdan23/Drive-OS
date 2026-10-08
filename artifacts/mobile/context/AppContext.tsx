@@ -29,6 +29,7 @@ import { UnitSystem, ResolvedUnitSystem, resolveUnitSystem } from '@/lib/units';
 import { api, backendEnv, ep, newId, onConnectionStatus } from '@/lib/backendClient';
 import { deviceStorage } from '@/lib/secureStorage';
 import { driveTracker } from '@/lib/driveBackgroundLocation';
+import { journal } from '@/lib/diagnostics';
 import { APP_NAME } from '@/constants/brand';
 
 export type {
@@ -190,7 +191,7 @@ export function AppProvider({ userId, children }: { userId: string; children: Re
   const cloud = useMemo(() => {
     if (!ep || !backendEnv) throw new Error('Backend is not configured');
     const c = new CloudSync({
-      ep, store: deviceStorage, userId, publishableKey: backendEnv.supabasePublishableKey, newId, timezone, tracker: driveTracker,
+      ep, store: deviceStorage, userId, publishableKey: backendEnv.supabasePublishableKey, newId, timezone, tracker: driveTracker, journal,
       prepareFile: (uri, purpose) => (purpose === 'avatar' ? prepareAvatar(uri) : prepareImage(uri)),
     });
     return c;
@@ -264,7 +265,11 @@ export function AppProvider({ userId, children }: { userId: string; children: Re
   const startDrive = useCallback(() => {
     if (cloud.isDriving) return;
     setCurrentDrive(newLiveDrive(Date.now()));
-    cloud.startDrive(activeVehicleRef.current).catch((err) => reportFailure('Could not start recording', err));
+    cloud.startDrive(activeVehicleRef.current).catch((err) => {
+      // Not recording (e.g. an earlier drive saved on the phone couldn't be read yet)
+      setCurrentDrive(cloud.activeRecord ? liveDriveFromRecord(cloud.activeRecord) : null);
+      reportFailure('Could not start recording', err);
+    });
   }, [cloud]);
 
   // Passenger mode records nothing, from the screen or the background.

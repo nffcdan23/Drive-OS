@@ -37,6 +37,42 @@ export async function readJson<T>(store: KeyValueStore, key: string, fallback: T
   }
 }
 
+/**
+ * A read that tells "nothing saved" apart from "couldn't read it".
+ * readJson treats both as the fallback, which is fine for caches but not for
+ * a drive: an unreadable drive must never be taken for no drive (and then
+ * overwritten).  `io` is a failed read (worth retrying); `corrupt` read
+ * something that isn't the expected value (`raw` is kept to preserve it).
+ */
+export type CheckedRead<T> =
+  | { ok: true; value: T | null }
+  | { ok: false; reason: 'io' | 'corrupt'; raw: string | null; error: string };
+
+export async function readJsonChecked<T>(
+  store: KeyValueStore,
+  key: string,
+  isValid: (v: unknown) => boolean = () => true,
+): Promise<CheckedRead<T>> {
+  let raw: string | null;
+  try {
+    raw = await store.getItem(key);
+  } catch (err) {
+    return { ok: false, reason: 'io', raw: null, error: errorText(err) };
+  }
+  if (raw == null || raw === '') return { ok: true, value: null };
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch (err) {
+    return { ok: false, reason: 'corrupt', raw, error: errorText(err) };
+  }
+  if (value === null) return { ok: true, value: null };
+  if (!isValid(value)) return { ok: false, reason: 'corrupt', raw, error: 'unexpected contents' };
+  return { ok: true, value: value as T };
+}
+
+export const errorText = (err: unknown) => (err instanceof Error ? err.message : String(err)).slice(0, 200);
+
 export async function writeJson(store: KeyValueStore, key: string, value: unknown): Promise<void> {
   await store.setItem(key, JSON.stringify(value));
 }
