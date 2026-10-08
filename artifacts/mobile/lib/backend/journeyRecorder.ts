@@ -12,10 +12,11 @@
  * de-duplicates, and completion can be repeated safely. So a drive recorded
  * offline, or interrupted by a crash, uploads later without duplicates.
  */
+import { msToKmh } from '../units';
 import { bearingDeg, distanceM, turnDeg } from './geo';
 import type { Endpoints, RoutePointInput, ServerJourney } from './endpoints';
 import { ApiError } from './http';
-import { readJson, userKey, writeJson, type KeyValueStore } from './storage';
+import { readJson, readJsonChecked, userKey, writeJson, type CheckedRead, type KeyValueStore } from './storage';
 
 export const THINNING = {
   minIntervalMs: 3_000,
@@ -73,7 +74,7 @@ export function toPoint(fix: GpsFix): RecordedPoint {
     recordedAt: new Date(fix.timestamp).toISOString(),
     latitude: fix.latitude,
     longitude: fix.longitude,
-    speedKmh: fix.speedMs != null && fix.speedMs > 0 ? Math.min(fix.speedMs * 3.6, 350) : 0,
+    speedKmh: Math.min(msToKmh(fix.speedMs), 350),
     headingDeg: fix.headingDeg != null && fix.headingDeg >= 0 ? fix.headingDeg % 360 : null,
     accuracyM: fix.accuracyM ?? null,
     altitudeM: fix.altitudeM ?? null,
@@ -214,21 +215,110 @@ export function recordFix(rec: JourneyRecord, fix: GpsFix): boolean {
 
 // ─── Storage (per user) ─────────────────────────────────────────────────────
 
+/** Whether a stored value looks like a drive record (enough to work with) */
+export function isJourneyRecord(v: unknown): v is JourneyRecord {
+  if (!v || typeof v !== 'object') return false;
+  const r = v as Partial<JourneyRecord>;
+  return typeof r.clientRef === 'string' && typeof r.startedAt === 'string' && Array.isArray(r.points);
+}
+
+/**
+ * Drives saved on the device, per user: the one in progress ("active") and
+ * finished ones waiting to upload ("pending").
+ *
+ * readActive / readPending report a failed or unreadable read as such, never
+ * as "no drive": callers must not decide anything about a drive they couldn't
+ * read, and must not overwrite it.  An unreadable value is copied aside with
+ * quarantine() before anything replaces it.
+ */
 export class JourneyStore {
   constructor(private readonly store: KeyValueStore, private readonly userId: string) {}
   private get activeKey() { return userKey(this.userId, 'journey/active'); }
   private get pendingKey() { return userKey(this.userId, 'journey/pending'); }
+  private get quarantineIndexKey() { return userKey(this.userId, 'journey/quarantine'); }
 
-  loadActive() { return readJson<JourneyRecord | null>(this.store, this.activeKey, null); }
+  /** The saved drive in progress; null only when there is none. */
+  readActive(): Promise<CheckedRead<JourneyRecord>> {
+    return readJsonChecked<JourneyRecord>(this.store, this.activeKey, isJourneyRecord);
+  }
+  /** Finished drives waiting to upload; an empty list only when there are none. */
+  readPending(): Promise<CheckedRead<JourneyRecord[]>> {
+    return readJsonChecked<JourneyRecord[]>(this.store, this.pendingKey, (v) => Array.isArray(v) && v.every(isJourneyRecord));
+  }
   saveActive(rec: JourneyRecord | null) {
     return rec ? writeJson(this.store, this.activeKey, rec) : this.store.removeItem(this.activeKey);
   }
-  loadPending() { return readJson<JourneyRecord[]>(this.store, this.pendingKey, []); }
   savePending(list: JourneyRecord[]) { return writeJson(this.store, this.pendingKey, list); }
+
+  /**
+   * Copies an unreadable saved value aside, byte for byte, under its own key
+   * (listed in the quarantine index), and checks the copy reads back the
+   * same.  Returns the key, or throws when it couldn't be kept.
+   */
+  async quarantine(what: 'active' | 'pending', raw: string, atMs: number): Promise<string> {
+    const key = userKey(this.userId, `journey/quarantine/${what}-${atMs}`);
+    await this.store.setItem(key, raw);
+    if ((await this.store.getItem(key)) !== raw) throw new Error('quarantine copy did not read back');
+    try {
+      const index = await readJson<string[]>(this.store, this.quarantineIndexKey, []);
+      if (!index.includes(key)) await writeJson(this.store, this.quarantineIndexKey, [...index, key]);
+    } catch {
+      // The copy itself is kept; only the list of copies is behind.
+    }
+    return key;
+  }
+
   async clearAll() {
     await this.store.removeItem(this.activeKey);
     await this.store.removeItem(this.pendingKey);
   }
+}
+
+/**
+ * Pending drives with no two for the same drive: a crash between saving a
+ * finished drive to pending and clearing it from active can leave both
+ * copies, and the later one may have more points.  Keeps the copy with the
+ * most points (then the latest activity), in first-seen order.
+ */
+export function dedupeDrives(list: readonly JourneyRecord[]): JourneyRecord[] {
+  const byRef = new Map<string, JourneyRecord>();
+  for (const rec of list) {
+    const seen = byRef.get(rec.clientRef);
+    if (!seen || moreComplete(rec, seen)) byRef.set(rec.clientRef, seen ? mergeUploadState(rec, seen) : rec);
+    else byRef.set(rec.clientRef, mergeUploadState(seen, rec));
+  }
+  return [...byRef.values()];
+}
+
+function moreComplete(a: JourneyRecord, b: JourneyRecord): boolean {
+  if (a.points.length !== b.points.length) return a.points.length > b.points.length;
+  return lastActivityMs(a) > lastActivityMs(b);
+}
+
+/** The kept copy, with whatever the other copy already knows about its upload */
+function mergeUploadState(kept: JourneyRecord, other: JourneyRecord): JourneyRecord {
+  return {
+    ...kept,
+    serverId: kept.serverId ?? other.serverId,
+    // Taking the other copy's server journey: send every point again (the
+    // server ignores ones it already has)
+    uploadedCount: kept.serverId ? kept.uploadedCount : 0,
+    name: kept.name ?? other.name,
+    endedAt: kept.endedAt ?? other.endedAt,
+  };
+}
+
+/**
+ * The last moment a drive is known to have been under way: its newest point
+ * or its newest fix (kept or not), never earlier than its start.  A crashed
+ * drive is finished here, so it is never cut down to its start time (and
+ * mistaken for a drive too short to save) just because its last fixes
+ * weren't stored as points.
+ */
+export function lastActivityMs(rec: Pick<JourneyRecord, 'startedAt' | 'points' | 'lastFixAt'>): number {
+  const times = [rec.startedAt, rec.lastFixAt, rec.points[rec.points.length - 1]?.recordedAt]
+    .filter((t): t is string => !!t).map((t) => Date.parse(t)).filter(Number.isFinite);
+  return Math.max(...times);
 }
 
 // ─── Upload ─────────────────────────────────────────────────────────────────

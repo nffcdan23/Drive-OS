@@ -27,7 +27,8 @@ import {
   JourneyStore, acceptDriveFix, lastRecordedFix, noteFixTime, recordFix,
   type FixRef, type GpsFix, type JourneyRecord,
 } from './journeyRecorder';
-import { readJson, writeJson, type KeyValueStore } from './storage';
+import { noJournal, type Journal } from './journal';
+import { errorText, readJsonChecked, writeJson, type KeyValueStore } from './storage';
 
 /** The drive background updates belong to. */
 export interface DriveSession {
@@ -101,8 +102,14 @@ export interface DriveTracker {
   start(session: DriveSession): Promise<Exclude<BackgroundTracking, 'off'>>;
   /** Stops background updates; nothing more is recorded after this resolves. */
   stop(): Promise<void>;
-  /** The drive background updates are running for, if any. */
-  running(): Promise<DriveSession | null>;
+  /**
+   * The drive background updates are running for, if any; 'unknown' when
+   * updates are running but the saved session couldn't be read (the caller
+   * decides from its own drive, and may adopt() it).
+   */
+  running(): Promise<DriveSession | null | 'unknown'>;
+  /** Re-asserts the session for running updates whose saved session couldn't be read. */
+  adopt(session: DriveSession): Promise<void>;
   /**
    * Hands background fixes for `userId`'s drives to `onFixes` until the
    * returned function is called.  Anything recorded without a listener is
@@ -114,6 +121,11 @@ export interface DriveTracker {
 export const DRIVE_SESSION_KEY = '@driveos/drive/background-session';
 /** With no CloudSync running, the drive is saved at most this often. */
 export const HEADLESS_SAVE_EVERY_MS = 10_000;
+/**
+ * Fixes held in memory while the drive (or its session) can't be read, to be
+ * recorded once it can: about two hours at one a second.
+ */
+export const HELD_FIXES_MAX = 7_200;
 
 interface Headless {
   journeys: JourneyStore;
@@ -123,16 +135,23 @@ interface Headless {
   savedAt: number;
 }
 
+const isSession = (v: unknown): boolean =>
+  !!v && typeof v === 'object' && typeof (v as DriveSession).userId === 'string' && typeof (v as DriveSession).clientRef === 'string';
+
 export class BackgroundDriveRecorder implements DriveTracker {
-  /** undefined until read from the device */
+  /** undefined until read from the device (or after a read that failed) */
   private session: DriveSession | null | undefined;
   private listener: { userId: string; onFixes: (fixes: GpsFix[]) => void } | null = null;
   private headless: Headless | null = null;
   private queue: Promise<unknown> = Promise.resolve();
+  /** Fixes that arrived while their drive couldn't be read: recorded once it can */
+  private held: GpsFix[] = [];
+  private deliveries = 0;
 
-  constructor(private readonly deps: { store: KeyValueStore; updates: LocationUpdates; now?: () => number }) {}
+  constructor(private readonly deps: { store: KeyValueStore; updates: LocationUpdates; now?: () => number; journal?: Journal }) {}
 
   private now() { return this.deps.now ? this.deps.now() : Date.now(); }
+  private get journal() { return this.deps.journal ?? noJournal; }
 
   /** Runs jobs one at a time, so fixes, hand-over and stop never interleave. */
   private serial<T>(job: () => Promise<T>): Promise<T> {
@@ -141,20 +160,33 @@ export class BackgroundDriveRecorder implements DriveTracker {
     return run;
   }
 
-  private async loadSession(): Promise<DriveSession | null> {
-    if (this.session === undefined) this.session = await readJson<DriveSession | null>(this.deps.store, DRIVE_SESSION_KEY, null);
+  /** The saved session; 'unreadable' when the read failed (retried next time, never taken as "no drive"). */
+  private async loadSession(): Promise<DriveSession | null | 'unreadable'> {
+    if (this.session !== undefined) return this.session;
+    const read = await readJsonChecked<DriveSession>(this.deps.store, DRIVE_SESSION_KEY, isSession);
+    if (!read.ok) {
+      this.journal.log('storage_read_failed', { what: 'background-session', reason: read.reason, error: read.error });
+      return 'unreadable';
+    }
+    this.session = read.value;
     return this.session;
   }
 
   private async setSession(session: DriveSession | null) {
     this.session = session;
-    if (session) await writeJson(this.deps.store, DRIVE_SESSION_KEY, session);
-    else await this.deps.store.removeItem(DRIVE_SESSION_KEY);
+    try {
+      if (session) await writeJson(this.deps.store, DRIVE_SESSION_KEY, session);
+      else await this.deps.store.removeItem(DRIVE_SESSION_KEY);
+    } catch (err) {
+      this.journal.log('storage_write_failed', { what: 'background-session', error: errorText(err) });
+      throw err;
+    }
   }
 
   start(session: DriveSession) {
     return this.serial(async () => {
       this.headless = null;
+      this.held = [];
       // Saved first: the first background fix may arrive before start() returns.
       await this.setSession(session);
       let result: Exclude<BackgroundTracking, 'off'>;
@@ -164,34 +196,49 @@ export class BackgroundDriveRecorder implements DriveTracker {
       } catch {
         result = 'unavailable';
       }
+      this.journal.log('tracking_start', { clientRef: session.clientRef, result });
       if (result !== 'on') {
         await this.deps.updates.stop().catch(() => {});
-        await this.setSession(null);
+        await this.setSession(null).catch(() => {});
       }
       return result;
     });
   }
 
   stop() {
-    return this.serial(() => this.stopNow());
+    return this.serial(() => this.stopNow('requested'));
   }
 
-  private async stopNow() {
+  private async stopNow(reason: string) {
     try {
       if (await this.deps.updates.isRunning()) await this.deps.updates.stop();
     } catch {
       // Not running (or already stopped by the system).
     }
+    this.journal.log('tracking_stop', { reason, clientRef: this.session ? this.session.clientRef : null });
     await this.flushHeadless();
     this.headless = null;
+    this.held = [];
     await this.setSession(null);
   }
 
   running() {
-    return this.serial(async () => {
+    return this.serial(async (): Promise<DriveSession | null | 'unknown'> => {
       const session = await this.loadSession();
+      const updates = await this.deps.updates.isRunning().catch(() => false);
+      if (session === 'unreadable') return updates ? 'unknown' : null;
       if (!session) return null;
-      return (await this.deps.updates.isRunning().catch(() => false)) ? session : null;
+      return updates ? session : null;
+    });
+  }
+
+  adopt(session: DriveSession) {
+    return this.serial(async () => {
+      this.journal.log('tracking_adopt', { clientRef: session.clientRef });
+      this.session = session;
+      await writeJson(this.deps.store, DRIVE_SESSION_KEY, session).catch((err) => {
+        this.journal.log('storage_write_failed', { what: 'background-session', error: errorText(err) });
+      });
     });
   }
 
@@ -201,6 +248,13 @@ export class BackgroundDriveRecorder implements DriveTracker {
       await this.flushHeadless();
       this.headless = null;
       this.listener = listener;
+      // Fixes held while nothing could be read go to the listener, which
+      // records them (or drops them, with no drive in progress)
+      if (this.held.length) {
+        const held = this.held;
+        this.held = [];
+        onFixes(held);
+      }
     });
     return () => { if (this.listener === listener) this.listener = null; };
   }
@@ -208,11 +262,19 @@ export class BackgroundDriveRecorder implements DriveTracker {
   /** Fixes from the background location task. */
   deliver(fixes: GpsFix[]): Promise<void> {
     return this.serial(async () => {
+      if (++this.deliveries === 1) this.journal.log('background_fixes', { first: true, count: fixes.length, listener: !!this.listener });
       const session = await this.loadSession();
+      if (session === 'unreadable') {
+        // Not "no drive": keep recording.  With CloudSync listening, it
+        // decides (it knows its drive); otherwise hold the fixes for later.
+        if (this.listener) this.listener.onFixes(fixes);
+        else this.hold(fixes);
+        return;
+      }
       if (!session) {
         // Updates with no drive in progress (left over from a crash, say):
         // stop them rather than track with nothing to record.
-        await this.stopNow();
+        await this.stopNow('no-drive');
         return;
       }
       if (this.listener) {
@@ -224,20 +286,37 @@ export class BackgroundDriveRecorder implements DriveTracker {
     });
   }
 
+  private hold(fixes: GpsFix[]) {
+    if (!this.held.length) this.journal.log('background_fixes_held', { count: fixes.length });
+    this.held.push(...fixes);
+    if (this.held.length > HELD_FIXES_MAX) this.held.splice(0, this.held.length - HELD_FIXES_MAX);
+  }
+
   /** No CloudSync running: apply the fixes to the drive saved on the device. */
   private async recordHeadless(session: DriveSession, fixes: GpsFix[]) {
     let h = this.headless;
     if (!h || h.rec.clientRef !== session.clientRef) {
       const journeys = new JourneyStore(this.deps.store, session.userId);
-      const rec = await journeys.loadActive();
+      const read = await journeys.readActive();
+      if (!read.ok) {
+        // Couldn't read the drive: never taken for "no drive".  Hold the
+        // fixes and try again with the next batch; CloudSync preserves an
+        // unreadable record when it starts.
+        this.journal.log('storage_read_failed', { what: 'active-drive', reason: read.reason, error: read.error, clientRef: session.clientRef });
+        this.hold(fixes);
+        return;
+      }
+      const rec = read.value;
       if (!rec || rec.clientRef !== session.clientRef || rec.endedAt) {
         // The drive was ended (or discarded) without stopping the updates.
-        await this.stopNow();
+        await this.stopNow('drive-not-in-progress');
         return;
       }
       h = this.headless = { journeys, rec, last: lastRecordedFix(rec), dirty: false, savedAt: this.now() };
     }
-    for (const fix of fixes) {
+    const all = this.held.length ? [...this.held, ...fixes] : fixes;
+    this.held = [];
+    for (const fix of all) {
       noteFixTime(h.rec, fix);
       h.dirty = true;
       if (!acceptDriveFix(h.rec, h.last, fix)) continue;
@@ -250,8 +329,13 @@ export class BackgroundDriveRecorder implements DriveTracker {
   private async flushHeadless() {
     const h = this.headless;
     if (!h || !h.dirty) return;
-    h.dirty = false;
     h.savedAt = this.now();
-    await h.journeys.saveActive(h.rec);
+    try {
+      await h.journeys.saveActive(h.rec);
+      h.dirty = false;
+    } catch (err) {
+      // Still dirty: saved with the next batch.
+      this.journal.log('storage_write_failed', { what: 'active-drive', clientRef: h.rec.clientRef, error: errorText(err) });
+    }
   }
 }

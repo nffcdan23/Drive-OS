@@ -17,9 +17,10 @@
 import type { Endpoints, LocationKind, SpotCategory, Visibility } from './endpoints';
 import { ApiError, describeError, isRetryable, type ConnectionState } from './http';
 import {
-  JourneyStore, acceptDriveFix, activeDriveMs, isLongEnoughToSave, lastRecordedFix, newJourneyRecord, noteFixTime, recordFix,
-  setRecordPaused, syncJourneyRecord, type FixRef, type GpsFix, type JourneyRecord,
+  JourneyStore, MIN_DRIVE_MS, acceptDriveFix, activeDriveMs, dedupeDrives, isLongEnoughToSave, lastActivityMs, lastRecordedFix,
+  newJourneyRecord, noteFixTime, recordFix, setRecordPaused, syncJourneyRecord, type FixRef, type GpsFix, type JourneyRecord,
 } from './journeyRecorder';
+import { noJournal, type Journal } from './journal';
 import type { BackgroundTracking, DriveTracker } from './driveTracking';
 import { decayPresence, type DriveState, type FriendPresenceStatus, type PresenceEvent } from './presence';
 import {
@@ -30,7 +31,7 @@ import type {
   BlockedUser, CachedData, Friend, Journey, JourneyCategory, NearbySpot, SavedPlace, UserProfile, Vehicle, VehicleSnapshot,
 } from './model';
 import { Outbox, isLocalId, type OutboxOp, type OutboxState, type Rejection } from './outbox';
-import { readJson, userKey, writeJson, type KeyValueStore } from './storage';
+import { errorText, readJson, userKey, writeJson, type KeyValueStore } from './storage';
 import { uploadAvatar, uploadVehiclePhoto, type PreparedFile } from './uploads';
 
 export interface SyncStatus {
@@ -64,6 +65,8 @@ export interface CloudSyncDeps {
   tracker?: DriveTracker;
   /** Wait before retrying a friends refresh that failed after an action (ms). */
   friendsRetryMs?: number;
+  /** The on-device diagnostics journal (lib/backend/journal). */
+  journal?: Journal;
 }
 
 /** A friends refresh that failed after a successful action is retried after this long. */
@@ -92,6 +95,46 @@ const PERSIST_HEARTBEAT_EVERY_MS = 60_000;
  * an interrupted drive.
  */
 export const RESUME_DRIVE_WITHIN_MS = 15 * 60_000;
+/**
+ * A journey still "active" on the server that this phone has no drive for is
+ * reported as a possibly lost drive only once it has had no points for this
+ * long: one being recorded right now (on another phone signed in to the same
+ * account, say) is not a candidate.
+ */
+export const ORPHAN_IDLE_MS = 3 * 60 * 60_000;
+/** How often the server is checked for such journeys. */
+export const ORPHAN_CHECK_EVERY_MS = 60 * 60_000;
+/** Fixes held while saved drives are being read or can't be: about two hours at one a second. */
+const HELD_FIXES_MAX = 7_200;
+/** Retrying storage that failed during start-up: first after this long, doubling up to the cap. */
+const SETTLE_RETRY_MS = 5_000;
+const SETTLE_RETRY_MAX_MS = 5 * 60_000;
+
+/**
+ * A journey still "active" on the server that this phone has no drive for.
+ * Report only: nothing about it is changed on the server.
+ */
+export interface OrphanJourney {
+  serverId: string;
+  clientRef: string | null;
+  name: string;
+  startedAt: string;
+  firstPointAt: string | null;
+  lastPointAt: string | null;
+  pointCount: number;
+  /** Seconds from its first point to its last */
+  spanS: number;
+  /** Hours since its last point (or its start, with none) */
+  quietH: number;
+  /**
+   * - candidate: quiet for ORPHAN_IDLE_MS with at least 10 s of points:
+   *   probably a drive whose copy on the phone was lost;
+   * - recent: points within ORPHAN_IDLE_MS (it may still be recording);
+   * - too-few-points: under two points, or under 10 s of them;
+   * - change-queued: an edit or delete for it is waiting to be sent.
+   */
+  outcome: 'candidate' | 'recent' | 'too-few-points' | 'change-queued';
+}
 
 export class CloudSync {
   data: CachedData = emptyData();
@@ -134,6 +177,30 @@ export class CloudSync {
   private friendsRetry: ReturnType<typeof setTimeout> | null = null;
   private friendsSettled: Promise<void> = Promise.resolve();
 
+  // ── Saved drives that couldn't be settled yet ──
+  // Nothing about a saved drive is decided, and nothing saved is overwritten,
+  // until it has been read: a failed read is never taken for "no drive".
+  /** The saved drive in progress couldn't be read (retried). */
+  private activeUnreadable = false;
+  /** The saved list of finished drives couldn't be read (retried; never overwritten meanwhile). */
+  private pendingUnreadable = false;
+  /** this.pending has drives not yet saved to the device. */
+  private pendingDirty = false;
+  /** An interrupted drive moved to pending whose copy in "active" is cleared once pending is saved. */
+  private staleActive: string | null = null;
+  /** start() (or a retry) is reading saved drives: fixes wait until it's done. */
+  private settling = false;
+  private heldFixes: GpsFix[] = [];
+  private settleRetry: ReturnType<typeof setTimeout> | null = null;
+  private settleRetryMs = SETTLE_RETRY_MS;
+  private startingDrive = false;
+  private activeWriteFailing = false;
+  private orphanCheckAt = -Infinity;
+  private orphans: OrphanJourney[] = [];
+  /** Orphans already written to the journal this run (by id and outcome), so hourly checks don't repeat them */
+  private orphansJournaled = new Set<string>();
+  private startup: Promise<void> = Promise.resolve();
+
   constructor(private readonly deps: CloudSyncDeps) {
     this.outbox = new Outbox(deps.store, deps.userId, (op) => this.execute(op));
     this.journeys = new JourneyStore(deps.store, deps.userId);
@@ -146,6 +213,7 @@ export class CloudSync {
   private now() { return this.deps.now ? this.deps.now() : Date.now(); }
   private get ep() { return this.deps.ep; }
   private get cacheKey() { return userKey(this.deps.userId, 'cache/v1'); }
+  private get journal() { return this.deps.journal ?? noJournal; }
 
   subscribe(fn: () => void): () => void {
     this.listeners.add(fn);
@@ -188,57 +256,331 @@ export class CloudSync {
   // ─── Start-up ─────────────────────────────────────────────────────────────
 
   /** Loads the cache, outbox and unfinished drives from the device. */
-  async start(): Promise<void> {
+  start(): Promise<void> {
+    this.startup = this.runStart();
+    return this.startup;
+  }
+
+  private async runStart(): Promise<void> {
+    this.settling = true;
+    this.journal.log('sync_start');
     const cached = await readJson<CachedData | null>(this.deps.store, this.cacheKey, null);
     if (cached?.version === 1) this.data = cached;
     await this.outbox.load();
     // Background fixes come here from now on; any recorded while the app had
     // no screens are saved to the device first, so loading below includes them.
+    // (Until the saved drives are settled, fixes are held, not dropped.)
     const tracker = this.deps.tracker;
     this.detachTracker?.();
     this.detachTracker = tracker ? await tracker.attach(this.deps.userId, (fixes) => { for (const f of fixes) this.addFix(f); }) : null;
-    this.active = await this.journeys.loadActive();
-    this.pending = await this.journeys.loadPending();
-    const session = tracker ? await tracker.running().catch(() => null) : null;
-    if (this.active) {
-      const rec = this.active;
-      if (session && session.userId === this.deps.userId && session.clientRef === rec.clientRef && this.isRecent(rec)) {
-        // Still being recorded in the background (the system relaunched the
-        // app, or it was reopened moments after closing): carry on with it.
-        this.lastFix = lastRecordedFix(rec);
-        this.lastPointFlush = this.now();
-        this.status = { ...this.status, backgroundTracking: 'on' };
-        void this.pushActive();
-      } else {
-        // A drive that was still "active" when the app was killed is finished
-        // now (or thrown away, if it had under 10 s of active, unpaused driving).
-        await tracker?.stop().catch(() => {});
-        const last = rec.points[rec.points.length - 1];
-        rec.endedAt = last?.recordedAt ?? rec.startedAt;
-        this.active = null;
-        await this.journeys.saveActive(null);
-        if (isLongEnoughToSave(activeDriveMs(rec, this.now()))) {
-          this.pending.push(rec);
-          await this.journeys.savePending(this.pending);
-        } else if (rec.serverId) {
-          await this.queue({ kind: 'journey.delete', id: rec.serverId });
-        }
-      }
-    } else {
-      // Background updates with no drive to record: never leave them running.
-      await tracker?.stop().catch(() => {});
+    try {
+      await this.loadDrives();
+      if (!this.activeUnreadable) await this.recoverActive();
+      // A list that had to be cleaned (duplicates merged, a corrupt one set aside) is saved now
+      if (this.pendingDirty && !this.pendingUnreadable) await this.settleFinished();
+    } catch (err) {
+      // A save failed part-way.  Nothing is lost: see settleFinished.  Retried.
+      this.journal.log('recovery_incomplete', { error: errorText(err) });
     }
     this.data = this.withPendingJourneys(this.data);
     this.setStatus({ pendingJourneys: this.pending.length, lastSyncedAt: cached?.savedAt ?? null });
     this.notifyDrive();
+    this.journal.log('sync_started', {
+      driving: !!this.active, clientRef: this.active?.clientRef ?? null, serverId: this.active?.serverId ?? null,
+      pending: this.pending.length, unsettled: this.unsettled,
+    });
+    this.settling = false;
+    this.releaseHeldFixes();
+    if (this.unsettled) this.scheduleSettleRetry();
+  }
+
+  /** Whether some saved drive still couldn't be read or saved (being retried). */
+  get unsettled(): boolean {
+    return this.activeUnreadable || this.pendingUnreadable || this.pendingDirty || !!this.staleActive;
+  }
+
+  /**
+   * Reads the saved drives.  An unreadable record is never taken for "none":
+   * one that can't be parsed is copied aside (quarantined) first; one that
+   * couldn't be read at all leaves its flag set, so nothing overwrites it
+   * and start-up decides nothing about it until a retry can read it.
+   */
+  private async loadDrives(): Promise<void> {
+    const active = await this.journeys.readActive();
+    if (active.ok) {
+      this.active = active.value;
+      this.activeUnreadable = false;
+    } else {
+      this.journal.log('storage_read_failed', { what: 'active-drive', reason: active.reason, error: active.error });
+      this.active = null;
+      this.activeUnreadable = !(active.reason === 'corrupt' && (await this.quarantine('active', active.raw!)));
+    }
+    // Drives finished in memory but not yet saved stay, merged with what was saved
+    const unsaved = this.pendingDirty ? this.pending : [];
+    const pending = await this.journeys.readPending();
+    if (pending.ok) {
+      this.pending = dedupeDrives([...(pending.value ?? []), ...unsaved]);
+      this.pendingUnreadable = false;
+      if (this.pending.length !== (pending.value ?? []).length) this.pendingDirty = true;
+    } else {
+      this.journal.log('storage_read_failed', { what: 'pending-drives', reason: pending.reason, error: pending.error });
+      if (pending.reason === 'corrupt' && (await this.quarantine('pending', pending.raw!))) {
+        this.pending = dedupeDrives(unsaved);
+        this.pendingUnreadable = false;
+        this.pendingDirty = true; // the unreadable list is replaced once saved aside
+      } else {
+        this.pending = dedupeDrives(unsaved);
+        this.pendingUnreadable = true;
+      }
+    }
+  }
+
+  /** Copies an unreadable saved value aside; false when it couldn't be kept (then nothing replaces it). */
+  private async quarantine(what: 'active' | 'pending', raw: string): Promise<boolean> {
+    try {
+      const key = await this.journeys.quarantine(what, raw, this.now());
+      this.journal.log('storage_quarantined', { what, key, bytes: raw.length });
+      return true;
+    } catch (err) {
+      this.journal.log('storage_quarantine_failed', { what, error: errorText(err) });
+      return false;
+    }
+  }
+
+  /** The drive saved as in progress at start-up: carried on, or finished as interrupted. */
+  private async recoverActive(): Promise<void> {
+    const tracker = this.deps.tracker;
+    const rec = this.active;
+    if (!rec) {
+      // Background updates with no drive to record: never leave them running.
+      // (Only after a successful read: an unreadable drive keeps them going.)
+      this.journal.log('recovery_none');
+      await tracker?.stop().catch(() => {});
+      return;
+    }
+    const alreadyPending = this.pending.some((p) => p.clientRef === rec.clientRef);
+    const session = tracker ? await tracker.running().catch(() => null) : null;
+    const tracking = session === 'unknown'
+      || (!!session && session.userId === this.deps.userId && session.clientRef === rec.clientRef);
+    const quietMs = this.now() - lastActivityMs(rec);
+    if (!alreadyPending && tracking && this.isRecent(rec)) {
+      // Still being recorded in the background (the system relaunched the
+      // app, or it was reopened moments after closing): carry on with it.
+      this.lastFix = lastRecordedFix(rec);
+      this.lastPointFlush = this.now();
+      this.status = { ...this.status, backgroundTracking: 'on' };
+      // The saved session couldn't be read: this drive is the one tracked
+      if (session === 'unknown') await tracker!.adopt({ userId: this.deps.userId, clientRef: rec.clientRef });
+      this.journal.log('recovery_resume', {
+        clientRef: rec.clientRef, serverId: rec.serverId, pointCount: rec.points.length,
+        quietS: Math.round(quietMs / 1000), sessionUnreadable: session === 'unknown',
+      });
+      void this.pushActive();
+      return;
+    }
+    // A drive that was still "active" when the app was killed is finished now.
+    this.active = null;
+    await this.finishInterrupted(rec, alreadyPending ? 'already-pending' : !tracking ? 'not-tracking' : 'quiet');
+  }
+
+  /**
+   * Finishes a drive interrupted by the app being killed, at its last known
+   * activity (newest point or fix, see lastActivityMs).  It goes to pending,
+   * to upload like any finished drive, unless it was driven under 10 s.
+   *
+   * Never deletes anything on the server: the local copy may be missing its
+   * last few seconds, so it can't prove a drive was too short.  A short one's
+   * server journey is left as it is; the orphan check (findOrphanJourneys)
+   * reports it, and changes nothing.
+   */
+  private async finishInterrupted(rec: JourneyRecord, reason: string): Promise<void> {
+    const ended: JourneyRecord = { ...rec, endedAt: rec.endedAt ?? new Date(lastActivityMs(rec)).toISOString() };
+    const drivenMs = activeDriveMs(ended, this.now());
+    const kept = isLongEnoughToSave(drivenMs);
+    this.journal.log('recovery_finish', {
+      clientRef: rec.clientRef, serverId: rec.serverId, reason, pointCount: rec.points.length,
+      drivenS: Math.round(drivenMs / 1000), kept, serverJourneyLeft: !kept && !!rec.serverId,
+    });
+    if (kept) {
+      this.pending = dedupeDrives([...this.pending, ended]);
+      this.pendingDirty = true;
+    }
+    this.staleActive = rec.clientRef;
+    await this.settleFinished();
+  }
+
+  /**
+   * Makes a finished drive safe, in this order: (1) the pending list with the
+   * drive in it is saved; (2) only then is its copy in "active" cleared;
+   * (3) only then are background updates stopped.  A crash (or failed
+   * write) between any two steps leaves the drive in "active", in pending or
+   * both (merged on the next start), never in neither.  Throws when a step
+   * fails; the rest is retried.
+   */
+  private async settleFinished(): Promise<void> {
+    if (this.pendingDirty || this.pendingUnreadable) await this.persistPending();
+    if (this.staleActive) {
+      try {
+        await this.journeys.saveActive(null);
+      } catch (err) {
+        this.journal.log('storage_write_failed', { what: 'active-drive', clientRef: this.staleActive, error: errorText(err) });
+        throw err;
+      }
+      this.staleActive = null;
+      await this.deps.tracker?.stop().catch(() => {});
+    }
+  }
+
+  /**
+   * Saves the pending list.  If the saved list couldn't be read, it is read
+   * again first and merged, never overwritten blind; throws if it still
+   * can't be read or the save fails (the drives stay in memory, and are
+   * saved by a retry).
+   */
+  private async persistPending(): Promise<void> {
+    if (this.pendingUnreadable) {
+      const read = await this.journeys.readPending();
+      if (read.ok) {
+        this.pending = dedupeDrives([...(read.value ?? []), ...this.pending]);
+        this.pendingUnreadable = false;
+        this.journal.log('storage_read_recovered', { what: 'pending-drives', pending: this.pending.length });
+      } else if (read.reason === 'corrupt' && (await this.quarantine('pending', read.raw!))) {
+        this.pendingUnreadable = false;
+      } else {
+        this.pendingDirty = true;
+        throw new Error(`The drives saved on this phone couldn't be read (${read.error})`);
+      }
+    }
+    try {
+      await this.journeys.savePending(this.pending);
+      this.pendingDirty = false;
+    } catch (err) {
+      this.pendingDirty = true;
+      this.journal.log('storage_write_failed', { what: 'pending-drives', pending: this.pending.length, error: errorText(err) });
+      throw err;
+    }
+  }
+
+  /** Saves the drive in progress; a failure is noted (once until a save works) and the next save retries. */
+  private persistActive(rec: JourneyRecord): Promise<void> {
+    return this.journeys.saveActive(rec).then(() => {
+      if (this.activeWriteFailing) this.journal.log('storage_write_recovered', { what: 'active-drive', clientRef: rec.clientRef });
+      this.activeWriteFailing = false;
+    }, (err) => {
+      if (!this.activeWriteFailing) this.journal.log('storage_write_failed', { what: 'active-drive', clientRef: rec.clientRef, error: errorText(err) });
+      this.activeWriteFailing = true;
+    });
+  }
+
+  private scheduleSettleRetry() {
+    if (this.settleRetry || this.disposed) return;
+    const wait = this.settleRetryMs;
+    this.settleRetryMs = Math.min(this.settleRetryMs * 2, SETTLE_RETRY_MAX_MS);
+    this.settleRetry = setTimeout(() => { this.settleRetry = null; void this.settleNow(); }, wait);
+    // Never what keeps a process alive (Node; a no-op in React Native)
+    (this.settleRetry as { unref?: () => void }).unref?.();
+  }
+
+  /** Tries again to read and settle saved drives that couldn't be earlier. */
+  async settleNow(): Promise<void> {
+    if (this.settling || !this.unsettled) return;
+    this.settling = true;
+    try {
+      if (this.activeUnreadable) {
+        await this.loadDrives();
+        if (!this.activeUnreadable) {
+          this.journal.log('storage_read_recovered', { what: 'active-drive', clientRef: this.active?.clientRef ?? null });
+          await this.recoverActive();
+        }
+      }
+      await this.settleFinished();
+    } catch (err) {
+      this.journal.log('recovery_incomplete', { error: errorText(err) });
+    } finally {
+      this.settling = false;
+    }
+    this.update((d) => this.withPendingJourneys(d));
+    this.setStatus({ pendingJourneys: this.pending.length });
+    this.notifyDrive(); // a drive read only now may be carried on
+    this.releaseHeldFixes();
+    if (this.unsettled) this.scheduleSettleRetry();
+    else {
+      this.settleRetryMs = SETTLE_RETRY_MS;
+      this.journal.log('recovery_settled', { driving: !!this.active, pending: this.pending.length });
+    }
+  }
+
+  /** Fixes that arrived while saved drives were being read go to the drive now (in time order). */
+  private releaseHeldFixes() {
+    if (this.settling || this.activeUnreadable || !this.heldFixes.length) return;
+    const held = this.heldFixes.sort((a, b) => a.timestamp - b.timestamp);
+    this.heldFixes = [];
+    if (this.active) for (const fix of held) this.addFix(fix);
   }
 
   /** Full refresh: upload what's waiting, then reload everything. */
   async sync(): Promise<void> {
+    if (this.unsettled) await this.settleNow();
     await this.outbox.flush();
     await this.syncJourneys();
+    await this.findOrphanJourneys().catch((err) => { this.journal.log('orphan_check_failed', { error: errorText(err) }); });
     await this.refresh();
   }
+
+  /**
+   * Server journeys still "active" that this phone has no drive for (its
+   * copy was lost, or the drive was recorded before a crash and never
+   * finished).  REPORT ONLY: each one is noted in the journal with what
+   * identifies it (server id, clientRef, start, first and last point times,
+   * point count) and kept in orphanJourneys; nothing is finished, changed or
+   * deleted on the server.  Only reads (the list of active journeys and
+   * their point times) are sent.  Checked at most every
+   * ORPHAN_CHECK_EVERY_MS; skipped while any saved drive is unsettled, since
+   * until it can be read the phone can't say which drives it has.
+   */
+  async findOrphanJourneys(): Promise<OrphanJourney[]> {
+    const ep = this.ep as Partial<Endpoints>;
+    if (this.unsettled || this.settling || !ep.listActiveJourneys || !ep.getJourneyPoints) return [];
+    if (this.now() - this.orphanCheckAt < ORPHAN_CHECK_EVERY_MS) return [];
+    const serverActive = await ep.listActiveJourneys();
+    this.orphanCheckAt = this.now();
+    const mine = [...(this.active ? [this.active] : []), ...this.pending];
+    const refs = new Set(mine.map((r) => r.clientRef));
+    const ids = new Set([...mine.map((r) => r.serverId), ...this.journeyIds.values()].filter(Boolean));
+    const found: OrphanJourney[] = [];
+    for (const j of serverActive) {
+      if ((j.clientRef && refs.has(j.clientRef)) || ids.has(j.id)) continue;
+      const times = (await ep.getJourneyPoints(j.id)).map((p) => Date.parse(p.recordedAt)).filter(Number.isFinite).sort((a, b) => a - b);
+      const first = times[0];
+      const last = times[times.length - 1];
+      const quietMs = this.now() - (last ?? Date.parse(j.startedAt));
+      const spanMs = first != null && last != null ? last - first : 0;
+      let outcome: OrphanJourney['outcome'];
+      if (this.outbox.hasPendingFor(j.id)) outcome = 'change-queued'; // e.g. a delete waiting to go
+      else if (quietMs < ORPHAN_IDLE_MS) outcome = 'recent';
+      else if (times.length < 2 || spanMs < MIN_DRIVE_MS) outcome = 'too-few-points';
+      else outcome = 'candidate';
+      const orphan: OrphanJourney = {
+        serverId: j.id, clientRef: j.clientRef, name: j.name, startedAt: j.startedAt,
+        firstPointAt: first != null ? new Date(first).toISOString() : null,
+        lastPointAt: last != null ? new Date(last).toISOString() : null,
+        pointCount: times.length, spanS: Math.round(spanMs / 1000), quietH: Math.round(quietMs / 360_000) / 10, outcome,
+      };
+      if (!this.orphansJournaled.has(`${j.id}:${outcome}`)) {
+        this.orphansJournaled.add(`${j.id}:${outcome}`);
+        this.journal.log('orphan_found', { ...orphan });
+      }
+      found.push(orphan);
+    }
+    this.orphans = found;
+    this.journal.log('orphan_check', { found: found.length, candidates: found.filter((o) => o.outcome === 'candidate').length });
+    return found;
+  }
+
+  /** What the last orphan check found (report only) */
+  get orphanJourneys(): readonly OrphanJourney[] { return this.orphans; }
+  /** When the last orphan check ran (null: not this session) */
+  get orphanCheckedAt(): number | null { return Number.isFinite(this.orphanCheckAt) ? this.orphanCheckAt : null; }
 
   /** Reloads all data from the API. Sections that fail keep their cached value. */
   async refresh(): Promise<void> {
@@ -643,7 +985,7 @@ export class CloudSync {
     if (serverId.startsWith('local:')) {
       // Still uploading: keep the new name with the drive.
       const rec = this.pending.find((r) => `local:${r.clientRef}` === serverId);
-      if (rec && updates.name) { rec.name = updates.name; await this.journeys.savePending(this.pending); }
+      if (rec && updates.name) { rec.name = updates.name; this.pendingDirty = true; await this.persistPending(); }
       return;
     }
     const fields: Record<string, unknown> = {};
@@ -671,7 +1013,7 @@ export class CloudSync {
   /** Throws away a drive that hasn't uploaded (e.g. one the server rejected). */
   async discardPendingJourney(localId: string) {
     this.pending = this.pending.filter((r) => `local:${r.clientRef}` !== localId);
-    await this.journeys.savePending(this.pending);
+    await this.persistPending();
     this.update((d) => ({ ...d, journeys: d.journeys.filter((j) => j.id !== localId) }));
     this.setStatus({ pendingJourneys: this.pending.length });
   }
@@ -733,7 +1075,7 @@ export class CloudSync {
   async saveActiveNow(): Promise<void> {
     if (!this.active) return;
     this.lastPointPersist = this.now();
-    await this.journeys.saveActive(this.active);
+    await this.persistActive(this.active);
   }
 
   /** Active (unpaused) time of the drive in progress, as the drive timer counts it */
@@ -746,7 +1088,7 @@ export class CloudSync {
     const rec = this.active;
     if (!rec) return;
     setRecordPaused(rec, paused, this.now());
-    void this.journeys.saveActive(rec);
+    void this.persistActive(rec);
   }
 
   /**
@@ -758,6 +1100,7 @@ export class CloudSync {
   async discardDrive(): Promise<void> {
     const rec = this.active;
     if (!rec) return;
+    this.journal.log('drive_discard', { clientRef: rec.clientRef, serverId: rec.serverId, drivenS: Math.round(activeDriveMs(rec, this.now()) / 1000) });
     this.active = null;
     this.notifyDrive();
     await this.stopTracking();
@@ -781,7 +1124,27 @@ export class CloudSync {
   }
 
   async startDrive(vehicle: Vehicle | null): Promise<void> {
-    if (this.active) return;
+    if (this.active || this.startingDrive) return;
+    this.startingDrive = true;
+    try {
+      // Start-up reads the saved drives first
+      await this.startup.catch(() => {});
+      // A drive saved earlier that couldn't be read or saved yet is never
+      // overwritten by a new one: settle it first, or refuse to start.
+      if (this.unsettled) await this.settleNow();
+      if (this.activeUnreadable) {
+        throw new Error("A drive saved on this phone couldn't be read yet, so a new one can't start. Try again in a moment.");
+      }
+      // An interrupted drive still in "active" (its pending copy not saved
+      // yet): saved first, or the new drive would overwrite it
+      if (this.staleActive) await this.settleFinished();
+      if (!this.active) await this.beginDrive(vehicle);
+    } finally {
+      this.startingDrive = false;
+    }
+  }
+
+  private async beginDrive(vehicle: Vehicle | null): Promise<void> {
     const snapshot = vehicle ? {
       vehicleId: vehicle.id, make: vehicle.make, model: vehicle.model, nickname: vehicle.nickname, year: vehicle.year,
       registration: vehicle.registration, imageUri: null, power: vehicle.power, engine: vehicle.engine,
@@ -794,6 +1157,7 @@ export class CloudSync {
     this.lastFix = null;
     const rec = this.active;
     this.notifyDrive();
+    this.journal.log('drive_start', { clientRef: rec.clientRef });
     await this.journeys.saveActive(rec);
     // Record in the background too, for as long as the drive lasts.
     void this.startTracking(rec);
@@ -825,6 +1189,12 @@ export class CloudSync {
    * is ignored.
    */
   addFix(fix: GpsFix): boolean {
+    if (this.settling || this.activeUnreadable) {
+      // Saved drives are still being read: the fix waits for its drive.
+      this.heldFixes.push(fix);
+      if (this.heldFixes.length > HELD_FIXES_MAX) this.heldFixes.splice(0, this.heldFixes.length - HELD_FIXES_MAX);
+      return false;
+    }
     const rec = this.active;
     if (!rec) return false;
     const now = this.now();
@@ -833,7 +1203,7 @@ export class CloudSync {
     if (this.passenger || !acceptDriveFix(rec, this.lastFix, fix)) {
       if (now - this.lastPointPersist >= PERSIST_HEARTBEAT_EVERY_MS) {
         this.lastPointPersist = now;
-        void this.journeys.saveActive(rec);
+        void this.persistActive(rec);
       }
       return false;
     }
@@ -841,7 +1211,7 @@ export class CloudSync {
     const kept = recordFix(rec, fix);
     if (now - this.lastPointPersist >= (kept ? PERSIST_POINTS_EVERY_MS : PERSIST_HEARTBEAT_EVERY_MS)) {
       this.lastPointPersist = now;
-      void this.journeys.saveActive(rec);
+      void this.persistActive(rec);
     }
     for (const fn of this.fixListeners) fn(fix);
     if (now - this.lastPointFlush >= FLUSH_POINTS_EVERY_MS) {
@@ -856,9 +1226,11 @@ export class CloudSync {
     if (this.activePush) return this.activePush;
     const rec = this.active;
     if (!rec) return Promise.resolve();
+    const hadServerId = !!rec.serverId;
     this.activePush = syncJourneyRecord(this.ep, rec, {
       resolveId: (id) => this.outbox.resolve(id),
       save: async (r) => {
+        if (!hadServerId && r.serverId) this.journal.log('drive_server_id', { clientRef: r.clientRef, serverId: r.serverId });
         if (this.active !== r) return;
         this.notifyDrive(); // the journey now has its server id
         await this.journeys.saveActive(r);
@@ -886,9 +1258,20 @@ export class CloudSync {
     rec.endedAt = new Date(this.now()).toISOString();
     this.active = null;
     this.notifyDrive();
-    this.pending.push(rec);
-    await this.journeys.savePending(this.pending);
-    await this.journeys.saveActive(null);
+    this.journal.log('drive_end', {
+      clientRef: rec.clientRef, serverId: rec.serverId, pointCount: rec.points.length,
+      drivenS: Math.round(activeDriveMs(rec, this.now()) / 1000),
+    });
+    // Pending first, then "active" cleared (see settleFinished).  If saving
+    // fails the drive stays in memory and in "active", and is retried.
+    this.pending = dedupeDrives([...this.pending, rec]);
+    this.pendingDirty = true;
+    this.staleActive = rec.clientRef;
+    try {
+      await this.settleFinished();
+    } catch {
+      this.scheduleSettleRetry();
+    }
     this.update((d) => this.withPendingJourneys(d));
     this.setStatus({ pendingJourneys: this.pending.length });
     await this.syncJourneys();
@@ -911,13 +1294,13 @@ export class CloudSync {
       try {
         const journey = await syncJourneyRecord(this.ep, rec, {
           resolveId: (id) => this.outbox.resolve(id),
-          save: () => this.journeys.savePending(this.pending),
+          save: () => this.persistPending(),
         });
         if (!journey) continue;
         this.journeyIds.set(rec.clientRef, journey.id);
         this.completedChanges++;
         this.pending = this.pending.filter((r) => r !== rec);
-        await this.journeys.savePending(this.pending);
+        await this.persistPending().catch(() => {});
         this.update((d) => {
           const others = d.journeys.filter((j) => j.id !== `local:${rec.clientRef}` && j.id !== journey.id);
           return { ...d, journeys: [toJourney(journey), ...others] };
@@ -929,7 +1312,7 @@ export class CloudSync {
         rec.attempts++;
         rec.lastError = describeError(err);
         if (!isRetryable(err) && err instanceof ApiError && err.status !== 401) rec.rejected = true;
-        await this.journeys.savePending(this.pending);
+        await this.persistPending().catch(() => {});
         this.update((d) => this.withPendingJourneys(d));
         if (isRetryable(err)) break;
       }
@@ -1141,9 +1524,11 @@ export class CloudSync {
     this.wiped = true;
     this.disposed = true;
     if (this.cacheTimer) clearTimeout(this.cacheTimer);
+    if (this.settleRetry) { clearTimeout(this.settleRetry); this.settleRetry = null; }
     // Signing out mid-drive: the drive is deleted below, so stop recording it.
     this.active = null;
     this.notifyDrive();
+    this.heldFixes = [];
     this.detachTracker?.();
     this.detachTracker = null;
     await this.deps.tracker?.stop().catch(() => {});
@@ -1161,6 +1546,7 @@ export class CloudSync {
     this.disposed = true;
     if (this.cacheTimer) clearTimeout(this.cacheTimer);
     if (this.friendsRetry) clearTimeout(this.friendsRetry);
+    if (this.settleRetry) { clearTimeout(this.settleRetry); this.settleRetry = null; }
     // Background updates keep running (the drive goes on); with no listener,
     // their fixes are saved to the device for the next start().
     this.detachTracker?.();

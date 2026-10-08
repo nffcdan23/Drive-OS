@@ -270,6 +270,10 @@ export const endpoints = (api: ApiClient) => ({
 
   // Journeys
   listJourneys: () => api.get<ServerJourney[]>('/journeys'),
+  /** Journeys still recording (or never finished) on the server */
+  listActiveJourneys: () => api.get<ServerJourney[]>('/journeys?status=active'),
+  /** A journey's stored GPS points (own journeys only), oldest first */
+  getJourneyPoints: (id: string) => api.get<{ recordedAt: string }[]>(`/journeys/${id}/points`),
   getJourney: (id: string) => api.get<ServerJourney>(`/journeys/${id}`),
   startJourney: (input: { clientRef: string; startedAt: string; timezone: string; vehicleId?: string | null; name?: string }) =>
     api.post<ServerJourney>('/journeys', input),

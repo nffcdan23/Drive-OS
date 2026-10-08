@@ -22,7 +22,12 @@ import { Ionicons } from "@expo/vector-icons";
 import Svg, { Path, Circle } from "react-native-svg";
 import * as Haptics from "expo-haptics";
 import { ActiveDrive } from "@/context/AppContext";
-import { ResolvedUnitSystem, formatDistance, speedUnit } from "@/lib/units";
+import {
+  ResolvedUnitSystem,
+  convertSpeed,
+  formatDistance,
+  speedUnit,
+} from "@/lib/units";
 
 export type ActiveDriveMode = "navigation" | "tracking";
 
@@ -87,10 +92,6 @@ function avgSpeedKmh(drive: ActiveDrive | null): number {
   return (
     drive.speedSamples.reduce((a, b) => a + b, 0) / drive.speedSamples.length
   );
-}
-
-function convertSpeed(kmh: number, system: ResolvedUnitSystem): number {
-  return system === "imperial" ? kmh * 0.621371 : kmh;
 }
 
 // ─── Speedometer SVG ──────────────────────────────────────────────────────────

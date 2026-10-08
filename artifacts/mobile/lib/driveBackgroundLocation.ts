@@ -23,6 +23,7 @@ import {
 } from '@/lib/backend/driveTracking';
 import type { GpsFix } from '@/lib/backend/journeyRecorder';
 import { requestBackgroundLocation, requestForegroundLocation } from '@/lib/locationPermission';
+import { journal } from '@/lib/diagnostics';
 import { deviceStorage } from '@/lib/secureStorage';
 
 export const DRIVE_LOCATION_TASK = 'drive-location-recording';
@@ -101,7 +102,7 @@ const updates: LocationUpdates = {
   },
 };
 
-export const driveTracker = new BackgroundDriveRecorder({ store: deviceStorage, updates });
+export const driveTracker = new BackgroundDriveRecorder({ store: deviceStorage, updates, journal });
 
 function toFix(loc: Location.LocationObject): GpsFix {
   return {

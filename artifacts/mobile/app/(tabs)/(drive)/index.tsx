@@ -39,7 +39,9 @@ import ActiveDriveOverlay, {
 } from "@/components/ActiveDriveOverlay";
 import type { MapboxDriveMapHandle } from "@/components/MapboxDriveMap";
 import { DRIVE_MAPBOX, MAP_PROVIDER_DIAGNOSTICS } from "@/lib/mapProvider";
-import { clampMapboxZoom, mapboxStyleFor } from "@/lib/mapbox";
+import { clampMapboxZoom, displayTrail, mapboxStyleFor } from "@/lib/mapbox";
+import { useVisualGate } from "@/hooks/useVisualGate";
+import type { VisualState } from "@/lib/visualGate";
 import * as Location from "expo-location";
 import { requestForegroundLocation } from "@/lib/locationPermission";
 import { buildFollowCamera } from "@/lib/followCamera";
@@ -54,6 +56,7 @@ import {
   markerScreenRotation,
 } from "@/lib/headingFilter";
 import { LiveTrailHead } from "@/lib/liveTrail";
+import { msToKmh } from "@/lib/units";
 import { isLongEnoughToSave } from "@/lib/backend/journeyRecorder";
 import {
   lookAheadForSpeed,
@@ -514,6 +517,7 @@ export default function MapScreen() {
     setDrivePaused,
     isDrivePaused,
     activeDriveMs,
+    latestDriveFix,
     updateDriveCoordinate,
     noteForegroundFix,
     resolvedUnitSystem,
@@ -658,6 +662,16 @@ export default function MapScreen() {
   } | null>(null);
   const isDrivingRef = useRef(isDriving);
   const isPassengerModeRef = useRef(isPassengerMode);
+  // ── Visual work only while the app is on screen (lib/visualGate) ──
+  // Background = recording and data only: no frame loop, no camera, arrow or
+  // trail writes, no on-screen timers.  Launched in the background by iOS to
+  // deliver locations, the map isn't even created until the app is opened.
+  const onVisualChangeRef = useRef<(next: VisualState, prev: VisualState) => void>(() => {});
+  const visuals = useVisualGate((next, prev) => onVisualChangeRef.current(next, prev));
+  const visualsLiveRef = visuals.liveRef;
+  // When the screen's watcher last delivered a fix (to tell whether the
+  // background's newest fix is newer on returning to the app)
+  const lastScreenFixAtRef = useRef(0);
   // Timestamp until which region changes are ours rather than the user's.  A
   // one-shot boolean was consumed by the first of the several events a single
   // animation emits, so the rest looked like gestures and cancelled follow mode.
@@ -777,7 +791,8 @@ export default function MapScreen() {
   // Ends follow mode (set below, once its callback exists)
   const leaveFollowRef = useRef<() => void>(() => {});
   const wakeFrameLoop = useCallback(() => {
-    if (frameIdRef.current != null) return;
+    // Never while the app is off screen: background is recording only
+    if (frameIdRef.current != null || !visualsLiveRef.current) return;
     lastFrameAtRef.current = Date.now();
     frameIdRef.current = requestAnimationFrame(() => frameLoopRef.current());
   }, []);
@@ -819,6 +834,8 @@ export default function MapScreen() {
 
   frameLoopRef.current = () => {
     frameIdRef.current = null;
+    // The app left the screen since this frame was asked for: stop here
+    if (!visualsLiveRef.current) return;
     const now = Date.now();
     const dt = Math.min(
       Math.max(now - lastFrameAtRef.current, 0),
@@ -945,6 +962,52 @@ export default function MapScreen() {
     [],
   );
 
+  // Leaving the screen stops all visual work at once (recording carries on);
+  // coming back catches up to where the drive is now in one step: the arrow
+  // and camera go straight to the newest position, no missed frame or camera
+  // pose is replayed, and the route (held by AppContext meanwhile) arrives as
+  // one update.
+  onVisualChangeRef.current = (next, prev) => {
+    if (prev.live && !next.live) {
+      if (frameIdRef.current != null) cancelAnimationFrame(frameIdRef.current);
+      frameIdRef.current = null;
+      mapboxRef.current?.setVisualsLive(false);
+      return;
+    }
+    if (!prev.live && next.live) {
+      mapboxRef.current?.setVisualsLive(true);
+      const now = Date.now();
+      // Background tracking kept recording: start from its newest fix
+      const fix = latestDriveFix();
+      if (fix && fix.timestamp > lastScreenFixAtRef.current) {
+        locationSmoother.addFix(
+          {
+            latitude: fix.latitude,
+            longitude: fix.longitude,
+            speed: fix.speedMs,
+            course: fix.headingDeg ?? null,
+            accuracy: fix.accuracyM ?? null,
+            time: fix.timestamp,
+          },
+          now,
+        );
+        const speedKmh = msToKmh(fix.speedMs);
+        lastSpeedKmhRef.current = speedKmh;
+        if (fix.headingDeg != null && fix.headingDeg >= 0 && speedKmh >= MIN_SPEED_FOR_GPS_HEADING) {
+          headingFilter.update(fix.headingDeg, "course");
+        }
+      }
+      // Following: the camera starts at the current target, no ease across
+      // everything that happened while away
+      const position = locationSmoother.sample(now);
+      if (followModeRef.current === "following" && position) {
+        followCamera.enter(false, {}, followTargetFor(position));
+      }
+      markerDrawnAtRef.current = null; // the arrow is placed on the next frame
+      wakeFrameLoop();
+    }
+  };
+
   // Enter follow mode.  With the live camera in hand it eases from there;
   // otherwise the loop fetches it first.
   const startFollowing = useCallback(
@@ -1007,7 +1070,7 @@ export default function MapScreen() {
         const dt = (now - prev.time) / 1000;
         if (dt > 0) {
           const dist = haversineMeters(prev.lat, prev.lon, lat, lon);
-          const impliedKmh = (dist / dt) * 3.6;
+          const impliedKmh = msToKmh(dist / dt);
           if (impliedKmh > MAX_PLAUSIBLE_KMH) return; // reject implausible jump
         }
       }
@@ -1035,10 +1098,14 @@ export default function MapScreen() {
       );
       // The first fix lands as-is; place the marker before it first renders so
       // it never flashes at the placeholder coordinate
+      lastScreenFixAtRef.current = fixTime ?? now;
       if (firstFix) {
-        mapboxRef.current?.setMarker(coord);
-        markerDrawnAtRef.current = coord;
         markerInitialCoordRef.current = coord;
+        // Off screen, the frame loop places it on returning
+        if (visualsLiveRef.current) {
+          mapboxRef.current?.setMarker(coord);
+          markerDrawnAtRef.current = coord;
+        }
       }
 
       // ── Record to active drive ──
@@ -1047,8 +1114,6 @@ export default function MapScreen() {
         !isPassengerModeRef.current &&
         !isPausedRef.current
       ) {
-        const speedKmh = speedMs != null ? speedMs * 3.6 : 0;
-        // Plausibility-checked speed before updating stats
         updateDriveCoordinate({
           latitude: lat,
           longitude: lon,
@@ -1075,7 +1140,7 @@ export default function MapScreen() {
       // Moving: the GPS course is the heading.  Stopped or crawling, the course
       // is noise and the compass handler supplies the heading instead; this
       // path no longer touches it, so the two never fight.
-      const speedKmh = speedMs != null ? speedMs * 3.6 : 0;
+      const speedKmh = msToKmh(speedMs);
       lastSpeedKmhRef.current = speedKmh;
       if (
         gpsHeading != null &&
@@ -1094,8 +1159,12 @@ export default function MapScreen() {
   // The live head starts from the recorded trail's newest point, as drawn: a
   // fix the recorder thinned away, or one background tracking delivered
   // first, can't leave a gap between the two
+  // (Held by AppContext while the app is off screen, and caught up in one
+  // update when it's back.)
   const driveTrail =
     isDriving && currentDrive ? currentDrive.coordinates : null;
+  // The Apple map's route lines, bounded like the Mapbox trail (lib/mapbox)
+  const shownRoute = useMemo(() => displayTrail(driveTrail), [driveTrail]);
   useEffect(() => {
     if (!driveTrail || isPausedRef.current || isPassengerModeRef.current)
       return;
@@ -1266,7 +1335,8 @@ export default function MapScreen() {
   useEffect(() => {
     const tick = () => setDriveSeconds(Math.floor((activeDriveMs() ?? 0) / 1000));
     tick();
-    if (isDriving && !isPaused) {
+    // The on-screen timer runs only while the app is on screen
+    if (isDriving && !isPaused && visuals.live) {
       driveTimerRef.current = setInterval(tick, 1000);
     }
     // Catch up at once on returning to the app
@@ -1278,7 +1348,7 @@ export default function MapScreen() {
       driveTimerRef.current = null;
       sub.remove();
     };
-  }, [isDriving, isPaused, activeDriveMs]);
+  }, [isDriving, isPaused, activeDriveMs, visuals.live]);
 
   // ── Follow mode resume ────────────────────────────────────────────────────
   const handleResumeFollowing = useCallback(() => {
@@ -1446,10 +1516,12 @@ export default function MapScreen() {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     // Under 10 s of active driving, by the on-screen drive timer (paused time
     // doesn't count): thrown away, not saved.  The summary screen saves on
-    // open, so the check has to happen before going there.  Read through a
-    // ref: this runs from the End Drive confirmation, which may have been
-    // open for a while since the button was pressed.
-    if (!isLongEnoughToSave(driveSecondsRef.current * 1000)) {
+    // open, so the check has to happen before going there.  Read from the
+    // drive's own timestamps at the moment of confirming (the confirmation
+    // may have been open a while), not the on-screen timer, which can lag
+    // just after the app was relaunched and a drive picked up.
+    const drivenMs = activeDriveMs() ?? driveSecondsRef.current * 1000;
+    if (!isLongEnoughToSave(drivenMs)) {
       void discardDrive();
       Alert.alert(
         "Drive too short to save",
@@ -1807,7 +1879,11 @@ export default function MapScreen() {
       }
     >
       {/* ── Map ── */}
-      {Platform.OS !== "web" && MapboxDriveMap && DRIVE_MAPBOX ? (
+      {Platform.OS !== "web" && !visuals.mounted ? (
+        // Launched in the background by iOS (to deliver locations): no map
+        // until the app is actually opened
+        <View style={styles.mapFull} />
+      ) : Platform.OS !== "web" && MapboxDriveMap && DRIVE_MAPBOX ? (
         <MapboxDriveMap
           ref={mapboxRef}
           style={styles.mapFull}
@@ -1883,18 +1959,18 @@ export default function MapScreen() {
             />
           )}
           {/* Recorded route: a soft glow under the cyan line */}
-          {isDriving && currentDrive && currentDrive.coordinates.length > 1 && (
+          {isDriving && shownRoute && shownRoute.length > 1 && (
             <Polyline
-              coordinates={currentDrive.coordinates}
+              coordinates={shownRoute as LatLngPoint[]}
               strokeColor="rgba(0,207,232,0.28)"
               strokeWidth={12}
               lineCap="round"
               lineJoin="round"
             />
           )}
-          {isDriving && currentDrive && currentDrive.coordinates.length > 1 && (
+          {isDriving && shownRoute && shownRoute.length > 1 && (
             <Polyline
-              coordinates={currentDrive.coordinates}
+              coordinates={shownRoute as LatLngPoint[]}
               strokeColor={colors.primary}
               strokeWidth={4}
               lineCap="round"
