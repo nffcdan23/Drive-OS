@@ -198,6 +198,8 @@ class FakeServer {
   /** Each journey's stored point times, as the server keeps them (duplicates ignored) */
   pointTimes = new Map<string, Set<string>>();
   deletedJourneys: string[] = [];
+  /** Every endpoint called, in order */
+  calls: string[] = [];
   loseNextStartReply = false;
   private n = 0;
   private guard() { if (this.offline) throw new NetworkError(); }
@@ -261,6 +263,9 @@ class FakeServer {
         return j;
       },
     };
+    for (const [name, fn] of Object.entries(e)) {
+      (e as Record<string, unknown>)[name] = (...args: unknown[]) => { self.calls.push(name); return (fn as (...a: unknown[]) => unknown)(...args); };
+    }
     return e as unknown as Endpoints;
   }
 }
@@ -4379,7 +4384,7 @@ test('a saved drive that can\'t be read is never taken for "no drive": tracking 
   again.app.dispose();
 });
 
-test('a corrupt saved drive is copied aside byte for byte, its server journey is kept, and the server copy is recovered later', async () => {
+test('a corrupt saved drive is copied aside byte for byte, its server journey is kept, and the server copy is reported later (not changed)', async () => {
   const store = new MemoryStore();
   const clock = { t: Date.parse('2026-10-05T13:00:00Z') };
   const updates = new FakeUpdates();
@@ -4406,13 +4411,16 @@ test('a corrupt saved drive is copied aside byte for byte, its server journey is
   await again.app.startDrive(null);
   assert.equal(again.app.isDriving, true);
   await again.app.discardDrive();
-  // Hours later, the server copy (uploaded every 30 s while driving) is finished from its own points
+  // Hours later, the server copy (uploaded every 30 s while driving) is
+  // reported as a lost drive: identified, but left exactly as it is
+  const lostId = server.journeys[0]!.id;
+  const before = JSON.stringify(server.journeys);
   clock.t += ORPHAN_IDLE_MS;
   await again.app.sync();
-  const recovered = server.journeys.find((j) => j.name === 'Recovered drive')!;
-  assert.equal(recovered.status, 'completed');
-  assert.ok(server.pointTimes.get(recovered.id)!.size > 500);
-  assert.ok(again.app.data.journeys.some((j) => j.id === recovered.id), 'shown in the drive history');
+  assert.deepEqual(again.app.orphanJourneys.map((o) => [o.serverId, o.outcome]), [[lostId, 'candidate']]);
+  assert.ok(again.app.orphanJourneys[0]!.pointCount > 500);
+  assert.equal(JSON.stringify(server.journeys), before, 'not finished, changed or deleted');
+  assert.ok((await events(again)).includes('orphan_found'));
   again.app.dispose();
 });
 
@@ -4500,7 +4508,7 @@ test('the background task never stops recording because the drive or its session
   assert.ok(HELD_FIXES_MAX >= 7200, 'about two hours of fixes can be held');
 });
 
-test('server journeys left "active" with no drive on the phone are found, finished from their own points once quiet, and never deleted', async () => {
+test('server journeys left "active" with no drive on the phone are reported, never finished, changed or deleted', async () => {
   const clock = { t: Date.parse('2026-10-08T12:00:00Z') };
   const server = new FakeServer();
   const iso = (ms: number) => new Date(ms).toISOString();
@@ -4510,9 +4518,11 @@ test('server journeys left "active" with no drive on the phone are found, finish
   };
   const twoDaysAgo = clock.t - 2 * 24 * 3600_000;
   const every3s = (from: number, seconds: number) => Array.from({ length: Math.floor(seconds / 3) }, (_, i) => from + i * 3000);
-  seed('lost', 'lost-ref', twoDaysAgo, every3s(twoDaysAgo, 100 * 60)); // 1 h 40 min, two days ago
+  const lostTimes = every3s(twoDaysAgo, 100 * 60);
+  seed('lost', 'lost-ref', twoDaysAgo, lostTimes); // 1 h 40 min, two days ago: the Lincoln case
   seed('recent', 'other-phone', clock.t - 60 * 60_000, every3s(clock.t - 60 * 60_000, 30 * 60)); // quiet for 30 min
   seed('tiny', 'tiny-ref', twoDaysAgo, [twoDaysAgo + 1000]);
+  seed('none', 'none-ref', twoDaysAgo, []);
   seed('short', 'short-ref', twoDaysAgo, [twoDaysAgo, twoDaysAgo + 4000]);
   seed('done', 'done-ref', twoDaysAgo, every3s(twoDaysAgo, 600), 'completed');
   seed('mine', 'mine-ref', twoDaysAgo, every3s(twoDaysAgo, 600));
@@ -4521,28 +4531,77 @@ test('server journeys left "active" with no drive on the phone are found, finish
   const mine = { ...newRecord({ clientRef: 'mine-ref', startedAt: new Date(twoDaysAgo), timezone: 'UTC', vehicleId: null, vehicleSnapshot: null }),
     serverId: 'mine', endedAt: iso(twoDaysAgo + 600_000), rejected: true };
   await store.setItem(PENDING_KEY, JSON.stringify([mine]));
+  const before = JSON.stringify({ journeys: server.journeys, points: [...server.pointTimes].map(([k, v]) => [k, [...v]]) });
   const b = recoveryApp(store, clock, undefined, server);
   await b.app.start();
-  const found = await b.app.recoverOrphans();
+  server.calls = [];
+  const found = await b.app.findOrphanJourneys();
   const outcome = Object.fromEntries(found.map((o) => [o.serverId, o.outcome]));
-  assert.deepEqual(outcome, { lost: 'finalized', recent: 'recent', tiny: 'too-few-points', short: 'too-few-points' });
-  const lost = server.journeys.find((j) => j.id === 'lost')!;
-  assert.equal(lost.status, 'completed');
-  assert.equal(lost.endedAt, iso(Math.max(...every3s(twoDaysAgo, 100 * 60))), 'ended at its last point');
-  assert.equal(lost.name, 'Recovered drive');
-  for (const id of ['recent', 'tiny', 'short', 'mine']) assert.equal(server.journeys.find((j) => j.id === id)!.status, 'active', `${id} untouched`);
-  assert.equal(server.deletedJourneys.length, 0, 'nothing deleted');
-  const found2 = found.find((o) => o.serverId === 'lost')!;
-  assert.equal(found2.pointCount, 2000);
-  // Every one is in the journal (times and ids only)
+  assert.deepEqual(outcome, { lost: 'candidate', recent: 'recent', tiny: 'too-few-points', none: 'too-few-points', short: 'too-few-points' });
+  // Enough to identify the lost drive safely
+  assert.deepEqual(found.find((o) => o.serverId === 'lost'), {
+    serverId: 'lost', clientRef: 'lost-ref', name: 'Active Journey', startedAt: iso(twoDaysAgo),
+    firstPointAt: iso(lostTimes[0]!), lastPointAt: iso(lostTimes.at(-1)!), pointCount: 2000,
+    spanS: Math.round((lostTimes.at(-1)! - lostTimes[0]!) / 1000), quietH: 46.3, outcome: 'candidate', // quiet since its last point
+  });
+  assert.deepEqual(b.app.orphanJourneys, found, 'kept for the app to show');
+  // Report only: nothing on the server changed, and only reads were sent
+  assert.deepEqual([...new Set(server.calls)].sort(), ['getJourneyPoints', 'listActiveJourneys']);
+  assert.equal(JSON.stringify({ journeys: server.journeys, points: [...server.pointTimes].map(([k, v]) => [k, [...v]]) }), before);
+  assert.equal(server.deletedJourneys.length, 0);
+  // Each one is in the journal with what identifies it (times and ids only)
   const entries = await b.journal.read();
-  assert.equal(entries.filter((e) => e.event === 'orphan_found').length, 4);
-  assert.equal(entries.filter((e) => e.event === 'orphan_finalized').length, 1);
-  // Checked at most hourly; the recovered drive shows in the history after a sync
-  assert.deepEqual(await b.app.recoverOrphans(), []);
+  const lostEntry = entries.find((e) => e.event === 'orphan_found' && e.serverId === 'lost')!;
+  assert.equal(lostEntry.outcome, 'candidate');
+  assert.equal(lostEntry.clientRef, 'lost-ref');
+  assert.equal(lostEntry.lastPointAt, iso(lostTimes.at(-1)!));
+  assert.equal(lostEntry.pointCount, 2000);
+  assert.equal(entries.filter((e) => e.event === 'orphan_found').length, 5);
+  assert.deepEqual(entries.filter((e) => e.event === 'orphan_check').map((e) => [e.found, e.candidates]), [[5, 1]]);
+  assert.ok(!entries.some((e) => e.event === 'orphan_finalized'));
+  // Checked at most hourly; a later check doesn't repeat them in the journal, and still changes nothing
+  assert.deepEqual(await b.app.findOrphanJourneys(), []);
   clock.t += ORPHAN_CHECK_EVERY_MS;
+  server.calls = [];
   await b.app.sync();
-  assert.ok(b.app.data.journeys.some((j) => j.id === 'lost'));
+  assert.ok(!server.calls.some((c) => /^(complete|delete|update|start)Journey$|^addRoutePoints$/.test(c)), server.calls.join(','));
+  assert.equal((await b.journal.read()).filter((e) => e.event === 'orphan_found').length, 5);
+  assert.equal(server.journeys.find((j) => j.id === 'lost')!.status, 'active');
+  assert.ok(!b.app.data.journeys.some((j) => j.id === 'lost'), 'not shown as a drive: nothing was finished');
+  b.app.dispose();
+});
+
+test('drives this phone is recording or still uploading are never reported as orphans', async () => {
+  const clock = { t: Date.parse('2026-10-08T06:00:00Z') };
+  const server = new FakeServer();
+  const b = recoveryApp(new MemoryStore(), clock, undefined, server);
+  await b.app.start();
+  // A finished drive still waiting to finish uploading (offline when it ended)
+  await b.app.startDrive(null);
+  await settle();
+  await longDrive(b, 0, 10 * 60);
+  const waiting = b.app.activeRecord!.clientRef;
+  server.offline = true;
+  await b.app.endDrive();
+  server.offline = false;
+  assert.equal(b.app.status.pendingJourneys, 1);
+  // A long drive in progress, then parked for 4 h with recording on (no new points)
+  await b.app.startDrive(null);
+  await settle();
+  await longDrive(b, 10_000, 20 * 60);
+  const driving = b.app.activeRecord!.clientRef;
+  clock.t += 4 * 3600_000;
+  // A real orphan alongside them, as a control
+  const old = clock.t - 24 * 3600_000;
+  server.journeys.push({ id: 'orphan', clientRef: 'orphan-ref', status: 'active', startedAt: new Date(old).toISOString(), name: 'Active Journey', route: null } as unknown as ServerJourney);
+  server.pointTimes.set('orphan', new Set([old, old + 600_000].map((t) => new Date(t).toISOString())));
+  // Both of this phone's journeys are active on the server and quiet for hours
+  const mine = server.journeys.filter((j) => j.clientRef === waiting || j.clientRef === driving);
+  assert.equal(mine.length, 2);
+  assert.ok(mine.every((j) => j.status === 'active'));
+  const found = await b.app.findOrphanJourneys();
+  assert.deepEqual(found.map((o) => [o.serverId, o.outcome]), [['orphan', 'candidate']], 'only the real orphan');
+  assert.equal(b.app.isDriving, true);
   b.app.dispose();
 });
 
@@ -4558,7 +4617,7 @@ test('the orphan check leaves journeys alone while a saved drive is unreadable, 
   store.failReads = ['journey/active'];
   const b = recoveryApp(store, clock, undefined, server);
   await b.app.start();
-  assert.deepEqual(await b.app.recoverOrphans(), []);
+  assert.deepEqual(await b.app.findOrphanJourneys(), []);
   assert.equal(server.journeys[0]!.status, 'active');
   b.app.dispose();
   // A delete queued for it (the user removed it while it couldn't be sent): not finished behind their back
@@ -4570,7 +4629,7 @@ test('the orphan check leaves journeys alone while a saved drive is unreadable, 
   });
   await c.start();
   await c.deleteJourney('old');
-  const found = await c.recoverOrphans();
+  const found = await c.findOrphanJourneys();
   assert.deepEqual(found.map((o) => o.outcome), ['change-queued']);
   assert.equal(server.journeys[0]!.status, 'active');
   c.dispose();

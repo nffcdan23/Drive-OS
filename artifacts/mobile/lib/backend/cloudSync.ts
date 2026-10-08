@@ -93,9 +93,9 @@ const PERSIST_HEARTBEAT_EVERY_MS = 60_000;
 export const RESUME_DRIVE_WITHIN_MS = 15 * 60_000;
 /**
  * A journey still "active" on the server that this phone has no drive for is
- * finished from its stored points only once it has had no points for this
- * long: a drive being recorded right now (on another phone signed in to the
- * same account, say) is never cut short.
+ * reported as a possibly lost drive only once it has had no points for this
+ * long: one being recorded right now (on another phone signed in to the same
+ * account, say) is not a candidate.
  */
 export const ORPHAN_IDLE_MS = 3 * 60 * 60_000;
 /** How often the server is checked for such journeys. */
@@ -106,14 +106,30 @@ const HELD_FIXES_MAX = 7_200;
 const SETTLE_RETRY_MS = 5_000;
 const SETTLE_RETRY_MAX_MS = 5 * 60_000;
 
-/** What happened to one server journey found still active with no drive on this phone */
+/**
+ * A journey still "active" on the server that this phone has no drive for.
+ * Report only: nothing about it is changed on the server.
+ */
 export interface OrphanJourney {
   serverId: string;
   clientRef: string | null;
+  name: string;
   startedAt: string;
-  pointCount: number;
+  firstPointAt: string | null;
   lastPointAt: string | null;
-  outcome: 'finalized' | 'recent' | 'too-few-points' | 'change-queued';
+  pointCount: number;
+  /** Seconds from its first point to its last */
+  spanS: number;
+  /** Hours since its last point (or its start, with none) */
+  quietH: number;
+  /**
+   * - candidate: quiet for ORPHAN_IDLE_MS with at least 10 s of points:
+   *   probably a drive whose copy on the phone was lost;
+   * - recent: points within ORPHAN_IDLE_MS (it may still be recording);
+   * - too-few-points: under two points, or under 10 s of them;
+   * - change-queued: an edit or delete for it is waiting to be sent.
+   */
+  outcome: 'candidate' | 'recent' | 'too-few-points' | 'change-queued';
 }
 
 export class CloudSync {
@@ -173,6 +189,9 @@ export class CloudSync {
   private startingDrive = false;
   private activeWriteFailing = false;
   private orphanCheckAt = -Infinity;
+  private orphans: OrphanJourney[] = [];
+  /** Orphans already written to the journal this run (by id and outcome), so hourly checks don't repeat them */
+  private orphansJournaled = new Set<string>();
   private startup: Promise<void> = Promise.resolve();
 
   constructor(private readonly deps: CloudSyncDeps) {
@@ -363,8 +382,8 @@ export class CloudSync {
    *
    * Never deletes anything on the server: the local copy may be missing its
    * last few seconds, so it can't prove a drive was too short.  A short one's
-   * server journey is left for the orphan check (recoverOrphans), which only
-   * finishes it from its own points if they show a real drive.
+   * server journey is left as it is; the orphan check (findOrphanJourneys)
+   * reports it, and changes nothing.
    */
   private async finishInterrupted(rec: JourneyRecord, reason: string): Promise<void> {
     const ended: JourneyRecord = { ...rec, endedAt: rec.endedAt ?? new Date(lastActivityMs(rec)).toISOString() };
@@ -495,21 +514,22 @@ export class CloudSync {
     if (this.unsettled) await this.settleNow();
     await this.outbox.flush();
     await this.syncJourneys();
-    await this.recoverOrphans().catch((err) => { this.journal.log('orphan_check_failed', { error: errorText(err) }); });
+    await this.findOrphanJourneys().catch((err) => { this.journal.log('orphan_check_failed', { error: errorText(err) }); });
     await this.refresh();
   }
 
   /**
    * Server journeys still "active" that this phone has no drive for (its
    * copy was lost, or the drive was recorded before a crash and never
-   * finished): never left hidden.  Each one that has been quiet for
-   * ORPHAN_IDLE_MS and has at least 10 s of points is finished from its
-   * stored points, as a "Recovered drive", ending at its last point.  Others
-   * are left exactly as they are (never deleted).  Every one found is noted
-   * in the journal.  Skipped while any saved drive is unsettled: until it
-   * can be read, the phone can't say which drives it has.
+   * finished).  REPORT ONLY: each one is noted in the journal with what
+   * identifies it (server id, clientRef, start, first and last point times,
+   * point count) and kept in orphanJourneys; nothing is finished, changed or
+   * deleted on the server.  Only reads (the list of active journeys and
+   * their point times) are sent.  Checked at most every
+   * ORPHAN_CHECK_EVERY_MS; skipped while any saved drive is unsettled, since
+   * until it can be read the phone can't say which drives it has.
    */
-  async recoverOrphans(): Promise<OrphanJourney[]> {
+  async findOrphanJourneys(): Promise<OrphanJourney[]> {
     const ep = this.ep as Partial<Endpoints>;
     if (this.unsettled || this.settling || !ep.listActiveJourneys || !ep.getJourneyPoints) return [];
     if (this.now() - this.orphanCheckAt < ORPHAN_CHECK_EVERY_MS) return [];
@@ -525,28 +545,31 @@ export class CloudSync {
       const first = times[0];
       const last = times[times.length - 1];
       const quietMs = this.now() - (last ?? Date.parse(j.startedAt));
+      const spanMs = first != null && last != null ? last - first : 0;
       let outcome: OrphanJourney['outcome'];
       if (this.outbox.hasPendingFor(j.id)) outcome = 'change-queued'; // e.g. a delete waiting to go
       else if (quietMs < ORPHAN_IDLE_MS) outcome = 'recent';
-      else if (first == null || last == null || times.length < 2 || last - first < MIN_DRIVE_MS) outcome = 'too-few-points';
-      else outcome = 'finalized';
+      else if (times.length < 2 || spanMs < MIN_DRIVE_MS) outcome = 'too-few-points';
+      else outcome = 'candidate';
       const orphan: OrphanJourney = {
-        serverId: j.id, clientRef: j.clientRef, startedAt: j.startedAt, pointCount: times.length,
-        lastPointAt: last != null ? new Date(last).toISOString() : null, outcome,
+        serverId: j.id, clientRef: j.clientRef, name: j.name, startedAt: j.startedAt,
+        firstPointAt: first != null ? new Date(first).toISOString() : null,
+        lastPointAt: last != null ? new Date(last).toISOString() : null,
+        pointCount: times.length, spanS: Math.round(spanMs / 1000), quietH: Math.round(quietMs / 360_000) / 10, outcome,
       };
-      this.journal.log('orphan_found', {
-        serverId: orphan.serverId, clientRef: orphan.clientRef, startedAt: orphan.startedAt, pointCount: orphan.pointCount,
-        lastPointAt: orphan.lastPointAt, quietH: Math.round(quietMs / 360_000) / 10, outcome,
-      });
-      if (outcome === 'finalized') {
-        await this.ep.completeJourney(j.id, { endedAt: new Date(last!).toISOString(), distanceKm: 0, name: 'Recovered drive' });
-        this.completedChanges++;
-        this.journal.log('orphan_finalized', { serverId: j.id, clientRef: j.clientRef, endedAt: orphan.lastPointAt });
+      if (!this.orphansJournaled.has(`${j.id}:${outcome}`)) {
+        this.orphansJournaled.add(`${j.id}:${outcome}`);
+        this.journal.log('orphan_found', { ...orphan });
       }
       found.push(orphan);
     }
+    this.orphans = found;
+    this.journal.log('orphan_check', { found: found.length, candidates: found.filter((o) => o.outcome === 'candidate').length });
     return found;
   }
+
+  /** What the last orphan check found (report only) */
+  get orphanJourneys(): readonly OrphanJourney[] { return this.orphans; }
 
   /** Reloads all data from the API. Sections that fail keep their cached value. */
   async refresh(): Promise<void> {
