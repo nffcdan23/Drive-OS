@@ -38,6 +38,9 @@ import ActiveDriveOverlay, {
   ActiveDriveMode,
 } from "@/components/ActiveDriveOverlay";
 import type { MapboxDriveMapHandle } from "@/components/MapboxDriveMap";
+import { FriendMarkersNative } from "@/components/friendMap/FriendMarkersNative";
+import { FriendLiveCard } from "@/components/friendMap/FriendLiveCard";
+import { friendMapSelection } from "@/lib/liveMap";
 import { DRIVE_MAPBOX, MAP_PROVIDER_DIAGNOSTICS } from "@/lib/mapProvider";
 import { clampMapboxZoom, mapboxStyleFor } from "@/lib/mapbox";
 import * as Location from "expo-location";
@@ -111,6 +114,10 @@ function AboveTabBar({
 const USING_MAPBOX = DRIVE_MAPBOX != null;
 const MapboxDriveMap: typeof import("@/components/MapboxDriveMap").default | null =
   USING_MAPBOX ? require("@/components/MapboxDriveMap").default : null;
+// Friends' live positions: a self-contained layer per map (it subscribes to
+// the shared positions itself, so updates never re-render this screen)
+const FriendMarkersMapbox: typeof import("@/components/friendMap/FriendMarkersMapbox").default | null =
+  USING_MAPBOX ? require("@/components/friendMap/FriendMarkersMapbox").default : null;
 // The follow zoom each map states: Mapbox zoom, or Google zoom on Android
 // (iOS Apple Maps holds a camera distance instead)
 const FOLLOW_ZOOM = USING_MAPBOX ? NAV_CAMERA.mapboxZoom : NAV_CAMERA.androidZoom;
@@ -523,6 +530,12 @@ export default function MapScreen() {
   // ── Map state ──
   const [mapType, setMapType] = useState<MapType>("standard");
   const [showLayerPicker, setShowLayerPicker] = useState(false);
+  // Friends' live locations on the map (only ever what's shared with you)
+  const [showFriends, setShowFriends] = useState(true);
+  useEffect(() => {
+    if (!showFriends) friendMapSelection.select(null);
+  }, [showFriends]);
+  useEffect(() => () => friendMapSelection.select(null), []);
   const [showMore, setShowMore] = useState(false);
   // Mapbox's logo and attribution must stay visible, so they sit just above
   // whatever covers the bottom of the map: the drive actions (and, on iOS,
@@ -1819,6 +1832,9 @@ export default function MapScreen() {
           trail={driveTrail}
           trailColor={colors.primary}
           trailHead={subscribeLiveTrail}
+          friendLayer={
+            showFriends && FriendMarkersMapbox ? <FriendMarkersMapbox /> : null
+          }
           ornamentBottom={
             (isDriving && driveMapAreaHeight > 0
               ? Math.max(screenHeight - driveMapAreaHeight, 0)
@@ -1866,6 +1882,8 @@ export default function MapScreen() {
                 }
           }
         >
+          {/* Friends' live positions, beneath the user's own arrow */}
+          {showFriends && <FriendMarkersNative />}
           {userLocation && (
             <UserMarker
               markerRef={markerRef}
@@ -2109,10 +2127,7 @@ export default function MapScreen() {
               key={layer.type}
               accessibilityRole="button"
               accessibilityState={{ selected: mapType === layer.type }}
-              style={[
-                styles.menuRow,
-                i === mapLayers.length - 1 && styles.menuRowLast,
-              ]}
+              style={styles.menuRow}
               onPress={() => {
                 setMapType(layer.type);
                 setShowLayerPicker(false);
@@ -2146,7 +2161,50 @@ export default function MapScreen() {
               )}
             </TouchableOpacity>
           ))}
+          {/* Friends' live locations: only what friends and Convoy members share with you */}
+          <TouchableOpacity
+            accessibilityRole="switch"
+            accessibilityState={{ checked: showFriends }}
+            accessibilityLabel="Friends' live locations"
+            style={[styles.menuRow, styles.menuRowLast]}
+            onPress={() => {
+              setShowFriends((v) => !v);
+              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+            }}
+          >
+            <Ionicons
+              name="people-outline"
+              size={18}
+              color={showFriends ? colors.primary : colors.mutedForeground}
+            />
+            <Text
+              style={[styles.menuText, showFriends && { color: colors.primary }]}
+            >
+              Friends' Locations
+            </Text>
+            {showFriends && (
+              <Ionicons
+                name="checkmark"
+                size={16}
+                color={colors.primary}
+                style={{ marginLeft: "auto" }}
+              />
+            )}
+          </TouchableOpacity>
         </GlassSurface>
+      )}
+
+      {/* ── A tapped friend's live card (it closes itself when they stop sharing) ── */}
+      {showFriends && (
+        <FriendLiveCard
+          units={resolvedUnitSystem}
+          style={{
+            position: "absolute",
+            top: CONTROLS_TOP + passengerOffset,
+            left: 16,
+            right: 72,
+          }}
+        />
       )}
 
       {/* ── More: orientation, saved places, passenger mode ── */}

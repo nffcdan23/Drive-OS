@@ -147,9 +147,9 @@ interface AppContextValue {
   profileStats: ProfileStats;
   refreshProfileStats: () => Promise<void>;
 
-  // ── Private live location (no map display yet) ──
-  /** Positions friends and Convoy members currently share with you (memory only). */
-  sharedLocations: LiveLocation[];
+  // ── Private live location ──
+  // Positions shared with you are NOT in this value (each update would
+  // re-render every screen): read them with useSharedLocations().
   /** Your sharing settings (WHO and WHEN); null until loaded or when offline. */
   locationSharing: ServerLocationSharing | null;
   refreshLocationSharing: () => Promise<ServerLocationSharing>;
@@ -173,6 +173,29 @@ interface AppContextValue {
 }
 
 const AppContext = createContext<AppContextValue | null>(null);
+
+/**
+ * The positions friends and Convoy members currently share with you (Phase
+ * 4A's store, in memory only), in their own context: the store object never
+ * changes, so a live update re-renders only the components that read it
+ * (useSharedLocations), never the Drive screen or the rest of the app.
+ */
+const SharedLocationsContext = createContext<LiveLocationStore | null>(null);
+
+export function useSharedLocationStore(): LiveLocationStore {
+  const store = useContext(SharedLocationsContext);
+  if (!store) throw new Error('useSharedLocationStore must be used inside AppProvider');
+  return store;
+}
+
+/** The current shared positions; re-renders the caller (only) when they change. */
+export function useSharedLocations(): LiveLocation[] {
+  const store = useSharedLocationStore();
+  return useSyncExternalStore(
+    useCallback((fn: () => void) => store.subscribe(fn), [store]),
+    () => store.list,
+  );
+}
 /** Set once the "recording only while open" explanation has been shown (never repeated). */
 const BACKGROUND_NOTICE_KEY = '@driveos/drive/background-notice-shown';
 const NO_CONVERSATIONS: Conversation[] = [];
@@ -228,10 +251,6 @@ export function AppProvider({ userId, children }: { userId: string; children: Re
   const liveLocationRef = useRef<LiveLocationSession | null>(null);
   // Shared positions live in memory only and belong to this signed-in user.
   const liveLocations = useMemo(() => new LiveLocationStore(), [userId]);
-  const sharedLocations = useSyncExternalStore(
-    useCallback((fn: () => void) => liveLocations.subscribe(fn), [liveLocations]),
-    () => liveLocations.list,
-  );
   const [locationSharing, setLocationSharing] = useState<ServerLocationSharing | null>(null);
   const [isPassengerMode, setIsPassengerMode] = useState(false);
   const [currentDrive, setCurrentDrive] = useState<ActiveDrive | null>(null);
@@ -590,11 +609,15 @@ export function AppProvider({ userId, children }: { userId: string; children: Re
     unitSystem: data.unitSystem,
     resolvedUnitSystem: resolveUnitSystem(data.unitSystem),
     profileStats: data.profileStats,
-    sharedLocations, locationSharing, refreshLocationSharing, updateLocationSharing,
+    locationSharing, refreshLocationSharing, updateLocationSharing,
     setLocationShareFriend, setLocationShareConvoy, noteForegroundFix,
   };
 
-  return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
+  return (
+    <AppContext.Provider value={value}>
+      <SharedLocationsContext.Provider value={liveLocations}>{children}</SharedLocationsContext.Provider>
+    </AppContext.Provider>
+  );
 }
 
 /** Accepts ISO strings or "YYYY-MM-DDTHH:MM" local times from the forms. */

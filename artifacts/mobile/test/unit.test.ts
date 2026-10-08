@@ -4978,3 +4978,175 @@ test('live location modes: drive recording is the same whatever the sharing mode
   assert.equal(using.shared, 0, 'While Using in the background shares nothing');
   assert.ok(driving.shared > 0, 'While Driving shares from the same fixes');
 });
+
+// ─── Phase 4B: friends' live positions on the Drive map ─────────────────────
+import {
+  FriendSelection, MIN_HEADING_SPEED_KMH, STALE_AFTER_MS, buildMarkerModels, formatSpeed, sameMarker,
+  shouldTween, statusLine, tweenPoint, updatedAgo, usableHeading, type SharerIdentity,
+} from '@/lib/liveMap';
+
+const MAP_NOW = Date.parse('2026-10-08T10:00:30.000Z');
+const ana = (over: Record<string, unknown> = {}) => ({
+  type: 'live_location', userId: 'ana', latitude: 54.5, longitude: -2.9, headingDeg: 90, speedKmh: 67.6, accuracyM: 5,
+  driving: true, recordedAt: '2026-10-08T10:00:26.000Z', expiresAt: '2026-10-08T10:03:26.000Z', ...over,
+});
+const WHO = new Map<string, SharerIdentity>([['ana', { name: 'Ana Driver', initials: 'AD', avatarUrl: null }]]);
+/** The map's view of a store: exactly what the layer renders. */
+const markersOf = (store: LiveLocationStore, now = MAP_NOW) => buildMarkerModels(store.list, WHO, now);
+const mapStore = () => new LiveLocationStore({ now: () => MAP_NOW, setTimeout: () => 0, clearTimeout: () => {} });
+
+test('friend map: an authorised shared position produces exactly one marker; revoked or expired ones produce none', () => {
+  const store = mapStore();
+  assert.deepEqual(markersOf(store), [], 'nothing shared: no markers');
+  store.apply(parseLiveLocationEvent(ana())!);
+  const [m, ...rest] = markersOf(store);
+  assert.equal(rest.length, 0);
+  assert.equal(m!.userId, 'ana');
+  assert.equal(m!.name, 'Ana Driver');
+  assert.deepEqual([m!.latitude, m!.longitude], [54.5, -2.9]);
+  // Duplicate and repeated updates never make a second marker
+  store.apply(parseLiveLocationEvent(ana({ latitude: 54.51, recordedAt: '2026-10-08T10:00:28.000Z', expiresAt: '2026-10-08T10:03:28.000Z' }))!);
+  store.apply(parseLiveLocationEvent(ana({ latitude: 54.51, recordedAt: '2026-10-08T10:00:28.000Z', expiresAt: '2026-10-08T10:03:28.000Z' }))!);
+  assert.equal(markersOf(store).length, 1, 'one marker per person');
+  assert.equal(markersOf(store)[0]!.latitude, 54.51, 'moved to the newest position');
+  assert.equal(buildMarkerModels([...store.list, ...store.list], WHO, MAP_NOW).length, 1, 'even if a list repeats someone');
+  // Revoked (live_location_hidden): gone at once
+  store.apply({ type: 'live_location_hidden', userId: 'ana' });
+  assert.deepEqual(markersOf(store), [], 'revoked: marker removed');
+  // Expired: gone when the store drops it (no server message needed)
+  const clock = { t: MAP_NOW };
+  const timed = new LiveLocationStore({ now: () => clock.t, setTimeout: () => 0, clearTimeout: () => {} });
+  timed.apply(parseLiveLocationEvent(ana())!);
+  clock.t += 3 * 60_000 + 1;
+  timed.prune();
+  assert.deepEqual(markersOf(timed, clock.t), [], 'expired: marker removed');
+  // Sharing stopped / block / unfriend all arrive as a removal or a snapshot without them
+  timed.replaceAll([ana()]);
+  timed.replaceAll([]);
+  assert.deepEqual(markersOf(timed), [], 'a snapshot without them removes the marker');
+});
+
+test('friend map: only shared positions are drawn — never other friends, Convoy members or anyone else', () => {
+  const store = mapStore();
+  const everyone = new Map<string, SharerIdentity>([
+    ['ana', { name: 'Ana', initials: 'A' }], ['ben', { name: 'Ben (friend, not sharing)', initials: 'B' }],
+    ['cat', { name: 'Cat (Convoy, not sharing)', initials: 'C' }],
+  ]);
+  store.apply(parseLiveLocationEvent(ana())!);
+  assert.deepEqual(buildMarkerModels(store.list, everyone, MAP_NOW).map((m) => m.userId), ['ana'],
+    'knowing someone gives them no marker; only a shared position does');
+  // Someone sharing through a Convoy whose name isn't known yet is still only what was shared
+  store.apply(parseLiveLocationEvent(ana({ userId: 'dee' }))!);
+  const dee = buildMarkerModels(store.list, WHO, MAP_NOW).find((m) => m.userId === 'dee')!;
+  assert.equal(dee.name, 'Convoy member', 'no lookup by id: a neutral label until the Convoy roster loads');
+  // Malformed entries are skipped, not drawn somewhere wrong
+  assert.equal(buildMarkerModels([{ ...ana(), latitude: Number.NaN } as never], WHO, MAP_NOW).length, 0);
+});
+
+test('friend map: stationary vs driving, heading only when it means something', () => {
+  const store = mapStore();
+  store.apply(parseLiveLocationEvent(ana({ driving: false, headingDeg: 90, speedKmh: 0 }))!);
+  let m = markersOf(store)[0]!;
+  assert.equal(m.mode, 'stationary');
+  assert.equal(m.headingDeg, null, 'a stationary marker is never rotated');
+  store.apply(parseLiveLocationEvent(ana({ recordedAt: '2026-10-08T10:00:27.000Z', expiresAt: '2026-10-08T10:03:27.000Z' }))!);
+  m = markersOf(store)[0]!;
+  assert.equal(m.mode, 'driving');
+  assert.equal(m.headingDeg, 90, 'driving and moving: rotated to the reported heading');
+  assert.equal(usableHeading({ driving: true, headingDeg: null, speedKmh: 50 }), null, 'missing heading: no rotation (car badge instead)');
+  assert.equal(usableHeading({ driving: true, headingDeg: -1, speedKmh: 50 }), null, 'invalid heading');
+  assert.equal(usableHeading({ driving: true, headingDeg: Number.NaN, speedKmh: 50 }), null);
+  assert.equal(usableHeading({ driving: true, headingDeg: 400, speedKmh: 50 }), 40, 'normalised into 0–360');
+  assert.equal(usableHeading({ driving: true, headingDeg: 180, speedKmh: MIN_HEADING_SPEED_KMH - 1 }), null,
+    'crawling or stopped mid-drive: the GPS course is noise, not shown');
+  assert.equal(usableHeading({ driving: true, headingDeg: 180, speedKmh: null }), 180, 'unknown speed: trust the heading');
+});
+
+test('friend map: speed in mph (or km/h when chosen); unknown speed is omitted, never shown as 0', () => {
+  assert.equal(formatSpeed(67.6, 'imperial'), '42 mph');
+  assert.equal(formatSpeed(67.6, 'metric'), '68 km/h');
+  assert.equal(formatSpeed(null, 'imperial'), null);
+  assert.equal(formatSpeed(-1, 'imperial'), null);
+  assert.equal(formatSpeed(0, 'imperial'), '0 mph', 'a reported 0 is a real standstill');
+  assert.equal(statusLine({ mode: 'driving', speedKmh: 67.6 }, 'imperial'), 'Driving · 42 mph');
+  assert.equal(statusLine({ mode: 'driving', speedKmh: null }, 'imperial'), 'Driving', 'speed unavailable: omitted');
+  assert.equal(statusLine({ mode: 'stationary', speedKmh: 0 }, 'imperial'), 'Stationary');
+  assert.equal(updatedAgo(MAP_NOW - 4_000, MAP_NOW), 'Updated 4s ago');
+  assert.equal(updatedAgo(MAP_NOW - 130_000, MAP_NOW), 'Updated 2 min ago');
+  assert.equal(updatedAgo(MAP_NOW + 2_000, MAP_NOW), 'Updated 0s ago', 'a phone clock slightly behind never shows the future');
+  // Faded once old, still drawn until it expires
+  const store = mapStore();
+  store.apply(parseLiveLocationEvent(ana())!);
+  assert.equal(markersOf(store)[0]!.stale, false);
+  assert.equal(markersOf(store, Date.parse('2026-10-08T10:00:26.000Z') + STALE_AFTER_MS + 1)[0]!.stale, true);
+});
+
+test('friend map: tapping a marker selects that friend; markers glide between updates without snapping', () => {
+  const sel = new FriendSelection();
+  let changes = 0;
+  sel.subscribe(() => { changes++; });
+  const store = mapStore();
+  store.apply(parseLiveLocationEvent(ana())!);
+  store.apply(parseLiveLocationEvent(ana({ userId: 'dee' }))!);
+  const tapped = markersOf(store).find((m) => m.userId === 'dee')!;
+  sel.select(tapped.userId);
+  assert.equal(sel.current, 'dee', 'the card shows the tapped friend');
+  sel.select('dee');
+  assert.equal(changes, 1, 'tapping again changes nothing');
+  sel.select(null);
+  assert.equal(sel.current, null);
+  // Movement
+  const a = { latitude: 54.5, longitude: -2.9 };
+  const b = { latitude: 54.5009, longitude: -2.9 }; // ~100 m
+  assert.equal(shouldTween(null, b), false, 'first placement: at once');
+  assert.equal(shouldTween(a, b), true, 'a normal update: glided');
+  assert.equal(shouldTween(a, { latitude: 54.6, longitude: -2.9 }), false, 'a big jump: placed at once');
+  assert.deepEqual(tweenPoint(a, b, 0), a);
+  assert.deepEqual(tweenPoint(a, b, 1), b);
+  const mid = tweenPoint(a, b, 0.5);
+  assert.ok(mid.latitude > a.latitude && mid.latitude < b.latitude);
+  // An unchanged marker isn't redrawn when the list is rebuilt
+  const [m1] = markersOf(store);
+  const [m2] = markersOf(store);
+  assert.notEqual(m1, m2);
+  assert.ok(sameMarker(m1!, m2!), 'same position and look: memoised, not redrawn');
+});
+
+test('friend map: live updates never touch drive recording', async () => {
+  const clock = { t: Date.now() };
+  const cloud = makeSync(new FakeServer(), new MemoryStore(), clock);
+  await cloud.start();
+  await cloud.startDrive(null);
+  for (let i = 0; i < 20; i++) {
+    clock.t += 1000;
+    cloud.addFix({ latitude: 54.5 + i * 0.0003, longitude: -2.9, speedMs: 13, headingDeg: 0, accuracyM: 5, timestamp: clock.t });
+  }
+  const before = JSON.stringify({ points: cloud.activeRecord!.points, drive: cloud.driveState });
+  const store = mapStore();
+  for (let i = 0; i < 50; i++) {
+    store.apply(parseLiveLocationEvent(ana({ userId: `f${i % 20}`, latitude: 54 + i / 1000 }))!);
+    markersOf(store);
+  }
+  store.apply({ type: 'live_location_hidden', userId: 'f1' });
+  store.clear();
+  assert.equal(JSON.stringify({ points: cloud.activeRecord!.points, drive: cloud.driveState }), before,
+    'the recorder, its points and the drive state are unchanged');
+  cloud.dispose();
+});
+
+test('friend map: 20 sharers build quickly and stay one marker each', () => {
+  const store = mapStore();
+  const t0 = performance.now();
+  for (let round = 0; round < 30; round++) {
+    for (let i = 0; i < 20; i++) {
+      const sec = String(26 + round).padStart(2, '0');
+      store.apply(parseLiveLocationEvent(ana({
+        userId: `f${i}`, latitude: 54 + i / 100 + round / 10_000,
+        recordedAt: `2026-10-08T10:00:${sec}.000Z`, expiresAt: `2026-10-08T10:03:${sec}.000Z`,
+      }))!);
+    }
+    assert.equal(markersOf(store).length, 20);
+  }
+  const ms = performance.now() - t0;
+  assert.ok(ms < 250, `600 updates and 30 rebuilds of 20 markers took ${ms.toFixed(1)} ms`);
+});
