@@ -16,7 +16,7 @@ import { useLocales } from 'expo-localization';
 import { CloudSync, type SyncStatus } from '@/lib/backend/cloudSync';
 import { describeError } from '@/lib/backend/http';
 import type { GpsFix } from '@/lib/backend/journeyRecorder';
-import { appendLiveFix, liveDriveFromRecord, newLiveDrive } from '@/lib/backend/liveDrive';
+import { LiveDriveFeed, liveDriveFromRecord, newLiveDrive } from '@/lib/backend/liveDrive';
 import type { LocationKind, SpotCategory, Visibility } from '@/lib/backend/endpoints';
 import type {
   ActiveDrive, BlockedUser, Conversation, Convoy, Coordinate, DriveOSEvent, Friend, FriendRequest, Group, Journey,
@@ -86,6 +86,8 @@ interface AppContextValue {
   isDrivePaused: () => boolean;
   /** Active (unpaused) time of the drive in progress, from its timestamps; null with no drive */
   activeDriveMs: () => number | null;
+  /** The newest fix accepted for the drive in progress (from the screen or the background) */
+  latestDriveFix: () => GpsFix | null;
   togglePassengerMode: () => void;
 
   updateProfile: (updates: Partial<UserProfile>) => void;
@@ -211,6 +213,11 @@ export function AppProvider({ userId, children }: { userId: string; children: Re
   const [isLoading, setIsLoading] = useState(true);
   const [isPassengerMode, setIsPassengerMode] = useState(false);
   const [currentDrive, setCurrentDrive] = useState<ActiveDrive | null>(null);
+  // The live route goes to the screen through this: while the app isn't on
+  // screen, fixes are held (no re-render per fix) and published in one go
+  // when it's back.  Recording (CloudSync) is unaffected.
+  const [liveFeed] = useState(() => new LiveDriveFeed(setCurrentDrive, AppState.currentState === 'active'));
+  const latestFixRef = useRef<GpsFix | null>(null);
   const isDriving = currentDrive !== null;
 
   // Start: cached data first, then the server.
@@ -220,19 +227,19 @@ export function AppProvider({ userId, children }: { userId: string; children: Re
     let cancelled = false;
     // The live route: every fix the drive accepts, from the screen or the
     // background (each once), so it continues while the app is out of view.
-    const unsubscribeFixes = cloud.onDriveFix((fix) => setCurrentDrive((prev) => (prev ? appendLiveFix(prev, fix) : prev)));
+    const unsubscribeFixes = cloud.onDriveFix((fix) => { latestFixRef.current = fix; liveFeed.addFix(fix); });
     (async () => {
       await cloud.start();
       if (cancelled) return;
       // A drive still recording in the background when the app was relaunched
       // carries on, from the points recorded so far.
       const rec = cloud.activeRecord;
-      setCurrentDrive((prev) => (rec ? prev ?? liveDriveFromRecord(rec) : null));
+      liveFeed.update((prev) => (rec ? prev ?? liveDriveFromRecord(rec) : null));
       setIsLoading(false);
       await cloud.sync().catch(() => {});
     })();
     return () => { cancelled = true; unsubscribe(); unsubscribeFixes(); cloud.dispose(); };
-  }, [cloud]);
+  }, [cloud, liveFeed]);
 
   // Keep retrying while something is waiting or the server was unreachable,
   // and whenever the app comes back to the foreground.
@@ -250,12 +257,13 @@ export function AppProvider({ userId, children }: { userId: string; children: Re
     };
     const timer = setInterval(tick, 30_000);
     const sub = AppState.addEventListener('change', (state) => {
+      liveFeed.setVisible(state === 'active');
       if (state === 'active') void cloud.sync().catch(() => {});
       // The system may end the app at any point once it's out of view.
       else if (state === 'background') void cloud.saveActiveNow().catch(() => {});
     });
     return () => { clearInterval(timer); sub.remove(); };
-  }, [cloud]);
+  }, [cloud, liveFeed]);
 
   const activeVehicle = data.vehicles.find((v) => v.isActive) ?? data.vehicles[0] ?? null;
   const activeVehicleRef = useRef(activeVehicle);
@@ -264,13 +272,14 @@ export function AppProvider({ userId, children }: { userId: string; children: Re
   // ── Drives ──
   const startDrive = useCallback(() => {
     if (cloud.isDriving) return;
-    setCurrentDrive(newLiveDrive(Date.now()));
+    latestFixRef.current = null;
+    liveFeed.set(newLiveDrive(Date.now()));
     cloud.startDrive(activeVehicleRef.current).catch((err) => {
       // Not recording (e.g. an earlier drive saved on the phone couldn't be read yet)
-      setCurrentDrive(cloud.activeRecord ? liveDriveFromRecord(cloud.activeRecord) : null);
+      liveFeed.set(cloud.activeRecord ? liveDriveFromRecord(cloud.activeRecord) : null);
       reportFailure('Could not start recording', err);
     });
-  }, [cloud]);
+  }, [cloud, liveFeed]);
 
   // Passenger mode records nothing, from the screen or the background.
   useEffect(() => { cloud.setPassengerMode(isPassengerMode); }, [cloud, isPassengerMode]);
@@ -324,27 +333,28 @@ export function AppProvider({ userId, children }: { userId: string; children: Re
   }, [isDriving, status.backgroundTracking]);
 
   const endDrive = useCallback(async () => {
-    setCurrentDrive(null);
+    liveFeed.set(null);
     try {
       return await cloud.endDrive();
     } catch (err) {
       reportFailure('Could not save the drive', err);
       return null;
     }
-  }, [cloud]);
+  }, [cloud, liveFeed]);
 
   const discardDrive = useCallback(async () => {
-    setCurrentDrive(null);
+    liveFeed.set(null);
     try {
       await cloud.discardDrive();
     } catch (err) {
       reportFailure('Could not discard the drive', err);
     }
-  }, [cloud]);
+  }, [cloud, liveFeed]);
 
   const setDrivePaused = useCallback((paused: boolean) => cloud.setDrivePaused(paused), [cloud]);
   const isDrivePaused = useCallback(() => cloud.isDrivePaused, [cloud]);
   const activeDriveMs = useCallback(() => cloud.activeDriveMs(), [cloud]);
+  const latestDriveFix = useCallback(() => (cloud.isDriving ? latestFixRef.current : null), [cloud]);
 
   const pendingJourney = data.journeys.find((j) => j.syncState && j.syncState !== 'synced') ?? null;
   const syncSummary: SyncStatusSummary =
@@ -482,7 +492,7 @@ export function AppProvider({ userId, children }: { userId: string; children: Re
     sync: status,
     unsyncedJourneyId: pendingJourney?.id ?? null,
     categories: data.categories,
-    startDrive, updateDriveCoordinate, endDrive, discardDrive, setDrivePaused, isDrivePaused, activeDriveMs,
+    startDrive, updateDriveCoordinate, endDrive, discardDrive, setDrivePaused, isDrivePaused, activeDriveMs, latestDriveFix,
     places: data.places,
     friends: data.friends,
     friendRequests: data.friendRequests,

@@ -135,3 +135,22 @@ export function trailFeatureCollection(
     ],
   };
 }
+
+/**
+ * Most points the drawn trail is given at once.  The map's trail source is
+ * replaced whenever the route grows, so its size is what each update costs;
+ * past this the older stretch is thinned evenly (the recent stretch, where
+ * the live head joins it, is kept exactly).  Display only: the recorded
+ * route is untouched.
+ */
+export const TRAIL_DISPLAY = { maxPoints: 4000, recentPoints: 1000 } as const;
+
+export function displayTrail(coordinates: readonly LatLng[] | null | undefined): readonly LatLng[] | null {
+  if (!coordinates || coordinates.length <= TRAIL_DISPLAY.maxPoints) return coordinates ?? null;
+  const recentFrom = coordinates.length - TRAIL_DISPLAY.recentPoints;
+  const room = TRAIL_DISPLAY.maxPoints - TRAIL_DISPLAY.recentPoints;
+  const step = recentFrom / room;
+  const older: LatLng[] = [];
+  for (let i = 0; i < room; i++) older.push(coordinates[Math.floor(i * step)]!);
+  return [...older, ...coordinates.slice(recentFrom)];
+}

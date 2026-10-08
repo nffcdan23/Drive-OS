@@ -13,6 +13,16 @@
 // screen from the heading and the camera bearing it writes in the same frame,
 // so in heading-up follow it stays still on screen as the map turns.
 //
+// The follow camera is written as the Camera's own props (its `stop`), not
+// with Camera.setCamera(): setCamera is a promise-returning native command
+// run on the main thread, and one a frame queued up faster than the main
+// thread resolved them (the watchdog kills and multi-gigabyte memory in the
+// device logs).  Props go through React Native's renderer, which hands the
+// map only the newest value however many were set; on top of that the
+// LatestPoseWriter (lib/cameraWriter.ts) keeps at most one write in flight,
+// replaces a waiting pose with the newest, skips unchanged poses, caps the
+// rate, and writes nothing while the app isn't on screen.
+//
 // Loaded only when lib/mapProvider.ts selects Mapbox, so a binary without the
 // Mapbox native module never imports @rnmapbox/maps.
 
@@ -23,6 +33,7 @@ import React, {
   useCallback,
   useEffect,
   useImperativeHandle,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -43,10 +54,12 @@ import type {
 } from "@/lib/locationSmoothing";
 import {
   clampMapboxZoom,
+  displayTrail,
   mapboxFollowCamera,
   reportedPoseFromMapbox,
   trailFeatureCollection,
 } from "@/lib/mapbox";
+import { LatestPoseWriter, sameFollowPose } from "@/lib/cameraWriter";
 
 export interface MapboxDriveMapHandle {
   /** Writes the follow camera at once (the motion comes from the frame loop) */
@@ -59,6 +72,12 @@ export interface MapboxDriveMapHandle {
   easeToZoom(zoom: number): void;
   /** Moves the location arrow to the smoothed position */
   setMarker(position: LatLng): void;
+  /**
+   * The app is on screen (true) or not (false).  Off screen nothing is
+   * written to the map: no camera, no arrow; the waiting camera pose is
+   * dropped, not replayed later.
+   */
+  setVisualsLive(live: boolean): void;
 }
 
 /** Hands the map a function that draws the live trail head (null: none) */
@@ -152,6 +171,53 @@ const MarkerFeeder = memo(
 );
 
 /**
+ * The follow camera, as the Camera's props.  Its own small component, so a
+ * new pose re-renders only the Camera, never the map or its layers.  Each
+ * write reports `applied` once React has committed it; React Native's
+ * renderer then hands the map the newest committed pose (never a backlog).
+ */
+interface FollowCameraHandle {
+  write(pose: FollowCameraPose, applied: () => void): void;
+}
+type CameraDefaults = { centerCoordinate: [number, number]; zoomLevel: number };
+const FollowCamera = memo(
+  forwardRef<
+    FollowCameraHandle,
+    { cameraRef: React.RefObject<Camera | null>; defaultSettings: CameraDefaults }
+  >(function FollowCamera({ cameraRef, defaultSettings }, ref) {
+    const [pose, setPose] = useState<FollowCameraPose | null>(null);
+    const appliedRef = useRef<(() => void) | null>(null);
+    useImperativeHandle(
+      ref,
+      () => ({
+        write(next, applied) {
+          appliedRef.current = applied;
+          setPose((prev) =>
+            // The map applies a changed value only: the same pose again (to
+            // bring the camera back after the user moved the map) is nudged
+            // far below anything visible
+            prev && sameValues(prev, next)
+              ? { ...next, heading: next.heading + 1e-7 }
+              : next,
+          );
+        },
+      }),
+      [],
+    );
+    useLayoutEffect(() => {
+      const applied = appliedRef.current;
+      appliedRef.current = null;
+      applied?.();
+    }, [pose]);
+    const stop = pose ? mapboxFollowCamera(pose) : null;
+    return <Camera ref={cameraRef} defaultSettings={defaultSettings} {...stop} />;
+  }),
+);
+const sameValues = (a: FollowCameraPose, b: FollowCameraPose) =>
+  a.center.latitude === b.center.latitude && a.center.longitude === b.center.longitude &&
+  a.heading === b.heading && a.pitch === b.pitch && a.zoom === b.zoom;
+
+/**
  * The live trail head.  Its own small component with its own state, so a
  * redraw (many times a second while driving) re-renders only this source and
  * replaces its few points, never the recorded trail or the map.  Always
@@ -218,15 +284,32 @@ const MapboxDriveMap = forwardRef<MapboxDriveMapHandle, MapboxDriveMapProps>(
     useAccessToken(accessToken);
     const mapRef = useRef<MapView>(null);
     const cameraRef = useRef<Camera>(null);
+    const followCameraRef = useRef<FollowCameraHandle>(null);
     const markerRef = useRef<MarkerFeederHandle>(null);
     const lastCameraRef = useRef<ReportedPose | null>(null);
     const lastMarkerRef = useRef<LatLng | null>(null);
+    const liveRef = useRef(true);
+    // One camera write in flight at most, only the newest pose waiting
+    const [cameraWriter] = useState(
+      () =>
+        new LatestPoseWriter<FollowCameraPose>({
+          write: (pose, applied) => {
+            // Not mounted yet: the write times out and the next pose tries again
+            followCameraRef.current?.write(pose, applied);
+          },
+          same: sameFollowPose,
+          now: Date.now,
+          setTimer: (fn, ms) => setTimeout(fn, ms),
+          clearTimer: (t) => clearTimeout(t as ReturnType<typeof setTimeout>),
+        }),
+    );
+    useEffect(() => () => cameraWriter.pause(), [cameraWriter]);
 
     useImperativeHandle(
       ref,
       () => ({
         setFollowCamera(pose) {
-          cameraRef.current?.setCamera(mapboxFollowCamera(pose));
+          cameraWriter.submit(pose);
         },
         getCamera() {
           const cam = lastCameraRef.current;
@@ -246,10 +329,15 @@ const MapboxDriveMap = forwardRef<MapboxDriveMapHandle, MapboxDriveMapProps>(
         },
         setMarker(position) {
           lastMarkerRef.current = position;
-          markerRef.current?.set(position);
+          if (liveRef.current) markerRef.current?.set(position);
+        },
+        setVisualsLive(live) {
+          liveRef.current = live;
+          if (live) cameraWriter.resume();
+          else cameraWriter.pause();
         },
       }),
-      [],
+      [cameraWriter],
     );
 
     // Mapbox says whether a gesture moved the camera, so the app's own
@@ -259,13 +347,19 @@ const MapboxDriveMap = forwardRef<MapboxDriveMapHandle, MapboxDriveMapProps>(
     const handleCameraChanged = useCallback(
       (state: MapState) => {
         lastCameraRef.current = reportedPoseFromMapbox(state.properties);
-        if (state.gestures?.isGestureActive) onUserGesture();
+        if (state.gestures?.isGestureActive) {
+          // The map is no longer where the last pose put it: the next pose is
+          // written even if it's the same one
+          cameraWriter.invalidate();
+          onUserGesture();
+        }
         onCameraChange?.();
       },
-      [onUserGesture, onCameraChange],
+      [onUserGesture, onCameraChange, cameraWriter],
     );
 
-    const trailShape = useMemo(() => trailFeatureCollection(trail), [trail]);
+    // Bounded: a long drive's trail is thinned for drawing (lib/mapbox)
+    const trailShape = useMemo(() => trailFeatureCollection(displayTrail(trail)), [trail]);
 
     const initialCamera = useMemo(
       () => ({
@@ -300,7 +394,11 @@ const MapboxDriveMap = forwardRef<MapboxDriveMapHandle, MapboxDriveMapProps>(
           pitchEnabled
           onCameraChanged={handleCameraChanged}
         >
-          <Camera ref={cameraRef} defaultSettings={initialCamera} />
+          <FollowCamera
+            ref={followCameraRef}
+            cameraRef={cameraRef}
+            defaultSettings={initialCamera}
+          />
           {/* Mounted before the trail: the head draws beneath it (and the
               arrow, a view annotation, sits above every layer) */}
           {trailHead && (

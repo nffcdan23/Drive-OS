@@ -2850,7 +2850,8 @@ test('the Mapbox Drive map draws the live head from the same position as its puc
   assert.ok(!/liveTrail\.recordedPoint\(/.test(screen));
   assert.ok(/liveTrail\.followTrail\(driveTrail\)/.test(screen));
   // Both maps get the same head: Mapbox through its trailHead prop
-  const mapbox = screen.slice(screen.indexOf('<MapboxDriveMap'), screen.indexOf('/>', screen.indexOf('<MapboxDriveMap')));
+  const jsx = screen.search(/<MapboxDriveMap\s/); // the element, not the Handle type
+  const mapbox = screen.slice(jsx, screen.indexOf('/>', jsx));
   assert.ok(/trailHead=\{subscribeLiveTrail\}/.test(mapbox));
   assert.ok(/trail=\{driveTrail\}/.test(mapbox));
   assert.ok(/<LiveTrailHeadLines\s+subscribe=\{subscribeLiveTrail\}/.test(screen));
@@ -4749,4 +4750,404 @@ test('the journal is wired in: launch noted first, fatal JS errors saved synchro
   assert.match(diag, /journal\.log\('fatal_js_error'/);
   assert.match(readFileSync(join(MOBILE, 'lib/driveBackgroundLocation.ts'), 'utf8'), /new BackgroundDriveRecorder\(\{ store: deviceStorage, updates, journal \}\)/);
   assert.match(readFileSync(join(MOBILE, 'context/AppContext.tsx'), 'utf8'), /tracker: driveTracker, journal,/);
+});
+
+// ─── Crash fix: camera writes and background visual work ─────────────────────
+//
+// The device logs: every crash was a watchdog kill in the background, with
+// the main thread running a queue of Mapbox camera commands (one a frame,
+// each a promise) and memory in the gigabytes.  The follow camera now goes
+// through a LatestPoseWriter (one write in flight, newest pose only) into the
+// Camera's props, and nothing visual runs while the app isn't on screen.
+
+import { CAMERA_WRITES, LatestPoseWriter, sameFollowPose } from '@/lib/cameraWriter';
+import { VisualGate } from '@/lib/visualGate';
+import { LIVE_ROUTE, LiveDriveFeed, appendLiveFixes } from '@/lib/backend/liveDrive';
+import { TRAIL_DISPLAY, displayTrail } from '@/lib/mapbox';
+import type { FollowCameraPose } from '@/lib/locationSmoothing';
+
+/** Timers on a fake clock */
+class FakeTimers {
+  t = 0;
+  private queue: { at: number; fn: () => void; id: number }[] = [];
+  private n = 0;
+  get pending() { return this.queue.length; }
+  set = (fn: () => void, ms: number) => { const id = ++this.n; this.queue.push({ at: this.t + ms, fn, id }); return id; };
+  clear = (id: unknown) => { this.queue = this.queue.filter((q) => q.id !== id); };
+  advance(ms: number) {
+    const end = this.t + ms;
+    for (;;) {
+      this.queue.sort((a, b) => a.at - b.at || a.id - b.id);
+      const next = this.queue[0];
+      if (!next || next.at > end) break;
+      this.queue.shift();
+      this.t = next.at;
+      next.fn();
+    }
+    this.t = end;
+  }
+}
+
+/** A native camera that takes `delayMs` to apply each write (or never, with Infinity), counting what's outstanding */
+function slowCamera(timers: FakeTimers, delayMs: () => number) {
+  const cam = { outstanding: 0, maxOutstanding: 0, applied: [] as FollowCameraPose[], writes: 0 };
+  const writer = new LatestPoseWriter<FollowCameraPose>({
+    write: (pose, applied) => {
+      cam.writes++;
+      cam.outstanding++;
+      cam.maxOutstanding = Math.max(cam.maxOutstanding, cam.outstanding);
+      const d = delayMs();
+      if (Number.isFinite(d)) timers.set(() => { cam.outstanding--; cam.applied.push(pose); applied(); }, d);
+    },
+    same: sameFollowPose, now: () => timers.t, setTimer: timers.set, clearTimer: timers.clear,
+  });
+  return { cam, writer };
+}
+
+const poseAt = (i: number): FollowCameraPose => ({
+  center: { latitude: 53.23 + i * 1e-6, longitude: -0.54 }, heading: (i * 0.2) % 360, pitch: 55, distance: 400, zoom: 17,
+});
+
+test('10,000 camera poses while the native camera is slow: one write in flight, only the newest waiting, nothing piling up', () => {
+  const timers = new FakeTimers();
+  const { cam, writer } = slowCamera(timers, () => 50); // 50 ms a write: far slower than the poses arrive
+  let maxWaiting = 0;
+  let maxTimers = 0;
+  for (let i = 0; i < 10_000; i++) {
+    writer.submit(poseAt(i)); // a pose every millisecond
+    const st = writer.stats;
+    assert.ok(st.inFlight <= 1);
+    maxWaiting = Math.max(maxWaiting, st.waiting);
+    maxTimers = Math.max(maxTimers, timers.pending);
+    timers.advance(1);
+  }
+  timers.advance(200);
+  const st = writer.stats;
+  assert.equal(cam.maxOutstanding, 1, 'never more than one write outstanding at the native camera');
+  assert.equal(st.maxInFlight, 1);
+  assert.equal(maxWaiting, 1, 'at most one pose waiting');
+  assert.ok(maxTimers <= 3, `timers stay bounded (${maxTimers})`);
+  assert.ok(cam.writes <= 10_000 / 50 + 2, `writes follow the camera's pace, not the poses' (${cam.writes})`);
+  assert.ok(st.replaced > 9_000, 'waiting poses replaced, never queued');
+  // Each write after the first is the newest pose there was when the previous one landed
+  assert.deepEqual(cam.applied.at(-1), poseAt(9_999), 'the last pose is the one that ends up on the map');
+  for (let k = 1; k < cam.applied.length; k++) {
+    const i = Math.round((cam.applied[k]!.center.latitude - 53.23) / 1e-6);
+    const prev = Math.round((cam.applied[k - 1]!.center.latitude - 53.23) / 1e-6);
+    assert.ok(i - prev >= 40 || k === cam.applied.length - 1, 'intermediate poses were skipped, not replayed');
+  }
+  assert.equal(st.inFlight, 0);
+  assert.equal(st.waiting, 0, 'nothing left behind once idle');
+});
+
+test('a camera write that never reports back is given up on: the camera can\'t freeze, and nothing piles up', () => {
+  const timers = new FakeTimers();
+  const { cam, writer } = slowCamera(timers, () => Infinity);
+  for (let i = 0; i < 10_000; i++) { writer.submit(poseAt(i)); timers.advance(1); }
+  assert.ok(writer.stats.timedOut >= 9 && writer.stats.timedOut <= 11, `${writer.stats.timedOut}`);
+  assert.ok(cam.writes <= 11, `about one write a second (${cam.writes})`);
+  assert.ok(writer.stats.inFlight <= 1 && writer.stats.waiting <= 1);
+  assert.equal(CAMERA_WRITES.timeoutMs, 1000);
+});
+
+test('camera writes: unchanged poses aren\'t written, the rate is capped, and pausing drops what waits (no replay)', () => {
+  const timers = new FakeTimers();
+  const { cam, writer } = slowCamera(timers, () => 0); // a camera that applies at once
+  writer.submit(poseAt(1));
+  for (let i = 0; i < 100; i++) { writer.submit(poseAt(1)); timers.advance(1); }
+  assert.equal(cam.writes, 1, 'the same pose again is not written');
+  assert.equal(writer.stats.skipped, 100);
+  // ...unless the map was moved by something else (a gesture): then it's written once more
+  writer.invalidate();
+  writer.submit(poseAt(1));
+  timers.advance(CAMERA_WRITES.minIntervalMs);
+  assert.equal(cam.writes, 2);
+  // Poses every millisecond: written at most once per minIntervalMs
+  const before = cam.writes;
+  for (let i = 2; i < 1002; i++) { writer.submit(poseAt(i)); timers.advance(1); }
+  const rate = cam.writes - before;
+  assert.ok(rate <= Math.ceil(1000 / CAMERA_WRITES.minIntervalMs) + 1, `${rate} writes in a second`);
+  // Paused (the app left the screen): nothing written, nothing kept
+  writer.pause();
+  const atPause = cam.writes;
+  for (let i = 0; i < 5000; i++) { writer.submit(poseAt(5000 + i)); timers.advance(1); }
+  assert.equal(cam.writes, atPause, 'no camera writes while paused');
+  assert.equal(writer.stats.waiting, 0);
+  assert.equal(timers.pending, 0, 'no timers left running while paused');
+  // Back: the next pose is written, and only it
+  writer.resume();
+  timers.advance(100);
+  assert.equal(cam.writes, atPause, 'nothing replayed on resume');
+  writer.submit(poseAt(99_999));
+  timers.advance(20);
+  assert.equal(cam.writes, atPause + 1);
+  assert.deepEqual(cam.applied.at(-1), poseAt(99_999));
+});
+
+test('the visual gate: background means no visual work, and a background launch never creates the map', () => {
+  // Launched by iOS in the background to deliver locations
+  const bg = new VisualGate('background');
+  assert.deepEqual(bg.current, { live: false, mounted: false });
+  const seen: string[] = [];
+  bg.subscribe((n, p) => seen.push(`${p.live}->${n.live}/${n.mounted}`));
+  bg.update('background');
+  assert.deepEqual(seen, [], 'still nothing');
+  bg.update('active'); // the user opens the app
+  assert.deepEqual(bg.current, { live: true, mounted: true });
+  bg.update('inactive'); // Control Centre, a call, the app switcher
+  assert.deepEqual(bg.current, { live: false, mounted: true });
+  bg.update('background');
+  assert.deepEqual(bg.current, { live: false, mounted: true }, 'the map stays created, only paused');
+  bg.update('active');
+  assert.deepEqual(seen, ['false->true/true', 'true->false/true', 'false->true/true']);
+  // A normal launch (inactive, then active) creates the map straight away
+  const fg = new VisualGate('inactive');
+  assert.deepEqual(fg.current, { live: false, mounted: true });
+  assert.deepEqual(new VisualGate('active').current, { live: true, mounted: true });
+});
+
+test('the live route while the app is off screen: held, not re-rendered per fix, and caught up in one update', () => {
+  const published: (ActiveDrive | null)[] = [];
+  const feed = new LiveDriveFeed((d) => published.push(d), true);
+  feed.set(newLiveDrive(0));
+  const fix = (s: number): GpsFix => ({ latitude: 53.23 + s * 27 / 111_320, longitude: -0.54, speedMs: 27, accuracyM: 5, timestamp: s * 1000 });
+  for (let s = 1; s <= 60; s++) feed.addFix(fix(s));
+  assert.equal(published.length, 61, 'on screen: each fix published');
+  feed.setVisible(false);
+  for (let s = 61; s <= 3660; s++) feed.addFix(fix(s)); // an hour in the background
+  assert.equal(published.length, 61, 'off screen: nothing published (no re-renders)');
+  assert.ok(feed.heldCount < LIVE_ROUTE.maxHeldFixes, `held fixes stay bounded (${feed.heldCount})`);
+  feed.setVisible(true);
+  assert.equal(published.length, 62, 'back on screen: one update');
+  const route = published.at(-1)!.coordinates;
+  assert.equal(route.length, 3660, 'the whole drive is in it');
+  assert.deepEqual(route.at(-1), { latitude: fix(3660).latitude, longitude: fix(3660).longitude }, 'ending at the newest fix');
+  feed.setVisible(true);
+  assert.equal(published.length, 62, 'nothing replayed');
+});
+
+test('the live route stays bounded: a parked car adds no points, and a very long drive is thinned', () => {
+  const start = newLiveDrive(0);
+  // Parked for an hour: GPS wanders within a metre
+  const jitter = Array.from({ length: 3600 }, (_, i): GpsFix => ({
+    latitude: 53.23 + (Math.sin(i) * 0.5) / 111_320, longitude: -0.54 + (Math.cos(i) * 0.5) / 66_000, speedMs: 0, accuracyM: 5, timestamp: i * 1000,
+  }));
+  const parked = appendLiveFixes(start, jitter);
+  assert.ok(parked.coordinates.length <= 2, `${parked.coordinates.length} points for a parked hour`);
+  assert.deepEqual(parked.coordinates.at(-1), { latitude: jitter.at(-1)!.latitude, longitude: jitter.at(-1)!.longitude }, 'still ends at the newest fix');
+  // Twelve hours on the move, a fix a second
+  const moving = Array.from({ length: 12 * 3600 }, (_, s): GpsFix => ({
+    latitude: 53.23 + (s * 27) / 111_320, longitude: -0.54, speedMs: s % 2 ? 20 : 30, accuracyM: 5, timestamp: s * 1000,
+  }));
+  let d = start;
+  for (let i = 0; i < moving.length; i += 600) d = appendLiveFixes(d, moving.slice(i, i + 600));
+  assert.ok(d.coordinates.length <= LIVE_ROUTE.maxPoints, `${d.coordinates.length} points`);
+  assert.ok(d.speedSamples.length <= LIVE_ROUTE.maxSpeedSamples);
+  assert.ok(Math.abs(d.speedSamples.reduce((a, b) => a + b, 0) / d.speedSamples.length - 90) < 1, 'average speed kept');
+  assert.deepEqual(d.coordinates.at(-1), { latitude: moving.at(-1)!.latitude, longitude: moving.at(-1)!.longitude });
+  // And what's drawn is bounded too
+  const drawn = displayTrail(d.coordinates)!;
+  assert.equal(drawn.length, TRAIL_DISPLAY.maxPoints);
+  assert.deepEqual(drawn.slice(-TRAIL_DISPLAY.recentPoints), d.coordinates.slice(-TRAIL_DISPLAY.recentPoints), 'the recent stretch exactly');
+  assert.deepEqual(drawn[0], d.coordinates[0]);
+  const short = parked.coordinates;
+  assert.equal(displayTrail(short), short, 'short routes untouched');
+});
+
+test('2 h 10 min drive, switching between screen and background: recording continues, visual work stops off screen, everything stays bounded', async () => {
+  const store = new MemoryStore();
+  const clock = { t: Date.parse('2026-10-09T17:00:00Z') };
+  const timers = new FakeTimers();
+  const updates = new FakeUpdates();
+  const server = new FakeServer();
+  const b = recoveryApp(store, clock, updates, server);
+  await b.app.start();
+  // AppContext's wiring: the live route through a feed, visible only when active
+  const published: (ActiveDrive | null)[] = [];
+  const feed = new LiveDriveFeed((d) => published.push(d), true);
+  b.app.onDriveFix((fix) => feed.addFix(fix));
+  await b.app.startDrive(null);
+  feed.set(newLiveDrive(clock.t));
+  await settle();
+  // The Drive screen's visual side: gate, frame loop, camera writer, arrow, live head
+  const gate = new VisualGate('active');
+  const { cam, writer } = slowCamera(timers, () => 5 + Math.random() * 35); // a camera taking 5–40 ms a write
+  const liveTrail = new LiveTrailHead();
+  let markerSets = 0;
+  let headDraws = 0;
+  let writesOffScreen = 0;
+  let maxPayload = 0;
+  let publishesOffScreen = 0;
+  gate.subscribe((n) => {
+    feed.setVisible(n.live);
+    if (n.live) writer.resume(); else writer.pause();
+  });
+  const frame = (s: number, ms: number) => {
+    // wakeFrameLoop / the frame loop: nothing while not live
+    if (!gate.current.live) { return; }
+    const position = { latitude: 53.23 + (s * 27) / 111_320 + ms * 27e-3 / 111_320, longitude: -0.54 };
+    markerSets++;
+    const u = liveTrail.update(position, true, clock.t + ms);
+    if (u.kind === 'draw') headDraws++;
+    writer.submit({ center: position, heading: 10, pitch: 55, distance: 400, zoom: 17 });
+  };
+  let batch: GpsFix[] = [];
+  for (let s = 1; s <= 130 * 60; s++) {
+    // On screen for 10 minutes, then 10 minutes locked / in another app
+    const onScreen = Math.floor(s / 600) % 2 === 0;
+    if (onScreen !== gate.current.live) gate.update(onScreen ? 'active' : 'background');
+    const beforeWrites = cam.writes;
+    const beforePublishes = published.length;
+    const fix: GpsFix = { latitude: 53.23 + (s * 27) / 111_320, longitude: -0.54 + Math.sin(s / 200) * 1e-3, speedMs: 27, accuracyM: 5, timestamp: clock.t + 1000 };
+    batch.push(fix);
+    if (batch.length === 5) { await b.tracker.deliver(batch); batch = []; }
+    if (onScreen) b.app.addFix(fix);
+    if (onScreen && published.length > beforePublishes) {
+      // The screen's driveTrail effect: the live head starts from the route's newest point
+      const route = published.at(-1)!.coordinates;
+      liveTrail.followTrail(route);
+      maxPayload = Math.max(maxPayload, JSON.stringify(trailFeatureCollection(displayTrail(route))).length);
+    }
+    // 60 frames in this second
+    for (let f = 0; f < 60; f++) { frame(s, f * 16); timers.advance(16); clock.t += 16; }
+    clock.t += 1000 - 960;
+    timers.advance(40);
+    if (!onScreen) {
+      writesOffScreen += cam.writes - beforeWrites;
+      publishesOffScreen += published.length - beforePublishes;
+    }
+    if (s % 60 === 0) await settle();
+  }
+  await settle();
+  const rec = b.app.activeRecord!;
+  const live = feed.current!;
+  const report = {
+    recordedPoints: rec.points.length, liveRoutePoints: live.coordinates.length, cameraWrites: cam.writes,
+    cameraMaxOutstanding: cam.maxOutstanding, writerWaitingMax: 1, writesOffScreen, publishesOffScreen,
+    maxTrailPayloadKB: Math.round(maxPayload / 1024), heldInFeed: feed.heldCount,
+    cloudHeldFixes: (b.app as unknown as { heldFixes: unknown[] }).heldFixes.length,
+    trackerHeld: (b.tracker as unknown as { held: unknown[] }).held.length,
+    liveHeadTrace: (liveTrail as unknown as { trace: unknown[] }).trace.length,
+    journalEntries: (await b.journal.read()).length, markerSets, headDraws,
+  };
+  console.log('2h10 drive bounds', JSON.stringify(report));
+  // Recording carried on throughout, on screen or not
+  assert.ok(rec.points.length > 2400, `${rec.points.length} recorded points`);
+  assert.ok(Date.parse(rec.points.at(-1)!.recordedAt) >= clock.t - 10_000, 'recorded up to the end');
+  // Nothing visual while off screen
+  assert.equal(writesOffScreen, 0, 'no camera writes off screen');
+  assert.equal(publishesOffScreen, 0, 'no route re-renders off screen');
+  // Bounded
+  assert.equal(cam.maxOutstanding, 1);
+  assert.ok(writer.stats.waiting <= 1);
+  assert.ok(live.coordinates.length <= LIVE_ROUTE.maxPoints);
+  assert.ok(maxPayload < 200 * 1024, `trail payload ${maxPayload} bytes`);
+  assert.ok(report.cloudHeldFixes === 0 && report.trackerHeld === 0);
+  assert.ok(report.liveHeadTrace <= LIVE_TRAIL.maxTracePoints);
+  assert.ok(report.journalEntries <= 400);
+  // Camera writes were at a visual rate while on screen: ~65 on-screen minutes at most ~60 a second
+  assert.ok(cam.writes <= 65 * 60 * 61, `${cam.writes} camera writes`);
+  b.app.dispose();
+});
+
+test('back on screen after a background spell: the route arrives in one update and the camera resumes with no burst', () => {
+  const timers = new FakeTimers();
+  const { cam, writer } = slowCamera(timers, () => 10);
+  const gate = new VisualGate('active');
+  const published: (ActiveDrive | null)[] = [];
+  const feed = new LiveDriveFeed((d) => published.push(d), true);
+  feed.set(newLiveDrive(0));
+  gate.subscribe((n) => { feed.setVisible(n.live); if (n.live) writer.resume(); else writer.pause(); });
+  for (let i = 0; i < 100; i++) { writer.submit(poseAt(i)); timers.advance(16); }
+  const writesBefore = cam.writes;
+  gate.update('background');
+  // 20 minutes away: the frame loop is stopped (nothing submitted); fixes keep arriving
+  for (let s = 0; s < 1200; s++) {
+    feed.addFix({ latitude: 53.23 + s * 1e-4, longitude: -0.54, speedMs: 20, accuracyM: 5, timestamp: s * 1000 });
+    timers.advance(1000);
+  }
+  assert.equal(cam.writes, writesBefore, 'nothing written while away');
+  const publishedBefore = published.length;
+  gate.update('active');
+  assert.equal(published.length, publishedBefore + 1, 'the route catches up in one update');
+  assert.equal(published.at(-1)!.coordinates.length, 1200);
+  // The first frames back: one write at a time, at the frame rate, no backlog to work through
+  for (let i = 0; i < 60; i++) { writer.submit(poseAt(10_000 + i)); timers.advance(16); }
+  assert.ok(cam.writes - writesBefore <= 61, `${cam.writes - writesBefore} writes in the first second back`);
+  assert.equal(cam.maxOutstanding, 1);
+});
+
+test('the crash fixes are wired in: no per-frame Mapbox command, nothing visual off screen, background launches build no map', () => {
+  const map = readFileSync(join(MOBILE, 'components/MapboxDriveMap.tsx'), 'utf8');
+  const screen = readFileSync(join(MOBILE, 'app/(tabs)/(drive)/index.tsx'), 'utf8');
+  const ctx = readFileSync(join(MOBILE, 'context/AppContext.tsx'), 'utf8');
+  // Mapbox: the follow camera goes through the writer into the Camera's props, never setCamera
+  assert.ok(!/setCamera\(mapboxFollowCamera/.test(map), 'no promise-returning camera command per frame');
+  assert.match(map, /setFollowCamera\(pose\) \{\s*cameraWriter\.submit\(pose\);/);
+  assert.match(map, /<Camera ref=\{cameraRef\} defaultSettings=\{defaultSettings\} \{\.\.\.stop\} \/>/);
+  assert.match(map, /useLayoutEffect\(\(\) => \{\s*const applied = appliedRef\.current;/);
+  assert.match(map, /if \(live\) cameraWriter\.resume\(\);\s*else cameraWriter\.pause\(\);/);
+  assert.match(map, /if \(liveRef\.current\) markerRef\.current\?\.set\(position\);/);
+  assert.match(map, /trailFeatureCollection\(displayTrail\(trail\)\)/);
+  // The Drive screen: the frame loop and everything it drives only while live
+  assert.match(screen, /if \(frameIdRef\.current != null \|\| !visualsLiveRef\.current\) return;/);
+  assert.match(screen, /frameLoopRef\.current = \(\) => \{\s*frameIdRef\.current = null;[^]*?if \(!visualsLiveRef\.current\) return;/);
+  assert.match(screen, /if \(prev\.live && !next\.live\) \{\s*if \(frameIdRef\.current != null\) cancelAnimationFrame\(frameIdRef\.current\);\s*frameIdRef\.current = null;\s*mapboxRef\.current\?\.setVisualsLive\(false\);/);
+  assert.match(screen, /followCamera\.enter\(false, \{\}, followTargetFor\(position\)\)/, 'back on screen: the camera starts at the current target');
+  assert.match(screen, /if \(isDriving && !isPaused && visuals\.live\) \{\s*driveTimerRef\.current = setInterval\(tick, 1000\);/);
+  assert.match(screen, /Platform\.OS !== "web" && !visuals\.mounted \? \(/, 'no map until the app has been on screen');
+  // AppContext: the live route is held off screen; recording is untouched
+  assert.match(ctx, /cloud\.onDriveFix\(\(fix\) => \{ latestFixRef\.current = fix; liveFeed\.addFix\(fix\); \}\)/);
+  assert.match(ctx, /liveFeed\.setVisible\(state === 'active'\);/);
+  assert.match(ctx, /new LiveDriveFeed\(setCurrentDrive, AppState\.currentState === 'active'\)/);
+});
+
+test('a background relaunch by iOS: no map, no frame loop, no camera writes, and the background fixes are still recorded', async () => {
+  const store = new MemoryStore();
+  const clock = { t: Date.parse('2026-10-09T17:00:00Z') };
+  const updates = new FakeUpdates();
+  const server = new FakeServer();
+  // A drive in progress when iOS ended the app
+  const first = recoveryApp(store, clock, updates, server);
+  await first.app.start();
+  await first.app.startDrive(null);
+  await settle();
+  await longDrive(first, 0, 10 * 60);
+  first.app.dispose();
+  // iOS relaunches it in the background to deliver locations
+  clock.t += 60_000;
+  const gate = new VisualGate('background');
+  const timers = new FakeTimers();
+  const { cam, writer } = slowCamera(timers, () => 10);
+  const published: (ActiveDrive | null)[] = [];
+  const feed = new LiveDriveFeed((d) => published.push(d), false);
+  const again = recoveryApp(store, clock, updates, server, first.journal);
+  again.app.onDriveFix((fix) => feed.addFix(fix));
+  await again.app.start();
+  feed.update((prev) => (again.app.activeRecord ? prev ?? liveDriveFromRecord(again.app.activeRecord) : null));
+  let frames = 0;
+  const wake = () => { if (gate.current.live) { frames++; writer.submit(poseAt(frames)); } };
+  const pointsBefore = again.app.activeRecord!.points.length;
+  for (let s = 601; s <= 900; s += 5) {
+    const batch = [];
+    for (let k = 0; k < 5; k++) { clock.t += 1000; batch.push(aRoadFix(s + k, clock.t)); }
+    await again.tracker.deliver(batch);
+    wake(); // the screen's trail effect would wake the frame loop
+    timers.advance(5000);
+  }
+  assert.equal(gate.current.mounted, false, 'the map is never created');
+  assert.equal(frames, 0, 'no frame loop');
+  assert.equal(cam.writes, 0, 'no camera writes');
+  assert.equal(published.length, 1, 'only the drive picked up, no per-fix re-renders');
+  assert.ok(again.app.activeRecord!.points.length > pointsBefore + 80, 'background fixes recorded');
+  assert.equal(again.app.isDriving, true);
+  // The user opens the app: the map is created and visuals start, from now
+  gate.update('active');
+  feed.setVisible(true);
+  assert.equal(gate.current.mounted, true);
+  wake();
+  timers.advance(20);
+  assert.equal(cam.writes, 1);
+  assert.equal(published.length, 2, 'the route caught up in one update');
+  again.app.dispose();
 });
