@@ -262,6 +262,28 @@ export default function SettingsScreen() {
                 <Text style={s.label}>Retry Uploads</Text>
               </GlassButton>
             </GlassSurface>
+            <GlassSurface style={s.card}>
+              <Text style={s.title}>Diagnostics</Text>
+              <Text style={s.note}>
+                A record of drive recording and crashes on this phone, to help
+                investigate problems. It never includes your location or sign-in
+                details.
+              </Text>
+              <GlassButton
+                style={s.action}
+                onPress={() => router.push("/diagnostics")}
+              >
+                <Ionicons name="pulse-outline" size={20} color={c.primary} />
+                <Text style={[s.label, { flex: 1 }]}>
+                  View & Share Diagnostics
+                </Text>
+                <Ionicons
+                  name="chevron-forward"
+                  size={18}
+                  color={c.mutedForeground}
+                />
+              </GlassButton>
+            </GlassSurface>
           </>
         )}
         {section === "legal" && (

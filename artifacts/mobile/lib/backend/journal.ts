@@ -79,6 +79,24 @@ export class DiagnosticsJournal implements Journal {
     while (this.flushing) await this.flushing;
   }
 
+  /**
+   * Empties the journal, on the device too, and starts it again with a note
+   * of when it was cleared.
+   */
+  async clear(): Promise<void> {
+    await this.load();
+    this.entries = [];
+    // A write already under way finishes first, so it can't bring entries back
+    await this.flush();
+    try {
+      await this.deps.store.removeItem(JOURNAL_KEY);
+    } catch {
+      // Left on the device; the next write replaces it with the emptied journal.
+    }
+    this.log('journal_cleared');
+    await this.flush();
+  }
+
   /** Plain text, one entry per line, for sharing from Settings */
   async text(): Promise<string> {
     const lines = (await this.read()).map(({ t, event, ...rest }) => {

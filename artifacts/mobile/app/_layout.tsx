@@ -50,6 +50,7 @@ function AppStack({ signedIn, recovering }: { signedIn: boolean; recovering: boo
           options={{ presentation: "modal", headerShown: false, animation: "slide_from_bottom" }}
         />
         <Stack.Screen name="settings" options={{ headerShown: false, animation: "slide_from_right" }} />
+        <Stack.Screen name="diagnostics" options={{ headerShown: false, animation: "slide_from_right" }} />
         <Stack.Screen name="journey/[id]" options={{ headerShown: false, animation: "slide_from_right" }} />
         <Stack.Screen name="vehicle/[id]" options={{ headerShown: false, animation: "slide_from_right" }} />
         <Stack.Screen name="messages" options={{ headerShown: false, animation: "slide_from_right" }} />

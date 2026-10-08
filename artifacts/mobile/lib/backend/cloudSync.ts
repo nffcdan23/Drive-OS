@@ -570,6 +570,8 @@ export class CloudSync {
 
   /** What the last orphan check found (report only) */
   get orphanJourneys(): readonly OrphanJourney[] { return this.orphans; }
+  /** When the last orphan check ran (null: not this session) */
+  get orphanCheckedAt(): number | null { return Number.isFinite(this.orphanCheckAt) ? this.orphanCheckAt : null; }
 
   /** Reloads all data from the API. Sections that fail keep their cached value. */
   async refresh(): Promise<void> {

@@ -17,6 +17,7 @@ import { CloudSync, type SyncStatus } from '@/lib/backend/cloudSync';
 import { describeError } from '@/lib/backend/http';
 import type { GpsFix } from '@/lib/backend/journeyRecorder';
 import { LiveDriveFeed, liveDriveFromRecord, newLiveDrive } from '@/lib/backend/liveDrive';
+import type { DiagnosticsState } from '@/lib/backend/diagnosticsReport';
 import type { LocationKind, SpotCategory, Visibility } from '@/lib/backend/endpoints';
 import type {
   ActiveDrive, BlockedUser, Conversation, Convoy, Coordinate, DriveOSEvent, Friend, FriendRequest, Group, Journey,
@@ -88,6 +89,8 @@ interface AppContextValue {
   activeDriveMs: () => number | null;
   /** The newest fix accepted for the drive in progress (from the screen or the background) */
   latestDriveFix: () => GpsFix | null;
+  /** Drive and orphan-check state for the diagnostics report (no locations) */
+  diagnosticsState: () => DiagnosticsState;
   togglePassengerMode: () => void;
 
   updateProfile: (updates: Partial<UserProfile>) => void;
@@ -355,6 +358,12 @@ export function AppProvider({ userId, children }: { userId: string; children: Re
   const isDrivePaused = useCallback(() => cloud.isDrivePaused, [cloud]);
   const activeDriveMs = useCallback(() => cloud.activeDriveMs(), [cloud]);
   const latestDriveFix = useCallback(() => (cloud.isDriving ? latestFixRef.current : null), [cloud]);
+  const diagnosticsState = useCallback((): DiagnosticsState => ({
+    driveInProgress: cloud.activeRecord?.clientRef ?? null,
+    pendingDrives: cloud.status.pendingJourneys,
+    unsettled: cloud.unsettled,
+    orphans: cloud.orphanCheckedAt != null ? cloud.orphanJourneys : null,
+  }), [cloud]);
 
   const pendingJourney = data.journeys.find((j) => j.syncState && j.syncState !== 'synced') ?? null;
   const syncSummary: SyncStatusSummary =
@@ -492,7 +501,7 @@ export function AppProvider({ userId, children }: { userId: string; children: Re
     sync: status,
     unsyncedJourneyId: pendingJourney?.id ?? null,
     categories: data.categories,
-    startDrive, updateDriveCoordinate, endDrive, discardDrive, setDrivePaused, isDrivePaused, activeDriveMs, latestDriveFix,
+    startDrive, updateDriveCoordinate, endDrive, discardDrive, setDrivePaused, isDrivePaused, activeDriveMs, latestDriveFix, diagnosticsState,
     places: data.places,
     friends: data.friends,
     friendRequests: data.friendRequests,

@@ -5151,3 +5151,125 @@ test('a background relaunch by iOS: no map, no frame loop, no camera writes, and
   assert.equal(published.length, 2, 'the route caught up in one update');
   again.app.dispose();
 });
+
+// ─── Diagnostics: viewing, sharing and clearing the journal ──────────────────
+
+import { buildDiagnosticsReport, redactDiagnostics, type DiagnosticsState } from '@/lib/backend/diagnosticsReport';
+
+const diagApp = { name: 'Derwent', version: '1.0.0', build: '22', bundleId: 'uk.co.starscale.drive.staging', platform: 'ios', osVersion: '27.0' };
+
+test('the diagnostics report: version, build, time, drive state, orphan candidates and the journal', async () => {
+  const journal = new DiagnosticsJournal({ store: new MemoryStore(), now: () => Date.parse('2026-10-09T08:00:00Z') });
+  journal.log('launch', { appState: 'background', platform: 'ios' });
+  journal.log('recovery_finish', { clientRef: 'drive-7', serverId: 'srv-7', reason: 'quiet', pointCount: 1960, drivenS: 5880, kept: true });
+  const state: DiagnosticsState = {
+    driveInProgress: null, pendingDrives: 1, unsettled: false,
+    orphans: [{ serverId: 'lost', clientRef: 'lost-ref', name: 'Active Journey', startedAt: '2026-10-06T19:30:00.000Z',
+      firstPointAt: '2026-10-06T19:30:00.000Z', lastPointAt: '2026-10-06T21:09:57.000Z', pointCount: 2000, spanS: 5997, quietH: 46.3, outcome: 'candidate' }],
+  };
+  const report = buildDiagnosticsReport({ app: diagApp, generatedAt: new Date('2026-10-09T08:05:00Z'), state, entries: await journal.read() });
+  const lines = report.split('\n');
+  assert.equal(lines[0], 'Derwent diagnostics');
+  assert.equal(lines[1], 'Generated: 2026-10-09T08:05:00.000Z');
+  assert.equal(lines[2], 'App: Derwent 1.0.0 (build 22) uk.co.starscale.drive.staging');
+  assert.equal(lines[3], 'Device: ios 27.0');
+  assert.match(report, /Drives waiting to upload: 1/);
+  assert.match(report, /^ {2}candidate serverId=lost clientRef=lost-ref name="Active Journey" started=2026-10-06T19:30:00\.000Z firstPoint=2026-10-06T19:30:00\.000Z lastPoint=2026-10-06T21:09:57\.000Z points=2000 spanS=5997 quietH=46\.3$/m);
+  assert.match(report, /Journal \(2 entries, oldest first\)/);
+  assert.match(report, /^2026-10-09T08:00:00\.000Z recovery_finish clientRef="drive-7" serverId="srv-7" reason="quiet" pointCount=1960 drivenS=5880 kept=true$/m);
+  // Before any orphan check, and with none found
+  assert.match(buildDiagnosticsReport({ app: diagApp, generatedAt: new Date(), state: { ...state, orphans: null }, entries: [] }), /Not checked yet this session/);
+  assert.match(buildDiagnosticsReport({ app: diagApp, generatedAt: new Date(), state: { ...state, orphans: [] }, entries: [] }), /None found\./);
+});
+
+test('the diagnostics report never carries coordinates, tokens, keys, passwords or email addresses', async () => {
+  const journal = new DiagnosticsJournal({ store: new MemoryStore(), now: () => 0 });
+  // Things that must never get through, even inside an error message
+  journal.log('storage_write_failed', {
+    error: 'failed at 53.2312345,-0.5412345 for dan@example.com with Bearer abc.def.ghi password=hunter2 token: eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig',
+    key: 'sb_secret_ABCDEFGH12345678',
+  });
+  // Fields named like a location or sign-in data are dropped (the journal drops location fields itself)
+  const entries = [...await journal.read(), { t: '2026-10-09T08:00:00.000Z', event: 'odd', email: 'a@b.co', access_token: 'x', password: 'y', latitude: 53.2312345, route: 'r', ok: 1 }];
+  const report = buildDiagnosticsReport({ app: diagApp, generatedAt: new Date(0), state: { driveInProgress: null, pendingDrives: 0, unsettled: false, orphans: null }, entries });
+  for (const leak of ['53.2312345', '0.5412345', 'dan@example.com', 'a@b.co', 'hunter2', 'eyJhbGciOi', 'abc.def.ghi', 'sb_secret_ABCDEFGH', 'access_token=', 'latitude=', 'route=']) {
+    assert.ok(!report.includes(leak), `report contains ${leak}`);
+  }
+  assert.match(report, /\[number\],\[number\]/);
+  assert.match(report, /\[email\]/);
+  assert.match(report, /password=\[redacted\]/);
+  assert.match(report, /odd ok=1$/m);
+  // Ordinary figures are untouched
+  assert.equal(redactDiagnostics('quietH=46.3 spanS=5997 t=2026-10-09T08:00:00.000Z'), 'quietH=46.3 spanS=5997 t=2026-10-09T08:00:00.000Z');
+});
+
+test('clearing diagnostics empties the journal on the device and notes when it was cleared', async () => {
+  const store = new MemoryStore();
+  const journal = new DiagnosticsJournal({ store, now: () => Date.parse('2026-10-09T09:00:00Z') });
+  for (let i = 0; i < 50; i++) journal.log('tick', { i });
+  await journal.flush();
+  await journal.clear();
+  assert.deepEqual((await journal.read()).map((e) => e.event), ['journal_cleared']);
+  const reopened = new DiagnosticsJournal({ store });
+  assert.deepEqual((await reopened.read()).map((e) => e.event), ['journal_cleared'], 'cleared on the device too');
+  // Logging carries on afterwards
+  journal.log('launch', { appState: 'active' });
+  await journal.flush();
+  assert.deepEqual((await new DiagnosticsJournal({ store }).read()).map((e) => e.event), ['journal_cleared', 'launch']);
+  // Even if saving fails right then, the old journal is gone from the device
+  const full = new MemoryStore();
+  const before = new DiagnosticsJournal({ store: full });
+  for (let i = 0; i < 20; i++) before.log('old', { i });
+  await before.flush();
+  const failingWrites = { getItem: (k: string) => full.getItem(k), setItem: async () => { throw new Error('disk full'); }, removeItem: (k: string) => full.removeItem(k) };
+  await new DiagnosticsJournal({ store: failingWrites }).clear();
+  assert.deepEqual(await new DiagnosticsJournal({ store: full }).read(), [], 'no old entries left on the device');
+});
+
+test('a real drive, crash and orphan check produce a report with the candidate and no route in it', async () => {
+  const clock = { t: Date.parse('2026-10-08T12:00:00Z') };
+  const server = new FakeServer();
+  const old = clock.t - 2 * 24 * 3600_000;
+  server.journeys.push({ id: 'lost', clientRef: 'lost-ref', status: 'active', startedAt: new Date(old).toISOString(), name: 'Active Journey', route: null } as unknown as ServerJourney);
+  server.pointTimes.set('lost', new Set(Array.from({ length: 2000 }, (_, i) => new Date(old + i * 3000).toISOString())));
+  const b = recoveryApp(new MemoryStore(), clock, undefined, server);
+  await b.app.start();
+  await b.app.startDrive(null);
+  await settle();
+  await longDrive(b, 0, 10 * 60);
+  await b.app.endDrive();
+  await b.app.sync(); // uploads the drive; the orphan check reports 'lost'
+  const state: DiagnosticsState = {
+    driveInProgress: b.app.activeRecord?.clientRef ?? null, pendingDrives: b.app.status.pendingJourneys, unsettled: b.app.unsettled,
+    orphans: b.app.orphanCheckedAt != null ? b.app.orphanJourneys : null,
+  };
+  const report = buildDiagnosticsReport({ app: diagApp, generatedAt: new Date(clock.t), state, entries: await b.journal.read() });
+  assert.match(report, /candidate serverId=lost clientRef=lost-ref/);
+  assert.match(report, /drive_start clientRef=/);
+  assert.match(report, /orphan_found .*serverId="lost".*outcome="candidate"/);
+  assert.ok(!/53\.2\d|-0\.5\d|0\.54\d/.test(report), 'no coordinates from the drive');
+  b.app.dispose();
+});
+
+test('the Diagnostics option: Settings → Help & Support, with view, share sheet and a confirmed clear', () => {
+  const settings = readFileSync(join(MOBILE, 'app/settings.tsx'), 'utf8');
+  const screen = readFileSync(join(MOBILE, 'app/diagnostics.tsx'), 'utf8');
+  const layout = readFileSync(join(MOBILE, 'app/_layout.tsx'), 'utf8');
+  const help = settings.slice(settings.indexOf('section === "help"'), settings.indexOf('section === "legal"'));
+  assert.match(help, /<Text style=\{s\.title\}>Diagnostics<\/Text>/);
+  assert.match(help, /router\.push\("\/diagnostics"\)/);
+  assert.match(help, /View & Share Diagnostics/);
+  assert.match(layout, /<Stack\.Screen name="diagnostics"/);
+  // Viewing: the report, as selectable text
+  assert.match(screen, /buildDiagnosticsReport\(\{\s*app: appInfo\(\),\s*generatedAt: new Date\(\),\s*state: diagnosticsState\(\),\s*entries,/);
+  assert.match(screen, /<Text style=\{s\.report\} selectable>/);
+  // Sharing: the native share sheet, nothing else
+  assert.match(screen, /Share\.share\(\{ message: report, title: `\$\{APP_NAME\} diagnostics` \}\)/);
+  // Clearing: only after confirming
+  assert.match(screen, /Alert\.alert\(\s*"Clear diagnostics\?",[^]*style: "destructive",\s*onPress: \(\) => \{\s*void journal\.clear\(\)\.then\(refresh\);/);
+  // The installed binary's build number
+  assert.match(screen, /Constants\.platform\?\.ios\?\.buildNumber/);
+  // No crash/analytics SDK
+  const pkg = readFileSync(join(MOBILE, 'package.json'), 'utf8');
+  assert.ok(!/sentry|bugsnag|crashlytics|firebase|amplitude|mixpanel|segment/i.test(pkg));
+});
