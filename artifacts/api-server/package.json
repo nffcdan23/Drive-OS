@@ -8,7 +8,7 @@
     "build": "node ./build.mjs",
     "start": "node --enable-source-maps ./dist/index.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test:unit": "node --experimental-transform-types --no-warnings --test --test-reporter=spec test/dvla.unit.test.ts"
+    "test:unit": "node --experimental-transform-types --no-warnings --test --test-reporter=spec test/dvla.unit.test.ts test/navigation.unit.test.ts"
   },
   "dependencies": {
     "@workspace/api-zod": "workspace:*",

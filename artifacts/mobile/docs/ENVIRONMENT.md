@@ -63,6 +63,7 @@ The staging/TestFlight identity and its EAS project are committed in `CHOSEN.sta
 | `DVLA_API_KEY` | **secret** | optional: enables registration lookup. Server only, never an `EXPO_PUBLIC_*` value (the app build refuses one) |
 | `DVLA_VES_URL` | config | optional: `https://driver-vehicle-licensing.api.gov.uk/vehicle-enquiry/v1/vehicles` (default, live) or the same path on `uat.driver-vehicle-licensing.api.gov.uk`. Any other URL stops the API at startup, so the key can't be sent elsewhere. |
 | `DVLA_TIMEOUT_MS` | config | optional: DVLA request timeout, default `8000` |
+| `MAPBOX_DIRECTIONS_TOKEN` | **secret** | optional: enables route previews (`POST /api/navigation/routes`, Mapbox Directions). A **dedicated** Mapbox token for the server, not the app's public `EXPO_PUBLIC_MAPBOX_TOKEN`: mapbox.com → Account → Tokens → Create a token (no secret scopes are needed). Without it the endpoint answers `503 navigation_unavailable`: the app's route preview says routes aren't available, and its Open in Apple Maps button still works. Never an `EXPO_PUBLIC_*` value. |
 | `STORAGE_WORKER` | config | optional; `off` disables the file clean-up worker |
 | `STORAGE_WORKER_INTERVAL_MS` | config | optional, default `60000` |
 | `LOG_LEVEL` | config | optional, default `info` |
@@ -85,6 +86,7 @@ The staging/TestFlight identity and its EAS project are committed in `CHOSEN.sta
 | `DVLA_STAGING_API_KEY` | secret, optional | turns on DVLA lookup for staging (copied to the Railway staging service only) |
 | `DVLA_STAGING_VES_URL` | **variable**, optional | DVLA URL for staging: live or UAT (UAT recommended with a UAT key) |
 | `DVLA_STAGING_TEST_REGISTRATION` | **variable**, optional | a registration DVLA knows, for one real lookup per hosted test run |
+| `MAPBOX_DIRECTIONS_STAGING_TOKEN` | secret, optional | turns on route previews for staging (copied to the Railway staging service as `MAPBOX_DIRECTIONS_TOKEN` only) |
 | `STAGING_SIGNUP_EMAIL_DOMAIN` | **variable**, optional | domain for sign-up test addresses. Only needed if Supabase rejects the default `example.com` once "Confirm email" is off. Use a domain you control; no email is sent to it. |
 
 ## 5. Supabase Auth settings (dashboard), per project

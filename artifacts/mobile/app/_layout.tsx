@@ -25,6 +25,7 @@ import * as SplashScreen from "expo-splash-screen";
 import { AppProvider, useApp } from "@/context/AppContext";
 import LoadingScreen from "@/components/LoadingScreen";
 import { AuthProvider, useAuth } from "@/context/AuthContext";
+import { NavigationProvider } from "@/context/NavigationContext";
 import { configError } from "@/lib/backendClient";
 
 SplashScreen.preventAutoHideAsync();
@@ -97,11 +98,13 @@ function RootLayoutNav() {
   // One provider per account: signing in as someone else starts from a clean slate.
   return (
     <AppProvider key={userId} userId={userId}>
-      <DataLoaded onLoaded={dataLoaded} />
-      <View style={{ flex: 1 }}>
-        <ConnectionBanner />
-        <AppStack signedIn recovering={recoveringPassword} />
-      </View>
+      <NavigationProvider>
+        <DataLoaded onLoaded={dataLoaded} />
+        <View style={{ flex: 1 }}>
+          <ConnectionBanner />
+          <AppStack signedIn recovering={recoveringPassword} />
+        </View>
+      </NavigationProvider>
     </AppProvider>
   );
 }

@@ -43,10 +43,12 @@ import React, {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 import { StyleSheet, View, type StyleProp, type ViewStyle } from "react-native";
 import Mapbox, {
   Camera,
+  CircleLayer,
   Images,
   LineLayer,
   MapView,
@@ -69,6 +71,12 @@ import {
   trailFeatureCollection,
 } from "@/lib/mapbox";
 import { LatestPoseWriter, sameFollowPose } from "@/lib/cameraWriter";
+import type { RoutePreviewStore } from "@/lib/navigation/previewStore";
+import {
+  ROUTE_COLORS,
+  routePreviewFeatures,
+  tappedRouteIndex,
+} from "@/lib/navigation/routeLayers";
 
 export interface MapboxDriveMapHandle {
   /** Writes the follow camera at once (the motion comes from the frame loop) */
@@ -113,6 +121,11 @@ export interface MapboxDriveMapProps {
    * camera.  View annotations, so they sit above the map's layers
    */
   friendLayer?: ReactElement | null;
+  /**
+   * The route preview, drawn by RouteLayers from the store itself (so a
+   * preview update never re-renders the map).  Never touches the camera.
+   */
+  routePreview?: RoutePreviewStore | null;
   /** Logo and attribution sit this far above the bottom edge */
   ornamentBottom: number;
   ornamentLeft: number;
@@ -286,6 +299,71 @@ const TrailHeadLayers = memo(function TrailHeadLayers({
   );
 });
 
+/**
+ * The route preview: alternatives (muted, tap to choose), the selected route
+ * (bold) and the destination.  Its own small component reading the preview
+ * store, so choosing a route re-renders only these sources.  Always mounted,
+ * empty with no preview, so its layers keep their place beneath the trail and
+ * the arrow.  It draws only: no camera, no location component.
+ */
+const RouteLayers = memo(function RouteLayers({ store }: { store: RoutePreviewStore }) {
+  const state = useSyncExternalStore(
+    useCallback((fn: () => void) => store.subscribe(fn), [store]),
+    () => store.state,
+  );
+  const features = useMemo(() => routePreviewFeatures(state), [state]);
+  const choose = useCallback(
+    (e: { features?: ReadonlyArray<{ properties?: Record<string, unknown> | null }> }) => {
+      const index = tappedRouteIndex(e.features);
+      if (index != null) store.select(index);
+    },
+    [store],
+  );
+  const line = { lineCap: "round", lineJoin: "round", lineEmissiveStrength: 1 } as const;
+  return (
+    <>
+      <ShapeSource
+        id="derwent-route-alternatives"
+        shape={features.alternatives}
+        onPress={choose}
+        hitbox={{ width: 24, height: 24 }}
+      >
+        <LineLayer
+          id="derwent-route-alternatives-casing"
+          style={{ ...line, lineColor: ROUTE_COLORS.alternativeCasing, lineWidth: 9 }}
+        />
+        <LineLayer
+          id="derwent-route-alternatives-line"
+          style={{ ...line, lineColor: ROUTE_COLORS.alternative, lineWidth: 5 }}
+        />
+      </ShapeSource>
+      <ShapeSource id="derwent-route-selected" shape={features.selected}>
+        <LineLayer
+          id="derwent-route-selected-casing"
+          style={{ ...line, lineColor: ROUTE_COLORS.selectedCasing, lineWidth: 12 }}
+        />
+        <LineLayer
+          id="derwent-route-selected-line"
+          style={{ ...line, lineColor: ROUTE_COLORS.selected, lineWidth: 7 }}
+        />
+      </ShapeSource>
+      <ShapeSource id="derwent-route-destination" shape={features.destination}>
+        <CircleLayer
+          id="derwent-route-destination-dot"
+          style={{
+            circleRadius: 8,
+            circleColor: ROUTE_COLORS.destination,
+            circleStrokeColor: ROUTE_COLORS.destinationRing,
+            circleStrokeWidth: 4,
+            circlePitchAlignment: "map",
+            circleEmissiveStrength: 1,
+          }}
+        />
+      </ShapeSource>
+    </>
+  );
+});
+
 const MapboxDriveMap = forwardRef<MapboxDriveMapHandle, MapboxDriveMapProps>(
   function MapboxDriveMap(
     {
@@ -297,6 +375,7 @@ const MapboxDriveMap = forwardRef<MapboxDriveMapHandle, MapboxDriveMapProps>(
       trailColor,
       trailHead,
       friendLayer,
+      routePreview,
       ornamentBottom,
       ornamentLeft,
       onUserGesture,
@@ -427,6 +506,9 @@ const MapboxDriveMap = forwardRef<MapboxDriveMapHandle, MapboxDriveMapProps>(
             defaultSettings={initialCamera}
           />
           <Images images={ARROW_IMAGES} />
+          {/* Mounted first: the route preview draws beneath the trail and
+              the arrow */}
+          {routePreview && <RouteLayers store={routePreview} />}
           {/* Mounted before the trail: the head draws beneath it (and the
               arrow, mounted last, draws above both) */}
           {trailHead && (

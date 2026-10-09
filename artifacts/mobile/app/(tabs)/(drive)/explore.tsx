@@ -17,7 +17,11 @@ import { GlassButton, GlassSurface } from "@/components/Glass";
 import { SectionHeader, EventPreviewCard } from "@/components/Discovery";
 import { ScreenTitle } from "@/components/Cockpit";
 import { useApp, type NearbySpot, type SavedPlace } from "@/context/AppContext";
-import { openDirections } from "@/lib/directions";
+import {
+  placeDestination,
+  spotDestination,
+  useRouteToPlace,
+} from "@/hooks/useRouteToPlace";
 import colors from "@/constants/colors";
 import { requestForegroundLocation } from "@/lib/locationPermission";
 import { describeError } from "@/lib/backend/http";
@@ -31,6 +35,8 @@ export default function ExploreScreen() {
   const insets = useSafeAreaInsets();
   const { journeys, places, events, findNearbySpots, resolvedUnitSystem } =
     useApp();
+  // A route preview on the Drive map, or the phone's maps app as before
+  const routeToPlace = useRouteToPlace();
   const [duration, setDuration] = useState("1 hr");
   const [preferences, setPreferences] = useState(["B-roads"]);
   const [mode, setMode] = useState<"loop" | "destination">("loop");
@@ -250,7 +256,11 @@ export default function ExploreScreen() {
               <GlassButton
                 key={p.id}
                 style={s.place}
-                onPress={() => void openDirections(p.coordinate)}
+                onPress={() =>
+                  void routeToPlace(
+                    "isOwn" in p ? spotDestination(p) : placeDestination(p),
+                  )
+                }
               >
                 <View style={s.placeImage}>
                   <Ionicons

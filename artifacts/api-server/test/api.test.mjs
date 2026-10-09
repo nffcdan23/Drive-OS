@@ -83,6 +83,53 @@ function startStubDvla() {
   });
 }
 
+// ─── Stub Mapbox Directions API ─────────────────────────────────────────────
+// Answers by destination latitude so each outcome can be exercised end to end.
+// The token is assembled at run time so no token-shaped literal is committed.
+const MAPBOX_TOKEN = ["sk", "test-directions-token-never-leaves-the-server"].join(".");
+const mapboxCalls = []; // { path, query }
+let mapbox;
+let mapboxUrl = "";
+const ROUTE_LINE = "_p~iF~ps|U_ulLnnqC_mqNvxq`@"; // any non-empty polyline6
+
+function mapboxRoute(distance, duration) {
+  return {
+    geometry: ROUTE_LINE, distance, duration, duration_typical: duration - 60,
+    legs: [{
+      distance, duration, summary: "A591",
+      steps: [
+        { distance, duration, name: "Lake Road", ref: "A591", driving_side: "left",
+          maneuver: { type: "depart", bearing_before: 0, bearing_after: 180, location: [-3.1, 54.6], instruction: "Head south on Lake Road." } },
+        { distance: 0, duration: 0, name: "", driving_side: "left", maneuver: { type: "arrive", location: [-2.96, 54.43] } },
+      ],
+      annotation: { congestion: ["low"], maxspeed: [{ speed: 30, unit: "mph" }] },
+    }],
+  };
+}
+
+function startStubMapbox() {
+  return new Promise((resolve) => {
+    mapbox = createServer((req, res) => {
+      const url = new URL(req.url, "http://stub");
+      mapboxCalls.push({ path: url.pathname, query: Object.fromEntries(url.searchParams) });
+      const send = (status, body) => {
+        res.writeHead(status, { "content-type": "application/json" });
+        res.end(JSON.stringify(body));
+      };
+      if (url.searchParams.get("access_token") !== MAPBOX_TOKEN) return send(401, { message: "Not Authorized - Invalid Token" });
+      const [, dest] = decodeURIComponent(url.pathname.split("/").pop().replace(/\.json$/, "")).split(";");
+      const destLat = Number(dest?.split(",")[1]);
+      if (destLat === 51.1) return send(200, { code: "NoRoute", routes: [] });
+      if (destLat === 51.2) return send(500, { message: "Internal error" });
+      return send(200, { code: "Ok", uuid: "stub-uuid", routes: [mapboxRoute(24500, 1980), mapboxRoute(26000, 2100)] });
+    });
+    mapbox.listen(0, "127.0.0.1", () => {
+      mapboxUrl = `http://127.0.0.1:${mapbox.address().port}/`;
+      resolve();
+    });
+  });
+}
+
 /** Starts another API process (for configuration tests); resolves once it is up or has exited. */
 async function startExtraApi(env) {
   const port = API_PORT + 1000 + Math.floor(Math.random() * 1000);
@@ -193,6 +240,7 @@ async function putObject(bucket, name, size, mimetype) {
 before(async () => {
   await startFakeSupabase();
   await startStubDvla();
+  await startStubMapbox();
   const entry = fileURLToPath(new URL("../dist/index.mjs", import.meta.url));
   server = spawn(process.execPath, ["--enable-source-maps", entry], {
     env: {
@@ -200,6 +248,7 @@ before(async () => {
       SUPABASE_URL: supabaseUrl, SUPABASE_SECRET_KEY: SECRET_KEY, SUPABASE_JWT_SECRET: JWT_SECRET,
       STORAGE_WORKER_INTERVAL_MS: "300", LIVE_LOCATION_CLEANUP_INTERVAL_MS: "300", LOG_LEVEL: "warn",
       DVLA_API_KEY: DVLA_KEY, DVLA_VES_URL: dvlaUrl, DVLA_TIMEOUT_MS: "300",
+      MAPBOX_DIRECTIONS_TOKEN: MAPBOX_TOKEN, MAPBOX_DIRECTIONS_URL: mapboxUrl,
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -221,6 +270,8 @@ after(async () => {
   fake?.close();
   dvla?.closeAllConnections?.();
   dvla?.close();
+  mapbox?.closeAllConnections?.();
+  mapbox?.close();
   await db.end();
 });
 
@@ -1348,5 +1399,105 @@ test("the DVLA key and looked-up registrations never appear in responses or logs
   }
   for (const reg of ["AB12CDE", "SE19ABC", "BJ19ABC", "TO19ABC", "KY19ABC", "RL19ABC"]) {
     assert.ok(!serverOutput.includes(reg), `the log does not contain ${reg}`);
+  }
+});
+
+// ─── Route previews (Mapbox Directions, via the local stub) ─────────────────
+
+const KESWICK = { lat: 54.600123, lng: -3.134567 };
+const AMBLESIDE = { lat: 54.428765, lng: -2.961234 };
+const routes = (u, body) => post(u, "/navigation/routes", body);
+
+test("routes: signed-in users only; the body is validated", async () => {
+  expect(await routes(null, { origin: KESWICK, destination: AMBLESIDE }), 401, "no token");
+  const u = await newUser();
+  const before = mapboxCalls.length;
+  for (const [body, what] of [
+    [{}, "empty"],
+    [{ origin: KESWICK }, "no destination"],
+    [{ origin: { lat: 91, lng: 0 }, destination: AMBLESIDE }, "latitude out of range"],
+    [{ origin: KESWICK, destination: { lat: 54, lng: "x" } }, "longitude not a number"],
+    [{ origin: { ...KESWICK, headingDeg: 400 }, destination: AMBLESIDE }, "heading out of range"],
+    [{ origin: "here", destination: AMBLESIDE }, "origin not an object"],
+  ]) {
+    const r = await routes(u, body);
+    expect(r, 400, what);
+    assert.equal(r.body.error, "invalid_input", what);
+  }
+  assert.equal(mapboxCalls.length, before, "invalid requests never reach Mapbox");
+});
+
+test("routes: a preview comes back in Derwent's format; Mapbox gets UK English and British imperial units", async () => {
+  const u = await newUser();
+  const r = await routes(u, { origin: { ...KESWICK, headingDeg: 180 }, destination: AMBLESIDE });
+  expect(r, 200, "routes");
+  assert.equal(r.body.provider, "mapbox");
+  assert.equal(r.body.routes.length, 2);
+  assert.deepEqual(Object.keys(r.body.routes[0]).sort(), ["distanceM", "durationS", "geometry", "index", "legs", "summary", "typicalDurationS"]);
+  assert.equal(r.body.routes[0].summary, "A591");
+  assert.deepEqual(r.body.routes[0].legs[0].maxspeedKmh, [48]);
+  const call = mapboxCalls.at(-1);
+  assert.equal(call.path, "/directions/v5/mapbox/driving-traffic/-3.134567,54.600123;-2.961234,54.428765.json");
+  assert.equal(call.query.language, "en-GB");
+  assert.equal(call.query.voice_units, "british_imperial");
+  assert.equal(call.query.alternatives, "true");
+  assert.equal(call.query.geometries, "polyline6");
+  assert.equal(call.query.bearings, "180,45;");
+  assert.ok(!JSON.stringify(r.body).includes(MAPBOX_TOKEN), "the token never reaches the app");
+});
+
+test("routes: Mapbox outcomes become typed errors", async () => {
+  const u = await newUser();
+  const none = await routes(u, { origin: KESWICK, destination: { lat: 51.1, lng: -1 } });
+  expect(none, 404, "no route");
+  assert.equal(none.body.error, "route_not_found");
+  const down = await routes(u, { origin: KESWICK, destination: { lat: 51.2, lng: -1 } });
+  expect(down, 503, "Mapbox error");
+  assert.equal(down.body.error, "routing_unavailable");
+});
+
+test("routes: per-user rate limit (10 a minute)", async () => {
+  const u = await newUser();
+  for (let i = 0; i < 10; i++) expect(await routes(u, { origin: KESWICK, destination: AMBLESIDE }), 200, `request ${i + 1}`);
+  const limited = await routes(u, { origin: KESWICK, destination: AMBLESIDE });
+  expect(limited, 429, "11th request");
+  assert.equal(limited.body.error, "rate_limited");
+  expect(await routes(await newUser(), { origin: KESWICK, destination: AMBLESIDE }), 200, "other users unaffected");
+});
+
+test("routes: nothing about a route is logged (no coordinates, no token)", async () => {
+  await routes(await newUser(), { origin: KESWICK, destination: AMBLESIDE });
+  for (const leaked of [MAPBOX_TOKEN, "54.600123", "-3.134567", "54.428765", "-2.961234", "directions/v5"]) {
+    assert.ok(!serverOutput.includes(leaked), `server log mentions ${leaked}`);
+  }
+});
+
+test("routes: without a token the server says so and never calls Mapbox", async () => {
+  const extra = await startExtraApi({ NODE_ENV: "test", MAPBOX_DIRECTIONS_URL: mapboxUrl });
+  try {
+    const u = await newUser();
+    const before = mapboxCalls.length;
+    const res = await fetch(`http://127.0.0.1:${extra.port}/api/navigation/routes`, {
+      method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${u.token}` },
+      body: JSON.stringify({ origin: KESWICK, destination: AMBLESIDE }),
+    });
+    assert.equal(res.status, 503);
+    assert.equal((await res.json()).error, "navigation_unavailable");
+    assert.equal(mapboxCalls.length, before);
+  } finally {
+    extra.child.kill("SIGTERM");
+  }
+});
+
+test("routes: the server refuses to start with a non-Mapbox host (the token can't be sent elsewhere)", async () => {
+  for (const [env, url] of [["production", mapboxUrl], ["test", "https://evil.example/"]]) {
+    const extra = await startExtraApi({ NODE_ENV: env, MAPBOX_DIRECTIONS_TOKEN: MAPBOX_TOKEN, MAPBOX_DIRECTIONS_URL: url });
+    for (let i = 0; i < 50 && extra.child.exitCode === null; i++) await new Promise((r) => setTimeout(r, 100));
+    const exited = extra.child.exitCode;
+    extra.child.kill("SIGTERM");
+    assert.notEqual(exited, null, `${env} ${url}: the server must not start`);
+    assert.notEqual(exited, 0);
+    assert.match(extra.output(), /MAPBOX_DIRECTIONS_URL is only for the test suite/);
+    assert.ok(!extra.output().includes(MAPBOX_TOKEN), "the token is not printed");
   }
 });

@@ -13,6 +13,7 @@ import eventsRouter from "./events";
 import notificationsRouter from "./notifications";
 import presenceRouter from "./presence";
 import liveLocationRouter from "./liveLocation";
+import navigationRouter from "./navigation";
 
 const router: IRouter = Router();
 
@@ -30,5 +31,6 @@ router.use(eventsRouter);
 router.use(notificationsRouter);
 router.use(presenceRouter);
 router.use(liveLocationRouter);
+router.use(navigationRouter);
 
 export default router;

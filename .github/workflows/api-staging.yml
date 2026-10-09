@@ -63,6 +63,9 @@ jobs:
       # the Railway staging service; the URL must be DVLA's (UAT recommended).
       DVLA_STAGING_API_KEY: ${{ secrets.DVLA_STAGING_API_KEY }}
       DVLA_STAGING_VES_URL: ${{ vars.DVLA_STAGING_VES_URL }}
+      # Optional: route previews on staging (Mapbox Directions). A dedicated,
+      # server-only token; it only ever goes to the Railway staging service.
+      MAPBOX_DIRECTIONS_STAGING_TOKEN: ${{ secrets.MAPBOX_DIRECTIONS_STAGING_TOKEN }}
       # Pinned and more than a week old, like the workspace's minimumReleaseAge rule.
       RAILWAY_CLI_VERSION: 5.57.6
     steps:
@@ -256,6 +259,12 @@ jobs:
           else
             echo "No DVLA_STAGING_API_KEY secret: lookup on staging reports lookup_not_configured."
           fi
+          if [ -n "$MAPBOX_DIRECTIONS_STAGING_TOKEN" ]; then
+            printf '%s' "$MAPBOX_DIRECTIONS_STAGING_TOKEN" | put MAPBOX_DIRECTIONS_TOKEN
+            echo "Route previews configured for staging."
+          else
+            echo "No MAPBOX_DIRECTIONS_STAGING_TOKEN secret: route previews on staging report navigation_unavailable."
+          fi
           echo "Variables set (values not shown)."
 
       - name: Deploy this commit
@@ -355,3 +364,20 @@ jobs:
           fi
           rm -f "$logs"
           echo "Checked $lines lines of staging runtime and build logs: no DVLA key."
+
+      - name: The Mapbox Directions token is not in the staging logs
+        if: env.MODE == 'deploy'
+        run: |
+          logs="$RUNNER_TEMP/railway-logs.txt"
+          r() { railway "$@" -p "$RAILWAY_PROJECT_ID" -e "$RAILWAY_ENVIRONMENT" -s "$RAILWAY_SERVICE"; }
+          { r logs --deployment --lines 2000; r logs --build --lines 2000; } > "$logs" 2>&1 || true
+          lines=$(wc -l < "$logs")
+          # Compared literally and quietly: the token is never printed.
+          if [ -n "$MAPBOX_DIRECTIONS_STAGING_TOKEN" ] && grep -qF -- "$MAPBOX_DIRECTIONS_STAGING_TOKEN" "$logs"; then
+            rm -f "$logs"; echo "::error::The Mapbox Directions token appears in the staging logs"; exit 1
+          fi
+          if grep -qE "access_token=[ps]k\." "$logs"; then
+            rm -f "$logs"; echo "::error::A Mapbox access token appears in the staging logs"; exit 1
+          fi
+          rm -f "$logs"
+          echo "Checked $lines lines of staging runtime and build logs: no Mapbox Directions token."
