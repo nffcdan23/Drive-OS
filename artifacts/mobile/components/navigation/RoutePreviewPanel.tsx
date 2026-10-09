@@ -9,6 +9,10 @@
  * Start opens the place in the phone's maps app for now: Derwent's own
  * turn-by-turn guidance comes in a later phase. Routes are only ever fetched
  * when the user taps (Update Route, Try Again), never on their own.
+ *
+ * The bookmark saves the destination as a place (Phase 2B): shown filled when
+ * it's already saved, and not at all for a Search Box result, which Mapbox's
+ * terms allow for temporary use only.
  */
 import React, { memo, useEffect, useState } from "react";
 import {
@@ -23,6 +27,9 @@ import { Ionicons } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
 import { GlassButton, GlassSurface } from "@/components/Glass";
 import { useColors } from "@/hooks/useColors";
+import { useApp } from "@/context/AppContext";
+import { SavePlaceSheet } from "@/components/places/SavePlaceSheet";
+import { saveability } from "@/lib/navigation/places";
 import {
   useRoutePreview,
   useRoutePreviewStore,
@@ -115,12 +122,15 @@ export function RoutePreviewPanel({
   const update = useUpdateRoutePreview();
   const now = useMinuteClock();
   const [updateFailed, setUpdateFailed] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const { places, addPlace } = useApp();
   // A message about the last Update Route belongs to that preview only
   const requestKey = state.phase === "idle" ? null : `${state.destination.id}`;
   useEffect(() => setUpdateFailed(null), [requestKey]);
 
   if (state.phase === "idle") return null;
   const { destination } = state;
+  const save = saveability(places, destination);
 
   const requestUpdate = () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
@@ -148,6 +158,24 @@ export function RoutePreviewPanel({
             </Text>
           ) : null}
         </View>
+        {save.kind === "saved" ? (
+          <View accessible accessibilityLabel="Saved to your places" style={styles.bookmark}>
+            <Ionicons name="bookmark" size={22} color={colors.primary} />
+          </View>
+        ) : save.kind === "can_save" ? (
+          <TouchableOpacity
+            accessibilityRole="button"
+            accessibilityLabel={`Save ${destination.name} to your places`}
+            hitSlop={10}
+            style={styles.bookmark}
+            onPress={() => {
+              Haptics.selectionAsync();
+              setSaving(true);
+            }}
+          >
+            <Ionicons name="bookmark-outline" size={22} color={colors.foreground} />
+          </TouchableOpacity>
+        ) : null}
       </View>
 
       {state.phase === "routing" ? (
@@ -231,6 +259,13 @@ export function RoutePreviewPanel({
         </GlassButton>
       </View>
       <Text style={[styles.notice, { color: colors.mutedForeground }]}>{ROAD_SAFETY_NOTICE}</Text>
+      <SavePlaceSheet
+        visible={saving && save.kind === "can_save"}
+        defaultKind="poi"
+        destination={destination}
+        onClose={() => setSaving(false)}
+        onSave={addPlace}
+      />
     </GlassSurface>
   );
 }
@@ -246,6 +281,7 @@ const styles = StyleSheet.create({
     gap: 10,
   },
   header: { flexDirection: "row", alignItems: "center", gap: 12 },
+  bookmark: { padding: 4 },
   title: { fontSize: 20, fontWeight: "700", letterSpacing: -0.3 },
   subtitle: { fontSize: 13, marginTop: 2 },
   status: { flexDirection: "row", alignItems: "center", gap: 10, paddingVertical: 10, flexWrap: "wrap" },

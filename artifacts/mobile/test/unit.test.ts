@@ -226,7 +226,7 @@ class FakeServer {
       updateVehicle: async (id: string, f: Record<string, unknown>) => { self.guard(); const v = self.vehicles.find((x) => x.id === id)!; Object.assign(v, f); return v; },
       createLocation: async (f: Record<string, unknown>) => {
         self.guard();
-        const l = { id: `l${++self.n}`, ownerId: 'u1', clientRef: f.clientRef, kind: f.kind, category: null, name: f.name, description: '', address: '', lat: f.lat, lng: f.lng, routePolyline: null, visibility: f.kind === 'home' ? 'private' : (f.visibility ?? 'private'), status: 'active', coverPhotoId: null, sourceJourneyId: null, createdAt: '', updatedAt: '' } as ServerLocation;
+        const l = { id: `l${++self.n}`, ownerId: 'u1', clientRef: f.clientRef, kind: f.kind, category: null, name: f.name, description: '', address: typeof f.address === 'string' ? f.address : '', lat: f.lat, lng: f.lng, routePolyline: null, visibility: f.kind === 'home' ? 'private' : (f.visibility ?? 'private'), status: 'active', coverPhotoId: null, sourceJourneyId: null, createdAt: '', updatedAt: '' } as ServerLocation;
         self.locations.push(l);
         return l;
       },
@@ -3837,7 +3837,7 @@ test('no sheet with fields is a one-off Modal: every one is the shared sheet, an
     ['app/(tabs)/community.tsx', 'showCreateGroup', 'closeCreateGroup'],
     ['app/(tabs)/community.tsx', 'showCreateConvoy', 'closeCreateConvoy'],
     ['app/(tabs)/community.tsx', 'showCreateEvent', 'closeCreateEvent'],
-    ['app/search.tsx', 'visible', 'onClose'],
+    ['components/places/SavePlaceSheet.tsx', 'visible', 'onClose'],
   ] as const;
   for (const [rel, show, close] of sheets) {
     const src = read(rel).replace(/\/\/.*$/gm, '');
@@ -3850,7 +3850,7 @@ test('no sheet with fields is a one-off Modal: every one is the shared sheet, an
     assert.ok(/<SheetScrollView\b/.test(body) && /<TextInput\b/.test(body.slice(body.indexOf('<SheetScrollView'))));
     assert.ok(!/KeyboardAwareScrollView|<Modal\b/.test(body), `${rel}: ${show} nests a ScrollView or Modal`);
   }
-  for (const rel of ['app/(tabs)/community.tsx', 'app/search.tsx']) {
+  for (const rel of ['app/(tabs)/community.tsx', 'app/search.tsx', 'components/places/SavePlaceSheet.tsx']) {
     assert.ok(!/KeyboardAwareScrollViewCompat|\bModal,/.test(read(rel)), `${rel} still uses the old pattern`);
   }
 });
@@ -3877,7 +3877,7 @@ test('Create Group, Convoy and Event close without creating, reset their forms, 
     assert.ok(new RegExp(`onPress=\\{handleCreate${kind}\\}`).test(sheet), `${kind}: submit not wired`);
   }
   // Save Place: reset on every opening, Cancel and a successful save close it
-  const save = readFileSync(join(MOBILE, 'app/search.tsx'), 'utf8');
+  const save = readFileSync(join(MOBILE, 'components/places/SavePlaceSheet.tsx'), 'utf8');
   assert.ok(/if \(visible\) \{\s*setKind\(defaultKind\);\s*setName\(""\);\s*setDescription\(""\);/.test(save));
   assert.ok(/await onSave\([\s\S]*?onClose\(\);/.test(save) && /onPress=\{onClose\}[\s\S]*?Cancel/.test(save));
 });
@@ -3893,7 +3893,7 @@ test('a long sheet: scrolls only when its fields overflow, and keeps the focused
   assert.ok(/scrollable && styles\.shrink/.test(code) && /shrink: \{ flexShrink: 1 \}/.test(code));
   const community = readFileSync(join(MOBILE, 'app/(tabs)/community.tsx'), 'utf8');
   assert.ok(/modalScrollable: \{ flexShrink: 1 \}/.test(community));
-  assert.ok(/flexShrink: 1,/.test(readFileSync(join(MOBILE, 'app/search.tsx'), 'utf8')));
+  assert.ok(/flexShrink: 1,/.test(readFileSync(join(MOBILE, 'components/places/SavePlaceSheet.tsx'), 'utf8')));
 });
 
 // ─── Dragging a sheet like an iOS bottom sheet ──────────────────────────────
@@ -6998,11 +6998,16 @@ test('route previews: fetched only when the user asks, kept in memory only, with
   assert.ok(!/this\.fetch\(|fetchRoutes|this\.open\(|this\.update\(/.test(timer));
   const noteFix = store.slice(store.indexOf('noteFix(position'), store.indexOf('get selected'));
   assert.ok(!/this\.fetch\(|fetchRoutes|this\.open\(|this\.update\(/.test(noteFix));
-  // In memory only: no storage, no logging
-  for (const f of ['../lib/navigation/previewStore.ts', '../lib/navigation/model.ts', '../context/NavigationContext.tsx', '../components/navigation/RoutePreviewPanel.tsx', '../hooks/useRouteToPlace.ts']) {
+  // Routes in memory only: no storage, no logging
+  for (const f of ['../lib/navigation/previewStore.ts', '../lib/navigation/model.ts', '../components/navigation/RoutePreviewPanel.tsx', '../hooks/useRouteToPlace.ts']) {
     const src = strip(read(f));
     assert.ok(!/AsyncStorage|SecureStore|MemoryStore|storage|FileSystem|console\./.test(src), `${f} stores or logs routes`);
   }
+  // The context stores one thing on the device: recent destinations (Phase 2B), never routes
+  const ctx = strip(read('../context/NavigationContext.tsx'));
+  assert.ok(!/AsyncStorage|SecureStore|FileSystem|console\./.test(ctx));
+  assert.deepEqual(ctx.match(/deviceStorage/g)?.length, 2, 'deviceStorage: one import, one use (recents)');
+  assert.ok(/new RecentDestinations\(deviceStorage, userId\)/.test(ctx));
   // The disclosure Mapbox asks directions apps to show, on the preview itself
   const panel = read('../components/navigation/RoutePreviewPanel.tsx');
   assert.ok(panel.includes('"Directions are a guide. Always follow road signs, signals and local traffic laws."'));
@@ -7010,14 +7015,421 @@ test('route previews: fetched only when the user asks, kept in memory only, with
   // The entry points: saved places and Beauty Spots preview; typed searches still open the maps app
   const search = strip(read('../app/search.tsx'));
   const explore = strip(read('../app/(tabs)/(drive)/explore.tsx'));
-  assert.ok(/routeToPlace\(placeDestination\(p\)\)/.test(search) && /routeToPlace\(spotDestination\(n\)\)/.test(search));
+  assert.ok(/go\(placeDestination\(p\)\)/.test(search) && /go\(spotDestination\(n\)\)/.test(search) && /void routeToPlace\(destination\)/.test(search));
   assert.ok(/openDirections\(query\)/.test(search));
   assert.ok(/routeToPlace\(/.test(explore) && !/openDirections/.test(explore));
   const hook = strip(read('../hooks/useRouteToPlace.ts'));
-  assert.ok(/if \(!canPreviewRoutes\(isDriving\)\) \{\s*await openDirections\(/.test(hook), 'without Mapbox, or while driving, the maps app as before');
+  const fallback = hook.slice(hook.indexOf('if (!canPreviewRoutes(isDriving)) {'), hook.indexOf('try {'));
+  assert.ok(/await openDirections\(destination\.coordinate\)/.test(fallback), 'without Mapbox, or while driving, the maps app as before');
+  // ...except a Search Box result, which is never handed to another map (Mapbox's terms)
+  assert.ok(/if \(destination\.source === "search"\) \{[\s\S]*?return;\s*\}\s*await openDirections/.test(fallback));
 });
 
 test('route previews are only offered on the Mapbox map with no drive recording', () => {
   const src = readFileSync(toPath(new URL('../context/NavigationContext.tsx', import.meta.url)), 'utf8');
   assert.ok(/return DRIVE_MAPBOX != null && !isDriving;/.test(src));
+});
+
+// ─── Navigation Phase 2B: destination search and saving places ──────────────
+// Mapbox Search Box from the phone, in sessions; coordinates parsed locally;
+// recent destinations on the device; any storable destination saved as a
+// place. Search Box results are temporary use only: never stored.
+
+import { DestinationSearch, SEARCH, SearchSession, destinationFromRetrieve, resultsFromSuggest, suggestUrl, retrieveUrl, type SearchResult } from '@/lib/navigation/search';
+import { parseCoordinates, coordinateDestination, formatCoordinates } from '@/lib/navigation/coordinates';
+import { RecentDestinations, RECENTS, recentsKey } from '@/lib/navigation/recents';
+import { findSavedMatch, saveability, placeFieldsFor } from '@/lib/navigation/places';
+import { localMatches, matchesQuery, placeToDestination } from '@/lib/navigation/localResults';
+import { canStoreDestination } from '@/lib/navigation/model';
+
+const SUGGEST_BODY = {
+  suggestions: [
+    { name: 'Booths', mapbox_id: 'poi.111', feature_type: 'poi', full_address: 'Lake Road, Keswick, CA12 5DQ, United Kingdom', place_formatted: 'Keswick, England', poi_category: ['supermarket'], distance: 1234, maki: 'grocery', context: { country: { name: 'United Kingdom' } }, external_ids: { foursquare: 'x' }, metadata: { phone: '01234' } },
+    { name: 'CA12 5DQ', mapbox_id: 'postcode.222', feature_type: 'postcode', place_formatted: 'Keswick, England, United Kingdom' },
+    { name: 'Petrol stations', mapbox_id: 'category.petrol', feature_type: 'category' },
+    { name: 'Keswick', mapbox_id: 'place.333', feature_type: 'place', place_formatted: 'Cumbria, England, United Kingdom' },
+    { name: '', mapbox_id: 'poi.bad', feature_type: 'poi' },
+  ],
+  attribution: '© Mapbox', response_id: 'resp-1',
+};
+const RETRIEVE_BODY = {
+  type: 'FeatureCollection',
+  features: [{
+    type: 'Feature',
+    geometry: { type: 'Point', coordinates: [-3.1345, 54.6001] },
+    properties: {
+      name: 'Booths', mapbox_id: 'poi.111', feature_type: 'poi', full_address: 'Lake Road, Keswick, CA12 5DQ, United Kingdom',
+      coordinates: { latitude: 54.6001, longitude: -3.1345, routable_points: [{ name: 'default', latitude: 54.6003, longitude: -3.1341 }] },
+      metadata: { phone: '01234', website: 'https://example.com' }, external_ids: { foursquare: 'x' },
+    },
+  }],
+};
+
+/** A DestinationSearch with a fake Mapbox, a hand-driven clock and timers */
+function searchHarness(opts: { token?: string | null; respond?: (url: string) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }> } = {}) {
+  const clock = { t: 1_000_000 };
+  const timers: Array<{ fn: () => void; at: number; id: number }> = [];
+  let tid = 0, tokens = 0;
+  const calls: Array<{ url: string; signal: AbortSignal }> = [];
+  const respond = opts.respond ?? (async (url: string) => ({
+    ok: true, status: 200,
+    json: async () => (url.includes('/retrieve/') ? RETRIEVE_BODY : SUGGEST_BODY),
+  }));
+  const search = new DestinationSearch({
+    token: opts.token === undefined ? 'pk.test-public-token' : opts.token,
+    fetch: (url, init) => { calls.push({ url, signal: init.signal }); return respond(url); },
+    newSessionToken: () => `session-${++tokens}`,
+    now: () => clock.t,
+    setTimer: (fn, ms) => { const id = ++tid; timers.push({ fn, at: clock.t + ms, id }); return id; },
+    clearTimer: (id) => { const i = timers.findIndex((t) => t.id === id); if (i >= 0) timers.splice(i, 1); },
+  });
+  const advance = async (ms: number) => {
+    clock.t += ms;
+    for (;;) {
+      const due = timers.filter((t) => t.at <= clock.t).sort((a, b) => a.at - b.at)[0];
+      if (!due) break;
+      timers.splice(timers.indexOf(due), 1);
+      due.fn();
+    }
+    for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+  };
+  const param = (url: string, k: string) => new URL(url).searchParams.get(k);
+  return { search, calls, advance, clock, param, suggests: () => calls.filter((c) => c.url.includes('/suggest')) };
+}
+
+test('search: Search Box requests are UK-first, English, near the phone, and carry a session token', () => {
+  const url = suggestUrl('booths keswick', { token: 'pk.abc', session: 'sess-1', proximity: { latitude: 54.60012, longitude: -3.13456 } });
+  const u = new URL(url);
+  assert.equal(u.origin + u.pathname, 'https://api.mapbox.com/search/searchbox/v1/suggest');
+  assert.equal(u.searchParams.get('q'), 'booths keswick');
+  assert.equal(u.searchParams.get('country'), 'GB');
+  assert.equal(u.searchParams.get('language'), 'en');
+  assert.equal(u.searchParams.get('proximity'), '-3.1346,54.6001', 'longitude first, as Mapbox expects');
+  assert.equal(u.searchParams.get('session_token'), 'sess-1');
+  assert.equal(u.searchParams.get('limit'), String(SEARCH.limit));
+  assert.equal(u.searchParams.get('access_token'), 'pk.abc');
+  // No position known: Mapbox's own default (IP) rather than a made-up point
+  assert.equal(new URL(suggestUrl('york', { token: 'pk.abc', session: 's', proximity: null })).searchParams.get('proximity'), null);
+  const r = new URL(retrieveUrl('poi.1/x', { token: 'pk.abc', session: 'sess-1' }));
+  assert.equal(r.pathname, '/search/searchbox/v1/retrieve/poi.1%2Fx');
+  assert.equal(r.searchParams.get('session_token'), 'sess-1');
+});
+
+test('search: typing is debounced, short queries and repeats are never sent', async () => {
+  const h = searchHarness();
+  for (const q of ['k', 'ke', 'kes', 'kesw', 'keswi', 'keswick']) { h.search.setQuery(q); await h.advance(50); }
+  assert.equal(h.suggests().length, 0, 'nothing sent while typing');
+  assert.equal(h.search.state.status, 'loading');
+  await h.advance(SEARCH.debounceMs);
+  assert.equal(h.suggests().length, 1);
+  assert.equal(h.param(h.suggests()[0]!.url, 'q'), 'keswick');
+  assert.equal(h.search.state.status, 'ready');
+  // The same query again (or with different spacing/case): no new request
+  h.search.setQuery('Keswick ');
+  await h.advance(1000);
+  assert.equal(h.suggests().length, 1);
+  assert.equal(h.search.state.status, 'ready');
+  // Under three characters: nothing sent, nothing shown
+  h.search.setQuery('ke');
+  await h.advance(1000);
+  assert.equal(h.suggests().length, 1);
+  assert.equal(h.search.state.status, 'idle');
+});
+
+test('search: a newer query cancels the request in flight; its late answer is ignored', async () => {
+  const pending: Array<(v: { ok: boolean; status: number; json(): Promise<unknown> }) => void> = [];
+  const h = searchHarness({ respond: () => new Promise((resolve) => pending.push(resolve)) });
+  h.search.setQuery('kendal');
+  await h.advance(SEARCH.debounceMs);
+  h.search.setQuery('keswick');
+  await h.advance(SEARCH.debounceMs);
+  assert.equal(h.suggests().length, 2);
+  assert.equal(h.suggests()[0]!.signal.aborted, true, 'the stale request was cancelled');
+  assert.equal(h.suggests()[1]!.signal.aborted, false);
+  // The newer answer arrives, then the stale one: only the newer is shown
+  pending[1]!({ ok: true, status: 200, json: async () => ({ suggestions: [{ name: 'Keswick', mapbox_id: 'place.k', feature_type: 'place' }] }) });
+  await h.advance(0);
+  pending[0]!({ ok: true, status: 200, json: async () => ({ suggestions: [{ name: 'Kendal', mapbox_id: 'place.d', feature_type: 'place' }] }) });
+  await h.advance(0);
+  assert.deepEqual(h.search.state.results.map((r) => r.name), ['Keswick']);
+  // Closing the search cancels whatever is left and keeps nothing
+  h.search.setQuery('penrith');
+  await h.advance(SEARCH.debounceMs);
+  h.search.close();
+  assert.equal(h.suggests()[2]!.signal.aborted, true);
+  assert.equal(h.search.state.status, 'idle');
+  assert.equal(h.search.state.results.length, 0);
+});
+
+test('search: one session token per search, reused for suggestions and retrieve, then rotated', async () => {
+  const h = searchHarness();
+  h.search.setQuery('booths');
+  await h.advance(SEARCH.debounceMs);
+  h.search.setQuery('booths keswick');
+  await h.advance(SEARCH.debounceMs);
+  const [a, b] = h.suggests().map((c) => h.param(c.url, 'session_token'));
+  assert.equal(a, 'session-1');
+  assert.equal(b, 'session-1', 'the same session while typing');
+  const pick = h.search.state.results[0]!;
+  await h.search.select(pick);
+  const retrieve = h.calls.find((c) => c.url.includes('/retrieve/'))!;
+  assert.equal(h.param(retrieve.url, 'session_token'), 'session-1', 'retrieve closes the same session');
+  assert.equal(h.search.session.active, null, 'the token is dropped once a result is retrieved');
+  // The next search is a new session
+  h.search.setQuery('kendal');
+  await h.advance(SEARCH.debounceMs);
+  assert.equal(h.param(h.suggests().at(-1)!.url, 'session_token'), 'session-2');
+  // Closing ends it; reopening starts another
+  h.search.close();
+  assert.equal(h.search.session.active, null);
+  h.search.setQuery('penrith');
+  await h.advance(SEARCH.debounceMs);
+  assert.equal(h.param(h.suggests().at(-1)!.url, 'session_token'), 'session-3');
+  // Idle past Mapbox's window: a new token rather than a stale one
+  h.clock.t += SEARCH.sessionIdleMs + 1;
+  h.search.setQuery('ambleside');
+  await h.advance(SEARCH.debounceMs);
+  assert.equal(h.param(h.suggests().at(-1)!.url, 'session_token'), 'session-4');
+  // And never more than 50 suggestions on one token
+  let n = 0;
+  const session = new SearchSession(() => `t${++n}`, () => 0);
+  const used = Array.from({ length: SEARCH.maxSuggestPerSession + 1 }, () => session.use('suggest'));
+  assert.equal(new Set(used.slice(0, SEARCH.maxSuggestPerSession)).size, 1);
+  assert.equal(used.at(-1), 't2');
+});
+
+test('search: provider answers become Derwent results with only the fields the app uses', () => {
+  const results = resultsFromSuggest(SUGGEST_BODY);
+  // Category searches and nameless entries aren't places; the rest are kept
+  assert.deepEqual(results.map((r) => r.name), ['Booths', 'CA12 5DQ', 'Keswick']);
+  assert.deepEqual(results.map((r) => r.kind), ['poi', 'postcode', 'place']);
+  const booths = results[0]!;
+  assert.deepEqual(Object.keys(booths).sort(), ['category', 'distanceM', 'id', 'kind', 'name', 'providerRef', 'source', 'subtitle']);
+  assert.equal(booths.subtitle, 'Lake Road, Keswick, CA12 5DQ, United Kingdom');
+  assert.equal(booths.category, 'Supermarket');
+  assert.equal(booths.distanceM, 1234);
+  assert.equal(booths.source, 'search');
+  assert.ok(!JSON.stringify(results).includes('01234') && !JSON.stringify(results).includes('foursquare'), 'provider metadata is dropped');
+  // Retrieve: the routable point (where a car can get to), only the destination fields
+  const d = destinationFromRetrieve(RETRIEVE_BODY, booths);
+  assert.deepEqual(d, {
+    id: 'search:poi.111', name: 'Booths', subtitle: 'Lake Road, Keswick, CA12 5DQ, United Kingdom',
+    coordinate: { latitude: 54.6003, longitude: -3.1341 }, source: 'search',
+  });
+  // No routable point: the place itself; no position at all: a clear error
+  const plain = { features: [{ geometry: { coordinates: [-2.9612, 54.4287] }, properties: { name: 'Ambleside' } }] };
+  assert.deepEqual(destinationFromRetrieve(plain, booths).coordinate, { latitude: 54.4287, longitude: -2.9612 });
+  assert.throws(() => destinationFromRetrieve({ features: [] }, booths), /Couldn't find where/);
+  assert.deepEqual(resultsFromSuggest(null), []);
+  assert.deepEqual(resultsFromSuggest({ suggestions: 'nope' }), []);
+});
+
+test('search: choosing a result opens the same route preview as a saved place', async () => {
+  const h = searchHarness();
+  h.search.setQuery('booths');
+  await h.advance(SEARCH.debounceMs);
+  const destination = await h.search.select(h.search.state.results[0]!);
+  const p = previewHarness();
+  void p.store.open(destination, NAV_ORIGIN);
+  assert.equal(p.store.phase, 'routing');
+  assert.deepEqual(p.pending[0]!.body, {
+    origin: { lat: NAV_ORIGIN.coordinate.latitude, lng: NAV_ORIGIN.coordinate.longitude, headingDeg: null },
+    destination: { lat: 54.6003, lng: -3.1341 },
+  });
+  // And a saved place goes through exactly the same store and request
+  const saved = placeToDestination({ id: 'p1', kind: 'favourite_road', name: 'Honister', address: '', coordinate: { latitude: 54.51, longitude: -3.2 } });
+  void p.store.open(saved, NAV_ORIGIN);
+  assert.equal(p.store.phase, 'routing');
+  assert.deepEqual((p.pending[1]!.body as { destination: unknown }).destination, { lat: 54.51, lng: -3.2 });
+  assert.equal(saved.id, 'place:p1');
+  assert.equal(saved.source, 'saved');
+});
+
+test('search: offline, the remote half says so and the user\'s own places still match', async () => {
+  const h = searchHarness({ respond: async () => { throw new TypeError('Network request failed'); } });
+  h.search.setQuery('honister');
+  await h.advance(SEARCH.debounceMs);
+  assert.equal(h.search.state.status, 'offline');
+  assert.match(h.search.state.message!, /offline/i);
+  const local = localMatches('honister', {
+    places: [{ id: 'p1', kind: 'favourite_road', name: 'Honister Pass', coordinate: { latitude: 54.51, longitude: -3.2 } }],
+    recents: [coordinateDestination({ latitude: 54.5, longitude: -3.1 })],
+    nearby: [],
+  });
+  assert.deepEqual(local.map((m) => m.destination.name), ['Honister Pass']);
+  // Errors from Mapbox are typed for the user; none of them retry by themselves
+  for (const [status, expect] of [[429, 'error'], [401, 'unavailable'], [500, 'error']] as const) {
+    const e = searchHarness({ respond: async () => ({ ok: false, status, json: async () => ({}) }) });
+    e.search.setQuery('honister');
+    await e.advance(SEARCH.debounceMs);
+    assert.equal(e.search.state.status, expect, `HTTP ${status}`);
+    await e.advance(60_000);
+    assert.equal(e.suggests().length, 1, `HTTP ${status}: no automatic retry`);
+    e.search.retry();
+    await e.advance(SEARCH.debounceMs);
+    assert.equal(e.suggests().length, 2, 'Retry asks again');
+  }
+  // Without a token (no Mapbox map, or a drive recording) nothing is ever sent
+  const off = searchHarness({ token: null });
+  off.search.setQuery('honister pass');
+  await off.advance(1000);
+  assert.equal(off.calls.length, 0);
+  assert.equal(off.search.state.status, 'unavailable');
+});
+
+test('coordinates: typed or pasted positions are parsed on the phone; Mapbox is never asked', async () => {
+  assert.deepEqual(parseCoordinates('53.1234, -1.2345'), { latitude: 53.1234, longitude: -1.2345 });
+  assert.deepEqual(parseCoordinates('53.1234 -1.2345'), { latitude: 53.1234, longitude: -1.2345 });
+  assert.deepEqual(parseCoordinates('  53.1234,-1.2345 '), { latitude: 53.1234, longitude: -1.2345 });
+  assert.deepEqual(parseCoordinates('-33.8688, 151.2093'), { latitude: -33.8688, longitude: 151.2093 });
+  for (const bad of ['91.0, 0.5', '45.5, 181.0', '12 34', 'CA12 5DQ', '10 Downing Street', '53.1', '53.1, -1.2, 4', '', 'abc, def']) {
+    assert.equal(parseCoordinates(bad), null, bad);
+  }
+  const d = coordinateDestination({ latitude: 53.1234, longitude: -1.2345 });
+  assert.equal(d.name, 'Dropped Pin');
+  assert.equal(d.subtitle, '53.12340, -1.23450');
+  assert.equal(d.source, 'coordinates');
+  assert.equal(formatCoordinates(d.coordinate), '53.12340, -1.23450');
+  const h = searchHarness();
+  h.search.setQuery('53.1234, -1.2345');
+  await h.advance(5000);
+  assert.equal(h.calls.length, 0, 'no Search Box request for coordinates');
+  assert.deepEqual(h.search.state.coordinates, { latitude: 53.1234, longitude: -1.2345 });
+});
+
+test('recent destinations: newest first, bounded, per user, never Search Box results, cleared at sign-out', async () => {
+  const store = new MemoryStore();
+  let t = 0;
+  const recents = new RecentDestinations(store, 'u1', () => ++t);
+  const at = (i: number) => coordinateDestination({ latitude: 54 + i * 0.01, longitude: -3 });
+  for (let i = 0; i < RECENTS.max + 3; i++) await recents.record(at(i));
+  assert.equal(recents.items.length, RECENTS.max);
+  assert.equal(recents.items[0]!.coordinate.latitude, 54 + (RECENTS.max + 2) * 0.01);
+  // Going somewhere again moves it to the top (no duplicate)
+  await recents.record(at(5));
+  assert.equal(recents.items[0]!.id, at(5).id);
+  assert.equal(recents.items.filter((r) => r.id === at(5).id).length, 1);
+  // Only the destination itself is kept
+  const stored = JSON.parse(store.data.get(recentsKey('u1'))!);
+  assert.deepEqual(Object.keys(stored[0]).sort(), ['coordinate', 'id', 'name', 'source', 'subtitle', 'usedAt']);
+  // A Search Box result is never written (temporary use only)
+  const before = store.data.get(recentsKey('u1'));
+  await recents.record({ id: 'search:poi.1', name: 'Booths', subtitle: 'Keswick', coordinate: { latitude: 54.6, longitude: -3.1 }, source: 'search' });
+  assert.equal(store.data.get(recentsKey('u1')), before);
+  assert.ok(!recents.items.some((r) => r.source === 'search'));
+  // Per user: another account on the phone sees none of them
+  const other = new RecentDestinations(store, 'u2');
+  await other.load();
+  assert.equal(other.items.length, 0);
+  // Reloaded from the device
+  const again = new RecentDestinations(store, 'u1');
+  await again.load();
+  assert.equal(again.items.length, RECENTS.max);
+  // A tampered entry from search is dropped on load
+  await store.setItem(recentsKey('u3'), JSON.stringify([{ ...at(1), usedAt: 1 }, { id: 'search:x', name: 'x', subtitle: null, coordinate: { latitude: 1, longitude: 1 }, source: 'search', usedAt: 2 }]));
+  const tampered = new RecentDestinations(store, 'u3');
+  await tampered.load();
+  assert.deepEqual(tampered.items.map((r) => r.source), ['coordinates']);
+  await recents.clear();
+  assert.equal(recents.items.length, 0);
+  assert.equal(store.data.has(recentsKey('u1')), false);
+  // Sign-out (CloudSync.wipeLocal) removes them with the rest of the user's device data
+  await again.record(at(1));
+  const server = new FakeServer();
+  const app = makeSync(server, store, { t: Date.now() });
+  await app.start();
+  assert.equal(store.data.has(recentsKey('u1')), true);
+  await app.wipeLocal();
+  assert.equal(store.data.has(recentsKey('u1')), false, 'recents cleared at sign-out');
+  assert.equal(recentsKey('u1'), userKey('u1', RECENTS.name));
+});
+
+test('saving a place: any storable destination, with its address; duplicates are recognised', async () => {
+  const places = [
+    { id: 'a', name: 'Honister Pass', address: '', coordinate: { latitude: 54.5100, longitude: -3.2000 } },
+    { id: 'b', name: 'Home', address: '1 Lake Road, Keswick', coordinate: { latitude: 54.6000, longitude: -3.1300 } },
+  ];
+  const pin = coordinateDestination({ latitude: 54.7, longitude: -3.0 }, 'pin');
+  // Same spot (a few metres), whatever it's called
+  assert.equal(findSavedMatch(places, coordinateDestination({ latitude: 54.51005, longitude: -3.20005 }))?.id, 'a');
+  // Same name nearby: the same place
+  assert.equal(findSavedMatch(places, { ...pin, name: 'honister pass', coordinate: { latitude: 54.5108, longitude: -3.2 } })?.id, 'a');
+  // Same address nearby
+  assert.equal(findSavedMatch(places, { ...pin, name: 'Dropped Pin', subtitle: '1 Lake Road, Keswick', coordinate: { latitude: 54.6008, longitude: -3.13 } })?.id, 'b');
+  // A different place a street away is not merged, nor a same-named one far off
+  assert.equal(findSavedMatch(places, coordinateDestination({ latitude: 54.5110, longitude: -3.2 })), null);
+  assert.equal(findSavedMatch(places, { ...pin, name: 'Honister Pass', coordinate: { latitude: 54.6, longitude: -3.0 } }), null);
+  // The saved place itself
+  assert.equal(findSavedMatch(places, placeToDestination({ ...places[1]!, kind: 'home' }))?.id, 'b');
+  assert.deepEqual(saveability(places, pin), { kind: 'can_save' });
+  assert.deepEqual(saveability(places, placeToDestination({ ...places[0]!, kind: 'favourite_road' })), { kind: 'saved', placeId: 'a' });
+  // A Search Box result can't be saved (temporary use only), even if the app asked
+  const searched = { id: 'search:poi.1', name: 'Booths', subtitle: 'Lake Road', coordinate: { latitude: 54.7, longitude: -3.0 }, source: 'search' as const };
+  assert.equal(canStoreDestination(searched), false);
+  assert.deepEqual(saveability([], searched), { kind: 'not_storable' });
+  assert.throws(() => placeFieldsFor(searched, 'Booths'), /cannot be saved/);
+  // Saved where it is (not where the phone is), with the user's name and its address
+  const fields = placeFieldsFor({ ...pin, subtitle: '54.70000, -3.00000' }, '  Lay-by on the A591 ');
+  assert.deepEqual(fields, { name: 'Lay-by on the A591', coordinate: { latitude: 54.7, longitude: -3.0 }, address: '54.70000, -3.00000' });
+  const server = new FakeServer();
+  const app = makeSync(server, new MemoryStore(), { t: Date.now() });
+  await app.start();
+  await app.addPlace({ kind: 'poi', ...fields });
+  await app.outbox.flush();
+  const created = server.locations.at(-1)!;
+  assert.deepEqual([created.name, created.lat, created.lng, created.address, created.kind], ['Lay-by on the A591', 54.7, -3.0, '54.70000, -3.00000', 'poi']);
+  // Existing saves (where I am) are unchanged: no address unless one is given
+  await app.addPlace({ kind: 'favourite_road', name: 'Here', coordinate: { latitude: 1, longitude: 1 } });
+  await app.outbox.flush();
+  assert.equal(server.locations.at(-1)!.address, '');
+});
+
+test('local matches: word starts, names before addresses, recents and shared spots, no repeats', () => {
+  assert.ok(matchesQuery('Lake Road, Keswick', 'lake rd') === false);
+  assert.ok(matchesQuery('Lake Road, Keswick', 'lake ro'));
+  assert.ok(matchesQuery('Honister Pass', 'pass hon'));
+  assert.ok(!matchesQuery('Honister Pass', 'ass'));
+  const m = localMatches('kes', {
+    places: [
+      { id: 'w', kind: 'work', name: 'Office', address: 'Main Street, Keswick', coordinate: { latitude: 1, longitude: 1 } },
+      { id: 'k', kind: 'favourite_road', name: 'Keswick loop', coordinate: { latitude: 2, longitude: 2 } },
+    ],
+    recents: [{ ...coordinateDestination({ latitude: 3, longitude: 3 }), name: 'Keswick car park' }],
+    nearby: [{ id: 's', name: 'Kesh viewpoint', coordinate: { latitude: 4, longitude: 4 }, isOwn: false }, { id: 'k', name: 'Keswick loop', coordinate: { latitude: 2, longitude: 2 }, isOwn: true }],
+  });
+  assert.deepEqual(m.map((x) => x.destination.name), ['Keswick loop', 'Office', 'Keswick car park', 'Kesh viewpoint']);
+  assert.deepEqual(m.map((x) => x.icon), ['saved', 'work', 'recent', 'spot']);
+  assert.deepEqual(localMatches('  ', { places: [], recents: [], nearby: [] }), []);
+});
+
+test('Phase 2B wiring: search off the Drive screen, results never stored, the one preview flow reused', () => {
+  const read = (rel: string) => readFileSync(toPath(new URL(rel, import.meta.url)), 'utf8');
+  const strip = (src: string) => src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+  // The Drive screen knows nothing of search (keystrokes never re-render it)
+  const drive = strip(read('../app/(tabs)/(drive)/index.tsx'));
+  assert.ok(!/useDestinationSearch|DestinationSearch|searchbox|useRecentDestinations/.test(drive));
+  // A long press drops a pin into the same preview, never touching the camera itself
+  const press = drive.slice(drive.indexOf('const handleMapLongPress'), drive.indexOf('const handleOpenRouteInMaps'));
+  assert.ok(/openRoutePreview\(coordinateDestination\(coordinate, "pin"\)\)/.test(press));
+  assert.ok(/isDrivingRef\.current/.test(press) && !/setFollowCamera|startFollowing|setCamera/.test(press));
+  const map = strip(read('../components/MapboxDriveMap.tsx'));
+  const lp = map.slice(map.indexOf('const handleLongPress'), map.indexOf('[onLongPress]'));
+  assert.ok(lp.length > 0 && !/camera|Camera/.test(lp));
+  // Search lives in its own module; the screen opens results through the Phase 2A hook
+  const search = strip(read('../app/search.tsx'));
+  assert.ok(/useDestinationSearch\(isDriving\)/.test(search));
+  assert.ok(/const destination = await search\.select\(r\);\s*await routeToPlace\(destination\);/.test(search));
+  assert.ok(!/fetch\(|api\.mapbox\.com|AsyncStorage|deviceStorage|writeJson/.test(search), 'the screen neither calls Mapbox nor stores anything itself');
+  // Only one preview panel; it offers saving for storable destinations only
+  const panel = strip(read('../components/navigation/RoutePreviewPanel.tsx'));
+  assert.ok(/const save = saveability\(places, destination\)/.test(panel) && /save\.kind === "can_save"/.test(panel));
+  const sheet = strip(read('../components/places/SavePlaceSheet.tsx'));
+  assert.ok(/placeFieldsFor\(destination, finalName\)/.test(sheet), 'a chosen place is saved through placeFieldsFor (which refuses search results)');
+  // Search only where a result can be shown on the Mapbox map, and with the public token
+  const ctx = strip(read('../context/NavigationContext.tsx'));
+  assert.ok(/const remote = canPreviewRoutes\(isDriving\);/.test(ctx) && /token: remote \? DRIVE_MAPBOX\?\.token \?\? null : null/.test(ctx));
+  assert.ok(/return \(\) => search\.close\(\);/.test(ctx), 'the session ends with the screen');
+  // The search module stores nothing and logs nothing
+  const lib = strip(read('../lib/navigation/search.ts'));
+  assert.ok(!/storage|Storage|writeJson|console\./.test(lib));
 });

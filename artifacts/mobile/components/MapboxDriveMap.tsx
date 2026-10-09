@@ -133,6 +133,8 @@ export interface MapboxDriveMapProps {
   onUserGesture: () => void;
   /** The camera changed, for any reason */
   onCameraChange?: () => void;
+  /** A long press on the map, where it was (drop a pin). Never moves the camera */
+  onLongPress?: (coordinate: { latitude: number; longitude: number }) => void;
   onTouchStart: () => void;
   onTouchEnd: () => void;
   style?: StyleProp<ViewStyle>;
@@ -380,6 +382,7 @@ const MapboxDriveMap = forwardRef<MapboxDriveMapHandle, MapboxDriveMapProps>(
       ornamentLeft,
       onUserGesture,
       onCameraChange,
+      onLongPress,
       onTouchStart,
       onTouchEnd,
       style,
@@ -464,6 +467,20 @@ const MapboxDriveMap = forwardRef<MapboxDriveMapHandle, MapboxDriveMapProps>(
       [onUserGesture, onCameraChange, cameraWriter],
     );
 
+    // A long press reports where it was; what to do with it is the screen's
+    const handleLongPress = useCallback(
+      (feature: { geometry?: { coordinates?: number[] } }) => {
+        const [longitude, latitude] = feature.geometry?.coordinates ?? [];
+        if (
+          typeof latitude === "number" && typeof longitude === "number" &&
+          Number.isFinite(latitude) && Number.isFinite(longitude)
+        ) {
+          onLongPress?.({ latitude, longitude });
+        }
+      },
+      [onLongPress],
+    );
+
     // Bounded: a long drive's trail is thinned for drawing (lib/mapbox)
     const trailShape = useMemo(() => trailFeatureCollection(displayTrail(trail)), [trail]);
 
@@ -499,6 +516,7 @@ const MapboxDriveMap = forwardRef<MapboxDriveMapHandle, MapboxDriveMapProps>(
           zoomEnabled
           pitchEnabled
           onCameraChanged={handleCameraChanged}
+          onLongPress={onLongPress ? handleLongPress : undefined}
         >
           <FollowCamera
             ref={followCameraRef}

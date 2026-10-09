@@ -73,10 +73,14 @@ import {
   LocationSmoother,
 } from "@/lib/locationSmoothing";
 import {
+  canPreviewRoutes,
   useNoteRouteFix,
+  useOpenRoutePreview,
   useRoutePreviewPhase,
   useRoutePreviewStore,
 } from "@/context/NavigationContext";
+import { coordinateDestination } from "@/lib/navigation/coordinates";
+import { describeError } from "@/lib/backend/http";
 import { RoutePreviewPanel } from "@/components/navigation/RoutePreviewPanel";
 import {
   easeInOut,
@@ -1705,6 +1709,20 @@ export default function MapScreen() {
       routePreviewStore.cancel();
   }, [isDriving, routePreviewStore]);
 
+  // A long press on the map previews a route to that point (a dropped pin).
+  // Not while recording a drive; the camera is left to the preview as usual.
+  const openRoutePreview = useOpenRoutePreview();
+  const handleMapLongPress = useCallback(
+    (coordinate: { latitude: number; longitude: number }) => {
+      if (isDrivingRef.current || !canPreviewRoutes(false)) return;
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+      openRoutePreview(coordinateDestination(coordinate, "pin")).catch((err) =>
+        Alert.alert("Couldn't preview a route", describeError(err)),
+      );
+    },
+    [openRoutePreview],
+  );
+
   // Start, for now: the place in the phone's maps app, which ends the preview
   const handleOpenRouteInMaps = useCallback(
     (destination: { coordinate: { latitude: number; longitude: number } }) => {
@@ -2120,6 +2138,7 @@ export default function MapScreen() {
           ornamentLeft={isDriving ? 66 : ORNAMENT_GAP}
           onUserGesture={handleMapPanDrag}
           onCameraChange={handleRegionChange}
+          onLongPress={handleMapLongPress}
           onTouchStart={handleMapTouchStart}
           onTouchEnd={handleMapTouchEnd}
         />

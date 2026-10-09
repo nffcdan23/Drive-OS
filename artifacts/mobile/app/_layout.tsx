@@ -98,7 +98,7 @@ function RootLayoutNav() {
   // One provider per account: signing in as someone else starts from a clean slate.
   return (
     <AppProvider key={userId} userId={userId}>
-      <NavigationProvider>
+      <NavigationProvider userId={userId}>
         <DataLoaded onLoaded={dataLoaded} />
         <View style={{ flex: 1 }}>
           <ConnectionBanner />

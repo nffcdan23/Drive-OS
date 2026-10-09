@@ -909,13 +909,15 @@ export class CloudSync {
   async addPlace(input: {
     kind: LocationKind; name: string; coordinate: { latitude: number; longitude: number };
     description?: string; category?: SpotCategory | null; visibility?: Visibility;
+    /** e.g. the address of a place chosen on the map (saved_locations.address) */
+    address?: string;
   }): Promise<string> {
     const id = `local:${this.deps.newId()}`;
     // Home and Work are always private (the API enforces this too).
     const visibility = input.kind === 'home' || input.kind === 'work' ? 'private' : input.visibility;
     const place: SavedPlace = {
       id, kind: input.kind, category: input.category ?? null, name: input.name, description: input.description ?? '',
-      address: '', coordinate: input.coordinate, visibility: visibility ?? 'private', createdAt: new Date().toISOString(),
+      address: input.address ?? '', coordinate: input.coordinate, visibility: visibility ?? 'private', createdAt: new Date().toISOString(),
       syncState: 'pending',
     };
     this.update((d) => ({ ...d, places: [place, ...d.places] }));
@@ -925,6 +927,7 @@ export class CloudSync {
         kind: input.kind, name: input.name, lat: input.coordinate.latitude, lng: input.coordinate.longitude,
         ...(input.description ? { description: input.description } : {}),
         ...(input.category ? { category: input.category } : {}),
+        ...(input.address ? { address: input.address } : {}),
         ...(visibility ? { visibility } : {}),
       },
     });
@@ -1541,6 +1544,8 @@ export class CloudSync {
     await this.outbox.clear();
     await this.journeys.clearAll();
     await this.deps.store.removeItem(this.cacheKey);
+    // Recent destinations (lib/navigation/recents.ts) are this user's too
+    await this.deps.store.removeItem(userKey(this.deps.userId, 'nav/recents/v1'));
   }
 
   /**
@@ -1598,7 +1603,7 @@ function vehicleFromCreate(id: string, f: Record<string, unknown>): Vehicle {
 function placeFromCreate(id: string, f: Record<string, unknown>): SavedPlace {
   return {
     id, kind: f.kind as LocationKind, category: (f.category as SpotCategory | undefined) ?? null, name: String(f.name ?? ''),
-    description: String(f.description ?? ''), address: '', coordinate: { latitude: Number(f.lat), longitude: Number(f.lng) },
+    description: String(f.description ?? ''), address: typeof f.address === 'string' ? f.address : '', coordinate: { latitude: Number(f.lat), longitude: Number(f.lng) },
     visibility: (f.visibility as Visibility | undefined) ?? (f.kind === 'beauty_spot' ? 'private' : 'private'),
     createdAt: new Date().toISOString(), syncState: 'pending',
   };

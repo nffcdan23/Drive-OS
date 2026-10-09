@@ -12,13 +12,20 @@
  *
  * Previews need the Mapbox map (DRIVE_MAPBOX) and no drive being recorded;
  * otherwise places still open in the phone's maps app, as before.
+ *
+ * Also here (Phase 2B): the user's recent destinations (device only, never
+ * Search Box results) and destination search (lib/navigation/search.ts),
+ * which only runs where a result can be previewed on the Mapbox map.
  */
-import React, { createContext, useCallback, useContext, useMemo, useRef, useSyncExternalStore } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import * as Location from 'expo-location';
-import { ep } from '@/lib/backendClient';
+import { ep, newId } from '@/lib/backendClient';
 import { ApiError, AuthRequiredError, NetworkError, describeError } from '@/lib/backend/http';
 import { requestForegroundLocation } from '@/lib/locationPermission';
 import { DRIVE_MAPBOX } from '@/lib/mapProvider';
+import { deviceStorage } from '@/lib/secureStorage';
+import { RecentDestinations, type RecentDestination } from '@/lib/navigation/recents';
+import { DestinationSearch, type SearchState } from '@/lib/navigation/search';
 import { RoutePreviewStore, type PreviewError, type PreviewPhase, type PreviewState } from '@/lib/navigation/previewStore';
 import type { Destination, LatLng, RouteOrigin } from '@/lib/navigation/model';
 
@@ -33,6 +40,9 @@ interface NavigationContextValue {
   noteFix(fix: { latitude: number; longitude: number; speedKmh: number; headingDeg: number | null; time: number }): void;
   /** Where a route would start now: the latest fix, or a fresh position */
   currentOrigin(): Promise<RouteOrigin>;
+  /** The latest position the Drive screen accepted, if recent (search ranks near it) */
+  recentPosition(): LatLng | null;
+  recents: RecentDestinations;
 }
 
 const NavigationContext = createContext<NavigationContextValue | null>(null);
@@ -44,7 +54,7 @@ export function describePreviewError(err: unknown): PreviewError {
   return { code: 'unknown', message: describeError(err) };
 }
 
-export function NavigationProvider({ children }: { children: React.ReactNode }) {
+export function NavigationProvider({ userId, children }: { userId: string; children: React.ReactNode }) {
   const store = useMemo(() => new RoutePreviewStore({
     fetchRoutes: (body) => {
       if (!ep) return Promise.reject(new Error('The app is not connected to a server.'));
@@ -74,7 +84,18 @@ export function NavigationProvider({ children }: { children: React.ReactNode }) 
     return { coordinate: { latitude: pos.coords.latitude, longitude: pos.coords.longitude }, headingDeg: null };
   }, []);
 
-  const value = useMemo(() => ({ store, noteFix, currentOrigin }), [store, noteFix, currentOrigin]);
+  const recentPosition = useCallback((): LatLng | null => {
+    const recent = lastFix.current;
+    return recent && Date.now() - recent.time <= 10 * ORIGIN_MAX_AGE_MS ? recent.origin.coordinate : null;
+  }, []);
+  // On this device, for this user only; cleared at sign-out (CloudSync.wipeLocal)
+  const recents = useMemo(() => new RecentDestinations(deviceStorage, userId), [userId]);
+  useEffect(() => { void recents.load(); }, [recents]);
+
+  const value = useMemo(
+    () => ({ store, noteFix, currentOrigin, recentPosition, recents }),
+    [store, noteFix, currentOrigin, recentPosition, recents],
+  );
   return <NavigationContext.Provider value={value}>{children}</NavigationContext.Provider>;
 }
 
@@ -116,11 +137,52 @@ export function canPreviewRoutes(isDriving: boolean): boolean {
  * Rejects only when there's no position to start from.
  */
 export function useOpenRoutePreview() {
-  const { store, currentOrigin } = useNavigation();
+  const { store, currentOrigin, recents } = useNavigation();
   return useCallback(async (destination: Destination) => {
     const origin = await currentOrigin();
     void store.open(destination, origin);
-  }, [store, currentOrigin]);
+    // A destination the user went to (never a Search Box result: recents skips those)
+    void recents.record(destination);
+  }, [store, currentOrigin, recents]);
+}
+
+/** Recent destinations, newest first */
+export function useRecentDestinations(): { items: readonly RecentDestination[]; remove(id: string): void } {
+  const { recents } = useNavigation();
+  const items = useSyncExternalStore(useCallback((fn: () => void) => recents.subscribe(fn), [recents]), () => recents.items);
+  return useMemo(() => ({ items, remove: (id: string) => void recents.remove(id) }), [items, recents]);
+}
+
+/**
+ * Destination search for one search screen: Mapbox Search Box when results
+ * can be previewed on the Mapbox map (DRIVE_MAPBOX, no drive recording),
+ * otherwise local results only. Closed (session ended, nothing kept) when
+ * the screen goes.
+ */
+export function useDestinationSearch(isDriving: boolean): { search: DestinationSearch; state: SearchState } {
+  const { recentPosition } = useNavigation();
+  const remote = canPreviewRoutes(isDriving);
+  const [search] = useState(() => new DestinationSearch({
+    token: remote ? DRIVE_MAPBOX?.token ?? null : null,
+    fetch: (url, init) => fetch(url, init),
+    newSessionToken: newId,
+    now: Date.now,
+    setTimer: (fn, ms) => setTimeout(fn, ms),
+    clearTimer: (t) => clearTimeout(t as ReturnType<typeof setTimeout>),
+  }));
+  useEffect(() => {
+    const near = recentPosition();
+    search.setProximity(near);
+    if (!near) {
+      // No recent fix from the Drive screen: the phone's last known position, if any
+      Location.getLastKnownPositionAsync({ maxAge: 10 * ORIGIN_MAX_AGE_MS })
+        .then((p) => { if (p) search.setProximity({ latitude: p.coords.latitude, longitude: p.coords.longitude }); })
+        .catch(() => {});
+    }
+    return () => search.close();
+  }, [search, recentPosition]);
+  const state = useSyncExternalStore(useCallback((fn: () => void) => search.subscribe(fn), [search]), () => search.state);
+  return { search, state };
 }
 
 /** Update Route / Retry: fresh routes from where the phone is now */
