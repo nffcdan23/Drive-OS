@@ -240,6 +240,9 @@ importers:
       expo-image-manipulator:
         specifier: 57.0.20
         version: 57.0.20(expo@57.0.26)
+      expo-keep-awake:
+        specifier: 57.0.2
+        version: 57.0.2(expo@57.0.26)(react@19.2.3)
       expo-localization:
         specifier: ~57.0.2
         version: 57.0.2(expo@57.0.26)(react@19.2.3)

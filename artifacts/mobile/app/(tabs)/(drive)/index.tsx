@@ -83,6 +83,7 @@ import {
 } from "@/context/NavigationContext";
 import { GuidanceBanner } from "@/components/navigation/GuidanceBanner";
 import { GuidanceBar, GuidanceStrip } from "@/components/navigation/GuidanceBar";
+import { GuidanceKeepAwake } from "@/components/navigation/GuidanceKeepAwake";
 import { guidanceZoom, type GuidanceZoom } from "@/lib/navigation/guidanceCamera";
 import { coordinateDestination } from "@/lib/navigation/coordinates";
 import { describeError } from "@/lib/backend/http";
@@ -2747,6 +2748,11 @@ export default function MapScreen() {
             navigating ? <GuidanceStrip unitSystem={resolvedUnitSystem} /> : null
           }
         />
+      )}
+
+      {/* While guiding, the screen stays on (guidance is foreground only) */}
+      {navigating && navPhase !== "arrived" && navPhase !== "error" && (
+        <GuidanceKeepAwake />
       )}
 
       {/* ── Turn-by-turn banner (Phase 3), on top while navigating ── */}

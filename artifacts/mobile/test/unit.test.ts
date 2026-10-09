@@ -8164,6 +8164,8 @@ test('guidance camera wiring: the follow camera writes, guidance only sets its z
   assert.ok(/navSession\.setForeground\(next\.live\)/.test(drive));
   // The Drive screen reads navigation's phase only
   assert.ok(/useNavigationPhase\(\)/.test(drive) && !/useNavigationState\(\)/.test(drive));
+  // The screen stays on while guiding (foreground only: an auto-lock would pause it), not after
+  assert.ok(/\{navigating && navPhase !== "arrived" && navPhase !== "error" && \(\s*<GuidanceKeepAwake \/>/.test(drive));
   // Long-press can't start something new mid-navigation
   assert.ok(/navSession\.phase !== "idle"\) return;/.test(drive));
   // The map's route layer reads the session's map view (route changes only), never each fix
