@@ -1,244 +1,138 @@
-import React, { useState, useEffect, useRef } from 'react';
-import {
-  View, Text, StyleSheet, TouchableOpacity, TextInput, Platform,
-  Keyboard,
-} from 'react-native';
-import { useRouter } from 'expo-router';
-import { Ionicons } from '@expo/vector-icons';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { LinearGradient } from 'expo-linear-gradient';
-import { useColors } from '@/hooks/useColors';
-import { useApp } from '@/context/AppContext';
-import { formatDistance, formatSpeed } from '@/lib/units';
-import { SyncBanner } from '@/components/SyncBanner';
-import { KeyboardAwareScrollViewCompat } from '@/components/KeyboardAwareScrollViewCompat';
-import * as Haptics from 'expo-haptics';
-
-function formatDuration(seconds: number): string {
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  const s = seconds % 60;
-  if (h > 0) return `${h}h ${m}m`;
-  if (m > 0) return `${m}m ${s}s`;
-  return `${s}s`;
-}
-
 /**
- * Returns the keyboard height on the web by measuring the gap between
- * window.innerHeight and window.visualViewport.height.
+ * Drive Complete.  The drive is saved when this screen opens (endDrive, as
+ * before), so nothing recorded is lost whatever is tapped next:
+ *  - Save Drive applies the chosen visibility and opens Drives;
+ *  - Discard deletes the saved drive, after confirming;
+ *  - the close button leaves the drive saved as it is.
  */
-function useWebKeyboardHeight(): number {
-  const [height, setHeight] = useState(0);
+import React, { useEffect, useRef, useState } from 'react';
+import { Alert, Platform } from 'react-native';
+import { useRouter } from 'expo-router';
+import * as Haptics from 'expo-haptics';
+import { useApp, type Journey } from '@/context/AppContext';
+import type { Visibility } from '@/lib/backend/endpoints';
+import { SyncBanner } from '@/components/SyncBanner';
+import DriveCompleteView from '@/components/driveComplete/DriveCompleteView';
 
-  useEffect(() => {
-    if (Platform.OS !== 'web') return;
-    if (typeof window === 'undefined') return;
-
-    const vv = (window as Window & { visualViewport?: VisualViewport }).visualViewport;
-    if (!vv) return;
-
-    function measure() {
-      const kh = Math.max(0, window.innerHeight - vv!.height - vv!.offsetTop);
-      setHeight(kh);
-    }
-
-    vv.addEventListener('resize', measure);
-    vv.addEventListener('scroll', measure);
-    measure();
-
-    return () => {
-      vv.removeEventListener('resize', measure);
-      vv.removeEventListener('scroll', measure);
-    };
-  }, []);
-
-  return height;
+function confirmDiscard(onConfirm: () => void) {
+  const title = 'Discard this drive?';
+  const message = "It will be deleted from your drives and can't be recovered.";
+  if (Platform.OS === 'web') {
+    if (typeof window !== 'undefined' && window.confirm(`${title}\n\n${message}`)) onConfirm();
+    return;
+  }
+  Alert.alert(title, message, [
+    { text: 'Keep Drive', style: 'cancel' },
+    { text: 'Discard', style: 'destructive', onPress: onConfirm },
+  ]);
 }
 
 export default function DriveSummaryScreen() {
-  const colors = useColors();
-  const insets = useSafeAreaInsets();
   const router = useRouter();
-  const { currentDrive, endDrive, updateJourney, syncStatus, retryJourneySync, resolvedUnitSystem } = useApp();
-  const [journeyName, setJourneyName] = useState('');
-  const [savedJourneyId, setSavedJourneyId] = useState<string | null>(null);
-  const [isSaving, setIsSaving] = useState(false);
+  const {
+    currentDrive, endDrive, updateJourney, deleteJourney, syncStatus, retryJourneySync, resolvedUnitSystem, userProfile,
+  } = useApp();
+  const [journey, setJourney] = useState<Journey | null>(null);
+  const [isSaving, setIsSaving] = useState(true);
+  const [visibility, setVisibility] = useState<Visibility>('private');
+  const [leaving, setLeaving] = useState(false);
   const endedRef = useRef(false);
 
-  // Snapshot the drive stats immediately on mount (before endDrive clears them)
-  const driveSnapshot = useRef({
-    distance:   currentDrive?.estimatedDistance ?? 0,
-    topSpeed:   currentDrive?.topSpeed          ?? 0,
-    avgSpeed:   currentDrive?.speedSamples && currentDrive.speedSamples.length > 0
+  // Snapshot the drive on mount (before endDrive clears it), shown until the
+  // saved journey's own figures arrive
+  const snapshot = useRef({
+    distance: currentDrive?.estimatedDistance ?? 0,
+    topSpeed: currentDrive?.topSpeed ?? 0,
+    avgSpeed: currentDrive?.speedSamples && currentDrive.speedSamples.length > 0
       ? Math.round(currentDrive.speedSamples.reduce((a, b) => a + b, 0) / currentDrive.speedSamples.length)
       : 0,
-    startTime:  currentDrive?.startTime ?? Date.now(),
+    startTime: currentDrive?.startTime ?? Date.now(),
+    coordinates: currentDrive?.coordinates ?? [],
+    endedAt: Date.now(),
   }).current;
 
-  const inputRef       = useRef<TextInput>(null);
-  const webKeyboardHeight = useWebKeyboardHeight();
-  const webKeyboardOpen   = webKeyboardHeight > 50;
-
-  // End the drive once on mount; show sync banner if it fails
+  // End the drive once on mount; the sync banner shows if uploading fails
   useEffect(() => {
-    if (!endedRef.current && currentDrive) {
-      endedRef.current = true;
-      setIsSaving(true);
-      (async () => {
-        try {
-          const j = await endDrive();
-          if (j) {
-            setSavedJourneyId(j.id);
-            setJourneyName(j.name);
-          }
-        } finally {
-          setIsSaving(false);
+    if (endedRef.current) return;
+    endedRef.current = true;
+    if (!currentDrive) { setIsSaving(false); return; }
+    (async () => {
+      try {
+        const j = await endDrive();
+        if (j) {
+          setJourney(j);
+          // A drive already on the server has the visibility it was given
+          // (the account's default for new drives); one still uploading
+          // starts at the safest, Only me.
+          if (!j.id.startsWith('local:') && j.privacy) setVisibility(j.privacy);
         }
-      })();
-    }
+      } finally {
+        setIsSaving(false);
+      }
+    })();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Scroll input into view on web when keyboard opens
-  useEffect(() => {
-    if (Platform.OS !== 'web' || !webKeyboardOpen) return;
-    const timer = setTimeout(() => {
-      const el = inputRef.current as unknown as HTMLElement | null;
-      if (el?.scrollIntoView) {
-        el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-      }
-    }, 180);
-    return () => clearTimeout(timer);
-  }, [webKeyboardOpen]);
+  const distance = journey?.distance ?? snapshot.distance;
+  const duration = journey?.duration ?? Math.round((snapshot.endedAt - snapshot.startTime) / 1000);
+  const avgSpeed = journey?.averageSpeed ?? snapshot.avgSpeed;
+  const topSpeed = journey?.topSpeed ?? snapshot.topSpeed;
+  const route = journey && journey.routeCoordinates.length > 1 ? journey.routeCoordinates : snapshot.coordinates;
+  const firstName = userProfile?.name?.trim().split(/\s+/)[0];
+  const busy = isSaving || leaving;
 
-  // On native the scroll view keeps the name field clear of the keyboard,
-  // moving only if the keyboard would cover it (KeyboardAwareScrollViewCompat)
-
-  const driveDuration = Math.round((Date.now() - driveSnapshot.startTime) / 1000);
-
-  const scrollBottomPadding =
-    Platform.OS === 'web'
-      ? Math.max(insets.bottom + 24, webKeyboardHeight + 24)
-      : insets.bottom + 24;
-
-  const heroTopPadding = Platform.OS === 'web' ? 67 + insets.top : insets.top + 20;
-
-  const styles = StyleSheet.create({
-    kaView:        { flex: 1, backgroundColor: colors.background },
-    heroGradient:  { paddingTop: heroTopPadding, paddingHorizontal: 24, paddingBottom: 32, alignItems: 'center' },
-    completedIcon: { width: 72, height: 72, borderRadius: 36, backgroundColor: 'rgba(255,255,255,0.2)', alignItems: 'center', justifyContent: 'center', marginBottom: 16 },
-    heroTitle:     { fontSize: 28, fontWeight: '700', color: '#fff', fontFamily: 'Inter_700Bold' },
-    heroSub:       { fontSize: 15, color: 'rgba(255,255,255,0.75)', fontFamily: 'Inter_400Regular', marginTop: 6 },
-    statsGrid:     { flexDirection: 'row', flexWrap: 'wrap', gap: 12, marginBottom: 24 },
-    statCard:      { flex: 1, minWidth: '45%', backgroundColor: colors.card, borderRadius: 16, padding: 16, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.border, alignItems: 'center' },
-    statValue:     { fontSize: 24, fontWeight: '700', color: colors.foreground, fontFamily: 'Inter_700Bold', marginTop: 8 },
-    statLabel:     { fontSize: 12, color: colors.mutedForeground, fontFamily: 'Inter_400Regular', marginTop: 4 },
-    statHighlight: { color: colors.primary },
-    nameSection:   { marginBottom: 24 },
-    nameLabel:     { fontSize: 14, fontWeight: '600', color: colors.foreground, fontFamily: 'Inter_600SemiBold', marginBottom: 10 },
-    nameInput:     { backgroundColor: colors.card, borderRadius: 14, padding: 14, fontSize: 16, color: colors.foreground, fontFamily: 'Inter_400Regular', borderWidth: 2, borderColor: colors.primary },
-    actionRow:     { gap: 10 },
-    viewJourneyBtn: { backgroundColor: colors.primary, borderRadius: 14, paddingVertical: 15, alignItems: 'center', opacity: isSaving ? 0.6 : 1 },
-    viewJourneyBtnText: { fontSize: 16, fontWeight: '600', color: '#fff', fontFamily: 'Inter_600SemiBold' },
-    backToMapBtn:  { borderRadius: 14, paddingVertical: 15, alignItems: 'center', borderWidth: 1, borderColor: colors.border },
-    backToMapBtnText: { fontSize: 16, fontWeight: '600', color: colors.foreground, fontFamily: 'Inter_600SemiBold' },
-  });
-
-  function handleSaveAndView() {
-    if (savedJourneyId && journeyName.trim()) {
-      updateJourney(savedJourneyId, { name: journeyName.trim() });
+  function handleSave() {
+    if (busy) return;
+    setLeaving(true);
+    // Sent when changed, and always for a drive still uploading (it goes
+    // with the drive when it completes)
+    if (journey && (visibility !== journey.privacy || journey.id.startsWith('local:'))) {
+      updateJourney(journey.id, { privacy: visibility });
     }
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     router.replace('/(tabs)/journeys');
   }
 
-  function handleBackToMap() {
+  function handleDiscard() {
+    if (busy || !journey) return;
+    confirmDiscard(() => {
+      setLeaving(true);
+      deleteJourney(journey.id);
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+      router.replace('/(tabs)/(drive)');
+    });
+  }
+
+  function handleClose() {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     router.replace('/(tabs)/(drive)');
   }
 
   return (
-    <View style={styles.kaView}>
-      <LinearGradient colors={['#F4631A', '#FF4E3A']} style={styles.heroGradient}>
-        <View style={styles.completedIcon}>
-          <Ionicons name="checkmark" size={36} color="#fff" />
-        </View>
-        <Text style={styles.heroTitle}>Drive Complete</Text>
-        <Text style={styles.heroSub}>
-          {isSaving ? 'Saving…' : 'Great drive! Here\'s your summary.'}
-        </Text>
-      </LinearGradient>
-
-      <KeyboardAwareScrollViewCompat
-        contentContainerStyle={{ padding: 24, paddingBottom: scrollBottomPadding }}
-        showsVerticalScrollIndicator={false}
-        keyboardShouldPersistTaps="handled"
-        keyboardDismissMode="interactive"
-      >
-        <View style={styles.statsGrid}>
-          <View style={styles.statCard}>
-            <Ionicons name="navigate-outline" size={24} color={colors.primary} />
-            <Text style={styles.statValue}>{formatDistance(driveSnapshot.distance, resolvedUnitSystem)}</Text>
-            <Text style={styles.statLabel}>Distance</Text>
-          </View>
-          <View style={styles.statCard}>
-            <Ionicons name="time-outline" size={24} color={colors.primary} />
-            <Text style={styles.statValue}>{formatDuration(driveDuration)}</Text>
-            <Text style={styles.statLabel}>Duration</Text>
-          </View>
-          <View style={styles.statCard}>
-            <Ionicons name="speedometer-outline" size={24} color={colors.primary} />
-            <Text style={[styles.statValue, styles.statHighlight]}>
-              {formatSpeed(driveSnapshot.topSpeed, resolvedUnitSystem)}
-            </Text>
-            <Text style={styles.statLabel}>Top Speed</Text>
-          </View>
-          <View style={styles.statCard}>
-            <Ionicons name="car-outline" size={24} color={colors.primary} />
-            <Text style={styles.statValue}>{formatSpeed(driveSnapshot.avgSpeed, resolvedUnitSystem)}</Text>
-            <Text style={styles.statLabel}>Avg Speed</Text>
-          </View>
-        </View>
-
-        <View style={styles.nameSection}>
-          <Text style={styles.nameLabel}>Name this journey</Text>
-          <TextInput
-            ref={inputRef}
-            style={styles.nameInput}
-            value={journeyName}
-            onChangeText={setJourneyName}
-            placeholder="e.g. Lake District Loop"
-            placeholderTextColor={colors.mutedForeground}
-            returnKeyType="done"
-            onSubmitEditing={() => Keyboard.dismiss()}
-            blurOnSubmit
-          />
-        </View>
-
-        <View style={styles.actionRow}>
-          <TouchableOpacity
-            style={styles.viewJourneyBtn}
-            onPress={handleSaveAndView}
-            disabled={isSaving}
-            activeOpacity={0.8}
-          >
-            <Text style={styles.viewJourneyBtnText}>
-              {isSaving ? 'Saving…' : 'Save & View Journey'}
-            </Text>
-          </TouchableOpacity>
-          <View style={{ height: 10 }} />
-          <TouchableOpacity style={styles.backToMapBtn} onPress={handleBackToMap}>
-            <Text style={styles.backToMapBtnText}>Back to Map</Text>
-          </TouchableOpacity>
-        </View>
-      </KeyboardAwareScrollViewCompat>
-
-      {/* Sync banner — visible when the server save failed */}
-      <SyncBanner
-        visible={syncStatus !== 'idle'}
-        status={syncStatus === 'syncing' ? 'syncing' : syncStatus === 'error' ? 'error' : 'waiting'}
-        onRetry={retryJourneySync}
-      />
-    </View>
+    <DriveCompleteView
+      firstName={firstName}
+      isSaving={isSaving}
+      busy={busy}
+      hasJourney={!!journey}
+      distanceKm={distance}
+      durationS={duration}
+      avgSpeedKmh={avgSpeed}
+      topSpeedKmh={topSpeed}
+      route={route}
+      unitSystem={resolvedUnitSystem}
+      visibility={visibility}
+      onVisibility={setVisibility}
+      visibilityLocked={leaving}
+      onSave={handleSave}
+      onDiscard={handleDiscard}
+      onClose={handleClose}
+      syncBanner={
+        <SyncBanner
+          visible={syncStatus !== 'idle'}
+          status={syncStatus === 'syncing' ? 'syncing' : syncStatus === 'error' ? 'error' : 'waiting'}
+          onRetry={retryJourneySync}
+        />
+      }
+    />
   );
 }

@@ -728,7 +728,7 @@ export class CloudSync {
       journeyType: 'personal',
       xpEarned: 0,
       vehicleSnapshot: (r.vehicleSnapshot as unknown as VehicleSnapshot) ?? undefined,
-      privacy: 'private',
+      privacy: r.visibility ?? 'private',
       startedAtIso: r.startedAt,
       syncState: r.rejected ? 'failed' : 'pending',
       syncError: r.lastError,
@@ -983,9 +983,15 @@ export class CloudSync {
     const serverId = this.resolveJourneyId(id);
     this.update((d) => ({ ...d, journeys: d.journeys.map((j) => (j.id === id || j.id === serverId ? { ...j, ...updates } : j)) }));
     if (serverId.startsWith('local:')) {
-      // Still uploading: keep the new name with the drive.
+      // Still uploading: keep the new name and visibility with the drive;
+      // both are sent when it completes.
       const rec = this.pending.find((r) => `local:${r.clientRef}` === serverId);
-      if (rec && updates.name) { rec.name = updates.name; this.pendingDirty = true; await this.persistPending(); }
+      if (rec && (updates.name || updates.privacy)) {
+        if (updates.name) rec.name = updates.name;
+        if (updates.privacy) rec.visibility = updates.privacy;
+        this.pendingDirty = true;
+        await this.persistPending();
+      }
       return;
     }
     const fields: Record<string, unknown> = {};
