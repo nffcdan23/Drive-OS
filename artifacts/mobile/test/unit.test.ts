@@ -6623,3 +6623,26 @@ test('Drive Complete: real data, one visibility of three, Save sends it, Discard
   assert.ok(/routeCoordinates/.test(screen) && /DRIVE_MAPBOX/.test(card));
   assert.ok(!/react-native-maps/.test(card + read('components/driveComplete/RouteMapMapbox.tsx')));
 });
+
+import { dayStreak, firstNameOf, levelProgress } from '@/lib/driveRewards';
+
+test('Drive Complete rewards: level progress from the profile, day streak from drives, real first name only', () => {
+  // 11,580 XP: 580 into level 12, 420 to go
+  assert.deepEqual(levelProgress(11580, 420), { fraction: 0.58, xp: 11580, nextLevelXp: 12000 });
+  assert.equal(levelProgress(0, 1000).fraction, 0);
+
+  const now = new Date(2026, 9, 9, 18, 0);
+  const at = (d: number, h = 9) => new Date(2026, 9, d, h, 0).toISOString();
+  assert.equal(dayStreak([at(9), at(8), at(8, 20), at(7), at(5)], now), 3, 'today, yesterday and the day before');
+  assert.equal(dayStreak([at(8), at(7)], now), 2, 'still alive before today\'s first drive');
+  assert.equal(dayStreak([at(6)], now), 0);
+  assert.equal(dayStreak([null, undefined, 'not a date'], now), 0);
+
+  assert.equal(firstNameOf({ id: 'u1', name: '  Alex  Morgan ' }), 'Alex');
+  assert.equal(firstNameOf({ name: 'Driver' }), undefined, 'the placeholder profile before the account loads');
+  assert.equal(firstNameOf({ id: 'u1', name: '' }), undefined);
+  assert.equal(firstNameOf(null), undefined);
+  // Never a hard-coded name in the screen
+  const read = (rel: string) => readFileSync(toPath(new URL(`../${rel}`, import.meta.url)), 'utf8');
+  assert.ok(!/Daniel/.test(read('app/drive-summary.tsx') + read('components/driveComplete/DriveCompleteView.tsx')));
+});

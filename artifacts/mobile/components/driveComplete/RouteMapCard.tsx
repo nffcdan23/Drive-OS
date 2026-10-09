@@ -125,7 +125,7 @@ export default function RouteMapCard({ coordinates }: { coordinates: Coordinate[
 
 const styles = StyleSheet.create({
   card: {
-    height: 190,
+    height: 150,
     borderRadius: 24,
     overflow: "hidden",
     backgroundColor: "#0F1820",

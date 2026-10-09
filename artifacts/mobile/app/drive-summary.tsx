@@ -12,7 +12,8 @@ import * as Haptics from 'expo-haptics';
 import { useApp, type Journey } from '@/context/AppContext';
 import type { Visibility } from '@/lib/backend/endpoints';
 import { SyncBanner } from '@/components/SyncBanner';
-import DriveCompleteView from '@/components/driveComplete/DriveCompleteView';
+import DriveCompleteView, { type DriveRewards } from '@/components/driveComplete/DriveCompleteView';
+import { dayStreak, firstNameOf, levelProgress } from '@/lib/driveRewards';
 
 function confirmDiscard(onConfirm: () => void) {
   const title = 'Discard this drive?';
@@ -31,8 +32,9 @@ export default function DriveSummaryScreen() {
   const router = useRouter();
   const {
     currentDrive, endDrive, updateJourney, deleteJourney, syncStatus, retryJourneySync, resolvedUnitSystem, userProfile,
+    journeys,
   } = useApp();
-  const [journey, setJourney] = useState<Journey | null>(null);
+  const [savedJourney, setJourney] = useState<Journey | null>(null);
   const [isSaving, setIsSaving] = useState(true);
   const [visibility, setVisibility] = useState<Visibility>('private');
   const [leaving, setLeaving] = useState(false);
@@ -49,6 +51,7 @@ export default function DriveSummaryScreen() {
     startTime: currentDrive?.startTime ?? Date.now(),
     coordinates: currentDrive?.coordinates ?? [],
     endedAt: Date.now(),
+    recorded: !!currentDrive,
   }).current;
 
   // End the drive once on mount; the sync banner shows if uploading fails
@@ -73,12 +76,36 @@ export default function DriveSummaryScreen() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // The saved drive, kept current as it syncs (its XP comes from the server)
+  // (a drive saved while uploading gets its server id once it syncs; it's
+  // the same drive when it started at the same moment)
+  const savedStart = savedJourney?.startedAtIso ? Date.parse(savedJourney.startedAtIso) : Number.NaN;
+  const journey = savedJourney
+    ? journeys.find((j) => j.id === savedJourney.id)
+      ?? journeys.find((j) => !!j.startedAtIso && Date.parse(j.startedAtIso) === savedStart)
+      ?? savedJourney
+    : null;
+
   const distance = journey?.distance ?? snapshot.distance;
   const duration = journey?.duration ?? Math.round((snapshot.endedAt - snapshot.startTime) / 1000);
   const avgSpeed = journey?.averageSpeed ?? snapshot.avgSpeed;
   const topSpeed = journey?.topSpeed ?? snapshot.topSpeed;
   const route = journey && journey.routeCoordinates.length > 1 ? journey.routeCoordinates : snapshot.coordinates;
-  const firstName = userProfile?.name?.trim().split(/\s+/)[0];
+  const firstName = firstNameOf(userProfile);
+  // Level and XP are the profile's, which the app refreshes once the drive
+  // has synced; the streak counts days with a drive, this one included.
+  const progress = levelProgress(userProfile.xp, userProfile.xpToNextLevel);
+  const rewards: DriveRewards = {
+    xpEarned: journey && !journey.id.startsWith('local:') ? journey.xpEarned ?? 0 : null,
+    level: userProfile.level,
+    levelFraction: progress.fraction,
+    xp: progress.xp,
+    nextLevelXp: progress.nextLevelXp,
+    streakDays: dayStreak([
+      ...journeys.map((j) => j.startedAtIso ?? (j.date ? `${j.date}T12:00:00` : null)),
+      snapshot.recorded ? new Date(snapshot.startTime).toISOString() : null,
+    ]),
+  };
   const busy = isSaving || leaving;
 
   function handleSave() {
@@ -120,6 +147,7 @@ export default function DriveSummaryScreen() {
       topSpeedKmh={topSpeed}
       route={route}
       unitSystem={resolvedUnitSystem}
+      rewards={rewards}
       visibility={visibility}
       onVisibility={setVisibility}
       visibilityLocked={leaving}

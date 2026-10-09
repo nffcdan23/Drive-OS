@@ -1,9 +1,9 @@
 // The Drive Complete screen's layout (app/drive-summary.tsx holds the logic):
 // scenic hero, the route, four stats, who can see the drive, and the actions.
 
-import React from 'react';
+import React, { useState } from 'react';
 import {
-  ActivityIndicator, ScrollView, StyleSheet, Text, TouchableOpacity, View, useWindowDimensions,
+  ActivityIndicator, ScrollView, StyleSheet, Text, TouchableOpacity, View,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -15,6 +15,7 @@ import { GlassButton, GlassSurface } from '@/components/Glass';
 import { Glyph } from '@/components/Glyph';
 import RouteMapCard from './RouteMapCard';
 import VisibilityPicker from './VisibilityPicker';
+import RewardsCard from './RewardsCard';
 
 // The Derwent sunset artwork, framed on the valley and lake below its logo
 const HERO = require('@/assets/images/loading-screen.png');
@@ -28,9 +29,19 @@ export function formatDuration(seconds: number): string {
   return `${s}s`;
 }
 
+export interface DriveRewards {
+  /** XP the server gave this drive; null while it's still uploading */
+  xpEarned: number | null;
+  level: number;
+  levelFraction: number;
+  xp: number;
+  nextLevelXp: number;
+  streakDays: number;
+}
+
 export default function DriveCompleteView({
   firstName, isSaving, busy, hasJourney, distanceKm, durationS, avgSpeedKmh, topSpeedKmh, route, unitSystem,
-  visibility, onVisibility, visibilityLocked, onSave, onDiscard, onClose, syncBanner,
+  rewards, visibility, onVisibility, visibilityLocked, onSave, onDiscard, onClose, syncBanner,
 }: {
   firstName: string | undefined;
   isSaving: boolean;
@@ -43,6 +54,7 @@ export default function DriveCompleteView({
   topSpeedKmh: number;
   route: Coordinate[];
   unitSystem: ResolvedUnitSystem;
+  rewards: DriveRewards;
   visibility: Visibility;
   onVisibility: (v: Visibility) => void;
   visibilityLocked: boolean;
@@ -52,9 +64,12 @@ export default function DriveCompleteView({
   syncBanner?: React.ReactNode;
 }) {
   const insets = useSafeAreaInsets();
-  const { height } = useWindowDimensions();
-  const heroHeight = insets.top + Math.min(250, Math.round(height * 0.27));
-  const footerHeight = 56 + Math.max(insets.bottom, 16) + 20;
+  // The hero takes whatever height the content leaves, so the actions sit at
+  // the bottom with no empty band on tall phones; short phones scroll.
+  const [viewport, setViewport] = useState(0);
+  const [content, setContent] = useState(0);
+  const minHero = insets.top + 150;
+  const heroHeight = viewport && content ? Math.max(minHero, viewport - content) : minHero;
 
   const stats = [
     { label: 'Distance', value: formatDistance(distanceKm, unitSystem), sf: 'point.topleft.down.to.point.bottomright.curvepath', ion: 'git-commit-outline' },
@@ -63,11 +78,13 @@ export default function DriveCompleteView({
     { label: 'Max Speed', value: formatSpeed(topSpeedKmh, unitSystem), sf: 'gauge.with.dots.needle.100percent', ion: 'flash-outline' },
   ] as const;
 
+  const greeting = isSaving ? 'Saving your drive…' : firstName ? `Great drive, ${firstName}.` : 'Great drive.';
+
   return (
     <View style={styles.screen}>
       <ScrollView
-        contentContainerStyle={{ paddingBottom: footerHeight + 16 }}
         showsVerticalScrollIndicator={false}
+        onLayout={(e) => setViewport(Math.round(e.nativeEvent.layout.height))}
       >
         {/* Hero */}
         <View style={{ height: heroHeight }}>
@@ -79,22 +96,25 @@ export default function DriveCompleteView({
             accessible={false}
           />
           <LinearGradient
-            colors={['rgba(7,9,12,0.15)', 'rgba(7,9,12,0.35)', '#07090C']}
-            locations={[0, 0.55, 1]}
+            colors={['rgba(7,9,12,0.1)', 'rgba(7,9,12,0.3)', '#07090C']}
+            locations={[0, 0.6, 1]}
             style={StyleSheet.absoluteFill}
           />
-          <View style={[styles.heroContent, { paddingTop: insets.top + 24 }]}>
+          <View style={styles.heroContent}>
             <GlassSurface style={styles.flag}>
-              <Glyph sf="flag.checkered" ion="flag-outline" size={30} color="#FFFFFF" />
+              <Glyph sf="flag.checkered" ion="flag-outline" size={28} color="#FFFFFF" />
             </GlassSurface>
-            <Text style={styles.title} accessibilityRole="header">Drive Complete</Text>
-            <Text style={styles.subtitle}>
-              {isSaving ? 'Saving your drive…' : firstName ? `Great drive, ${firstName}.` : 'Great drive.'}
+            <Text style={styles.title} accessibilityRole="header" numberOfLines={1} adjustsFontSizeToFit>
+              Drive Complete
             </Text>
+            <Text style={styles.subtitle} numberOfLines={1}>{greeting}</Text>
           </View>
         </View>
 
-        <View style={styles.body}>
+        <View
+          style={[styles.body, { paddingBottom: Math.max(insets.bottom, 16) + 6 }]}
+          onLayout={(e) => setContent(Math.round(e.nativeEvent.layout.height))}
+        >
           <RouteMapCard coordinates={route} />
 
           {/* The four stats */}
@@ -106,7 +126,7 @@ export default function DriveCompleteView({
                 accessibilityLabel={`${s.label}: ${s.value}`}
                 style={[styles.stat, i > 0 && styles.statDivider]}
               >
-                <Glyph sf={s.sf} ion={s.ion} size={22} color="#FFFFFF" />
+                <Glyph sf={s.sf} ion={s.ion} size={21} color="#FFFFFF" />
                 <Text style={styles.statLabel} numberOfLines={1}>{s.label}</Text>
                 <Text style={styles.statValue} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.75}>
                   {s.value}
@@ -114,6 +134,8 @@ export default function DriveCompleteView({
               </View>
             ))}
           </GlassSurface>
+
+          <RewardsCard {...rewards} />
 
           {hasJourney || isSaving ? (
             <VisibilityPicker value={visibility} onChange={onVisibility} disabled={visibilityLocked} />
@@ -124,6 +146,38 @@ export default function DriveCompleteView({
               </Text>
             </GlassSurface>
           )}
+
+          <View style={styles.actions}>
+            <GlassButton
+              accessibilityLabel="Discard"
+              accessibilityHint="Asks you to confirm, then deletes this drive"
+              accessibilityState={{ disabled: busy || !hasJourney }}
+              disabled={busy || !hasJourney}
+              onPress={onDiscard}
+              style={[styles.button, (busy || !hasJourney) && styles.dimmed]}
+            >
+              <Text style={styles.discardText}>Discard</Text>
+            </GlassButton>
+            <View style={[styles.saveGlow, busy && styles.dimmed]}>
+              <TouchableOpacity
+                accessibilityRole="button"
+                accessibilityLabel="Save Drive"
+                accessibilityState={{ disabled: busy, busy }}
+                disabled={busy}
+                activeOpacity={0.85}
+                onPress={onSave}
+                style={styles.saveButton}
+              >
+                <LinearGradient
+                  colors={['#6FE6FF', '#2CC9F2', '#12B2E8']}
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 1 }}
+                  style={StyleSheet.absoluteFill}
+                />
+                {busy ? <ActivityIndicator color="#04121B" /> : <Text style={styles.saveText}>Save Drive</Text>}
+              </TouchableOpacity>
+            </View>
+          </View>
         </View>
       </ScrollView>
 
@@ -137,43 +191,6 @@ export default function DriveCompleteView({
         <Glyph sf="xmark" ion="close" size={20} color="#FFFFFF" />
       </GlassButton>
 
-      {/* Actions, always within reach */}
-      <View style={[styles.footer, { paddingBottom: Math.max(insets.bottom, 16) }]} pointerEvents="box-none">
-        <LinearGradient
-          colors={['rgba(7,9,12,0)', 'rgba(7,9,12,0.92)', '#07090C']}
-          locations={[0, 0.35, 1]}
-          style={StyleSheet.absoluteFill}
-          pointerEvents="none"
-        />
-        <GlassButton
-          accessibilityLabel="Discard"
-          accessibilityHint="Asks you to confirm, then deletes this drive"
-          accessibilityState={{ disabled: busy || !hasJourney }}
-          disabled={busy || !hasJourney}
-          onPress={onDiscard}
-          style={[styles.button, styles.discard, (busy || !hasJourney) && styles.dimmed]}
-        >
-          <Text style={styles.discardText}>Discard</Text>
-        </GlassButton>
-        <TouchableOpacity
-          accessibilityRole="button"
-          accessibilityLabel="Save Drive"
-          accessibilityState={{ disabled: busy, busy }}
-          disabled={busy}
-          activeOpacity={0.85}
-          onPress={onSave}
-          style={[styles.button, styles.save, busy && styles.dimmed]}
-        >
-          <LinearGradient
-            colors={['#6FE6FF', '#2CC9F2', '#12B2E8']}
-            start={{ x: 0, y: 0 }}
-            end={{ x: 1, y: 1 }}
-            style={StyleSheet.absoluteFill}
-          />
-          {busy ? <ActivityIndicator color="#04121B" /> : <Text style={styles.saveText}>Save Drive</Text>}
-        </TouchableOpacity>
-      </View>
-
       {syncBanner}
     </View>
   );
@@ -181,35 +198,35 @@ export default function DriveCompleteView({
 
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: '#07090C' },
-  heroContent: { flex: 1, alignItems: 'center', justifyContent: 'flex-end', paddingBottom: 18, paddingHorizontal: 24 },
-  flag: { width: 64, height: 64, borderRadius: 20, alignItems: 'center', justifyContent: 'center', marginBottom: 14 },
+  heroContent: { flex: 1, alignItems: 'center', justifyContent: 'flex-end', paddingBottom: 16, paddingHorizontal: 24 },
+  flag: { width: 56, height: 56, borderRadius: 18, alignItems: 'center', justifyContent: 'center', marginBottom: 10 },
   title: {
-    color: '#FFFFFF', fontSize: 34, fontWeight: '700', letterSpacing: -0.5,
+    color: '#FFFFFF', fontSize: 34, fontWeight: '700', letterSpacing: -0.5, textAlign: 'center',
     textShadowColor: 'rgba(0,0,0,0.5)', textShadowRadius: 12,
   },
   subtitle: {
-    color: 'rgba(236,240,244,0.85)', fontSize: 17, marginTop: 6,
+    color: 'rgba(236,240,244,0.88)', fontSize: 17, marginTop: 4, textAlign: 'center',
     textShadowColor: 'rgba(0,0,0,0.5)', textShadowRadius: 8,
   },
-  body: { paddingHorizontal: 16, gap: 14, marginTop: 6 },
-  stats: { flexDirection: 'row', borderRadius: 24, paddingVertical: 18 },
-  stat: { flex: 1, alignItems: 'center', gap: 6, paddingHorizontal: 4 },
+  body: { paddingHorizontal: 16, gap: 10 },
+  stats: { flexDirection: 'row', borderRadius: 22, paddingVertical: 13 },
+  stat: { flex: 1, alignItems: 'center', gap: 5, paddingHorizontal: 4 },
   statDivider: { borderLeftWidth: StyleSheet.hairlineWidth, borderLeftColor: 'rgba(220,232,244,0.18)' },
-  statLabel: { color: 'rgba(214,224,234,0.72)', fontSize: 13, marginTop: 4 },
+  statLabel: { color: 'rgba(214,224,234,0.72)', fontSize: 12.5, marginTop: 3 },
   statValue: { color: '#FFFFFF', fontSize: 20, fontWeight: '600', fontVariant: ['tabular-nums'] },
   notice: { borderRadius: 22, padding: 18 },
   noticeText: { color: 'rgba(214,224,234,0.8)', fontSize: 15, lineHeight: 21 },
   close: {
     position: 'absolute', left: 16, width: 46, height: 46, borderRadius: 23, alignItems: 'center', justifyContent: 'center',
   },
-  footer: {
-    position: 'absolute', left: 0, right: 0, bottom: 0, flexDirection: 'row', gap: 12,
-    paddingHorizontal: 16, paddingTop: 20,
-  },
+  actions: { flexDirection: 'row', gap: 12, marginTop: 4 },
   button: { flex: 1, height: 56, borderRadius: 28, alignItems: 'center', justifyContent: 'center', overflow: 'hidden' },
-  discard: {},
+  saveButton: { height: 56, borderRadius: 28, alignItems: 'center', justifyContent: 'center', overflow: 'hidden' },
+  saveGlow: {
+    flex: 1, borderRadius: 28,
+    shadowColor: '#18C2F0', shadowOpacity: 0.4, shadowRadius: 14, shadowOffset: { width: 0, height: 4 },
+  },
   discardText: { color: '#FFFFFF', fontSize: 17, fontWeight: '600' },
-  save: {},
   saveText: { color: '#04121B', fontSize: 17, fontWeight: '700' },
   dimmed: { opacity: 0.5 },
 });

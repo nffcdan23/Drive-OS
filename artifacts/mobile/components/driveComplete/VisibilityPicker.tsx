@@ -10,16 +10,15 @@ const CYAN = "#3FD6F5";
 export const VISIBILITY_OPTIONS: {
   value: Visibility;
   title: string;
-  detail: string;
   sf: React.ComponentProps<typeof Glyph>["sf"];
   ion: React.ComponentProps<typeof Glyph>["ion"];
 }[] = [
-  { value: "private", title: "Only me", detail: "Keep this drive private.", sf: "lock", ion: "lock-closed-outline" },
-  { value: "friends", title: "Friends", detail: "Visible to your friends.", sf: "person.2", ion: "people-outline" },
-  { value: "public", title: "Everyone", detail: "Visible to the community.", sf: "globe", ion: "globe-outline" },
+  { value: "private", title: "Only me", sf: "lock", ion: "lock-closed-outline" },
+  { value: "friends", title: "Friends", sf: "person.2", ion: "people-outline" },
+  { value: "public", title: "Everyone", sf: "globe", ion: "globe-outline" },
 ];
 
-/** "Who can see this drive?": one choice of three. */
+/** "Who can see this drive?": one choice of three, side by side. */
 export default function VisibilityPicker({
   value,
   onChange,
@@ -32,9 +31,6 @@ export default function VisibilityPicker({
   return (
     <GlassSurface style={styles.card}>
       <Text style={styles.title} accessibilityRole="header">Who can see this drive?</Text>
-      <Text style={styles.subtitle}>
-        Choose who can see this drive on your profile and in the community.
-      </Text>
       <View accessibilityRole="radiogroup" style={styles.options}>
         {VISIBILITY_OPTIONS.map((o) => {
           const selected = o.value === value;
@@ -43,22 +39,23 @@ export default function VisibilityPicker({
               key={o.value}
               accessibilityRole="radio"
               accessibilityState={{ checked: selected, disabled }}
-              accessibilityLabel={`${o.title}. ${o.detail}`}
+              accessibilityLabel={o.title}
               disabled={disabled}
               activeOpacity={0.8}
               onPress={() => onChange(o.value)}
               style={[styles.option, selected && styles.optionOn]}
             >
-              <View style={[styles.icon, selected && styles.iconOn]}>
-                <Glyph sf={o.sf} ion={o.ion} size={22} color="#FFFFFF" />
+              <View style={styles.top}>
+                <View style={[styles.icon, selected && styles.iconOn]}>
+                  <Glyph sf={o.sf} ion={o.ion} size={20} color="#FFFFFF" />
+                </View>
+                <View style={[styles.radio, selected && styles.radioOn]}>
+                  {selected && <View style={styles.radioDot} />}
+                </View>
               </View>
-              <View style={styles.text}>
-                <Text style={styles.optionTitle}>{o.title}</Text>
-                <Text style={styles.optionDetail}>{o.detail}</Text>
-              </View>
-              <View style={[styles.radio, selected && styles.radioOn]}>
-                {selected && <View style={styles.radioDot} />}
-              </View>
+              <Text style={styles.optionTitle} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.85}>
+                {o.title}
+              </Text>
             </TouchableOpacity>
           );
         })}
@@ -68,45 +65,47 @@ export default function VisibilityPicker({
 }
 
 const styles = StyleSheet.create({
-  card: { borderRadius: 26, padding: 18, paddingTop: 20 },
-  title: { color: "#FFFFFF", fontSize: 21, fontWeight: "600" },
-  subtitle: { color: "rgba(214,224,234,0.72)", fontSize: 14.5, lineHeight: 20, marginTop: 6 },
-  options: { gap: 10, marginTop: 16 },
+  card: { borderRadius: 22, padding: 14, paddingTop: 16 },
+  title: { color: "#FFFFFF", fontSize: 19, fontWeight: "600" },
+  options: { flexDirection: "row", gap: 10, marginTop: 12 },
   option: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 14,
-    minHeight: 64,
-    paddingHorizontal: 10,
-    paddingVertical: 10,
+    flex: 1,
+    minHeight: 84,
+    padding: 10,
     borderRadius: 18,
     borderWidth: 1,
     borderColor: "rgba(220,232,244,0.12)",
     backgroundColor: "rgba(255,255,255,0.03)",
+    justifyContent: "space-between",
   },
-  optionOn: { borderColor: CYAN, backgroundColor: "rgba(63,214,245,0.10)" },
+  optionOn: {
+    borderColor: CYAN,
+    backgroundColor: "rgba(63,214,245,0.10)",
+    shadowColor: CYAN,
+    shadowOpacity: 0.25,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 0 },
+  },
+  top: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start" },
   icon: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: "rgba(255,255,255,0.08)",
   },
   iconOn: { backgroundColor: "rgba(63,214,245,0.22)" },
-  text: { flex: 1 },
-  optionTitle: { color: "#FFFFFF", fontSize: 16, fontWeight: "600" },
-  optionDetail: { color: "rgba(214,224,234,0.72)", fontSize: 13.5, marginTop: 2 },
   radio: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
+    width: 22,
+    height: 22,
+    borderRadius: 11,
     borderWidth: 2,
     borderColor: "rgba(214,224,234,0.5)",
     alignItems: "center",
     justifyContent: "center",
-    marginRight: 6,
   },
-  radioOn: { borderColor: CYAN, backgroundColor: CYAN },
-  radioDot: { width: 9, height: 9, borderRadius: 5, backgroundColor: "#04121B" },
+  radioOn: { borderColor: CYAN },
+  radioDot: { width: 10, height: 10, borderRadius: 5, backgroundColor: CYAN },
+  optionTitle: { color: "#FFFFFF", fontSize: 15.5, fontWeight: "600", marginTop: 10 },
 });
