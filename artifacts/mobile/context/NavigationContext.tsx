@@ -16,6 +16,12 @@
  * Also here (Phase 2B): the user's recent destinations (device only, never
  * Search Box results) and destination search (lib/navigation/search.ts),
  * which only runs where a result can be previewed on the Mapbox map.
+ *
+ * And the active navigation session (Phase 3, lib/navigation/session.ts):
+ * Start Navigation turns the preview into turn-by-turn guidance, fed the
+ * same accepted fixes, read only. In memory only: the app closing (or the
+ * user signing out) ends it. The Drive screen reads only its phase; the
+ * guidance banner and bar read the rest.
  */
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import * as Location from 'expo-location';
@@ -26,6 +32,9 @@ import { DRIVE_MAPBOX } from '@/lib/mapProvider';
 import { deviceStorage } from '@/lib/secureStorage';
 import { RecentDestinations, type RecentDestination } from '@/lib/navigation/recents';
 import { DestinationSearch, type SearchState } from '@/lib/navigation/search';
+import { NavigationSession, type EndReason, type NavigationState, type NavPhase } from '@/lib/navigation/session';
+import { startFromPreview } from '@/lib/navigation/startNavigation';
+import { journal } from '@/lib/diagnostics';
 import { RoutePreviewStore, type PreviewError, type PreviewPhase, type PreviewState } from '@/lib/navigation/previewStore';
 import type { Destination, LatLng, RouteOrigin } from '@/lib/navigation/model';
 
@@ -36,8 +45,12 @@ const HEADING_MIN_KMH = 10;
 
 interface NavigationContextValue {
   store: RoutePreviewStore;
-  /** The Drive screen's accepted fixes: the preview's start, and when it goes out of date */
-  noteFix(fix: { latitude: number; longitude: number; speedKmh: number; headingDeg: number | null; time: number }): void;
+  session: NavigationSession;
+  /** The Drive screen's accepted fixes: the preview's start and staleness, and guidance progress */
+  noteFix(fix: {
+    latitude: number; longitude: number; speedKmh: number; speedMs: number | null;
+    headingDeg: number | null; accuracyM: number | null; time: number;
+  }): void;
   /** Where a route would start now: the latest fix, or a fresh position */
   currentOrigin(): Promise<RouteOrigin>;
   /** The latest position the Drive screen accepted, if recent (search ranks near it) */
@@ -65,6 +78,21 @@ export function NavigationProvider({ userId, children }: { userId: string; child
     setTimer: (fn, ms) => setTimeout(fn, ms),
     clearTimer: (t) => clearTimeout(t as ReturnType<typeof setTimeout>),
   }), []);
+  // Guidance: the same route requests as previews, only ever on the user's
+  // action (Start with an out-of-date route, Update Route)
+  const session = useMemo(() => new NavigationSession({
+    fetchRoutes: (body) => {
+      if (!ep) return Promise.reject(new Error('The app is not connected to a server.'));
+      return ep.getRoutes(body);
+    },
+    describe: describePreviewError,
+    now: Date.now,
+    setTimer: (fn, ms) => setTimeout(fn, ms),
+    clearTimer: (t) => clearTimeout(t as ReturnType<typeof setTimeout>),
+    journal,
+  }), []);
+  // Signing out (or anything else unmounting this) ends navigation
+  useEffect(() => () => session.end('closed'), [session]);
   const lastFix = useRef<{ origin: RouteOrigin; time: number } | null>(null);
 
   const noteFix = useCallback<NavigationContextValue['noteFix']>((fix) => {
@@ -72,7 +100,11 @@ export function NavigationProvider({ userId, children }: { userId: string; child
     const moving = fix.speedKmh >= HEADING_MIN_KMH && fix.headingDeg != null && fix.headingDeg >= 0;
     lastFix.current = { origin: { coordinate, headingDeg: moving ? fix.headingDeg : null }, time: fix.time };
     store.noteFix(coordinate, fix.time);
-  }, [store]);
+    session.noteFix({
+      latitude: fix.latitude, longitude: fix.longitude, accuracyM: fix.accuracyM,
+      speedMs: fix.speedMs, headingDeg: fix.headingDeg, time: fix.time,
+    });
+  }, [store, session]);
 
   const currentOrigin = useCallback(async (): Promise<RouteOrigin> => {
     const recent = lastFix.current;
@@ -93,8 +125,8 @@ export function NavigationProvider({ userId, children }: { userId: string; child
   useEffect(() => { void recents.load(); }, [recents]);
 
   const value = useMemo(
-    () => ({ store, noteFix, currentOrigin, recentPosition, recents }),
-    [store, noteFix, currentOrigin, recentPosition, recents],
+    () => ({ store, session, noteFix, currentOrigin, recentPosition, recents }),
+    [store, session, noteFix, currentOrigin, recentPosition, recents],
   );
   return <NavigationContext.Provider value={value}>{children}</NavigationContext.Provider>;
 }
@@ -193,3 +225,46 @@ export function useUpdateRoutePreview() {
     await store.update(origin);
   }, [store, currentOrigin]);
 }
+
+// ─── Guidance (Phase 3) ─────────────────────────────────────────────────────
+
+export function useNavigationSession(): NavigationSession {
+  return useNavigation().session;
+}
+
+/** Navigation's phase only: re-renders the caller when the phase changes, nothing else */
+export function useNavigationPhase(): NavPhase {
+  const session = useNavigationSession();
+  return useSyncExternalStore(useCallback((fn: () => void) => session.subscribe(fn), [session]), () => session.phase);
+}
+
+/** The whole navigation state (it changes with every fix): for the guidance banner and bar only */
+export function useNavigationState(): NavigationState {
+  const session = useNavigationSession();
+  return useSyncExternalStore(useCallback((fn: () => void) => session.subscribe(fn), [session]), () => session.state);
+}
+
+/**
+ * Start Navigation: the preview's chosen route becomes guidance (with one
+ * fresh route request first only if the preview was out of date).
+ */
+export function useStartNavigation() {
+  const { store, session, currentOrigin } = useNavigation();
+  return useCallback(() => startFromPreview(store, session, currentOrigin), [store, session, currentOrigin]);
+}
+
+/** Update Route while navigating: one tap, one request, from where the phone is now */
+export function useRerouteNavigation() {
+  const { session, currentOrigin } = useNavigation();
+  return useCallback(async () => {
+    const origin = await currentOrigin();
+    await session.reroute(origin);
+  }, [session, currentOrigin]);
+}
+
+/** End navigation (End, or Done on arriving). A drive being recorded carries on. */
+export function useEndNavigation() {
+  const session = useNavigationSession();
+  return useCallback((reason: EndReason = 'user') => session.end(reason), [session]);
+}
+

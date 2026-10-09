@@ -72,6 +72,7 @@ import {
 } from "@/lib/mapbox";
 import { LatestPoseWriter, sameFollowPose } from "@/lib/cameraWriter";
 import type { RoutePreviewStore } from "@/lib/navigation/previewStore";
+import type { NavigationSession } from "@/lib/navigation/session";
 import {
   ROUTE_COLORS,
   routePreviewFeatures,
@@ -126,6 +127,12 @@ export interface MapboxDriveMapProps {
    * preview update never re-renders the map).  Never touches the camera.
    */
   routePreview?: RoutePreviewStore | null;
+  /**
+   * The route being navigated (Phase 3), drawn by NavigationRouteLayers from
+   * the session itself, redrawn only when the route changes (a reroute),
+   * never per GPS fix. Never touches the camera.
+   */
+  navigation?: NavigationSession | null;
   /** Logo and attribution sit this far above the bottom edge */
   ornamentBottom: number;
   ornamentLeft: number;
@@ -366,6 +373,78 @@ const RouteLayers = memo(function RouteLayers({ store }: { store: RoutePreviewSt
   );
 });
 
+/**
+ * The route being navigated, and its destination. Reads the session's map
+ * view, which changes only with the route or destination: GPS fixes never
+ * redraw it. Draws only: no camera, no location component.
+ */
+const NavigationRouteLayers = memo(function NavigationRouteLayers({ session }: { session: NavigationSession }) {
+  const view = useSyncExternalStore(
+    useCallback((fn: () => void) => session.subscribe(fn), [session]),
+    () => session.map,
+  );
+  const line = useMemo(
+    () => ({
+      type: "FeatureCollection" as const,
+      features: view.route
+        ? [{
+            type: "Feature" as const,
+            properties: {},
+            geometry: {
+              type: "LineString" as const,
+              coordinates: view.route.geometry.map((p): [number, number] => [p.longitude, p.latitude]),
+            },
+          }]
+        : [],
+    }),
+    [view.route],
+  );
+  const point = useMemo(
+    () => ({
+      type: "FeatureCollection" as const,
+      features: view.destination
+        ? [{
+            type: "Feature" as const,
+            properties: {},
+            geometry: {
+              type: "Point" as const,
+              coordinates: [view.destination.coordinate.longitude, view.destination.coordinate.latitude] as [number, number],
+            },
+          }]
+        : [],
+    }),
+    [view.destination],
+  );
+  const style = { lineCap: "round", lineJoin: "round", lineEmissiveStrength: 1 } as const;
+  return (
+    <>
+      <ShapeSource id="derwent-nav-route" shape={line}>
+        <LineLayer
+          id="derwent-nav-route-casing"
+          style={{ ...style, lineColor: ROUTE_COLORS.selectedCasing, lineWidth: 13 }}
+        />
+        <LineLayer
+          id="derwent-nav-route-line"
+          style={{ ...style, lineColor: ROUTE_COLORS.selected, lineWidth: 8 }}
+        />
+      </ShapeSource>
+      <ShapeSource id="derwent-nav-destination" shape={point}>
+        <CircleLayer
+          id="derwent-nav-destination-dot"
+          style={{
+            circleRadius: 9,
+            circleColor: ROUTE_COLORS.destination,
+            circleStrokeColor: ROUTE_COLORS.destinationRing,
+            circleStrokeWidth: 4,
+            circlePitchAlignment: "map",
+            circleEmissiveStrength: 1,
+          }}
+        />
+      </ShapeSource>
+    </>
+  );
+});
+
 const MapboxDriveMap = forwardRef<MapboxDriveMapHandle, MapboxDriveMapProps>(
   function MapboxDriveMap(
     {
@@ -378,6 +457,7 @@ const MapboxDriveMap = forwardRef<MapboxDriveMapHandle, MapboxDriveMapProps>(
       trailHead,
       friendLayer,
       routePreview,
+      navigation,
       ornamentBottom,
       ornamentLeft,
       onUserGesture,
@@ -527,6 +607,7 @@ const MapboxDriveMap = forwardRef<MapboxDriveMapHandle, MapboxDriveMapProps>(
           {/* Mounted first: the route preview draws beneath the trail and
               the arrow */}
           {routePreview && <RouteLayers store={routePreview} />}
+          {navigation && <NavigationRouteLayers session={navigation} />}
           {/* Mounted before the trail: the head draws beneath it (and the
               arrow, mounted last, draws above both) */}
           {trailHead && (

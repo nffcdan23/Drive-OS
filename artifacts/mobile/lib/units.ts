@@ -147,3 +147,23 @@ export function formatSpeed(kmh: number, system: ResolvedUnitSystem): string {
 export function speedUnit(system: ResolvedUnitSystem): string {
   return system === 'imperial' ? 'mph' : 'km/h';
 }
+
+/**
+ * A guidance distance, sat-nav style: in miles down to 0.1 mi, then yards
+ * (to the nearest 10, never feet); metric: kilometres down to 1 km, then
+ * metres to the nearest 10. Never "0".
+ */
+export function formatGuidanceDistance(metres: number, system: ResolvedUnitSystem): string {
+  const m = Math.max(0, Number.isFinite(metres) ? metres : 0);
+  if (system === 'imperial') {
+    const miles = m / (KM_PER_MILE * 1000);
+    if (miles >= 0.1) return miles < 10 ? `${miles.toFixed(1)} mi` : `${Math.round(miles)} mi`;
+    const yards = m / METRES_PER_YARD;
+    return `${Math.max(10, Math.round(yards / 10) * 10)} yd`;
+  }
+  if (m >= 1000) {
+    const km = m / 1000;
+    return km < 10 ? `${km.toFixed(1)} km` : `${Math.round(km)} km`;
+  }
+  return `${Math.max(10, Math.round(m / 10) * 10)} m`;
+}

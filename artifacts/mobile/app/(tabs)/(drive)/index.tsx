@@ -74,11 +74,16 @@ import {
 } from "@/lib/locationSmoothing";
 import {
   canPreviewRoutes,
+  useNavigationPhase,
+  useNavigationSession,
   useNoteRouteFix,
   useOpenRoutePreview,
   useRoutePreviewPhase,
   useRoutePreviewStore,
 } from "@/context/NavigationContext";
+import { GuidanceBanner } from "@/components/navigation/GuidanceBanner";
+import { GuidanceBar, GuidanceStrip } from "@/components/navigation/GuidanceBar";
+import { guidanceZoom, type GuidanceZoom } from "@/lib/navigation/guidanceCamera";
 import { coordinateDestination } from "@/lib/navigation/coordinates";
 import { describeError } from "@/lib/backend/http";
 import { RoutePreviewPanel } from "@/components/navigation/RoutePreviewPanel";
@@ -562,6 +567,26 @@ export default function MapScreen() {
   const noteRouteFix = useNoteRouteFix();
   const previewing = USING_MAPBOX && !isDriving && routePhase !== "idle";
 
+  // ── Navigation (Phase 3) ──
+  // Turn-by-turn guidance runs in its own session (lib/navigation/session);
+  // this screen reads only its phase, so GPS updates to the guidance never
+  // re-render it. It's fed the same accepted fixes as everything else, read
+  // only: recording, the arrow and sharing keep the raw positions.
+  const navSession = useNavigationSession();
+  const navPhase = useNavigationPhase();
+  const navigating = USING_MAPBOX && navPhase !== "idle";
+  // While guiding, the follow camera turns with the car and takes its zoom
+  // from speed and the next turn (lib/navigation/guidanceCamera)
+  const guidingRef = useRef(false);
+  const guidanceZoomRef = useRef<GuidanceZoom | null>(null);
+  const [guidanceBannerHeight, setGuidanceBannerHeight] = useState(0);
+  const guidanceBannerHeightRef = useRef(0);
+  const onGuidanceBannerHeight = useCallback((h: number) => {
+    if (Math.abs(h - guidanceBannerHeightRef.current) < 1) return;
+    guidanceBannerHeightRef.current = h;
+    setGuidanceBannerHeight(h);
+  }, []);
+
   // ── Map state ──
   const [mapType, setMapType] = useState<MapType>("standard");
   const [showLayerPicker, setShowLayerPicker] = useState(false);
@@ -801,7 +826,9 @@ export default function MapScreen() {
   // while the map glides, and it stops itself once nothing is moving.
   const followTargetFor = useCallback(
     (position: { latitude: number; longitude: number }): FollowFrameTarget => {
-      const isHeadingUp = headingModeRef.current === "heading-up";
+      // Guidance always turns with the car; otherwise the user's choice
+      const isHeadingUp =
+        guidingRef.current || headingModeRef.current === "heading-up";
       // No distance or zoom here: those are the controller's alone
       return {
         position,
@@ -1008,6 +1035,8 @@ export default function MapScreen() {
   // pose is replayed, and the route (held by AppContext meanwhile) arrives as
   // one update.
   onVisualChangeRef.current = (next, prev) => {
+    // Guidance searches widely for the car on coming back (it may have moved on)
+    navSession.setForeground(next.live);
     if (prev.live && !next.live) {
       if (frameIdRef.current != null) cancelAnimationFrame(frameIdRef.current);
       frameIdRef.current = null;
@@ -1055,7 +1084,11 @@ export default function MapScreen() {
       zoomTarget.clearGesture();
       if (resetZoom) {
         zoomTarget.set({
-          zoom: FOLLOW_ZOOM,
+          // Guiding: the guidance zoom for this speed and turn
+          zoom:
+            guidingRef.current && guidanceZoomRef.current
+              ? guidanceZoomRef.current.zoom
+              : FOLLOW_ZOOM,
           distance: NAV_CAMERA.distanceM,
         });
       }
@@ -1191,13 +1224,17 @@ export default function MapScreen() {
         headingFilter.update(gpsHeading, "course");
       }
 
-      // ── Route preview ── where a route would start from; an open preview
-      // is only ever marked out of date by this, never re-requested
+      // ── Route preview and guidance ── where a route would start from; an
+      // open preview is only ever marked out of date by this, never
+      // re-requested; guidance reads it for progress (recording above is
+      // untouched by either)
       noteRouteFix({
         latitude: lat,
         longitude: lon,
         speedKmh,
+        speedMs,
         headingDeg: gpsHeading,
+        accuracyM: accuracy,
         time: fixTime ?? now,
       });
 
@@ -1578,29 +1615,9 @@ export default function MapScreen() {
       cancelAnimationFrame(overviewFrameRef.current);
     overviewFrameRef.current = null;
   }, []);
-  const fitRoutePreview = useCallback(() => {
-    const s = routePreviewStore.state;
-    const { width, height } = screenSizeRef.current;
-    if (s.phase === "idle" || !width || !height) return;
-    if (!visualsLiveRef.current || !mapboxRef.current) return;
-    // Routing: where it starts and the place; then every route too
-    const bounds = routesBounds(s.phase === "preview" ? s.routes : [], [
-      s.origin.coordinate,
-      s.destination.coordinate,
-    ]);
-    if (!bounds) return;
-    const target = overviewPose(
-      bounds,
-      { width, height },
-      {
-        // Below the search bar, which stays over the preview
-        top: SEARCH_TOP + SEARCH_HEIGHT + (isPassengerMode ? 34 : 0) + OVERVIEW_MARGIN,
-        // Before the panel has been measured, assume it covers about half
-        bottom: (previewBottomRef.current || height * 0.5) + OVERVIEW_MARGIN,
-        left: OVERVIEW_SIDE,
-        right: OVERVIEW_SIDE,
-      },
-    );
+  // Moves the map to `target`, eased from where it is now. Both overviews
+  // (a route preview, and the whole route while navigating) come here.
+  const animateOverview = useCallback((target: FollowCameraPose) => {
     stopOverview();
     const token = overviewTokenRef.current;
     readMapCamera()
@@ -1622,11 +1639,11 @@ export default function MapScreen() {
           overviewFrameRef.current = null;
           const now = Date.now();
           if (token !== overviewTokenRef.current) return;
-          // Off screen, closed, following again, or the user took the map:
-          // stop where it is (the follow loop and this never both write)
+          // Off screen, following again, or the user took the map: stop
+          // where it is (the follow loop and this never both write). Closing
+          // the preview or ending navigation stops it too (stopOverview).
           if (
             !visualsLiveRef.current ||
-            routePreviewStore.phase === "idle" ||
             followModeRef.current === "following" ||
             zoomTarget.gestureActive(now)
           )
@@ -1642,7 +1659,39 @@ export default function MapScreen() {
         };
         step();
       });
-  }, [routePreviewStore, readMapCamera, stopOverview, zoomTarget, SEARCH_TOP, isPassengerMode]);
+  }, [readMapCamera, stopOverview, zoomTarget]);
+
+  const fitRoutePreview = useCallback(() => {
+    const s = routePreviewStore.state;
+    const { width, height } = screenSizeRef.current;
+    if (s.phase === "idle" || !width || !height) return;
+    if (!visualsLiveRef.current || !mapboxRef.current) return;
+    // Routing: where it starts and the place; then every route too
+    const bounds = routesBounds(s.phase === "preview" ? s.routes : [], [
+      s.origin.coordinate,
+      s.destination.coordinate,
+    ]);
+    if (!bounds) return;
+    animateOverview(
+      overviewPose(
+        bounds,
+        { width, height },
+        {
+          // Below the search bar (or the guidance banner), which stays over the preview
+          top:
+            (navSession.guiding
+              ? SEARCH_TOP + guidanceBannerHeightRef.current
+              : SEARCH_TOP + SEARCH_HEIGHT) +
+            (isPassengerMode ? 34 : 0) +
+            OVERVIEW_MARGIN,
+          // Before the panel has been measured, assume it covers about half
+          bottom: (previewBottomRef.current || height * 0.5) + OVERVIEW_MARGIN,
+          left: OVERVIEW_SIDE,
+          right: OVERVIEW_SIDE,
+        },
+      ),
+    );
+  }, [routePreviewStore, navSession, animateOverview, SEARCH_TOP, isPassengerMode]);
   const fitRoutePreviewRef = useRef(fitRoutePreview);
   fitRoutePreviewRef.current = fitRoutePreview;
 
@@ -1709,21 +1758,111 @@ export default function MapScreen() {
       routePreviewStore.cancel();
   }, [isDriving, routePreviewStore]);
 
+  // ── Navigation camera ──
+  // Follows the session without re-rendering this screen. Guidance turns the
+  // follow camera heading-up and picks its zoom (speed bands, closer for a
+  // turn in town) by setting the follow camera's own zoom target: the frame
+  // loop stays the only writer while following, and nothing is written off
+  // screen (the loop stops there). Leaving guidance (arrived, ended) goes
+  // back to the usual follow camera. Moving the map by hand leaves follow
+  // as always; Recenter (startFollowing) comes back to guidance.
+  useEffect(() => {
+    if (!USING_MAPBOX) return;
+    let wasGuiding = navSession.guiding;
+    guidingRef.current = wasGuiding;
+    const apply = () => {
+      const guiding = navSession.guiding;
+      if (guiding !== wasGuiding) {
+        wasGuiding = guiding;
+        guidingRef.current = guiding;
+        if (!guiding) {
+          guidanceZoomRef.current = null;
+          stopOverview();
+          if (followModeRef.current === "following") {
+            startFollowing(true);
+            const position = locationSmoother.sample(Date.now());
+            if (position) followCamera.retarget(followTargetFor(position));
+            wakeFrameLoop();
+          }
+          return;
+        }
+        setShowLayerPicker(false);
+        setShowMore(false);
+      }
+      if (!guiding) return;
+      const s = navSession.state;
+      const progress = "progress" in s ? s.progress : null;
+      const first = guidanceZoomRef.current == null;
+      const next = guidanceZoom(guidanceZoomRef.current, {
+        speedKmh: lastSpeedKmhRef.current,
+        distanceToNextM: progress?.distanceToNextM ?? null,
+        nextKind: progress?.next.kind ?? null,
+        now: Date.now(),
+      });
+      const changed = next.zoom !== guidanceZoomRef.current?.zoom;
+      guidanceZoomRef.current = next;
+      // Exploring the map: guidance carries on, the camera stays put
+      if (followModeRef.current !== "following") return;
+      if (first) {
+        zoomTarget.set({ zoom: next.zoom });
+        const position = locationSmoother.sample(Date.now());
+        if (position) followCamera.retarget(followTargetFor(position));
+        wakeFrameLoop();
+      } else if (changed) {
+        zoomTarget.set({ zoom: next.zoom });
+        wakeFrameLoop();
+      }
+    };
+    apply();
+    return navSession.subscribe(apply);
+  }, [navSession, startFollowing, stopOverview, followCamera, followTargetFor, locationSmoother, wakeFrameLoop, zoomTarget]);
+
+  // Navigation's overview: the whole route and the car, the same eased
+  // overview as a preview. Guidance carries on; Recenter comes back.
+  const showNavigationOverview = useCallback(() => {
+    const s = navSession.state;
+    if (!("route" in s) || !s.route) return;
+    const { width, height } = screenSizeRef.current;
+    if (!width || !height || !visualsLiveRef.current || !mapboxRef.current) return;
+    const here = s.progress?.snapped ?? userLocationRef.current;
+    const bounds = routesBounds([s.route], here ? [here, s.destination.coordinate] : [s.destination.coordinate]);
+    if (!bounds) return;
+    // Out of follow mode, quietly: the user asked for this view
+    if (followModeRef.current === "following") {
+      followModeRef.current = "free";
+      followCamera.leave();
+      setFollowMode("free");
+    }
+    animateOverview(
+      overviewPose(
+        bounds,
+        { width, height },
+        {
+          top: SEARCH_TOP + guidanceBannerHeightRef.current + (isPassengerMode ? 34 : 0) + OVERVIEW_MARGIN,
+          bottom: (previewBottomRef.current || height * 0.3) + OVERVIEW_MARGIN,
+          left: OVERVIEW_SIDE,
+          right: OVERVIEW_SIDE,
+        },
+      ),
+    );
+  }, [navSession, followCamera, animateOverview, SEARCH_TOP, isPassengerMode]);
+
   // A long press on the map previews a route to that point (a dropped pin).
   // Not while recording a drive; the camera is left to the preview as usual.
   const openRoutePreview = useOpenRoutePreview();
   const handleMapLongPress = useCallback(
     (coordinate: { latitude: number; longitude: number }) => {
-      if (isDrivingRef.current || !canPreviewRoutes(false)) return;
+      // Not while recording, nor while navigating (no accidental new routes)
+      if (isDrivingRef.current || !canPreviewRoutes(false) || navSession.phase !== "idle") return;
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
       openRoutePreview(coordinateDestination(coordinate, "pin")).catch((err) =>
         Alert.alert("Couldn't preview a route", describeError(err)),
       );
     },
-    [openRoutePreview],
+    [openRoutePreview, navSession],
   );
 
-  // Start, for now: the place in the phone's maps app, which ends the preview
+  // The place in the phone's maps app (the preview's second choice), which ends the preview
   const handleOpenRouteInMaps = useCallback(
     (destination: { coordinate: { latitude: number; longitude: number } }) => {
       void openDirections(destination.coordinate);
@@ -2007,6 +2146,12 @@ export default function MapScreen() {
       color: colors.mutedForeground,
       fontSize: 15,
     },
+    guidanceTop: {
+      position: "absolute",
+      left: 0,
+      right: 0,
+      zIndex: 20,
+    },
     bottomArea: {
       position: "absolute",
       left: 0,
@@ -2125,6 +2270,7 @@ export default function MapScreen() {
           trailColor={colors.primary}
           trailHead={subscribeLiveTrail}
           routePreview={routePreviewStore}
+          navigation={navSession}
           friendLayer={
             // Like every map write, only while the app is on screen
             showFriends && visuals.live && FriendMarkersMapbox ? <FriendMarkersMapbox /> : null
@@ -2255,8 +2401,8 @@ export default function MapScreen() {
         </View>
       )}
 
-      {/* ── GPS accuracy warning ── */}
-      {accuracyWarning && (
+      {/* ── GPS accuracy warning ── (navigating, the banner reports GPS) */}
+      {accuracyWarning && !navigating && (
         <View
           style={[
             styles.accuracyWarning,
@@ -2289,8 +2435,8 @@ export default function MapScreen() {
         />
       )}
 
-      {/* ── Search: the navigation entry point ── */}
-      {!isDriving && (
+      {/* ── Search: the navigation entry point ── (the banner's place while navigating) */}
+      {!isDriving && !navigating && (
         <View
           style={[styles.searchBarWrap, { top: SEARCH_TOP + passengerOffset }]}
         >
@@ -2312,7 +2458,7 @@ export default function MapScreen() {
       )}
 
       {/* ── Greeting and weather ── (the route overview needs the room) */}
-      {!isDriving && !previewing && (
+      {!isDriving && !previewing && !navigating && (
         <View
           style={[styles.welcomeRow, { top: WELCOME_TOP + passengerOffset }]}
         >
@@ -2357,7 +2503,7 @@ export default function MapScreen() {
       )}
 
       {/* ── Map controls: style, recenter, more ── */}
-      {!isDriving && !previewing && (
+      {!isDriving && !previewing && !navigating && (
         <View
           style={[styles.mapControls, { top: CONTROLS_TOP + passengerOffset }]}
         >
@@ -2412,7 +2558,7 @@ export default function MapScreen() {
       )}
 
       {/* ── Map style menu ── */}
-      {!isDriving && !previewing && showLayerPicker && (
+      {!isDriving && !previewing && !navigating && showLayerPicker && (
         <GlassSurface
           material="dense"
           style={[styles.menu, { top: CONTROLS_TOP + passengerOffset }]}
@@ -2495,7 +2641,10 @@ export default function MapScreen() {
           units={resolvedUnitSystem}
           style={{
             position: "absolute",
-            top: CONTROLS_TOP + passengerOffset,
+            // Below the guidance banner while navigating
+            top: navigating
+              ? SEARCH_TOP + passengerOffset + guidanceBannerHeight + 8
+              : CONTROLS_TOP + passengerOffset,
             left: 16,
             right: 72,
           }}
@@ -2503,7 +2652,7 @@ export default function MapScreen() {
       )}
 
       {/* ── More: orientation, saved places, passenger mode ── */}
-      {!isDriving && !previewing && showMore && (
+      {!isDriving && !previewing && !navigating && showMore && (
         <GlassSurface
           material="dense"
           style={[styles.menu, { top: CONTROLS_TOP + 120 + passengerOffset }]}
@@ -2592,7 +2741,25 @@ export default function MapScreen() {
           onZoomIn={handleZoomIn}
           onZoomOut={handleZoomOut}
           onMapAreaLayout={USING_MAPBOX ? setDriveMapAreaHeight : undefined}
+          // Navigating too: the banner is above, a slim strip below
+          topContentOffset={navigating ? guidanceBannerHeight + 8 : 0}
+          navigationStrip={
+            navigating ? <GuidanceStrip unitSystem={resolvedUnitSystem} /> : null
+          }
         />
+      )}
+
+      {/* ── Turn-by-turn banner (Phase 3), on top while navigating ── */}
+      {navigating && (
+        <View
+          pointerEvents="box-none"
+          style={[styles.guidanceTop, { top: SEARCH_TOP + passengerOffset }]}
+        >
+          <GuidanceBanner
+            unitSystem={resolvedUnitSystem}
+            onHeight={onGuidanceBannerHeight}
+          />
+        </View>
       )}
 
       {/* ── Route preview, in place of the drive actions ── */}
@@ -2614,8 +2781,30 @@ export default function MapScreen() {
         </AboveTabBar>
       )}
 
+      {/* ── Navigation (Phase 3), in place of the drive actions ── */}
+      {navigating && !previewing && !isDriving && (
+        <AboveTabBar
+          pointerEvents="box-none"
+          fallbackInset={TAB_BAR_FOOTPRINT}
+          style={styles.bottomArea}
+          onLayout={(e) => {
+            const h = e.nativeEvent.layout.height;
+            setIdleBottomHeight(h);
+            onPreviewBottomLayout(h);
+          }}
+        >
+          <GuidanceBar
+            unitSystem={resolvedUnitSystem}
+            following={followMode === "following"}
+            onRecenter={handleResumeFollowing}
+            onOverview={showNavigationOverview}
+            onRecord={handleStartDrive}
+          />
+        </AboveTabBar>
+      )}
+
       {/* ── Drive actions, just above the tab bar ── */}
-      {!isDriving && !previewing && (
+      {!isDriving && !previewing && !navigating && (
         <AboveTabBar
           pointerEvents="box-none"
           fallbackInset={TAB_BAR_FOOTPRINT}

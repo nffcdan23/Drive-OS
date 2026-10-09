@@ -62,7 +62,17 @@ interface Props {
   onZoomOut: () => void;
   /** Height of the open map area above the drive panel (layout only) */
   onMapAreaLayout?: (height: number) => void;
+  /**
+   * Navigating too (Phase 3): the turn-by-turn banner covers the top this
+   * far (the status row sits below it), and a slim navigation strip sits
+   * at the bottom of the map area, above the drive panel
+   */
+  topContentOffset?: number;
+  navigationStrip?: React.ReactNode;
 }
+
+/** Room the navigation strip takes above the drive panel */
+const STRIP_SPACE = 64;
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const ORANGE = palette.dark.primary;
@@ -292,6 +302,8 @@ export default function ActiveDriveOverlay({
   onZoomIn,
   onZoomOut,
   onMapAreaLayout,
+  topContentOffset = 0,
+  navigationStrip = null,
 }: Props) {
   const [saveConfirm, setSaveConfirm] = useState(false);
   const [showTelemetry, setShowTelemetry] = useState(false);
@@ -344,7 +356,7 @@ export default function ActiveDriveOverlay({
         <View
           style={[
             styles.statusRow,
-            { top: insets.top + 8, pointerEvents: "box-none" as any },
+            { top: insets.top + 8 + topContentOffset, pointerEvents: "box-none" as any },
           ]}
         >
           {/* Left: Drive in progress */}
@@ -369,7 +381,7 @@ export default function ActiveDriveOverlay({
           <View
             style={[
               styles.navCardWrap,
-              { top: insets.top + 8 + 60, pointerEvents: "box-none" as any },
+              { top: insets.top + 8 + 60 + topContentOffset, pointerEvents: "box-none" as any },
             ]}
           >
             <NavCard instruction={navInstruction} />
@@ -385,6 +397,7 @@ export default function ActiveDriveOverlay({
                 top:
                   insets.top +
                   8 +
+                  topContentOffset +
                   (driveMode === "navigation" && navInstruction ? 180 : 68),
               },
             ]}
@@ -395,7 +408,7 @@ export default function ActiveDriveOverlay({
         )}
 
         {/* Left map controls: locate + zoom */}
-        <View style={styles.mapControls}>
+        <View style={[styles.mapControls, navigationStrip ? { bottom: 24 + STRIP_SPACE } : null]}>
           <GlassButton
             style={styles.mapBtn}
             onPress={onLocateButton}
@@ -427,7 +440,7 @@ export default function ActiveDriveOverlay({
 
         {/* Resume following pill */}
         {followMode === "free" && (
-          <View style={styles.resumePill}>
+          <View style={[styles.resumePill, navigationStrip ? { bottom: 32 + STRIP_SPACE } : null]}>
             <GlassButton
               style={styles.resumePillInner}
               onPress={() => {
@@ -443,13 +456,17 @@ export default function ActiveDriveOverlay({
 
         {/* Passenger mode note */}
         {isPassengerMode && (
-          <View style={styles.passengerNote}>
+          <View style={[styles.passengerNote, navigationStrip ? { bottom: 80 + STRIP_SPACE } : null]}>
             <Ionicons name="walk-outline" size={12} color="#fff" />
             <Text style={styles.passengerNoteText}>
               Passenger Mode — not recording
             </Text>
           </View>
         )}
+        {/* Navigation (Phase 3): one slim row above the drive panel */}
+        {navigationStrip ? (
+          <View style={[styles.navStrip, { pointerEvents: "box-none" as any }]}>{navigationStrip}</View>
+        ) : null}
       </View>
 
       {/* ── Solid telemetry panel ── */}
@@ -754,6 +771,12 @@ const styles = StyleSheet.create({
     left: 12,
     bottom: 24,
     gap: 10,
+  },
+  navStrip: {
+    position: "absolute",
+    left: 12,
+    right: 12,
+    bottom: 10,
   },
   mapBtn: {
     width: 46,

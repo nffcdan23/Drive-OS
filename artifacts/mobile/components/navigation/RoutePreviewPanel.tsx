@@ -6,9 +6,12 @@
  * It reads the whole preview state itself (useRoutePreview), so route
  * choices and updates re-render this panel only, never the Drive screen.
  *
- * Start opens the place in the phone's maps app for now: Derwent's own
- * turn-by-turn guidance comes in a later phase. Routes are only ever fetched
- * when the user taps (Update Route, Try Again), never on their own.
+ * Start Navigation (Phase 3) turns the chosen route into Derwent's own
+ * turn-by-turn guidance. Opening the place in the phone's maps app stays as
+ * a second choice, except for a Search Box result, which Mapbox's terms
+ * keep to Mapbox maps. Routes are only ever fetched when the user taps
+ * (Update Route, Try Again, or Start with an out-of-date route), never on
+ * their own.
  *
  * The bookmark saves the destination as a place (Phase 2B): shown filled when
  * it's already saved, and not at all for a Search Box result, which Mapbox's
@@ -17,6 +20,7 @@
 import React, { memo, useEffect, useState } from "react";
 import {
   ActivityIndicator,
+  Alert,
   Platform,
   StyleSheet,
   Text,
@@ -33,8 +37,12 @@ import { saveability } from "@/lib/navigation/places";
 import {
   useRoutePreview,
   useRoutePreviewStore,
+  useStartNavigation,
   useUpdateRoutePreview,
 } from "@/context/NavigationContext";
+import { canNavigate } from "@/lib/navigation/startNavigation";
+import { canStoreDestination } from "@/lib/navigation/model";
+import { describeError } from "@/lib/backend/http";
 import {
   arrivalTime,
   formatClock,
@@ -120,6 +128,8 @@ export function RoutePreviewPanel({
   const state = useRoutePreview();
   const store = useRoutePreviewStore();
   const update = useUpdateRoutePreview();
+  const startNavigation = useStartNavigation();
+  const [starting, setStarting] = useState(false);
   const now = useMinuteClock();
   const [updateFailed, setUpdateFailed] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -131,6 +141,12 @@ export function RoutePreviewPanel({
   if (state.phase === "idle") return null;
   const { destination } = state;
   const save = saveability(places, destination);
+  const selectedRoute =
+    state.phase === "preview" ? state.routes.find((r) => r.index === state.selectedIndex) ?? state.routes[0] : null;
+  // Derwent guides along the route itself when it can; the phone's maps app
+  // is the other way, never for a Search Box result (Mapbox's terms)
+  const navigable = state.phase === "preview" && canNavigate(selectedRoute);
+  const handOff = canStoreDestination(destination);
 
   const requestUpdate = () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
@@ -243,21 +259,61 @@ export function RoutePreviewPanel({
         >
           <Text style={[styles.cancelText, { color: colors.foreground }]}>Cancel</Text>
         </GlassButton>
-        <GlassButton
-          material="accent"
-          accessibilityLabel={`Start: open ${destination.name} in ${MAPS_APP}`}
-          style={styles.start}
+        {navigable ? (
+          <GlassButton
+            material="accent"
+            accessibilityLabel={`Start navigation to ${destination.name}`}
+            accessibilityState={{ disabled: starting, busy: starting }}
+            disabled={starting}
+            style={styles.start}
+            onPress={() => {
+              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+              setStarting(true);
+              startNavigation()
+                .catch((err: unknown) => Alert.alert("Couldn't start navigation", describeError(err)))
+                .finally(() => setStarting(false));
+            }}
+          >
+            {starting ? (
+              <ActivityIndicator color={colors.primaryForeground} />
+            ) : (
+              <Ionicons name="navigate" size={20} color={colors.primaryForeground} />
+            )}
+            <Text numberOfLines={1} style={[styles.startText, { color: colors.primaryForeground }]}>
+              Start Navigation
+            </Text>
+          </GlassButton>
+        ) : handOff ? (
+          <GlassButton
+            material="accent"
+            accessibilityLabel={`Open ${destination.name} in ${MAPS_APP}`}
+            style={styles.start}
+            onPress={() => {
+              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+              onOpenInMaps(destination);
+            }}
+          >
+            <Ionicons name="open-outline" size={20} color={colors.primaryForeground} />
+            <Text numberOfLines={1} style={[styles.startText, { color: colors.primaryForeground }]}>
+              Open in {MAPS_APP}
+            </Text>
+          </GlassButton>
+        ) : null}
+      </View>
+      {navigable && handOff ? (
+        <TouchableOpacity
+          accessibilityRole="button"
+          accessibilityLabel={`Open ${destination.name} in ${MAPS_APP} instead`}
           onPress={() => {
-            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+            Haptics.selectionAsync();
             onOpenInMaps(destination);
           }}
+          style={styles.handOff}
+          hitSlop={6}
         >
-          <Ionicons name="navigate" size={20} color={colors.primaryForeground} />
-          <Text numberOfLines={1} style={[styles.startText, { color: colors.primaryForeground }]}>
-            Open in {MAPS_APP}
-          </Text>
-        </GlassButton>
-      </View>
+          <Text style={[styles.handOffText, { color: colors.mutedForeground }]}>Open in {MAPS_APP} instead</Text>
+        </TouchableOpacity>
+      ) : null}
       <Text style={[styles.notice, { color: colors.mutedForeground }]}>{ROAD_SAFETY_NOTICE}</Text>
       <SavePlaceSheet
         visible={saving && save.kind === "can_save"}
@@ -304,6 +360,8 @@ const styles = StyleSheet.create({
   staleRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 },
   staleText: { fontSize: 13, flexShrink: 1 },
   actions: { flexDirection: "row", gap: 10, marginTop: 2 },
+  handOff: { alignItems: "center", paddingVertical: 2 },
+  handOffText: { fontSize: 13, fontWeight: "600" },
   start: {
     flex: 2,
     height: 52,

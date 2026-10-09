@@ -33,3 +33,9 @@ export function formatVia(summary: string): string | null {
   const s = summary.trim();
   return s ? `via ${s}` : null;
 }
+
+/** A guidance distance, sat-nav style (lib/units does the converting) */
+export { formatGuidanceDistance } from '../units';
+
+/** Close enough to the manoeuvre (m) to say "Now" instead of a distance */
+export const NOW_WITHIN_M = 15;
