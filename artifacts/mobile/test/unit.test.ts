@@ -2838,7 +2838,7 @@ test('the Mapbox Drive map draws the live head from the same position as its puc
   // One head update per frame, for either map, from the very `position`
   // handed to the puck (and the Apple marker), after both
   const loop = screen.slice(screen.indexOf('const position = locationSmoother.sample(now);'));
-  const puck = loop.indexOf('mapboxRef.current?.setMarker(position)');
+  const puck = loop.indexOf('mapboxRef.current?.setMarker(position, drawnHeadingRef.current)');
   const marker = loop.indexOf('markerRef.current?.setCoordinates(position)');
   const update = loop.search(/liveTrail\.update\(\s*position,/);
   assert.ok(puck > 0 && marker > puck && update > marker, 'head not updated from the puck position');
@@ -3286,10 +3286,11 @@ test('the Drive screen turns one arrow, on either map, against the bearing writt
   const code = src.replace(/\/\/.*$/gm, '');
   const mapCode = map.replace(/\/\/.*$/gm, '').replace(/\{\/\*[\s\S]*?\*\/\}/g, '');
   // Mapbox's own puck (which re-animates each heading over 0.3 s and each
-  // position over 1.1 s) is gone; Derwent's arrow is a view annotation
+  // position over 1.1 s) is gone; on Mapbox the arrow lies flat on the map
+  // (see the flat-arrow tests); the screen-space arrow is Apple Maps' only
   assert.ok(!/LocationPuck|CustomLocationProvider|puckBearing/.test(mapCode));
-  assert.ok(/<MarkerView[\s\S]*\{children\}[\s\S]*<\/MarkerView>/.test(mapCode));
-  assert.ok(/marker=\{mapboxArrow\}/.test(code) && /<LocationArrow\s+rotation=\{arrowRotation\}/.test(code));
+  assert.ok(!/<MarkerView/.test(mapCode));
+  assert.ok(!/marker=\{/.test(code) && /<LocationArrow\s+rotation=\{rotationValue\}/.test(code));
   // The frame loop: camera bearing recorded as written, then the arrow turned
   // against it, for both maps (no provider guard around it)
   const loop = code.slice(code.indexOf('frameLoopRef.current = () => {'), code.indexOf('const settled ='));
@@ -6103,7 +6104,7 @@ test('the crash fixes are wired in: no per-frame Mapbox command, nothing visual 
   assert.match(map, /<Camera ref=\{cameraRef\} defaultSettings=\{defaultSettings\} \{\.\.\.stop\} \/>/);
   assert.match(map, /useLayoutEffect\(\(\) => \{\s*const applied = appliedRef\.current;/);
   assert.match(map, /if \(live\) cameraWriter\.resume\(\);\s*else cameraWriter\.pause\(\);/);
-  assert.match(map, /if \(liveRef\.current\) markerRef\.current\?\.set\(position\);/);
+  assert.match(map, /if \(liveRef\.current\) markerRef\.current\?\.set\(pose\);/);
   assert.match(map, /trailFeatureCollection\(displayTrail\(trail\)\)/);
   // The Drive screen: the frame loop and everything it drives only while live
   assert.match(screen, /if \(frameIdRef\.current != null \|\| !visualsLiveRef\.current\) return;/);
@@ -6461,4 +6462,101 @@ test('friend map: 20 sharers build quickly and stay one marker each', () => {
   }
   const ms = performance.now() - t0;
   assert.ok(ms < 250, `600 updates and 30 rebuilds of 20 markers took ${ms.toFixed(1)} ms`);
+});
+
+// ─── Mapbox location arrow: flat on the map; never the native puck ─────────
+//
+// On Mapbox the Derwent arrow is a symbol layer pitched and turned with the
+// map (the first Mapbox build's flat look, with its artwork), not a
+// screen-upright view annotation (which looked stood up on the tilted map).
+// Mapbox's location component is never switched on: its puck shows the
+// default blue puck until a custom image has loaded.
+import { LOCATION_ARROW_SYMBOL, locationArrowFeature } from '@/lib/mapbox';
+
+test('the Mapbox arrow lies flat on the map and turns with it', () => {
+  assert.equal(LOCATION_ARROW_SYMBOL.iconPitchAlignment, 'map');
+  assert.equal(LOCATION_ARROW_SYMBOL.iconRotationAlignment, 'map');
+  assert.deepEqual(LOCATION_ARROW_SYMBOL.iconRotate, ['get', 'heading']);
+  assert.equal(LOCATION_ARROW_SYMBOL.iconAllowOverlap, true);
+  assert.equal(LOCATION_ARROW_SYMBOL.iconIgnorePlacement, true);
+  // Heading from north, as the feature's own property; position as [lng, lat]
+  const f = locationArrowFeature({ latitude: 53.2, longitude: -0.54 }, 87.5);
+  assert.deepEqual(f.features[0]!.geometry.coordinates, [-0.54, 53.2]);
+  assert.equal(f.features[0]!.properties.heading, 87.5);
+  assert.equal(locationArrowFeature({ latitude: 1, longitude: 2 }, -90).features[0]!.properties.heading, 270);
+  assert.equal(locationArrowFeature({ latitude: 1, longitude: 2 }, 725).features[0]!.properties.heading, 5);
+  assert.equal(locationArrowFeature({ latitude: 1, longitude: 2 }, NaN).features[0]!.properties.heading, 0);
+  // No position: nothing drawn (never a placeholder spot)
+  assert.equal(locationArrowFeature(null, 10).features.length, 0);
+  assert.equal(locationArrowFeature({ latitude: NaN, longitude: 2 }, 10).features.length, 0);
+});
+
+test('the Mapbox Drive map draws the arrow as flat symbol layers from the drawn heading', () => {
+  const read = (rel: string) => readFileSync(toPath(new URL(rel, import.meta.url)), 'utf8');
+  const strip = (t: string) => t.replace(/\/\/.*$/gm, '').replace(/\{\/\*[\s\S]*?\*\/\}/g, '');
+  const map = strip(read('../components/MapboxDriveMap.tsx'));
+  const screen = strip(read('../app/(tabs)/(drive)/index.tsx'));
+  // The first Mapbox build's artwork, registered with the map
+  assert.match(map, /<Images images=\{ARROW_IMAGES\} \/>/);
+  assert.match(map, /"derwent-location-arrow": require\("@\/assets\/images\/map\/puck-arrow\.png"\)/);
+  assert.match(map, /"derwent-location-arrow-shadow": require\("@\/assets\/images\/map\/puck-shadow\.png"\)/);
+  // Shadow then arrow, both with the flat style, from the arrow's own source
+  const feeder = map.slice(map.indexOf('const MarkerFeeder'), map.indexOf('const FollowCamera'));
+  assert.match(feeder, /locationArrowFeature\(pose\.position, pose\.heading\)/);
+  const source = feeder.search(/<ShapeSource id="derwent-location-arrow"/);
+  const shadow = feeder.search(/<SymbolLayer\s+id="derwent-location-arrow-shadow"/);
+  const arrow = feeder.search(/<SymbolLayer\s+id="derwent-location-arrow"\s/);
+  assert.ok(source >= 0 && shadow > source);
+  assert.ok(shadow > 0 && arrow > shadow);
+  assert.equal(feeder.match(/\.\.\.LOCATION_ARROW_SYMBOL/g)?.length, 2);
+  // Mounted after the trail and its head, so it draws above both
+  const body = map.slice(map.search(/<MapView\s+ref=/));
+  assert.ok(body.indexOf('<MarkerFeeder') > body.indexOf('id="derwent-drive-trail"'));
+  assert.ok(body.indexOf('<MarkerFeeder') > body.indexOf('<TrailHeadLayers'));
+  // Turned by the heading the frame loop draws (from north), not against the
+  // camera: re-sent when either the position or the heading moves
+  assert.match(screen, /moved \|\| mapboxArrowHeadingRef\.current !== drawnHeadingRef\.current/);
+  assert.match(screen, /mapboxRef\.current\?\.setMarker\(position, drawnHeadingRef\.current\)/);
+  assert.match(screen, /mapboxRef\.current\?\.setMarker\(coord, drawnHeadingRef\.current\)/);
+  // No screen-space perspective faking on Mapbox: the tilted LocationArrow is
+  // only inside the Apple Maps marker
+  assert.equal(screen.match(/<LocationArrow\b/g)?.length, 1);
+  assert.ok(screen.indexOf('<LocationArrow') > screen.indexOf('const UserMarker'));
+  assert.ok(screen.indexOf('<LocationArrow') < screen.indexOf('const LiveTrailHeadLines'));
+});
+
+test('nothing on the Drive screen can show a native location puck', () => {
+  const read = (rel: string) => readFileSync(toPath(new URL(rel, import.meta.url)), 'utf8');
+  const strip = (t: string) => t.replace(/\/\/.*$/gm, '').replace(/\{\/\*[\s\S]*?\*\/\}/g, '').replace(/\/\*[\s\S]*?\*\//g, '');
+  // Every app file that uses Mapbox
+  const files: string[] = [];
+  const walk = (dir: string) => {
+    for (const name of readdirSync(join(MOBILE, dir))) {
+      const rel = join(dir, name);
+      if (statSync(join(MOBILE, rel)).isDirectory()) walk(rel);
+      else if (/\.(tsx?|jsx?)$/.test(name)) files.push(rel);
+    }
+  };
+  for (const dir of ['app', 'components', 'lib', 'hooks', 'context']) walk(dir);
+  const mapboxFiles = files.filter((f) => readFileSync(join(MOBILE, f), 'utf8').includes('@rnmapbox/maps'));
+  assert.ok(mapboxFiles.some((f) => f.endsWith('MapboxDriveMap.tsx')));
+  for (const f of mapboxFiles) {
+    const code = strip(readFileSync(join(MOBILE, f), 'utf8'));
+    // Mapbox's location component: the puck (blue by default), the user
+    // location layer, the heading indicator, a location provider, the
+    // viewport's follow-puck state, and camera tracking of the user
+    assert.ok(
+      !/\b(LocationPuck|UserLocation|NativeUserLocation|CustomLocationProvider|HeadingIndicator|Viewport|followUserLocation|followUserMode|puckBearing|showUserLocation|showUserHeading)\b/.test(code),
+      `${f} could switch on Mapbox's location puck`,
+    );
+  }
+  // The Apple Maps fallback: its own blue dot off, no user tracking
+  const screen = strip(read('../app/(tabs)/(drive)/index.tsx'));
+  assert.equal(screen.match(/showsUserLocation=\{false\}/g)?.length, 1);
+  assert.ok(!/showsUserLocation(?!=\{false\})|followsUserLocation|showsMyLocationButton|userTrackingMode/.test(screen));
+  // And nowhere else in the app
+  for (const f of files) {
+    if (f.endsWith(join('(drive)', 'index.tsx'))) continue;
+    assert.ok(!/showsUserLocation|followsUserLocation/.test(strip(readFileSync(join(MOBILE, f), 'utf8'))), `${f} shows a location dot`);
+  }
 });

@@ -1,17 +1,23 @@
 // The Drive screen's map on Mapbox: the published Derwent style, the follow
 // camera written by the Drive screen's frame loop, Derwent's location arrow
-// (the same one the Apple map draws) at the smoothed position, and the
-// recorded drive trail as line layers, continued to the arrow by the live
-// trail head (lib/liveTrail.ts) drawn from the same smoothed position.
+// at the smoothed position and heading, and the recorded drive trail as line
+// layers, continued to the arrow by the live trail head (lib/liveTrail.ts)
+// drawn from the same smoothed position.
 //
-// The arrow is a view annotation (MarkerView), not Mapbox's location puck.
-// The puck re-animates every update it's given, heading over 0.3 s and
-// position over 1.1 s (LocationManager's ValueInterpolators in the Mapbox iOS
-// SDK); fed a new value every frame, that made it a lag filter on top of
-// Derwent's own smoothing, so it turned visibly behind the map and sat behind
-// where the camera and trail put the user.  The arrow is turned by the Drive
-// screen from the heading and the camera bearing it writes in the same frame,
-// so in heading-up follow it stays still on screen as the map turns.
+// The arrow is a symbol layer lying flat on the map (LOCATION_ARROW_SYMBOL in
+// lib/mapbox.ts): the Derwent arrow artwork, pitched and turned with the map,
+// so it sits on the road at any tilt.  It is not a view annotation: those are
+// screen-upright views, which is why the arrow used to look stood up on the
+// tilted map.  Nor is it Mapbox's location puck, for two reasons:
+//  - the puck re-animates every update it's given, heading over 0.3 s and
+//    position over 1.1 s (LocationManager's ValueInterpolators in the Mapbox
+//    iOS SDK); fed a new value every frame, that made it a lag filter on top
+//    of Derwent's own smoothing;
+//  - until its custom image has been fetched the puck draws Mapbox's default
+//    blue puck (RNMBXNativeUserLocation: no images → Puck2DConfiguration
+//    .makeDefault), on first mount and after a style change.
+// Nothing on this map turns on Mapbox's location component (no LocationPuck,
+// UserLocation or followUserLocation), so the blue puck can never show.
 //
 // The follow camera is written as the Camera's own props (its `stop`), not
 // with Camera.setCamera(): setCamera is a promise-returning native command
@@ -41,10 +47,11 @@ import React, {
 import { StyleSheet, View, type StyleProp, type ViewStyle } from "react-native";
 import Mapbox, {
   Camera,
+  Images,
   LineLayer,
   MapView,
-  MarkerView,
   ShapeSource,
+  SymbolLayer,
   type MapState,
 } from "@rnmapbox/maps";
 import type {
@@ -55,6 +62,8 @@ import type {
 import {
   clampMapboxZoom,
   displayTrail,
+  LOCATION_ARROW_SYMBOL,
+  locationArrowFeature,
   mapboxFollowCamera,
   reportedPoseFromMapbox,
   trailFeatureCollection,
@@ -70,8 +79,8 @@ export interface MapboxDriveMapHandle {
   getZoom(): Promise<number>;
   /** Animates to a zoom the user picked (outside follow mode) */
   easeToZoom(zoom: number): void;
-  /** Moves the location arrow to the smoothed position */
-  setMarker(position: LatLng): void;
+  /** Moves the location arrow to the smoothed position and heading */
+  setMarker(position: LatLng, heading: number): void;
   /**
    * The app is on screen (true) or not (false).  Off screen nothing is
    * written to the map: no camera, no arrow; the waiting camera pose is
@@ -91,8 +100,6 @@ export interface MapboxDriveMapProps {
   initialCenter: LatLng;
   /** Shows the location arrow (once there is a position) */
   showMarker: boolean;
-  /** The location arrow; the Drive screen turns and tilts it */
-  marker: ReactElement;
   /** The recorded drive, drawn as the cyan trail; null when not driving */
   trail: readonly LatLng[] | null;
   trailColor: string;
@@ -102,8 +109,8 @@ export interface MapboxDriveMapProps {
    */
   trailHead?: TrailHeadSubscribe;
   /**
-   * Friends' live positions (FriendMarkersMapbox): drawn beneath the user's
-   * own arrow, and never touching the camera
+   * Friends' live positions (FriendMarkersMapbox), never touching the
+   * camera.  View annotations, so they sit above the map's layers
    */
   friendLayer?: ReactElement | null;
   /** Logo and attribution sit this far above the bottom edge */
@@ -111,7 +118,7 @@ export interface MapboxDriveMapProps {
   ornamentLeft: number;
   /** The user moved the map with a gesture (pan, pinch, rotate or tilt) */
   onUserGesture: () => void;
-  /** The camera changed, for any reason (the arrow turns against it) */
+  /** The camera changed, for any reason */
   onCameraChange?: () => void;
   onTouchStart: () => void;
   onTouchEnd: () => void;
@@ -120,6 +127,12 @@ export interface MapboxDriveMapProps {
 
 // The recorded drive: a soft glow under the cyan line, as on the old map
 const TRAIL_GLOW = "rgba(0,207,232,0.28)";
+
+// The arrow's artwork, the same images the first Mapbox build's arrow used
+const ARROW_IMAGES = {
+  "derwent-location-arrow": require("@/assets/images/map/puck-arrow.png"),
+  "derwent-location-arrow-shadow": require("@/assets/images/map/puck-shadow.png"),
+};
 
 let tokenSet: string | null = null;
 function useAccessToken(token: string) {
@@ -130,47 +143,55 @@ function useAccessToken(token: string) {
 }
 
 /**
- * Places the location arrow.  Its own small component, so moving it every
- * frame re-renders only this and never the map or its layers.  Mapbox moves a
- * view annotation with the map in the same frame it draws the map; the arrow
- * is turned (and tilted) by the Drive screen.
+ * The location arrow, flat on the map.  Its own small component with its own
+ * state, so moving or turning it every frame re-renders only this source and
+ * replaces its one point, never the map or its other layers.  The shadow is
+ * drawn first, beneath the arrow.
  */
+type ArrowPose = { position: LatLng; heading: number };
 interface MarkerFeederHandle {
-  set(position: LatLng): void;
+  set(pose: ArrowPose): void;
 }
-const toLngLat = (p: LatLng): [number, number] => [p.longitude, p.latitude];
 const MarkerFeeder = memo(
   forwardRef<
     MarkerFeederHandle,
-    {
-      latest: React.RefObject<LatLng | null>;
-      fallback: LatLng;
-      children: ReactElement;
-    }
-  >(function MarkerFeeder({ latest, fallback, children }, ref) {
-    const [coordinate, setCoordinate] = useState(() =>
-      toLngLat(latest.current ?? fallback),
+    { latest: React.RefObject<ArrowPose | null>; fallback: LatLng }
+  >(function MarkerFeeder({ latest, fallback }, ref) {
+    const [pose, setPose] = useState<ArrowPose>(
+      () => latest.current ?? { position: fallback, heading: 0 },
     );
-    const set = useCallback((position: LatLng) => {
-      setCoordinate((prev) =>
-        prev[0] === position.longitude && prev[1] === position.latitude
+    const set = useCallback((next: ArrowPose) => {
+      setPose((prev) =>
+        prev.position.latitude === next.position.latitude &&
+        prev.position.longitude === next.position.longitude &&
+        prev.heading === next.heading
           ? prev
-          : toLngLat(position),
+          : next,
       );
     }, []);
     useImperativeHandle(ref, () => ({ set }), [set]);
-    // A position pushed between this render and mounting is picked up here
+    // A pose pushed between this render and mounting is picked up here
     useEffect(() => {
       if (latest.current) set(latest.current);
     }, [latest, set]);
+    const shape = useMemo(
+      () => locationArrowFeature(pose.position, pose.heading),
+      [pose],
+    );
     return (
-      <MarkerView
-        coordinate={coordinate}
-        anchor={{ x: 0.5, y: 0.5 }}
-        allowOverlap
-      >
-        {children}
-      </MarkerView>
+      <ShapeSource id="derwent-location-arrow" shape={shape}>
+        <SymbolLayer
+          id="derwent-location-arrow-shadow"
+          style={{
+            ...LOCATION_ARROW_SYMBOL,
+            iconImage: "derwent-location-arrow-shadow",
+          }}
+        />
+        <SymbolLayer
+          id="derwent-location-arrow"
+          style={{ ...LOCATION_ARROW_SYMBOL, iconImage: "derwent-location-arrow" }}
+        />
+      </ShapeSource>
     );
   }),
 );
@@ -272,7 +293,6 @@ const MapboxDriveMap = forwardRef<MapboxDriveMapHandle, MapboxDriveMapProps>(
       styleURL,
       initialCenter,
       showMarker,
-      marker,
       trail,
       trailColor,
       trailHead,
@@ -293,7 +313,7 @@ const MapboxDriveMap = forwardRef<MapboxDriveMapHandle, MapboxDriveMapProps>(
     const followCameraRef = useRef<FollowCameraHandle>(null);
     const markerRef = useRef<MarkerFeederHandle>(null);
     const lastCameraRef = useRef<ReportedPose | null>(null);
-    const lastMarkerRef = useRef<LatLng | null>(null);
+    const lastMarkerRef = useRef<ArrowPose | null>(null);
     const liveRef = useRef(true);
     // One camera write in flight at most, only the newest pose waiting
     const [cameraWriter] = useState(
@@ -333,9 +353,10 @@ const MapboxDriveMap = forwardRef<MapboxDriveMapHandle, MapboxDriveMapProps>(
             animationMode: "easeTo",
           });
         },
-        setMarker(position) {
-          lastMarkerRef.current = position;
-          if (liveRef.current) markerRef.current?.set(position);
+        setMarker(position, heading) {
+          const pose = { position, heading };
+          lastMarkerRef.current = pose;
+          if (liveRef.current) markerRef.current?.set(pose);
         },
         setVisualsLive(live) {
           liveRef.current = live;
@@ -405,8 +426,9 @@ const MapboxDriveMap = forwardRef<MapboxDriveMapHandle, MapboxDriveMapProps>(
             cameraRef={cameraRef}
             defaultSettings={initialCamera}
           />
+          <Images images={ARROW_IMAGES} />
           {/* Mounted before the trail: the head draws beneath it (and the
-              arrow, a view annotation, sits above every layer) */}
+              arrow, mounted last, draws above both) */}
           {trailHead && (
             <TrailHeadLayers subscribe={trailHead} color={trailColor} />
           )}
@@ -438,9 +460,7 @@ const MapboxDriveMap = forwardRef<MapboxDriveMapHandle, MapboxDriveMapProps>(
               ref={markerRef}
               latest={lastMarkerRef}
               fallback={initialCenter}
-            >
-              {marker}
-            </MarkerFeeder>
+            />
           )}
         </MapView>
       </View>

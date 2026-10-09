@@ -592,19 +592,9 @@ export default function MapScreen() {
       };
     })(),
   ).current;
-  // The same arrow on the Mapbox map (a view annotation there), turned and
-  // tilted by the same native-driven values
-  const mapboxArrow = useMemo(
-    () => (
-      <LocationArrow
-        rotation={arrowRotation}
-        scaleY={arrowPerspective.scaleY}
-        edgeLift={arrowPerspective.edgeLift}
-        shadowLift={arrowPerspective.shadowLift}
-      />
-    ),
-    [arrowRotation, arrowPerspective],
-  );
+  // (The Mapbox map draws its own arrow, flat on the map: MapboxDriveMap.)
+  // The heading last given to it
+  const mapboxArrowHeadingRef = useRef<number | null>(null);
 
   // ── Drive state ──
   const [driveSeconds, setDriveSeconds] = useState(0);
@@ -874,17 +864,23 @@ export default function MapScreen() {
     const position = locationSmoother.sample(now);
     let cameraSettled = true;
     if (position) {
-      // ── Marker ── (skipped when only the heading is moving).  The same
-      // arrow on either map; it's turned below, once the camera is written.
+      // ── Marker ── (skipped when nothing it shows has moved).  On Apple
+      // Maps it's turned below, once the camera is written; on Mapbox it lies
+      // flat on the map and takes the drawn heading itself (from north).
       const drawn = markerDrawnAtRef.current;
-      if (
+      const moved =
         !drawn ||
         drawn.latitude !== position.latitude ||
-        drawn.longitude !== position.longitude
-      ) {
+        drawn.longitude !== position.longitude;
+      if (USING_MAPBOX) {
+        if (moved || mapboxArrowHeadingRef.current !== drawnHeadingRef.current) {
+          markerDrawnAtRef.current = position;
+          mapboxArrowHeadingRef.current = drawnHeadingRef.current;
+          mapboxRef.current?.setMarker(position, drawnHeadingRef.current);
+        }
+      } else if (moved) {
         markerDrawnAtRef.current = position;
-        if (USING_MAPBOX) mapboxRef.current?.setMarker(position);
-        else markerRef.current?.setCoordinates(position);
+        markerRef.current?.setCoordinates(position);
       }
     }
     // ── Live trail head ── on either map, ending exactly where the marker or
@@ -1116,7 +1112,8 @@ export default function MapScreen() {
         markerInitialCoordRef.current = coord;
         // Off screen, the frame loop places it on returning
         if (visualsLiveRef.current) {
-          mapboxRef.current?.setMarker(coord);
+          mapboxRef.current?.setMarker(coord, drawnHeadingRef.current);
+          mapboxArrowHeadingRef.current = drawnHeadingRef.current;
           markerDrawnAtRef.current = coord;
         }
       }
@@ -1904,7 +1901,6 @@ export default function MapScreen() {
           styleURL={mapboxStyleFor(mapType, DRIVE_MAPBOX.styleUrl)}
           initialCenter={userLocation ?? CONFIG.DEMO_REGION}
           showMarker={userLocation != null}
-          marker={mapboxArrow}
           trail={driveTrail}
           trailColor={colors.primary}
           trailHead={subscribeLiveTrail}

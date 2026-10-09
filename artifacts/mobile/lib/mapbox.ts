@@ -154,3 +154,49 @@ export function displayTrail(coordinates: readonly LatLng[] | null | undefined):
   for (let i = 0; i < room; i++) older.push(coordinates[Math.floor(i * step)]!);
   return [...older, ...coordinates.slice(recentFrom)];
 }
+
+/**
+ * The location arrow's look on the Mapbox map: the Derwent arrow artwork
+ * (assets/images/map/puck-arrow.png, over its soft shadow) drawn as a symbol
+ * lying flat on the map, the way the first Mapbox build drew it.  Pitch and
+ * rotation are both aligned to the map, so the arrow is foreshortened with the
+ * road at any tilt and turned by its heading from north, as part of the map
+ * (never a screen-upright view).  Overlap and placement are ignored, so labels
+ * never hide it.
+ */
+export const LOCATION_ARROW_SYMBOL = {
+  iconPitchAlignment: "map",
+  iconRotationAlignment: "map",
+  iconRotate: ["get", "heading"],
+  iconAnchor: "center",
+  iconAllowOverlap: true,
+  iconIgnorePlacement: true,
+  iconEmissiveStrength: 1,
+} as const;
+
+export interface LocationArrowFeature {
+  type: "FeatureCollection";
+  features: Array<{
+    type: "Feature";
+    properties: { heading: number };
+    geometry: { type: "Point"; coordinates: [number, number] };
+  }>;
+}
+
+/** The arrow at a position, turned to a heading (degrees clockwise from north) */
+export function locationArrowFeature(position: LatLng | null, heading: number): LocationArrowFeature {
+  if (!position || !Number.isFinite(position.latitude) || !Number.isFinite(position.longitude)) {
+    return { type: "FeatureCollection", features: [] };
+  }
+  const h = Number.isFinite(heading) ? ((heading % 360) + 360) % 360 : 0;
+  return {
+    type: "FeatureCollection",
+    features: [
+      {
+        type: "Feature",
+        properties: { heading: h },
+        geometry: { type: "Point", coordinates: [position.longitude, position.latitude] },
+      },
+    ],
+  };
+}
