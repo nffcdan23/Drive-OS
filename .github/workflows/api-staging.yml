@@ -345,6 +345,9 @@ jobs:
           SIGNUP_TEST_EMAIL_DOMAIN: ${{ vars.STAGING_SIGNUP_EMAIL_DOMAIN }}
           # Only compared against lookup responses (never printed or sent anywhere).
           LEAK_CHECK_DVLA_KEY: ${{ secrets.DVLA_STAGING_API_KEY }}
+          # Likewise only compared against route responses; its presence also
+          # means this deploy must return a real Mapbox route
+          LEAK_CHECK_MAPBOX_TOKEN: ${{ secrets.MAPBOX_DIRECTIONS_STAGING_TOKEN }}
         run: pnpm --filter @workspace/mobile run test:staging
 
       - name: The DVLA key is not in the staging logs
