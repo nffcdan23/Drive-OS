@@ -14,7 +14,7 @@
  */
 import { msToKmh } from '../units';
 import { bearingDeg, distanceM, turnDeg } from './geo';
-import type { Endpoints, RoutePointInput, ServerJourney } from './endpoints';
+import type { Endpoints, RoutePointInput, ServerJourney, Visibility } from './endpoints';
 import { ApiError } from './http';
 import { readJson, readJsonChecked, userKey, writeJson, type CheckedRead, type KeyValueStore } from './storage';
 
@@ -91,6 +91,8 @@ export interface JourneyRecord {
   vehicleId: string | null;
   vehicleSnapshot: Record<string, unknown> | null;
   name: string | null;
+  /** Who can see the drive, when chosen before it finished uploading. */
+  visibility?: Visibility | null;
   points: RecordedPoint[];
   uploadedCount: number;
   serverId: string | null;
@@ -304,6 +306,7 @@ function mergeUploadState(kept: JourneyRecord, other: JourneyRecord): JourneyRec
     // server ignores ones it already has)
     uploadedCount: kept.serverId ? kept.uploadedCount : 0,
     name: kept.name ?? other.name,
+    visibility: kept.visibility ?? other.visibility ?? null,
     endedAt: kept.endedAt ?? other.endedAt,
   };
 }
@@ -387,5 +390,6 @@ export async function syncJourneyRecord(
     endedAt,
     distanceKm: Math.round(rec.clientDistanceKm * 1000) / 1000,
     ...(rec.name ? { name: rec.name } : {}),
+    ...(rec.visibility ? { visibility: rec.visibility } : {}),
   });
 }

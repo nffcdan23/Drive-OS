@@ -256,10 +256,10 @@ class FakeServer {
       },
       listActiveJourneys: async () => { self.guard(); return self.journeys.filter((j) => j.status === 'active'); },
       getJourneyPoints: async (id: string) => { self.guard(); return [...(self.pointTimes.get(id) ?? [])].sort().map((recordedAt) => ({ recordedAt })); },
-      completeJourney: async (id: string, i: { endedAt: string; distanceKm: number; name?: string }) => {
+      completeJourney: async (id: string, i: { endedAt: string; distanceKm: number; name?: string; visibility?: string }) => {
         self.guard();
         const j = self.journeys.find((x) => x.id === id)!;
-        Object.assign(j, { name: i.name ?? j.name, status: 'completed', endedAt: i.endedAt, distanceKm: i.distanceKm, durationSeconds: 60, avgSpeedKmh: 0, topSpeedKmh: 0, xpEarned: 50, timezone: 'UTC', notes: '', visibility: 'private', journeyType: 'personal', vehicleId: null, categoryId: null, convoyId: null, vehicleSnapshot: null, publicRoutePolyline: null });
+        Object.assign(j, { name: i.name ?? j.name, status: 'completed', endedAt: i.endedAt, distanceKm: i.distanceKm, durationSeconds: 60, avgSpeedKmh: 0, topSpeedKmh: 0, xpEarned: 50, timezone: 'UTC', notes: '', visibility: i.visibility ?? 'private', journeyType: 'personal', vehicleId: null, categoryId: null, convoyId: null, vehicleSnapshot: null, publicRoutePolyline: null });
         return j;
       },
     };
@@ -633,6 +633,27 @@ test('renaming a drive while it uploads keeps the name; clearing a category is s
   await app.updateJourney(serverId, { categoryId: undefined });
   await app.outbox.flush();
   assert.deepEqual(server.journeyUpdates.at(-1), { id: serverId, fields: { categoryId: null } });
+});
+
+test('choosing who can see a drive while it uploads is sent when it completes; afterwards it is an update', async () => {
+  const server = new PhotoServer();
+  const clock = { t: Date.now() - 10 * 60_000 };
+  const app = photoSync(server, new MemoryStore(), clock);
+  server.offline = true;
+  await app.start();
+  await app.startDrive(null);
+  for (let s = 0; s < 30; s++) { clock.t += 2000; app.addFix({ latitude: 51 + s * 0.0005, longitude: 0, speedMs: 25, accuracyM: 5, timestamp: clock.t }); }
+  const j = await app.endDrive();
+  assert.ok(j!.id.startsWith('local:'), 'still uploading');
+  await app.updateJourney(j!.id, { privacy: 'friends' });
+  assert.equal(app.data.journeys.find((x) => x.id === j!.id)!.privacy, 'friends', 'shown at once');
+  server.offline = false;
+  await app.sync();
+  assert.equal(server.journeys[0]!.visibility, 'friends', 'sent with the completed drive');
+  const serverId = server.journeys[0]!.id;
+  await app.updateJourney(serverId, { privacy: 'public' });
+  await app.outbox.flush();
+  assert.deepEqual(server.journeyUpdates.at(-1), { id: serverId, fields: { visibility: 'public' } });
 });
 
 test('offline token refresh is reported as offline, not signed out', async () => {
@@ -6559,4 +6580,69 @@ test('nothing on the Drive screen can show a native location puck', () => {
     if (f.endsWith(join('(drive)', 'index.tsx'))) continue;
     assert.ok(!/showsUserLocation|followsUserLocation/.test(strip(readFileSync(join(MOBILE, f), 'utf8'))), `${f} shows a location dot`);
   }
+});
+
+// ─── Drive Complete ──────────────────────────────────────────────────────────
+
+import { routeBounds } from '@/lib/mapbox';
+
+test('the completed route is fitted by its own bounds; a drive that never moved still gets an area', () => {
+  assert.equal(routeBounds([]), null);
+  assert.equal(routeBounds(null), null);
+  const b = routeBounds([
+    { latitude: 54.6, longitude: -3.2 },
+    { latitude: 54.5, longitude: -3.0 },
+    { latitude: Number.NaN, longitude: 0 },
+  ])!;
+  assert.deepEqual(b, { ne: [-3.0, 54.6], sw: [-3.2, 54.5] });
+  const still = routeBounds([{ latitude: 54.6, longitude: -3.2 }])!;
+  assert.ok(still.ne[0] > still.sw[0] && still.ne[1] > still.sw[1]);
+  assert.ok(Math.abs(still.ne[1] - still.sw[1] - 0.002) < 1e-9);
+});
+
+test('Drive Complete: real data, one visibility of three, Save sends it, Discard confirms first', () => {
+  const read = (rel: string) => readFileSync(toPath(new URL(`../${rel}`, import.meta.url)), 'utf8');
+  const screen = read('app/drive-summary.tsx');
+  const view = read('components/driveComplete/DriveCompleteView.tsx');
+  const picker = read('components/driveComplete/VisibilityPicker.tsx');
+  const card = read('components/driveComplete/RouteMapCard.tsx');
+  // The drive is saved once, when the screen opens, as before
+  assert.equal(screen.match(/await endDrive\(\)/g)?.length, 1);
+  // The journey's own visibility values, and nothing else
+  assert.deepEqual([...picker.matchAll(/value: "(\w+)"/g)].map((m) => m[1]), ['private', 'friends', 'public']);
+  assert.ok(/accessibilityRole="radiogroup"/.test(picker) && /accessibilityRole="radio"/.test(picker));
+  // Save sends the choice with the journey; Discard deletes only after a confirmation
+  assert.ok(/updateJourney\(journey\.id, \{ privacy: visibility \}\)/.test(screen));
+  const discard = screen.slice(screen.indexOf('function handleDiscard'));
+  assert.ok(discard.indexOf('confirmDiscard(') < discard.indexOf('deleteJourney('), 'deletes only inside the confirmation');
+  assert.ok(/style: 'destructive', onPress: onConfirm/.test(screen));
+  // Exactly the four stats, from the drive (no sample figures)
+  assert.deepEqual([...view.matchAll(/label: '([^']+)'/g)].map((m) => m[1]), ['Distance', 'Duration', 'Avg. Speed', 'Max Speed']);
+  assert.ok(!/42\.7|1h 18m|32 mph|78 mph/.test(view + screen));
+  // The route is the recorded one, on the existing Mapbox setup (no second map library)
+  assert.ok(/routeCoordinates/.test(screen) && /DRIVE_MAPBOX/.test(card));
+  assert.ok(!/react-native-maps/.test(card + read('components/driveComplete/RouteMapMapbox.tsx')));
+});
+
+import { dayStreak, firstNameOf, levelProgress } from '@/lib/driveRewards';
+
+test('Drive Complete rewards: level progress from the profile, day streak from drives, real first name only', () => {
+  // 11,580 XP: 580 into level 12, 420 to go
+  assert.deepEqual(levelProgress(11580, 420), { fraction: 0.58, xp: 11580, nextLevelXp: 12000 });
+  assert.equal(levelProgress(0, 1000).fraction, 0);
+
+  const now = new Date(2026, 9, 9, 18, 0);
+  const at = (d: number, h = 9) => new Date(2026, 9, d, h, 0).toISOString();
+  assert.equal(dayStreak([at(9), at(8), at(8, 20), at(7), at(5)], now), 3, 'today, yesterday and the day before');
+  assert.equal(dayStreak([at(8), at(7)], now), 2, 'still alive before today\'s first drive');
+  assert.equal(dayStreak([at(6)], now), 0);
+  assert.equal(dayStreak([null, undefined, 'not a date'], now), 0);
+
+  assert.equal(firstNameOf({ id: 'u1', name: '  Alex  Morgan ' }), 'Alex');
+  assert.equal(firstNameOf({ name: 'Driver' }), undefined, 'the placeholder profile before the account loads');
+  assert.equal(firstNameOf({ id: 'u1', name: '' }), undefined);
+  assert.equal(firstNameOf(null), undefined);
+  // Never a hard-coded name in the screen
+  const read = (rel: string) => readFileSync(toPath(new URL(`../${rel}`, import.meta.url)), 'utf8');
+  assert.ok(!/Daniel/.test(read('app/drive-summary.tsx') + read('components/driveComplete/DriveCompleteView.tsx')));
 });

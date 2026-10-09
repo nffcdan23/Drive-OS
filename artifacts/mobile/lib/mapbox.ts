@@ -200,3 +200,31 @@ export function locationArrowFeature(position: LatLng | null, heading: number): 
     ],
   };
 }
+
+/**
+ * The box around a completed route, for fitting the camera to it ([lng, lat]
+ * corners), or null without any valid point.  A route that never moved gets
+ * a small box so the camera still has an area to show.
+ */
+export function routeBounds(
+  coordinates: readonly LatLng[] | null | undefined,
+): { ne: [number, number]; sw: [number, number] } | null {
+  const points = (coordinates ?? []).filter(
+    (c) => Number.isFinite(c.latitude) && Number.isFinite(c.longitude),
+  );
+  if (!points.length) return null;
+  let minLat = Infinity, maxLat = -Infinity, minLng = Infinity, maxLng = -Infinity;
+  for (const c of points) {
+    minLat = Math.min(minLat, c.latitude);
+    maxLat = Math.max(maxLat, c.latitude);
+    minLng = Math.min(minLng, c.longitude);
+    maxLng = Math.max(maxLng, c.longitude);
+  }
+  const MIN_SPAN = 0.002; // about 200 m
+  const padLat = Math.max(0, (MIN_SPAN - (maxLat - minLat)) / 2);
+  const padLng = Math.max(0, (MIN_SPAN - (maxLng - minLng)) / 2);
+  return {
+    ne: [maxLng + padLng, maxLat + padLat],
+    sw: [minLng - padLng, minLat - padLat],
+  };
+}
