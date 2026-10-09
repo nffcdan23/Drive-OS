@@ -9,6 +9,11 @@ import {
   SheetScrollView,
 } from "@/components/KeyboardAwareSheet";
 import { openDirections } from "@/lib/directions";
+import {
+  placeDestination,
+  spotDestination,
+  useRouteToPlace,
+} from "@/hooks/useRouteToPlace";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
@@ -102,6 +107,8 @@ export default function PlacesScreen() {
   const insets = useSafeAreaInsets();
   const router = useRouter();
   const { places, addPlace, deletePlace, findNearbySpots } = useApp();
+  // A route preview on the Drive map, or the phone's maps app as before
+  const routeToPlace = useRouteToPlace();
   const [query, setQuery] = useState("");
   const params = useLocalSearchParams<{ section?: string }>();
   const [section, setSection] = useState<Section>(
@@ -162,7 +169,7 @@ export default function PlacesScreen() {
       style={s.row}
       onPress={() => {
         Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-        void openDirections(p.coordinate);
+        void routeToPlace(placeDestination(p));
       }}
       onLongPress={() => confirmDelete(p)}
       accessibilityHint="Long-press to delete"
@@ -245,7 +252,7 @@ export default function PlacesScreen() {
             style={s.row}
             accessibilityRole="button"
             accessibilityLabel={`Directions to ${n.name}`}
-            onPress={() => void openDirections(n.coordinate)}
+            onPress={() => void routeToPlace(spotDestination(n))}
           >
             <View style={s.iconWrap}>
               <Ionicons

@@ -3194,9 +3194,15 @@ test('the Drive screen moves the camera only while following; heading only turns
   assert.ok(guard > 0, 'follow guard not found');
   const block = code.slice(guard, code.indexOf('syncArrowRotation();', guard));
   for (const write of ['setFollowCamera(', 'setCamera(\n              buildFollowCamera(']) {
-    assert.equal(code.split(write).length - 1, 1, `${write} written elsewhere`);
+    // The route preview's overview is the one other writer (Mapbox only),
+    // and it stops the moment follow mode is on: never both at once
+    const others = write === 'setFollowCamera(' ? 1 : 0;
+    assert.equal(code.split(write).length - 1, 1 + others, `${write} written elsewhere`);
     assert.ok(block.includes(write), `${write} outside the follow guard`);
   }
+  const overview = code.slice(code.indexOf('const fitRoutePreview = useCallback'), code.indexOf('const fitRoutePreviewRef'));
+  assert.ok(/setFollowCamera\(/.test(overview), 'the overview writes through the follow camera path');
+  assert.ok(/followModeRef\.current === "following" \|\|[\s\S]*\)\s*return;[\s\S]*setFollowCamera\(/.test(overview), 'the overview must stop while following');
   // A finished gesture the controller says left follow mode ends it on screen too
   assert.ok(/frame\.kind === "left" \|\| frame\.kind === "free"\)\s*\{\s*leaveFollowRef\.current\(\);/.test(code));
   // The map reporting a gesture is noted with the controller (Apple onPanDrag, Mapbox onUserGesture)
@@ -3206,8 +3212,8 @@ test('the Drive screen moves the camera only while following; heading only turns
   // Follow mode is entered in one place, from three explicit actions only
   assert.equal(code.match(/setFollowMode\("following"\)/g)?.length, 1);
   assert.equal(code.match(/followModeRef\.current = "following"/g)?.length, 1);
-  assert.equal(code.match(/startFollowing\(true/g)?.length, 3);
-  for (const caller of ['if (isDriving) {', 'const handleResumeFollowing', 'const handleLocateButton']) {
+  assert.equal(code.match(/startFollowing\(true/g)?.length, 4);
+  for (const caller of ['if (isDriving) {', 'const handleResumeFollowing', 'const handleLocateButton', 'if (s.phase === "idle") {']) {
     const i = code.indexOf(caller);
     assert.ok(i > 0 && /startFollowing\(true/.test(code.slice(i, i + 900)), `${caller} doesn't start following`);
   }
@@ -6645,4 +6651,373 @@ test('Drive Complete rewards: level progress from the profile, day streak from d
   // Never a hard-coded name in the screen
   const read = (rel: string) => readFileSync(toPath(new URL(`../${rel}`, import.meta.url)), 'utf8');
   assert.ok(!/Daniel/.test(read('app/drive-summary.tsx') + read('components/driveComplete/DriveCompleteView.tsx')));
+});
+
+// ─── Navigation Phase 2A: route previews ────────────────────────────────────
+// Routes are fetched only when the user asks; they live in memory only; the
+// overview camera fits them into the clear part of the screen.
+
+import { routesFromServer, routeRequestBody, type Destination as NavDestination, type RouteOrigin } from '@/lib/navigation/model';
+import { RoutePreviewStore, PREVIEW, type PreviewError } from '@/lib/navigation/previewStore';
+import { routesBounds, overviewPose, screenPoint, interpolatePose, OVERVIEW } from '@/lib/navigation/geometry';
+import { formatDuration, formatRouteDistance, formatClock, arrivalTime, formatVia } from '@/lib/navigation/format';
+import type { ServerRoutes } from '@/lib/backend/endpoints';
+
+const NAV_ORIGIN: RouteOrigin = { coordinate: { latitude: 54.6001, longitude: -3.1345 }, headingDeg: null };
+const NAV_DEST: NavDestination = {
+  id: 'place-1', name: 'Ambleside', subtitle: 'Saved place', source: 'saved',
+  coordinate: { latitude: 54.4287, longitude: -2.9612 },
+};
+const navLine = (n: number, dLng = 0) => Array.from({ length: n }, (_, i) => ({
+  lat: 54.6001 - (i / (n - 1)) * 0.1714, lng: -3.1345 + (i / (n - 1)) * 0.1733 + dLng * Math.sin((i / (n - 1)) * Math.PI),
+}));
+function serverRoutes(count = 2): ServerRoutes {
+  return {
+    provider: 'mapbox', providerResponseId: 'resp',
+    routes: Array.from({ length: count }, (_, i) => ({
+      index: i, geometry: encodePolyline(navLine(20, i * 0.02), 6), distanceM: 24_500 + i * 1500, durationS: 1980 + i * 120,
+      typicalDurationS: 1800, summary: i ? 'B5289' : 'A591',
+      legs: [{
+        distanceM: 24_500, durationS: 1980, summary: 'A591', congestion: [1], maxspeedKmh: [48],
+        steps: [{
+          maneuver: { type: 'depart', modifier: null, exit: null, bearingBefore: 0, bearingAfter: 180, location: { lat: 54.6001, lng: -3.1345 }, instruction: 'Head south' },
+          startDistanceM: 0, distanceM: 24_500, durationS: 1980, roadName: 'Lake Road', roadRef: 'A591', signposts: null,
+          junctionRef: null, drivingSide: 'left', banner: null, voice: [],
+        }],
+      }],
+    })),
+  };
+}
+
+/** A store with a controllable fetch, clock and timers */
+function previewHarness() {
+  const pending: Array<{ body: unknown; resolve: (r: ServerRoutes) => void; reject: (e: unknown) => void }> = [];
+  const clock = { t: 1_000_000 };
+  const timers: Array<{ at: number; fn: () => void; id: number }> = [];
+  let timerId = 0;
+  const store = new RoutePreviewStore({
+    fetchRoutes: (body) => new Promise((resolve, reject) => pending.push({ body, resolve, reject })),
+    describe: (err): PreviewError => ({ code: (err as { code?: string }).code ?? 'network', message: String((err as Error).message) }),
+    now: () => clock.t,
+    setTimer: (fn, ms) => { const id = ++timerId; timers.push({ at: clock.t + ms, fn, id }); return id; },
+    clearTimer: (id) => { const i = timers.findIndex((t) => t.id === id); if (i >= 0) timers.splice(i, 1); },
+  });
+  const advance = (ms: number) => {
+    clock.t += ms;
+    for (const t of timers.filter((x) => x.at <= clock.t)) { timers.splice(timers.indexOf(t), 1); t.fn(); }
+  };
+  const phases: string[] = [];
+  store.subscribe(() => phases.push(store.phase));
+  return { store, pending, clock, advance, phases };
+}
+const navSettle = () => new Promise((r) => setTimeout(r, 0));
+
+test('route previews: the API response becomes drawable routes (polyline6 decoded, alternatives kept)', () => {
+  const routes = routesFromServer(serverRoutes(3), 'r1');
+  assert.equal(routes.length, 3);
+  assert.deepEqual(routes.map((r) => r.routeId), ['r1:0', 'r1:1', 'r1:2']);
+  assert.equal(routes[0]!.geometry.length, 20);
+  assert.ok(Math.abs(routes[0]!.geometry[0]!.latitude - 54.6001) < 1e-6, 'precision 6');
+  assert.ok(Math.abs(routes[0]!.geometry[19]!.longitude - -2.9612) < 1e-6);
+  assert.equal(routes[1]!.summary, 'B5289');
+  assert.deepEqual(routes[0]!.legs[0]!.steps[0]!.maneuver.location, { latitude: 54.6001, longitude: -3.1345 });
+  // A route with no line can't be drawn: dropped
+  const broken = serverRoutes(2);
+  broken.routes[1]!.geometry = '';
+  assert.equal(routesFromServer(broken, 'r2').length, 1);
+  // The request carries only the two points (and the heading when known)
+  assert.deepEqual(routeRequestBody({ ...NAV_ORIGIN, headingDeg: 182 }, NAV_DEST), {
+    origin: { lat: 54.6001, lng: -3.1345, headingDeg: 182 }, destination: { lat: 54.4287, lng: -2.9612 },
+  });
+});
+
+test('route previews: open → routing → preview; select an alternative; cancel; failures are typed', async () => {
+  const { store, pending, phases } = previewHarness();
+  assert.equal(store.phase, 'idle');
+  void store.open(NAV_DEST, NAV_ORIGIN);
+  assert.equal(store.phase, 'routing');
+  assert.equal(pending.length, 1);
+  pending[0]!.resolve(serverRoutes(2));
+  await navSettle();
+  const s = store.state;
+  assert.equal(s.phase, 'preview');
+  if (s.phase !== 'preview') return;
+  assert.equal(s.routes.length, 2);
+  assert.equal(s.selectedIndex, 0);
+  assert.equal(s.stale, null);
+  store.select(1);
+  assert.equal(store.selected!.index, 1);
+  store.select(7); // no such route
+  assert.equal(store.selected!.index, 1);
+  store.cancel();
+  assert.equal(store.phase, 'idle');
+  assert.deepEqual(phases, ['routing', 'preview', 'preview', 'idle']);
+  // A failure is shown with its reason
+  void store.open(NAV_DEST, NAV_ORIGIN);
+  pending[1]!.reject(Object.assign(new Error('No driving route was found to that place.'), { code: 'route_not_found' }));
+  await navSettle();
+  const f = store.state;
+  assert.equal(f.phase, 'previewFailed');
+  if (f.phase === 'previewFailed') assert.equal(f.error.code, 'route_not_found');
+  // An empty answer is a failure too, never an empty preview
+  void store.open(NAV_DEST, NAV_ORIGIN);
+  pending[2]!.resolve({ provider: 'mapbox', providerResponseId: null, routes: [] });
+  await navSettle();
+  assert.equal(store.phase, 'previewFailed');
+});
+
+test('route previews: a stale response never replaces a newer request or reopens a cancelled preview', async () => {
+  const { store, pending } = previewHarness();
+  void store.open(NAV_DEST, NAV_ORIGIN);
+  const other = { ...NAV_DEST, id: 'place-2', name: 'Keswick' };
+  void store.open(other, NAV_ORIGIN);
+  pending[1]!.resolve(serverRoutes(1));
+  await navSettle();
+  pending[0]!.resolve(serverRoutes(3)); // the older request answers last
+  await navSettle();
+  const s = store.state;
+  assert.equal(s.phase, 'preview');
+  if (s.phase === 'preview') {
+    assert.equal(s.destination.id, 'place-2');
+    assert.equal(s.routes.length, 1);
+  }
+  // Cancelled while routing: the answer is dropped
+  void store.open(NAV_DEST, NAV_ORIGIN);
+  store.cancel();
+  pending[2]!.resolve(serverRoutes(2));
+  await navSettle();
+  assert.equal(store.phase, 'idle');
+  // Cancelled while an update is in flight: dropped too
+  void store.open(NAV_DEST, NAV_ORIGIN);
+  pending[3]!.resolve(serverRoutes(2));
+  await navSettle();
+  void store.update(NAV_ORIGIN);
+  store.cancel();
+  pending[4]!.reject(new Error('offline'));
+  await navSettle();
+  assert.equal(store.phase, 'idle');
+});
+
+test('route previews: never re-fetched on their own; out of date after 10 min or 300 m, updated only when the user asks', async () => {
+  const { store, pending, advance } = previewHarness();
+  void store.open(NAV_DEST, NAV_ORIGIN);
+  pending[0]!.resolve(serverRoutes(2));
+  await navSettle();
+  assert.equal(store.requests, 1);
+  // Moving about inside 300 m: still current
+  store.noteFix({ latitude: 54.6001 - 0.002, longitude: -3.1345 });
+  assert.equal(store.state.phase === 'preview' && store.state.stale, null);
+  // 300 m away: marked out of date, nothing fetched
+  store.noteFix({ latitude: 54.6001 - 0.003, longitude: -3.1345 });
+  assert.equal(store.state.phase === 'preview' && store.state.stale, 'moved');
+  // Hours pass with fixes arriving and timers firing: still one request
+  for (let i = 0; i < 120; i++) {
+    advance(60_000);
+    store.noteFix({ latitude: 54.5 + i * 1e-3, longitude: -3.1 });
+  }
+  assert.equal(store.requests, 1);
+  assert.equal(pending.length, 1);
+  // Update Route: the user asks; the old routes stay on screen until the new ones land
+  void store.update({ coordinate: { latitude: 54.59, longitude: -3.13 }, headingDeg: 170 });
+  assert.equal(store.requests, 2);
+  const during = store.state;
+  assert.ok(during.phase === 'preview' && during.refreshing && during.routes.length === 2);
+  pending[1]!.resolve(serverRoutes(1));
+  await navSettle();
+  const after = store.state;
+  assert.ok(after.phase === 'preview' && !after.refreshing && after.stale === null && after.routes.length === 1);
+  assert.deepEqual((pending[1]!.body as { origin: unknown }).origin, { lat: 54.59, lng: -3.13, headingDeg: 170 });
+  // The age alone marks it out of date (a timer, not a request)
+  advance(PREVIEW.staleAfterMs);
+  assert.equal(store.state.phase === 'preview' && store.state.stale, 'age');
+  assert.equal(store.requests, 2);
+  // An update that fails keeps the routes, with the reason
+  void store.update(NAV_ORIGIN);
+  pending[2]!.reject(Object.assign(new Error('Routing is busy right now.'), { code: 'routing_busy' }));
+  await navSettle();
+  const failed = store.state;
+  assert.ok(failed.phase === 'preview' && failed.routes.length === 1 && failed.updateError?.code === 'routing_busy' && !failed.refreshing);
+  // Retry from a failed preview is a new request (the user's)
+  store.cancel();
+  void store.open(NAV_DEST, NAV_ORIGIN);
+  pending[3]!.reject(new Error('offline'));
+  await navSettle();
+  assert.equal(store.phase, 'previewFailed');
+  void store.update(NAV_ORIGIN);
+  assert.equal(store.phase, 'routing');
+  assert.equal(store.requests, 5);
+});
+
+test('route previews: the overview camera fits every route into the clear part of the screen', () => {
+  const routes = routesFromServer(serverRoutes(3), 'r1');
+  const bounds = routesBounds(routes, [NAV_DEST.coordinate])!;
+  const viewport = { width: 393, height: 852 };
+  const insets = { top: 140, bottom: 330, left: 32, right: 32 };
+  const pose = overviewPose(bounds, viewport, insets);
+  assert.equal(pose.pitch, 0);
+  assert.equal(pose.heading, 0);
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (const r of routes) for (const p of r.geometry) {
+    const s = screenPoint(pose, viewport, p);
+    minX = Math.min(minX, s.x); maxX = Math.max(maxX, s.x); minY = Math.min(minY, s.y); maxY = Math.max(maxY, s.y);
+  }
+  const eps = 0.5;
+  assert.ok(minX >= insets.left - eps && maxX <= viewport.width - insets.right + eps, `x ${minX}..${maxX}`);
+  assert.ok(minY >= insets.top - eps && maxY <= viewport.height - insets.bottom + eps, `y ${minY}..${maxY}`);
+  // As large as possible: one side fills the clear area
+  const fillX = (maxX - minX) / (viewport.width - insets.left - insets.right);
+  const fillY = (maxY - minY) / (viewport.height - insets.top - insets.bottom);
+  assert.ok(Math.max(fillX, fillY) > 0.98, `fills ${fillX} × ${fillY}`);
+  // Centred in the clear area, not the screen
+  assert.ok(Math.abs((minY + maxY) / 2 - (insets.top + (viewport.height - insets.bottom)) / 2) < 1);
+  // A tiny route doesn't zoom in further than street level; nothing breaks on a point
+  const tiny = overviewPose({ north: 54.6, south: 54.6, east: -3.1, west: -3.1 }, viewport, insets);
+  assert.equal(tiny.zoom, OVERVIEW.maxZoom);
+  assert.ok(Number.isFinite(tiny.center.latitude));
+  assert.equal(routesBounds([]), null);
+});
+
+test('route previews: the move to the overview eases between the two cameras, turning the short way', () => {
+  const a = { center: { latitude: 54.6, longitude: -3.13 }, heading: 350, pitch: 60, distance: 0, zoom: 16 };
+  const b = { center: { latitude: 54.5, longitude: -3.05 }, heading: 10, pitch: 0, distance: 0, zoom: 10 };
+  assert.deepEqual(interpolatePose(a, b, 0).zoom, 16);
+  const end = interpolatePose(a, b, 1);
+  assert.ok(Math.abs(end.center.latitude - 54.5) < 1e-9 && Math.abs(end.center.longitude - -3.05) < 1e-9);
+  assert.equal(end.pitch, 0);
+  const mid = interpolatePose(a, b, 0.5);
+  assert.ok(Math.abs(mid.heading - 0) < 1e-9 || Math.abs(mid.heading - 360) < 1e-9, `heading ${mid.heading}`);
+  assert.equal(mid.zoom, 13);
+});
+
+test('route previews read in UK units: hours and minutes, yards then miles, 24-hour arrival, via roads', () => {
+  assert.equal(formatDuration(30), '1 min');
+  assert.equal(formatDuration(1980), '33 min');
+  assert.equal(formatDuration(3900), '1 hr 5 min');
+  assert.equal(formatDuration(7200), '2 hr');
+  assert.equal(formatRouteDistance(300, 'imperial'), '328 yd');
+  assert.equal(formatRouteDistance(8_000, 'imperial'), '5.0 mi');
+  assert.equal(formatRouteDistance(24_500, 'imperial'), '15 mi');
+  assert.equal(formatRouteDistance(8_000, 'metric'), '8.0 km');
+  assert.equal(formatClock(arrivalTime(new Date(2026, 9, 9, 13, 50).getTime(), 1980)), '14:23');
+  assert.equal(formatVia('A591, M6'), 'via A591, M6');
+  assert.equal(formatVia(' '), null);
+});
+
+import { routePreviewFeatures, tappedRouteIndex } from '@/lib/navigation/routeLayers';
+
+test('route previews: the map draws the selected route bold, the others tappable, and the place', async () => {
+  const store = new RoutePreviewStore({
+    fetchRoutes: async () => serverRoutes(3),
+    describe: (e) => ({ code: 'x', message: String(e) }),
+    now: () => 0,
+    setTimer: () => 1,
+    clearTimer: () => {},
+  });
+  // Idle: nothing drawn (the layers stay mounted, empty)
+  const idle = routePreviewFeatures(store.state);
+  assert.equal(idle.selected.features.length + idle.alternatives.features.length + idle.destination.features.length, 0);
+  const opened = store.open(NAV_DEST, NAV_ORIGIN);
+  // Finding routes: only the place
+  const routing = routePreviewFeatures(store.state);
+  assert.equal(routing.selected.features.length, 0);
+  assert.deepEqual(routing.destination.features[0]!.geometry.coordinates, [NAV_DEST.coordinate.longitude, NAV_DEST.coordinate.latitude]);
+  await opened;
+  const shown = routePreviewFeatures(store.state);
+  assert.deepEqual(shown.selected.features.map((f) => f.properties.index), [0]);
+  assert.deepEqual(shown.alternatives.features.map((f) => f.properties.index), [1, 2]);
+  // GeoJSON order: longitude first
+  const first = shown.selected.features[0]!.geometry.coordinates[0]!;
+  assert.ok(Math.abs(first[0] - -3.1345) < 1e-5 && Math.abs(first[1] - 54.6001) < 1e-5);
+  // Tapping an alternative selects it; the old one becomes an alternative
+  const tapped = tappedRouteIndex(shown.alternatives.features.slice(1));
+  assert.equal(tapped, 2);
+  store.select(tapped!);
+  const after = routePreviewFeatures(store.state);
+  assert.deepEqual(after.selected.features.map((f) => f.properties.index), [2]);
+  assert.deepEqual(after.alternatives.features.map((f) => f.properties.index), [0, 1]);
+  // A tap that names no route changes nothing
+  assert.equal(tappedRouteIndex([{ properties: {} }, { properties: null }]), null);
+  assert.equal(tappedRouteIndex(undefined), null);
+  assert.equal(store.requests, 1, 'drawing and choosing never fetches');
+  store.cancel();
+  assert.equal(routePreviewFeatures(store.state).destination.features.length, 0);
+});
+
+test('route previews: no camera commands, puck or viewport; the Drive screen reads only the phase', () => {
+  const read = (rel: string) => readFileSync(toPath(new URL(rel, import.meta.url)), 'utf8');
+  const strip = (src: string) => src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '').replace(/\{\/\*[\s\S]*?\*\/\}/g, '');
+  const files = [
+    '../lib/navigation/model.ts', '../lib/navigation/geometry.ts', '../lib/navigation/format.ts',
+    '../lib/navigation/previewStore.ts', '../lib/navigation/routeLayers.ts',
+    '../context/NavigationContext.tsx', '../components/navigation/RoutePreviewPanel.tsx', '../hooks/useRouteToPlace.ts',
+  ];
+  const map = strip(read('../components/MapboxDriveMap.tsx'));
+  const routeLayers = map.slice(map.indexOf('const RouteLayers = memo('), map.indexOf('});', map.indexOf('const RouteLayers = memo(')));
+  const banned = /\bsetCamera\(|fitBounds|flyTo|moveTo\(|zoomTo\(|\bViewport\b|LocationPuck|UserLocation|followUserLocation|followUserMode|puckBearing|showUserLocation|showUserHeading|<Camera\b/;
+  for (const f of files) assert.ok(!banned.test(strip(read(f))), `${f} drives the camera or a puck`);
+  assert.ok(routeLayers.length > 0 && !banned.test(routeLayers), 'the route layers only draw');
+  // Route layers sit beneath the live trail head, the trail and the arrow
+  const at = (s: string) => map.indexOf(s);
+  assert.ok(at('<RouteLayers store={routePreview} />') > at('<Images images={ARROW_IMAGES} />'));
+  assert.ok(at('<RouteLayers store={routePreview} />') < at('<TrailHeadLayers'));
+  assert.ok(at('<RouteLayers store={routePreview} />') < at('id="derwent-drive-trail"'));
+  assert.ok(at('<RouteLayers store={routePreview} />') < map.lastIndexOf('<MarkerFeeder'));
+
+  // The Drive screen: the phase only, never the whole preview state
+  const drive = strip(read('../app/(tabs)/(drive)/index.tsx'));
+  assert.ok(/useRoutePreviewPhase\(\)/.test(drive));
+  assert.ok(!/useRoutePreview\(\)/.test(drive), 'the Drive screen must not re-render on every preview change');
+  assert.ok(!/useSyncExternalStore/.test(drive));
+  // The overview goes through the follow camera path, and closing returns to follow
+  const fit = drive.slice(drive.indexOf('const fitRoutePreview = useCallback'), drive.indexOf('const fitRoutePreviewRef'));
+  assert.ok(/mapboxRef\.current\?\.setFollowCamera\(/.test(fit) && /overviewPose\(/.test(fit));
+  assert.ok(/visualsLiveRef\.current/.test(fit), 'no camera writes off screen');
+  const follow = drive.slice(drive.indexOf('if (s.phase === "idle") {'), drive.indexOf('return;', drive.indexOf('if (s.phase === "idle") {')));
+  assert.ok(/startFollowing\(true\)/.test(follow));
+  // The panel replaces the drive actions in the screen: not a modal or sheet
+  assert.ok(/previewing \? |\{previewing && \(/.test(drive) && /<RoutePreviewPanel/.test(drive));
+  const panel = strip(read('../components/navigation/RoutePreviewPanel.tsx'));
+  assert.ok(!/<Modal\b|KeyboardAwareSheet|BottomSheet|router\.push/.test(panel));
+  // A drive starting closes the preview
+  assert.ok(/if \(isDriving && routePreviewStore\.phase !== "idle"\)\s*routePreviewStore\.cancel\(\)/.test(drive));
+});
+
+test('route previews: fetched only when the user asks, kept in memory only, with the road-safety notice', () => {
+  const read = (rel: string) => readFileSync(toPath(new URL(rel, import.meta.url)), 'utf8');
+  const strip = (src: string) => src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+  const store = strip(read('../lib/navigation/previewStore.ts'));
+  // One provider call, from fetch(); fetch() only from open() and update()
+  assert.equal(store.match(/deps\.fetchRoutes\(/g)?.length, 1);
+  assert.equal(store.match(/this\.fetch\(/g)?.length, 2);
+  const open = store.slice(store.indexOf('open(destination'), store.indexOf('update(origin'));
+  const update = store.slice(store.indexOf('update(origin'), store.indexOf('select(index'));
+  assert.ok(/this\.fetch\(/.test(open) && /this\.fetch\(/.test(update));
+  // Nothing scheduled fetches: the only timer marks the preview out of date
+  assert.ok(!/setInterval/.test(store));
+  const timer = store.slice(store.indexOf('private startAgeTimer'), store.indexOf('private stopAgeTimer'));
+  assert.ok(!/this\.fetch\(|fetchRoutes|this\.open\(|this\.update\(/.test(timer));
+  const noteFix = store.slice(store.indexOf('noteFix(position'), store.indexOf('get selected'));
+  assert.ok(!/this\.fetch\(|fetchRoutes|this\.open\(|this\.update\(/.test(noteFix));
+  // In memory only: no storage, no logging
+  for (const f of ['../lib/navigation/previewStore.ts', '../lib/navigation/model.ts', '../context/NavigationContext.tsx', '../components/navigation/RoutePreviewPanel.tsx', '../hooks/useRouteToPlace.ts']) {
+    const src = strip(read(f));
+    assert.ok(!/AsyncStorage|SecureStore|MemoryStore|storage|FileSystem|console\./.test(src), `${f} stores or logs routes`);
+  }
+  // The disclosure Mapbox asks directions apps to show, on the preview itself
+  const panel = read('../components/navigation/RoutePreviewPanel.tsx');
+  assert.ok(panel.includes('"Directions are a guide. Always follow road signs, signals and local traffic laws."'));
+  assert.ok(/\{ROAD_SAFETY_NOTICE\}/.test(panel));
+  // The entry points: saved places and Beauty Spots preview; typed searches still open the maps app
+  const search = strip(read('../app/search.tsx'));
+  const explore = strip(read('../app/(tabs)/(drive)/explore.tsx'));
+  assert.ok(/routeToPlace\(placeDestination\(p\)\)/.test(search) && /routeToPlace\(spotDestination\(n\)\)/.test(search));
+  assert.ok(/openDirections\(query\)/.test(search));
+  assert.ok(/routeToPlace\(/.test(explore) && !/openDirections/.test(explore));
+  const hook = strip(read('../hooks/useRouteToPlace.ts'));
+  assert.ok(/if \(!canPreviewRoutes\(isDriving\)\) \{\s*await openDirections\(/.test(hook), 'without Mapbox, or while driving, the maps app as before');
+});
+
+test('route previews are only offered on the Mapbox map with no drive recording', () => {
+  const src = readFileSync(toPath(new URL('../context/NavigationContext.tsx', import.meta.url)), 'utf8');
+  assert.ok(/return DRIVE_MAPBOX != null && !isDriving;/.test(src));
 });

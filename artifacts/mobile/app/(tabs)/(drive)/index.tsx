@@ -68,9 +68,23 @@ import {
 } from "@/lib/navigationCamera";
 import {
   approach,
+  type FollowCameraPose,
   type ReportedPose,
   LocationSmoother,
 } from "@/lib/locationSmoothing";
+import {
+  useNoteRouteFix,
+  useRoutePreviewPhase,
+  useRoutePreviewStore,
+} from "@/context/NavigationContext";
+import { RoutePreviewPanel } from "@/components/navigation/RoutePreviewPanel";
+import {
+  easeInOut,
+  interpolatePose,
+  overviewPose,
+  routesBounds,
+} from "@/lib/navigation/geometry";
+import { openDirections } from "@/lib/directions";
 
 // SF Symbols on iOS, Ionicons elsewhere.
 function Glyph({
@@ -126,6 +140,11 @@ const FriendMarkersMapbox: typeof import("@/components/friendMap/FriendMarkersMa
 const FOLLOW_ZOOM = USING_MAPBOX ? NAV_CAMERA.mapboxZoom : NAV_CAMERA.androidZoom;
 // Space between the Mapbox logo/attribution and the controls below them
 const ORNAMENT_GAP = 8;
+// Route preview overview (Navigation Phase 2A): how long the map takes to
+// move to it, and the clear space kept around the routes (points)
+const OVERVIEW_EASE_MS = 650;
+const OVERVIEW_MARGIN = 24;
+const OVERVIEW_SIDE = 40;
 
 // TEMPORARY (development builds only): the map-provider diagnostics panel,
 // mid-left so it covers none of the Drive controls
@@ -530,6 +549,14 @@ export default function MapScreen() {
     resolvedUnitSystem,
     togglePassengerMode,
   } = useApp();
+
+  // ── Route preview (Navigation Phase 2A) ──
+  // The screen reads only the phase: route choices and updates re-render the
+  // preview panel and the map's route layers, never this screen
+  const routePreviewStore = useRoutePreviewStore();
+  const routePhase = useRoutePreviewPhase();
+  const noteRouteFix = useNoteRouteFix();
+  const previewing = USING_MAPBOX && !isDriving && routePhase !== "idle";
 
   // ── Map state ──
   const [mapType, setMapType] = useState<MapType>("standard");
@@ -1160,10 +1187,20 @@ export default function MapScreen() {
         headingFilter.update(gpsHeading, "course");
       }
 
+      // ── Route preview ── where a route would start from; an open preview
+      // is only ever marked out of date by this, never re-requested
+      noteRouteFix({
+        latitude: lat,
+        longitude: lon,
+        speedKmh,
+        headingDeg: gpsHeading,
+        time: fixTime ?? now,
+      });
+
       // ── Draw: marker, heading and follow camera glide from here ──
       wakeFrameLoop();
     },
-    [locationSmoother, headingFilter, updateDriveCoordinate, noteForegroundFix, wakeFrameLoop],
+    [locationSmoother, headingFilter, updateDriveCoordinate, noteForegroundFix, noteRouteFix, wakeFrameLoop],
   );
 
   // The live head starts from the recorded trail's newest point, as drawn: a
@@ -1422,6 +1459,9 @@ export default function MapScreen() {
   // (lib/followController.ts).  North-up follow is deliberately flat, so a
   // tilt there still leaves follow mode, as before.
   const followGestureStartRef = useRef<ReportedPose | null>(null);
+  // Set once the user touches the map during a route preview: from then on
+  // the overview is theirs to move, and is never refitted under them
+  const previewTouchedRef = useRef(false);
   const leaveFollow = useCallback(() => {
     if (followModeRef.current !== "following") return;
     followModeRef.current = "free";
@@ -1469,13 +1509,15 @@ export default function MapScreen() {
 
   const handleMapTouchStart = useCallback(() => {
     zoomTarget.touchStart(Date.now());
+    // The user has the map: the route overview stops refitting itself
+    if (routePreviewStore.phase !== "idle") previewTouchedRef.current = true;
     // A new gesture: its first camera read is what it's judged against
     if (followModeRef.current === "following") {
       followGestureStartRef.current = null;
       followCamera.beginGesture();
       readMapBearing();
     }
-  }, [zoomTarget, followCamera, readMapBearing]);
+  }, [zoomTarget, followCamera, readMapBearing, routePreviewStore]);
 
   const handleMapTouchEnd = useCallback(() => {
     zoomTarget.touchEnd(Date.now());
@@ -1515,6 +1557,162 @@ export default function MapScreen() {
       setFollowMode("free");
     }
   }, [zoomTarget, followCamera, readMapBearing]);
+
+  // ── Route preview: the overview camera ──────────────────────────────────
+  // A flat, north-up view of every route in the space the search bar and the
+  // preview panel leave clear.  It is written through the same camera path as
+  // following (setFollowCamera → the Camera's props), a few hundred
+  // milliseconds of poses from where the map is now; nothing imperative, and
+  // never while the app is off screen or the user has hold of the map.
+  const screenSizeRef = useRef({ width: 0, height: 0 });
+  const previewBottomRef = useRef(0);
+  const overviewTokenRef = useRef(0);
+  const overviewFrameRef = useRef<number | null>(null);
+  const stopOverview = useCallback(() => {
+    overviewTokenRef.current++;
+    if (overviewFrameRef.current != null)
+      cancelAnimationFrame(overviewFrameRef.current);
+    overviewFrameRef.current = null;
+  }, []);
+  const fitRoutePreview = useCallback(() => {
+    const s = routePreviewStore.state;
+    const { width, height } = screenSizeRef.current;
+    if (s.phase === "idle" || !width || !height) return;
+    if (!visualsLiveRef.current || !mapboxRef.current) return;
+    // Routing: where it starts and the place; then every route too
+    const bounds = routesBounds(s.phase === "preview" ? s.routes : [], [
+      s.origin.coordinate,
+      s.destination.coordinate,
+    ]);
+    if (!bounds) return;
+    const target = overviewPose(
+      bounds,
+      { width, height },
+      {
+        // Below the search bar, which stays over the preview
+        top: SEARCH_TOP + SEARCH_HEIGHT + (isPassengerMode ? 34 : 0) + OVERVIEW_MARGIN,
+        // Before the panel has been measured, assume it covers about half
+        bottom: (previewBottomRef.current || height * 0.5) + OVERVIEW_MARGIN,
+        left: OVERVIEW_SIDE,
+        right: OVERVIEW_SIDE,
+      },
+    );
+    stopOverview();
+    const token = overviewTokenRef.current;
+    readMapCamera()
+      .then((cam) => cam, () => null)
+      .then((cam) => {
+        if (token !== overviewTokenRef.current) return;
+        const from: FollowCameraPose | null =
+          cam?.center && cam.zoom != null
+            ? {
+                center: cam.center,
+                heading: cam.heading ?? 0,
+                pitch: cam.pitch ?? 0,
+                distance: 0,
+                zoom: cam.zoom,
+              }
+            : null;
+        const startedAt = Date.now();
+        const step = () => {
+          overviewFrameRef.current = null;
+          const now = Date.now();
+          if (token !== overviewTokenRef.current) return;
+          // Off screen, closed, following again, or the user took the map:
+          // stop where it is (the follow loop and this never both write)
+          if (
+            !visualsLiveRef.current ||
+            routePreviewStore.phase === "idle" ||
+            followModeRef.current === "following" ||
+            zoomTarget.gestureActive(now)
+          )
+            return;
+          const t = from ? (now - startedAt) / OVERVIEW_EASE_MS : 1;
+          mapHeadingRef.current = 0;
+          mapPitchRef.current = 0;
+          mapboxRef.current?.setFollowCamera(
+            from ? interpolatePose(from, target, easeInOut(t)) : target,
+          );
+          if (t < 1)
+            overviewFrameRef.current = requestAnimationFrame(step);
+        };
+        step();
+      });
+  }, [routePreviewStore, readMapCamera, stopOverview, zoomTarget, SEARCH_TOP, isPassengerMode]);
+  const fitRoutePreviewRef = useRef(fitRoutePreview);
+  fitRoutePreviewRef.current = fitRoutePreview;
+
+  // The panel's height decides the clear space: refit as it changes (more
+  // routes, an out-of-date notice) unless the user has moved the map
+  const onPreviewBottomLayout = useCallback((h: number) => {
+    if (Math.abs(h - previewBottomRef.current) < 1) return;
+    previewBottomRef.current = h;
+    if (routePreviewStore.phase !== "idle" && !previewTouchedRef.current)
+      fitRoutePreviewRef.current();
+  }, [routePreviewStore]);
+
+  // Follows the preview without re-rendering this screen: opening it leaves
+  // follow mode for the overview, new routes refit it, closing it goes back
+  // to following
+  useEffect(() => {
+    if (!USING_MAPBOX) return;
+    let lastPhase = routePreviewStore.phase;
+    let lastFitKey: string | null = null;
+    const onChange = () => {
+      const s = routePreviewStore.state;
+      if (s.phase === "idle") {
+        lastFitKey = null;
+        stopOverview();
+        if (lastPhase !== "idle") startFollowing(true);
+        lastPhase = "idle";
+        return;
+      }
+      if (lastPhase === "idle") {
+        setShowLayerPicker(false);
+        setShowMore(false);
+        // Out of follow mode, quietly: the user didn't move the map
+        if (followModeRef.current === "following") {
+          followModeRef.current = "free";
+          followCamera.leave();
+          setFollowMode("free");
+        }
+      }
+      lastPhase = s.phase;
+      // A new request shows the place at once; its routes when they arrive.
+      // An Update Route keeps the view until its routes are in.
+      const key =
+        s.phase === "routing"
+          ? `place:${s.requestId}`
+          : s.phase === "preview" && !s.refreshing
+            ? `routes:${s.requestId}`
+            : lastFitKey;
+      if (key === lastFitKey) return;
+      lastFitKey = key;
+      if (s.phase === "routing") previewTouchedRef.current = false;
+      if (!previewTouchedRef.current) fitRoutePreviewRef.current();
+    };
+    onChange();
+    const unsubscribe = routePreviewStore.subscribe(onChange);
+    return () => {
+      unsubscribe();
+      stopOverview();
+    };
+  }, [routePreviewStore, startFollowing, stopOverview, followCamera]);
+
+  // A drive starting closes any preview (guidance isn't part of a drive yet)
+  useEffect(() => {
+    if (isDriving && routePreviewStore.phase !== "idle")
+      routePreviewStore.cancel();
+  }, [isDriving, routePreviewStore]);
+
+  // Start, for now: the place in the phone's maps app, which ends the preview
+  const handleOpenRouteInMaps = useCallback(
+    (destination: { coordinate: { latitude: number; longitude: number } }) => {
+      void openDirections(destination.coordinate);
+      routePreviewStore.cancel();
+    },
+    [routePreviewStore],
+  );
 
   // ── Drive controls ────────────────────────────────────────────────────────
   function handleStartDrive() {
@@ -1884,7 +2082,11 @@ export default function MapScreen() {
       style={styles.container}
       onLayout={
         USING_MAPBOX
-          ? (e) => setScreenHeight(e.nativeEvent.layout.height)
+          ? (e) => {
+              const { width, height } = e.nativeEvent.layout;
+              screenSizeRef.current = { width, height };
+              setScreenHeight(height);
+            }
           : undefined
       }
     >
@@ -1904,6 +2106,7 @@ export default function MapScreen() {
           trail={driveTrail}
           trailColor={colors.primary}
           trailHead={subscribeLiveTrail}
+          routePreview={routePreviewStore}
           friendLayer={
             // Like every map write, only while the app is on screen
             showFriends && visuals.live && FriendMarkersMapbox ? <FriendMarkersMapbox /> : null
@@ -2089,8 +2292,8 @@ export default function MapScreen() {
         </View>
       )}
 
-      {/* ── Greeting and weather ── */}
-      {!isDriving && (
+      {/* ── Greeting and weather ── (the route overview needs the room) */}
+      {!isDriving && !previewing && (
         <View
           style={[styles.welcomeRow, { top: WELCOME_TOP + passengerOffset }]}
         >
@@ -2135,7 +2338,7 @@ export default function MapScreen() {
       )}
 
       {/* ── Map controls: style, recenter, more ── */}
-      {!isDriving && (
+      {!isDriving && !previewing && (
         <View
           style={[styles.mapControls, { top: CONTROLS_TOP + passengerOffset }]}
         >
@@ -2190,7 +2393,7 @@ export default function MapScreen() {
       )}
 
       {/* ── Map style menu ── */}
-      {!isDriving && showLayerPicker && (
+      {!isDriving && !previewing && showLayerPicker && (
         <GlassSurface
           material="dense"
           style={[styles.menu, { top: CONTROLS_TOP + passengerOffset }]}
@@ -2281,7 +2484,7 @@ export default function MapScreen() {
       )}
 
       {/* ── More: orientation, saved places, passenger mode ── */}
-      {!isDriving && showMore && (
+      {!isDriving && !previewing && showMore && (
         <GlassSurface
           material="dense"
           style={[styles.menu, { top: CONTROLS_TOP + 120 + passengerOffset }]}
@@ -2373,8 +2576,27 @@ export default function MapScreen() {
         />
       )}
 
+      {/* ── Route preview, in place of the drive actions ── */}
+      {previewing && (
+        <AboveTabBar
+          pointerEvents="box-none"
+          fallbackInset={TAB_BAR_FOOTPRINT}
+          style={styles.bottomArea}
+          onLayout={(e) => {
+            const h = e.nativeEvent.layout.height;
+            setIdleBottomHeight(h);
+            onPreviewBottomLayout(h);
+          }}
+        >
+          <RoutePreviewPanel
+            unitSystem={resolvedUnitSystem}
+            onOpenInMaps={handleOpenRouteInMaps}
+          />
+        </AboveTabBar>
+      )}
+
       {/* ── Drive actions, just above the tab bar ── */}
-      {!isDriving && (
+      {!isDriving && !previewing && (
         <AboveTabBar
           pointerEvents="box-none"
           fallbackInset={TAB_BAR_FOOTPRINT}

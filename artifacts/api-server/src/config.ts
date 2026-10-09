@@ -14,12 +14,16 @@
  *   DVLA_API_KEY          optional; enables registration lookup (server only)
  *   DVLA_VES_URL          optional; must be DVLA's live or UAT host (see lib/dvla)
  *   DVLA_TIMEOUT_MS       optional; DVLA request timeout (default 8000)
+ *   MAPBOX_DIRECTIONS_TOKEN  optional; a server-only Mapbox token for route
+ *                         previews (lib/mapboxDirections). Never sent to clients;
+ *                         without it /navigation/routes answers 503.
  *   STORAGE_WORKER        "off" disables the Storage clean-up worker
  *   STORAGE_WORKER_INTERVAL_MS  how often it runs (default 60000)
  *   LIVE_LOCATION_CLEANUP_INTERVAL_MS  how often expired live positions and
  *                               delivered live-location messages are removed (default 60000)
  */
 import { readDvlaConfig, type DvlaConfig } from "./lib/dvla";
+import { readDirectionsConfig, type DirectionsConfig } from "./lib/mapboxDirections";
 
 export interface Config {
   port: number;
@@ -29,6 +33,7 @@ export interface Config {
   supabaseSecretKey: string | null;
   jwtSecret: string | null;
   dvla: DvlaConfig;
+  directions: DirectionsConfig;
   storageWorker: boolean;
   storageWorkerIntervalMs: number;
   liveLocationCleanupIntervalMs: number;
@@ -52,6 +57,8 @@ function read(env: NodeJS.ProcessEnv): Config {
     jwtSecret: env.SUPABASE_JWT_SECRET || null,
     // Throws for a URL that isn't DVLA's, so the key can't be sent elsewhere.
     dvla: readDvlaConfig(env),
+    // Throws for a malformed token, so a bad paste fails at startup
+    directions: readDirectionsConfig(env),
     storageWorker: env.STORAGE_WORKER !== "off",
     storageWorkerIntervalMs: Math.max(200, Number(env.STORAGE_WORKER_INTERVAL_MS) || 60_000),
     liveLocationCleanupIntervalMs: Math.max(200, Number(env.LIVE_LOCATION_CLEANUP_INTERVAL_MS) || 60_000),

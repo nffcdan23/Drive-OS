@@ -8,6 +8,63 @@ import type { LiveLocation, LiveLocationUpdate, LocationFriendAudience, Location
 
 export type Visibility = 'private' | 'friends' | 'public';
 
+// ─── Route previews (Navigation Phase 2A) ───────────────────────────────────
+
+/** POST /navigation/routes body: where from (with heading when moving) and where to */
+export interface RouteRequestBody {
+  origin: { lat: number; lng: number; headingDeg?: number | null };
+  destination: { lat: number; lng: number };
+}
+
+export interface ServerRouteStep {
+  maneuver: {
+    type: string;
+    modifier: string | null;
+    exit: number | null;
+    bearingBefore: number | null;
+    bearingAfter: number | null;
+    location: { lat: number; lng: number };
+    instruction: string | null;
+  };
+  startDistanceM: number;
+  distanceM: number;
+  durationS: number;
+  roadName: string | null;
+  roadRef: string | null;
+  signposts: string | null;
+  junctionRef: string | null;
+  drivingSide: 'left' | 'right' | null;
+  banner: { primary: string; secondary: string | null } | null;
+  voice: Array<{ distanceBeforeM: number; text: string }>;
+}
+
+export interface ServerRouteLeg {
+  distanceM: number;
+  durationS: number;
+  summary: string;
+  steps: ServerRouteStep[];
+  congestion: number[] | null;
+  maxspeedKmh: Array<number | null> | null;
+}
+
+export interface ServerRoute {
+  index: number;
+  /** Precision-6 encoded polyline */
+  geometry: string;
+  distanceM: number;
+  durationS: number;
+  typicalDurationS: number | null;
+  summary: string;
+  legs: ServerRouteLeg[];
+}
+
+/** POST /navigation/routes: Derwent's route format (never the provider's) */
+export interface ServerRoutes {
+  provider: string;
+  providerResponseId: string | null;
+  routes: ServerRoute[];
+}
+
 export interface ServerSettings {
   unitSystem: 'auto' | 'metric' | 'imperial';
   profileVisibility: Visibility;
@@ -267,6 +324,10 @@ export const endpoints = (api: ApiClient) => ({
   activateVehicle: (id: string) => api.post<ServerVehicle>(`/vehicles/${id}/activate`),
   // Quiet: a DVLA outage mustn't show the app-wide "server problem" banner.
   lookupVehicle: (registration: string) => api.post<VehicleLookup>('/vehicles/lookup', { registration }, { quiet: true }),
+
+  // Route previews: origin and destination travel in the body only. Quiet:
+  // a routing failure is Mapbox's, not the API's, so no server banner.
+  getRoutes: (body: RouteRequestBody) => api.post<ServerRoutes>('/navigation/routes', body, { quiet: true }),
 
   // Journeys
   listJourneys: () => api.get<ServerJourney[]>('/journeys'),

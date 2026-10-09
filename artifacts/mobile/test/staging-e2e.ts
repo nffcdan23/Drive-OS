@@ -23,6 +23,7 @@ import { CloudSync } from '@/lib/backend/cloudSync';
 import { MemoryStore, LEGACY_KEYS } from '@/lib/backend/storage';
 import type { Vehicle } from '@/lib/backend/model';
 import { toJourney } from '@/lib/backend/mappers';
+import { decodePolyline } from '@/lib/backend/geo';
 
 const need = (k: string) => {
   const v = process.env[k];
@@ -529,6 +530,51 @@ async function run() {
       probe instanceof Error ? (probe as ApiError).code ?? probe.message : 'found');
   }
   check('a lookup failure never marks the API as down', p1.connection !== 'server_error', String(p1.connection));
+
+  // ─── 19. Route preview (Mapbox Directions, Navigation Phase 2A) ──────────
+  // One real Mapbox request per run, as a signed-in user would make it
+  // (Keswick → Ambleside). Without a token on the API the section only checks
+  // that it says so. Coordinates and route text are never printed.
+  section('19. Route preview (Mapbox Directions)');
+  const routesUrl = `${API_URL}/api/navigation/routes`;
+  const anon = await fetch(routesUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+  check('POST /api/navigation/routes exists and needs a signed-in user', anon.status === 401, `HTTP ${anon.status}`);
+  const badBody = await p1.ep.getRoutes({ origin: { lat: 91, lng: 0 }, destination: { lat: 54.4287, lng: -2.9612 } }).catch((e) => e);
+  check('an invalid route request is refused before reaching Mapbox', badBody instanceof ApiError && badBody.status === 400, badBody instanceof ApiError ? `${badBody.status} ${badBody.code}` : 'accepted');
+  const expectRoutes = !!process.env.LEAK_CHECK_MAPBOX_TOKEN?.trim();
+  const routed = await p1.ep.getRoutes({
+    origin: { lat: 54.6001, lng: -3.1345, headingDeg: null },
+    destination: { lat: 54.4287, lng: -2.9612 },
+  }).catch((e) => e);
+  if (routed instanceof ApiError && routed.code === 'navigation_unavailable') {
+    console.log('     route previews are not configured on this API (no token): live checks skipped');
+    check('without a token the API says route previews are unavailable', !expectRoutes, expectRoutes ? 'a token was expected on this deploy' : '');
+  } else if (routed instanceof Error) {
+    check('Mapbox returns a route through the hosted API', false, (routed as ApiError).code ?? routed.message);
+  } else {
+    const routes = routed.routes;
+    const first = routes[0];
+    check('Mapbox returns at least one route, in Derwent\'s format', routed.provider === 'mapbox' && routes.length >= 1 && typeof first?.geometry === 'string');
+    console.log(`     ${routes.length} route(s) returned (${Math.max(routes.length - 1, 0)} alternative(s))`);
+    check('alternatives are numbered and at most two', routes.length <= 3 && routes.every((r, i) => r.index === i));
+    const points = first ? decodePolyline(first.geometry, 6) : [];
+    const near = (p: { latitude: number; longitude: number } | undefined, lat: number, lng: number) =>
+      !!p && Math.abs(p.latitude - lat) < 0.02 && Math.abs(p.longitude - lng) < 0.02;
+    check('the route line decodes and runs from the start to the place', points.length > 10 && near(points[0], 54.6001, -3.1345) && near(points[points.length - 1], 54.4287, -2.9612), `${points.length} points`);
+    // Keswick → Ambleside is about 17 miles by the A591; alternatives may go further round
+    check('the routes have sensible distances and times', !!first && first.distanceM > 20_000 && first.distanceM < 45_000 && first.durationS > 1200 && first.durationS < 4200
+      && routes.every((r) => r.distanceM >= first.distanceM * 0.8 && r.distanceM < 120_000 && r.durationS > 900 && r.durationS < 9000),
+      routes.map((r) => `${(r.distanceM / 1609.344).toFixed(1)} mi / ${Math.round(r.durationS / 60)} min`).join(', '));
+    const steps = routes.flatMap((r) => r.legs.flatMap((l) => l.steps));
+    const voice = steps.flatMap((st) => st.voice.map((v) => v.text)).join(' ');
+    const banners = steps.map((st) => `${st.banner?.primary ?? ''} ${st.maneuver.instruction ?? ''}`).join(' ');
+    check('instructions are in English (en-GB)', /\b(Head|Turn|Continue|Drive|Keep|Bear|At the roundabout|Your destination)\b/i.test(banners) && /\b(Turn|Continue|Drive|Keep|Bear|roundabout|destination|arrive)\b/i.test(voice));
+    check('spoken distances are in British imperial units (miles and yards)', /\b(miles?|yards?)\b/i.test(voice) && !/\b(kilomet(re|er)s?|metres|meters|feet)\b/i.test(voice));
+    check('voice text is plain (no SSML)', !/<speak|<prosody|<say-as/i.test(voice));
+    const leak = process.env.LEAK_CHECK_MAPBOX_TOKEN?.trim();
+    if (leak) check('route responses never contain the Mapbox token', !JSON.stringify(routed).includes(leak));
+  }
+  check('a route request never marks the API as down', p1.connection !== 'server_error', String(p1.connection));
 
   // ─── 15. Account deletion ────────────────────────────────────────────────
   section('15. Account deletion');
