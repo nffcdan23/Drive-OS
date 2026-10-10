@@ -73,6 +73,7 @@ import {
 import { LatestPoseWriter, sameFollowPose } from "@/lib/cameraWriter";
 import type { RoutePreviewStore } from "@/lib/navigation/previewStore";
 import type { NavigationSession } from "@/lib/navigation/session";
+import { useOnScreenSnapshot } from "@/hooks/useOnScreenSnapshot";
 import {
   ROUTE_COLORS,
   routePreviewFeatures,
@@ -129,8 +130,9 @@ export interface MapboxDriveMapProps {
   routePreview?: RoutePreviewStore | null;
   /**
    * The route being navigated (Phase 3), drawn by NavigationRouteLayers from
-   * the session itself, redrawn only when the route changes (a reroute),
-   * never per GPS fix. Never touches the camera.
+   * the session itself: only the part still to drive, redrawn when the
+   * route changes (a reroute) or every 15 m or so of progress, never per GPS
+   * fix or frame. Never touches the camera.
    */
   navigation?: NavigationSession | null;
   /** Logo and attribution sit this far above the bottom edge */
@@ -374,14 +376,18 @@ const RouteLayers = memo(function RouteLayers({ store }: { store: RoutePreviewSt
 });
 
 /**
- * The route being navigated, and its destination. Reads the session's map
- * view, which changes only with the route or destination: GPS fixes never
- * redraw it. Draws only: no camera, no location component.
+ * The route being navigated (the part still ahead: the line behind the car
+ * is gone), and its destination. Reads the session's map view, which changes
+ * only with the route, the destination, or each REMAINING_LINE.redrawEveryM
+ * of progress: not every fix, never every frame. Draws only: no camera, no
+ * location component.
  */
 const NavigationRouteLayers = memo(function NavigationRouteLayers({ session }: { session: NavigationSession }) {
-  const view = useSyncExternalStore(
+  // Held still in the background (background guidance keeps the session
+  // current); the line as it is now arrives in one update on return
+  const view = useOnScreenSnapshot(
     useCallback((fn: () => void) => session.subscribe(fn), [session]),
-    () => session.map,
+    useCallback(() => session.map, [session]),
   );
   const line = useMemo(
     () => ({
@@ -392,12 +398,13 @@ const NavigationRouteLayers = memo(function NavigationRouteLayers({ session }: {
             properties: {},
             geometry: {
               type: "LineString" as const,
-              coordinates: view.route.geometry.map((p): [number, number] => [p.longitude, p.latitude]),
+              // Only the part still to drive (derived; the route is never changed)
+              coordinates: (view.remaining ?? view.route.geometry.map((p): [number, number] => [p.longitude, p.latitude])) as [number, number][],
             },
           }]
         : [],
     }),
-    [view.route],
+    [view.route, view.remaining],
   );
   const point = useMemo(
     () => ({

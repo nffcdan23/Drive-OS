@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
   DIRECTIONS_PARAMS, DirectionsClient, DirectionsConfigError, MAPBOX_API_ORIGIN, RoutingError,
-  directionsUrl, parseDirectionsResponse, readDirectionsConfig, type DirectionsConfig, type RouteRequest,
+  REROUTE_PARAMS, directionsUrl, parseDirectionsResponse, rerouteParams, readDirectionsConfig, type DirectionsConfig, type RouteRequest,
 } from "../src/lib/mapboxDirections.ts";
 import { encodePolyline } from "../src/lib/geo.ts";
 
@@ -122,6 +122,31 @@ test("request: driving-traffic, UK English, British imperial voice units, altern
   assert.equal(new URL(directionsUrl({ ...REQ, origin: { ...REQ.origin, headingDeg: null } }, TOKEN)).searchParams.get("bearings"), null);
 });
 
+test("request: a reroute from a moving car avoids an immediate manoeuvre and snaps within the fix's accuracy", () => {
+  // A preview (no speed, no accuracy): exactly as before
+  const preview = new URL(directionsUrl(REQ, TOKEN)).searchParams;
+  assert.equal(preview.get("avoid_maneuver_radius"), null);
+  assert.equal(preview.get("radiuses"), null);
+  assert.deepEqual(rerouteParams(REQ.origin), {});
+  // 30 mph (13.4 m/s), 8 m accuracy: ~107 m clear of manoeuvres; the start snaps within 50 m
+  const p = new URL(directionsUrl({ ...REQ, origin: { ...REQ.origin, speedMs: 13.4, accuracyM: 8 } }, TOKEN)).searchParams;
+  assert.equal(p.get("avoid_maneuver_radius"), "107");
+  assert.equal(p.get("radiuses"), "50;unlimited", "one per coordinate; the destination unlimited");
+  assert.equal(p.get("bearings"), "182,45;", "still leaves the way the car points");
+  // Scaled by speed within 50..300 m; none when crawling
+  assert.equal(rerouteParams({ ...REQ.origin, speedMs: 5 }).avoid_maneuver_radius, "50");
+  assert.equal(rerouteParams({ ...REQ.origin, speedMs: 31 }).avoid_maneuver_radius, "248");
+  assert.equal(rerouteParams({ ...REQ.origin, speedMs: 80 }).avoid_maneuver_radius, String(REROUTE_PARAMS.maneuverRadiusM.max));
+  assert.equal(rerouteParams({ ...REQ.origin, speedMs: 2 }).avoid_maneuver_radius, undefined);
+  // Radius follows the accuracy within 50..200 m
+  assert.equal(rerouteParams({ ...REQ.origin, accuracyM: 30 }).radiuses, "90;unlimited");
+  assert.equal(rerouteParams({ ...REQ.origin, accuracyM: 500 }).radiuses, "200;unlimited");
+  // Nonsense is ignored rather than sent
+  assert.deepEqual(rerouteParams({ ...REQ.origin, speedMs: Number.NaN, accuracyM: -1 }), {});
+  // Only Directions' own parameters: no hand-built manoeuvres or waypoints
+  assert.equal(new URL(directionsUrl({ ...REQ, origin: { ...REQ.origin, speedMs: 13.4, accuracyM: 8 } }, TOKEN)).pathname.split(";").length, 2);
+});
+
 test("parse: routes become Derwent's format (alternatives, steps, UK details, annotations)", () => {
   const r = parseDirectionsResponse(OK);
   assert.equal(r.provider, "mapbox");
@@ -157,6 +182,58 @@ test("parse: routes become Derwent's format (alternatives, steps, UK details, an
   assert.equal(sp.banner, null);
   assert.deepEqual(sp.voice, []);
   assert.equal(sparse.routes[0]!.legs[0]!.congestion, null);
+});
+
+test("parse: lane guidance keeps only lane-bearing junctions and the lane fields Derwent needs", () => {
+  // An M6 exit as Mapbox describes it: three lanes, the left two for the slip road
+  const motorway = {
+    location: [-2.75, 54.33], bearings: [10, 190, 220], entry: [true, false, true], in: 1, out: 2, geometry_index: 5,
+    classes: ["motorway"], mapbox_streets_v8: { class: "motorway" }, toll_collection: { type: "toll_booth" },
+    lanes: [
+      { valid: true, active: true, valid_indication: "slight left", indications: ["slight left"] },
+      { valid: true, active: false, valid_indication: "slight left", indications: ["straight", "slight left"] },
+      { valid: false, active: false, indications: ["straight"] },
+    ],
+  };
+  const plain = { location: [-2.76, 54.32], bearings: [0, 180], entry: [true, true], in: 1, out: 0 };
+  const r = parseDirectionsResponse({ code: "Ok", routes: [route({ legs: [{ distance: 1, duration: 1, steps: [
+    step({ intersections: [plain, motorway] }),
+    step({ maneuver: { type: "arrive", location: [-2.961234, 54.428765] } }),
+  ] }] })] });
+  const [first, second] = r.routes[0]!.legs[0]!.steps;
+  assert.deepEqual(first!.lanes, [{
+    location: { lat: 54.33, lng: -2.75 },
+    lanes: [
+      { indications: ["slight left"], valid: true, active: true, validIndication: "slight left" },
+      { indications: ["straight", "slight left"], valid: true, active: false, validIndication: "slight left" },
+      { indications: ["straight"], valid: false, active: false, validIndication: null },
+    ],
+  }], "only the junction with lanes, only the lane fields: no bearings, classes, tolls or geometry indexes");
+  assert.ok(!("lanes" in second!), "a step without lane data looks exactly as before");
+  // Every indication Mapbox uses; "none" and unknown ones are dropped, repeats folded
+  const all = parseDirectionsResponse({ code: "Ok", routes: [route({ legs: [{ distance: 1, duration: 1, steps: [step({ intersections: [{ location: [0, 0], lanes: [
+    { valid: true, active: false, indications: ["uturn", "sharp left", "left", "slight left", "straight", "slight right", "right", "sharp right", "none", "bogus", "left"] },
+  ] }] })] }] })] }).routes[0]!.legs[0]!.steps[0]!.lanes!;
+  assert.deepEqual(all[0]!.lanes[0]!.indications, ["uturn", "sharp left", "left", "slight left", "straight", "slight right", "right", "sharp right"]);
+  // Malformed or useless lane data is left out entirely (better nothing than wrong guidance)
+  for (const [x, why] of [
+    [{ location: [0, 0], lanes: [] }, "no lanes"],
+    [{ location: [0, 0], lanes: [{ valid: false, indications: ["left"] }, { valid: false, indications: ["straight"] }] }, "no valid lane"],
+    [{ location: [0, 0], lanes: [{ valid: true, indications: ["left"] }, "lane"] }, "a lane that isn't one"],
+    [{ location: [0, 0], lanes: [{ indications: ["left"] }] }, "validity missing"],
+    [{ location: "here", lanes: [{ valid: true, indications: ["left"] }] }, "no location"],
+    [{ location: [0, 0], lanes: Array.from({ length: 17 }, () => ({ valid: true, indications: ["straight"] })) }, "17 lanes"],
+  ] as const) {
+    const st = parseDirectionsResponse({ code: "Ok", routes: [route({ legs: [{ distance: 1, duration: 1, steps: [step({ intersections: [x] })] }] })] }).routes[0]!.legs[0]!.steps[0]!;
+    assert.ok(!("lanes" in st), why);
+  }
+  // active only ever marks a valid lane
+  const odd = parseDirectionsResponse({ code: "Ok", routes: [route({ legs: [{ distance: 1, duration: 1, steps: [step({ intersections: [{ location: [0, 0], lanes: [
+    { valid: true, active: false, indications: ["left"] }, { valid: false, active: true, indications: ["straight"] },
+  ] }] })] }] })] }).routes[0]!.legs[0]!.steps[0]!.lanes!;
+  assert.equal(odd[0]!.lanes[1]!.active, false);
+  // The existing route fixture (no intersections) is unchanged
+  assert.ok(!("lanes" in parseDirectionsResponse(OK).routes[0]!.legs[0]!.steps[0]!));
 });
 
 test("parse: no route, no road nearby and impossible requests are typed; garbage is a bad response", () => {

@@ -7,7 +7,8 @@
  * choices and updates re-render this panel only, never the Drive screen.
  *
  * Start Navigation (Phase 3) turns the chosen route into Derwent's own
- * turn-by-turn guidance. Opening the place in the phone's maps app stays as
+ * turn-by-turn guidance, and records the drive (Phase 3.1) with the usual
+ * recorder, unless one is already recording or Passenger Mode is on. Opening the place in the phone's maps app stays as
  * a second choice, except for a Search Box result, which Mapbox's terms
  * keep to Mapbox maps. Routes are only ever fetched when the user taps
  * (Update Route, Try Again, or Start with an out-of-date route), never on
@@ -133,7 +134,7 @@ export function RoutePreviewPanel({
   const now = useMinuteClock();
   const [updateFailed, setUpdateFailed] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
-  const { places, addPlace } = useApp();
+  const { places, addPlace, isPassengerMode } = useApp();
   // A message about the last Update Route belongs to that preview only
   const requestKey = state.phase === "idle" ? null : `${state.destination.id}`;
   useEffect(() => setUpdateFailed(null), [requestKey]);
@@ -263,6 +264,7 @@ export function RoutePreviewPanel({
           <GlassButton
             material="accent"
             accessibilityLabel={`Start navigation to ${destination.name}`}
+            accessibilityHint={isPassengerMode ? "Starts guidance" : "Starts guidance and records this drive"}
             accessibilityState={{ disabled: starting, busy: starting }}
             disabled={starting}
             style={styles.start}

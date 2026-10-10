@@ -94,6 +94,8 @@ export interface PreparedRoute {
   n: number;
   lat: Float64Array;
   lng: Float64Array;
+  /** The same points as [longitude, latitude], for drawing (never changed) */
+  coords: readonly (readonly [number, number])[];
   /** Distance along the route to each point (m) */
   cum: Float64Array;
   /** Per segment (point i to i+1): length (m), bearing, metric offset and the scale at its start */
@@ -205,8 +207,10 @@ export function prepareRoute(route: NavRoute): PreparedRoute {
   for (let k = steps.length - 2; k >= 0; k--) durationAfter[k] = durationAfter[k + 1]! + stepDuration[k + 1]!;
 
   const maneuvers = maneuversFor(steps);
+  const coords: (readonly [number, number])[] = new Array(n);
+  for (let i = 0; i < n; i++) coords[i] = [lng[i]!, lat[i]!];
   const prepared: PreparedRoute = {
-    route, n, lat, lng, cum, segLen, segBearing, segDx, segDy, segCos, total,
+    route, n, lat, lng, coords, cum, segLen, segBearing, segDx, segDy, segCos, total,
     steps, maneuvers, stepStart, stepDuration, durationAfter,
     holdUntil: new Float64Array(stepStart),
   };
@@ -239,6 +243,33 @@ export function pointAt(p: PreparedRoute, along: number): LatLng {
     latitude: p.lat[i]! + (p.lat[i + 1]! - p.lat[i]!) * t,
     longitude: p.lng[i]! + (p.lng[i + 1]! - p.lng[i]!) * t,
   };
+}
+
+export const REMAINING_LINE = {
+  /** The drawn line starts this far behind the car's progress (m) */
+  behindM: 5,
+  /** It's redrawn only once progress has moved on this far (m), never per frame */
+  redrawEveryM: 15,
+} as const;
+
+/**
+ * The part of the route still to drive, for drawing: from `behindM` before
+ * `along` (so the line starts just under the arrow, never ahead of it) to the
+ * end. Derived from the prepared points; the route itself is never changed.
+ * At the start of the route it is the prepared points array itself (no copy).
+ */
+export function remainingLine(
+  p: PreparedRoute, along: number, behindM: number = REMAINING_LINE.behindM,
+): readonly (readonly [number, number])[] {
+  const from = Math.min(Math.max(along - behindM, 0), p.total);
+  if (from <= 0) return p.coords;
+  const i = segmentAt(p, from);
+  const start = pointAt(p, from);
+  // The point at `from`, then every route point after it
+  const out: (readonly [number, number])[] = new Array(p.n - i);
+  out[0] = [start.longitude, start.latitude];
+  for (let k = i + 1; k < p.n; k++) out[k - i] = p.coords[k]!;
+  return out;
 }
 
 const vertexAt = (p: PreparedRoute, along: number) => {

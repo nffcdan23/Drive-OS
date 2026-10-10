@@ -12,7 +12,8 @@ export type Visibility = 'private' | 'friends' | 'public';
 
 /** POST /navigation/routes body: where from (with heading when moving) and where to */
 export interface RouteRequestBody {
-  origin: { lat: number; lng: number; headingDeg?: number | null };
+  /** speedMs and accuracyM: a reroute while driving (older servers ignore them) */
+  origin: { lat: number; lng: number; headingDeg?: number | null; speedMs?: number; accuracyM?: number };
   destination: { lat: number; lng: number };
 }
 
@@ -36,6 +37,11 @@ export interface ServerRouteStep {
   drivingSide: 'left' | 'right' | null;
   banner: { primary: string; secondary: string | null } | null;
   voice: Array<{ distanceBeforeM: number; text: string }>;
+  /** Lane guidance (newer servers; absent when there's none) */
+  lanes?: Array<{
+    location: { lat: number; lng: number };
+    lanes: Array<{ indications: string[]; valid: boolean; active: boolean; validIndication: string | null }>;
+  }>;
 }
 
 export interface ServerRouteLeg {

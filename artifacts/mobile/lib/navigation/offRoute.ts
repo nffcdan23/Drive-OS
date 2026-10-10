@@ -11,8 +11,8 @@
 // within the threshold, or the corner-cutting of a roundabout never trigger
 // it; carrying on past a missed turn does, within a few seconds.
 //
-// It never reroutes: the guidance shows "You're off route" and the user
-// chooses Update Route. Coming back onto the route clears it.
+// It never reroutes itself: once it says 'off', the session asks for a new
+// route (session.ts, REROUTE). Coming back onto the route clears it.
 //
 // No React Native imports, so it is unit-tested under node.
 

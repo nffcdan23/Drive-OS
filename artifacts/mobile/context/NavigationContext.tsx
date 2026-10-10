@@ -20,10 +20,26 @@
  * And the active navigation session (Phase 3, lib/navigation/session.ts):
  * Start Navigation turns the preview into turn-by-turn guidance, fed the
  * same accepted fixes, read only. In memory only: the app closing (or the
- * user signing out) ends it. The Drive screen reads only its phase; the
- * guidance banner and bar read the rest.
+ * user signing out) ends it. Starting it records the drive with the app's
+ * existing Start Drive when nothing is recording (Phase 3.1). The Drive
+ * screen reads only its phase; the guidance banner and bar read the rest.
+ *
+ * Voice guidance (Phase 4, lib/navigation/voice.ts) follows the session from
+ * here, so it lives as long as the session does (other tabs don't reset
+ * it). It speaks Mapbox's prompts on screen and, where the speaker can
+ * (lib/navigation/speech.ts: iOS with its audio session, Android), off
+ * screen and with the phone locked too. Its preference (Normal / Alerts only / Off) is
+ * kept on this device for this user (lib/navigation/voicePrefs.ts).
+ *
+ * Background guidance (lib/navigation/background.ts): with the app off screen
+ * or the phone locked, navigation is fed the fixes of the one background
+ * location task (the drive recorder's; lib/backend/sharedLocationUpdates), so
+ * progress, rerouting and arrival carry on. The guidance UI and the map's
+ * route line hold still in the background and catch up in one update on
+ * return (hooks/useOnScreenSnapshot); the camera is never touched.
  */
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { AppState } from 'react-native';
 import * as Location from 'expo-location';
 import { ep, newId } from '@/lib/backendClient';
 import { ApiError, AuthRequiredError, NetworkError, describeError } from '@/lib/backend/http';
@@ -33,7 +49,15 @@ import { deviceStorage } from '@/lib/secureStorage';
 import { RecentDestinations, type RecentDestination } from '@/lib/navigation/recents';
 import { DestinationSearch, type SearchState } from '@/lib/navigation/search';
 import { NavigationSession, type EndReason, type NavigationState, type NavPhase } from '@/lib/navigation/session';
-import { startFromPreview } from '@/lib/navigation/startNavigation';
+import { startFromPreview, type NavigationRecorder } from '@/lib/navigation/startNavigation';
+import { BackgroundNavigation, type BackgroundFix } from '@/lib/navigation/background';
+import { sharedLocation } from '@/lib/driveBackgroundLocation';
+import { useOnScreenSnapshot } from '@/hooks/useOnScreenSnapshot';
+import { msToKmh } from '@/lib/units';
+import { createSpeaker } from '@/lib/navigation/speech';
+import { VoiceGuidance, type VoiceMode } from '@/lib/navigation/voice';
+import { VoicePreferences } from '@/lib/navigation/voicePrefs';
+import { useApp } from '@/context/AppContext';
 import { journal } from '@/lib/diagnostics';
 import { RoutePreviewStore, type PreviewError, type PreviewPhase, type PreviewState } from '@/lib/navigation/previewStore';
 import type { Destination, LatLng, RouteOrigin } from '@/lib/navigation/model';
@@ -56,6 +80,9 @@ interface NavigationContextValue {
   /** The latest position the Drive screen accepted, if recent (search ranks near it) */
   recentPosition(): LatLng | null;
   recents: RecentDestinations;
+  voicePrefs: VoicePreferences;
+  /** The newest fix navigation was given (screen or background), if any */
+  latestFix(): BackgroundFix | null;
 }
 
 const NavigationContext = createContext<NavigationContextValue | null>(null);
@@ -78,8 +105,9 @@ export function NavigationProvider({ userId, children }: { userId: string; child
     setTimer: (fn, ms) => setTimeout(fn, ms),
     clearTimer: (t) => clearTimeout(t as ReturnType<typeof setTimeout>),
   }), []);
-  // Guidance: the same route requests as previews, only ever on the user's
-  // action (Start with an out-of-date route, Update Route)
+  // Guidance: the same route requests as previews: Start with an
+  // out-of-date route, and automatic rerouting once confirmed off the route
+  // (limited by the session: lib/navigation/session.ts REROUTE)
   const session = useMemo(() => new NavigationSession({
     fetchRoutes: (body) => {
       if (!ep) return Promise.reject(new Error('The app is not connected to a server.'));
@@ -93,18 +121,80 @@ export function NavigationProvider({ userId, children }: { userId: string; child
   }), []);
   // Signing out (or anything else unmounting this) ends navigation
   useEffect(() => () => session.end('closed'), [session]);
-  const lastFix = useRef<{ origin: RouteOrigin; time: number } | null>(null);
+
+  // Voice guidance: reads the session only; foreground only
+  const voicePrefs = useMemo(() => new VoicePreferences(deviceStorage, userId), [userId]);
+  useEffect(() => {
+    // The audio side (lib/navigation/audioSession.ts): one prompt at a time,
+    // on the app's own audio session where there is one (iOS), so it's heard
+    // off screen and with the phone locked, ducking other audio
+    const speaker = createSpeaker({ onError: (code) => voice.noteSpeechError(code), journal });
+    const voice: VoiceGuidance = new VoiceGuidance({ session, speaker, now: Date.now, journal });
+    voice.setBackgroundSpeech(speaker.background);
+    voice.setForeground(AppState.currentState === 'active');
+    speaker.setAppState(AppState.currentState);
+    const apply = () => voice.setMode(voicePrefs.mode);
+    apply();
+    const offPrefs = voicePrefs.subscribe(apply);
+    void voicePrefs.load();
+    // Off screen no longer silences guidance where the speaker can play
+    // there; where it can't, anything but active (background, a call,
+    // Control Centre) is quiet, as before
+    const app = AppState.addEventListener('change', (state) => {
+      voice.setForeground(state === 'active');
+      speaker.setAppState(state);
+    });
+    const detach = voice.attach();
+    return () => {
+      app.remove();
+      offPrefs();
+      detach();
+      speaker.dispose();
+    };
+  }, [session, voicePrefs]);
+  const lastFix = useRef<{ origin: RouteOrigin; time: number; fix: BackgroundFix } | null>(null);
 
   const noteFix = useCallback<NavigationContextValue['noteFix']>((fix) => {
+    // The screen's watcher and the background task can both deliver around
+    // a switch: each moment once, in order
+    if (lastFix.current && fix.time <= lastFix.current.time) return;
     const coordinate: LatLng = { latitude: fix.latitude, longitude: fix.longitude };
     const moving = fix.speedKmh >= HEADING_MIN_KMH && fix.headingDeg != null && fix.headingDeg >= 0;
-    lastFix.current = { origin: { coordinate, headingDeg: moving ? fix.headingDeg : null }, time: fix.time };
+    lastFix.current = {
+      origin: { coordinate, headingDeg: moving ? fix.headingDeg : null },
+      time: fix.time,
+      fix: { ...coordinate, speedMs: fix.speedMs, headingDeg: fix.headingDeg, accuracyM: fix.accuracyM, timestamp: fix.time },
+    };
     store.noteFix(coordinate, fix.time);
     session.noteFix({
       latitude: fix.latitude, longitude: fix.longitude, accuracyM: fix.accuracyM,
       speedMs: fix.speedMs, headingDeg: fix.headingDeg, time: fix.time,
     });
   }, [store, session]);
+
+  // Background guidance: the background task's fixes, while the app is off screen
+  useEffect(() => {
+    const background = new BackgroundNavigation({
+      session,
+      source: sharedLocation,
+      feed: (f) => noteFix({
+        latitude: f.latitude, longitude: f.longitude,
+        speedKmh: msToKmh(f.speedMs),
+        speedMs: f.speedMs, headingDeg: f.headingDeg ?? null, accuracyM: f.accuracyM ?? null, time: f.timestamp,
+      }),
+      now: Date.now,
+      journal,
+    });
+    background.setAppState(AppState.currentState);
+    const app = AppState.addEventListener('change', (state) => background.setAppState(state));
+    const detach = background.attach();
+    return () => {
+      app.remove();
+      detach();
+    };
+  }, [session, noteFix]);
+
+  const latestFix = useCallback(() => lastFix.current?.fix ?? null, []);
 
   const currentOrigin = useCallback(async (): Promise<RouteOrigin> => {
     const recent = lastFix.current;
@@ -125,8 +215,8 @@ export function NavigationProvider({ userId, children }: { userId: string; child
   useEffect(() => { void recents.load(); }, [recents]);
 
   const value = useMemo(
-    () => ({ store, session, noteFix, currentOrigin, recentPosition, recents }),
-    [store, session, noteFix, currentOrigin, recentPosition, recents],
+    () => ({ store, session, noteFix, currentOrigin, recentPosition, recents, voicePrefs, latestFix }),
+    [store, session, noteFix, currentOrigin, recentPosition, recents, voicePrefs, latestFix],
   );
   return <NavigationContext.Provider value={value}>{children}</NavigationContext.Provider>;
 }
@@ -238,33 +328,69 @@ export function useNavigationPhase(): NavPhase {
   return useSyncExternalStore(useCallback((fn: () => void) => session.subscribe(fn), [session]), () => session.phase);
 }
 
-/** The whole navigation state (it changes with every fix): for the guidance banner and bar only */
+/**
+ * The whole navigation state (it changes with every fix): for the guidance
+ * banner and bar only. Held still while the app is in the background (no
+ * renders there), and current again the moment it's back.
+ */
 export function useNavigationState(): NavigationState {
   const session = useNavigationSession();
-  return useSyncExternalStore(useCallback((fn: () => void) => session.subscribe(fn), [session]), () => session.state);
+  return useOnScreenSnapshot(
+    useCallback((fn: () => void) => session.subscribe(fn), [session]),
+    useCallback(() => session.state, [session]),
+  );
+}
+
+/** The newest fix navigation has (on screen or from the background), for the camera on coming back */
+export function useLatestNavigationFix(): () => BackgroundFix | null {
+  return useNavigation().latestFix;
 }
 
 /**
  * Start Navigation: the preview's chosen route becomes guidance (with one
- * fresh route request first only if the preview was out of date).
+ * fresh route request first only if the preview was out of date), and the
+ * drive is recorded with the app's existing Start Drive unless one already
+ * is (or Passenger Mode is on).
  */
 export function useStartNavigation() {
   const { store, session, currentOrigin } = useNavigation();
-  return useCallback(() => startFromPreview(store, session, currentOrigin), [store, session, currentOrigin]);
+  const { isDriving, isPassengerMode, startDrive } = useApp();
+  const app = useRef({ isDriving, isPassengerMode, startDrive });
+  app.current = { isDriving, isPassengerMode, startDrive };
+  const recorder = useMemo<NavigationRecorder>(() => ({
+    isRecording: () => app.current.isDriving,
+    canRecord: () => !app.current.isPassengerMode,
+    startRecording: () => app.current.startDrive(),
+  }), []);
+  return useCallback(() => startFromPreview(store, session, currentOrigin, recorder), [store, session, currentOrigin, recorder]);
 }
 
-/** Update Route while navigating: one tap, one request, from where the phone is now */
-export function useRerouteNavigation() {
-  const { session, currentOrigin } = useNavigation();
-  return useCallback(async () => {
-    const origin = await currentOrigin();
-    await session.reroute(origin);
-  }, [session, currentOrigin]);
+/**
+ * Try Again, offered off route only after several automatic updates failed:
+ * one request from the latest fix (the session reroutes by itself otherwise)
+ */
+export function useRetryReroute() {
+  const session = useNavigationSession();
+  return useCallback(() => session.retryReroute(), [session]);
 }
 
-/** End navigation (End, or Done on arriving). A drive being recorded carries on. */
+/**
+ * End navigation (End, or Done on arriving). It never stops a drive itself:
+ * the Drive screen finishes one navigation started, through its usual End
+ * Drive, when the user chooses to (or on arriving).
+ */
 export function useEndNavigation() {
   const session = useNavigationSession();
   return useCallback((reason: EndReason = 'user') => session.end(reason), [session]);
 }
 
+/** The navigation voice preference: Normal, Alerts only or Off (this device, this user) */
+export function useNavigationVoice(): { mode: VoiceMode; setMode(mode: VoiceMode): void; toggleMute(): void } {
+  const { voicePrefs } = useNavigation();
+  const mode = useSyncExternalStore(useCallback((fn: () => void) => voicePrefs.subscribe(fn), [voicePrefs]), () => voicePrefs.mode);
+  return useMemo(() => ({
+    mode,
+    setMode: (m: VoiceMode) => void voicePrefs.setMode(m),
+    toggleMute: () => void voicePrefs.toggleMute(),
+  }), [mode, voicePrefs]);
+}

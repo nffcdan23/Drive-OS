@@ -148,7 +148,19 @@ export class BackgroundDriveRecorder implements DriveTracker {
   private held: GpsFix[] = [];
   private deliveries = 0;
 
-  constructor(private readonly deps: { store: KeyValueStore; updates: LocationUpdates; now?: () => number; journal?: Journal }) {}
+  constructor(private readonly deps: {
+    store: KeyValueStore;
+    updates: LocationUpdates;
+    now?: () => number;
+    journal?: Journal;
+    /**
+     * Something else is using the same updates right now (navigation guiding
+     * in the background, lib/backend/sharedLocationUpdates): fixes with no
+     * drive in progress are then simply not recorded, rather than taken for
+     * updates left over from a crash and stopped.
+     */
+    othersUsingUpdates?: () => boolean;
+  }) {}
 
   private now() { return this.deps.now ? this.deps.now() : Date.now(); }
   private get journal() { return this.deps.journal ?? noJournal; }
@@ -272,6 +284,8 @@ export class BackgroundDriveRecorder implements DriveTracker {
         return;
       }
       if (!session) {
+        // Navigation is using them: nothing to record, nothing to stop
+        if (this.deps.othersUsingUpdates?.()) return;
         // Updates with no drive in progress (left over from a crash, say):
         // stop them rather than track with nothing to record.
         await this.stopNow('no-drive');

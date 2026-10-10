@@ -5794,7 +5794,7 @@ test('the journal is wired in: launch noted first, fatal JS errors saved synchro
   assert.match(diag, /setGlobalHandler\(\(error, isFatal\) => \{\s*if \(isFatal\) \{\s*try \{\s*SecureStore\.setItem\(LAST_FATAL_KEY/);
   assert.match(diag, /previous\(error, isFatal\);/);
   assert.match(diag, /journal\.log\('fatal_js_error'/);
-  assert.match(readFileSync(join(MOBILE, 'lib/driveBackgroundLocation.ts'), 'utf8'), /new BackgroundDriveRecorder\(\{ store: deviceStorage, updates, journal \}\)/);
+  assert.match(readFileSync(join(MOBILE, 'lib/driveBackgroundLocation.ts'), 'utf8'), /new BackgroundDriveRecorder\(\{\s*store: deviceStorage,\s*updates: sharedLocation\.drive,\s*journal,/);
   assert.match(readFileSync(join(MOBILE, 'context/AppContext.tsx'), 'utf8'), /tracker: driveTracker, journal,/);
 });
 
@@ -7006,11 +7006,13 @@ test('route previews: fetched only when the user asks, kept in memory only, with
     const src = strip(read(f));
     assert.ok(!/AsyncStorage|SecureStore|MemoryStore|storage|FileSystem|console\./.test(src), `${f} stores or logs routes`);
   }
-  // The context stores one thing on the device: recent destinations (Phase 2B), never routes
+  // The context stores two things on the device, never routes: recent
+  // destinations (Phase 2B) and the voice preference (Phase 4)
   const ctx = strip(read('../context/NavigationContext.tsx'));
   assert.ok(!/AsyncStorage|SecureStore|FileSystem|console\./.test(ctx));
-  assert.deepEqual(ctx.match(/deviceStorage/g)?.length, 2, 'deviceStorage: one import, one use (recents)');
+  assert.deepEqual(ctx.match(/deviceStorage/g)?.length, 3, 'deviceStorage: one import, two uses (recents, voice preference)');
   assert.ok(/new RecentDestinations\(deviceStorage, userId\)/.test(ctx));
+  assert.ok(/new VoicePreferences\(deviceStorage, userId\)/.test(ctx));
   // The disclosure Mapbox asks directions apps to show, on the preview itself
   const panel = read('../components/navigation/RoutePreviewPanel.tsx');
   assert.ok(panel.includes('"Directions are a guide. Always follow road signs, signals and local traffic laws."'));
@@ -7443,15 +7445,15 @@ test('Phase 2B wiring: search off the Drive screen, results never stored, the on
 // camera policy, UK formatting, recording isolation and privacy.
 
 import {
-  prepareRoute, progressAt, RouteTracker, PROGRESS, segmentAt, UnusableRouteError,
+  prepareRoute, progressAt, RouteTracker, PROGRESS, segmentAt, UnusableRouteError, pointAt, remainingLine, REMAINING_LINE,
   type GpsFix,
 } from '@/lib/navigation/routeProgress';
 import { OffRouteDetector, OFF_ROUTE, awayThresholdM } from '@/lib/navigation/offRoute';
-import { NavigationSession, NAVIGATION, type NavigationState } from '@/lib/navigation/session';
+import { NavigationSession, NAVIGATION, REROUTE, type NavigationState } from '@/lib/navigation/session';
 import { maneuverFor, maneuversFor, ordinal, roadLabel } from '@/lib/navigation/maneuver';
 import { guidanceZoom, GUIDANCE_CAMERA } from '@/lib/navigation/guidanceCamera';
 import { formatGuidanceDistance } from '@/lib/navigation/format';
-import { startFromPreview, canNavigate } from '@/lib/navigation/startNavigation';
+import { startFromPreview, canNavigate, recordingForStart, type NavigationRecorder } from '@/lib/navigation/startNavigation';
 import type { NavRoute as Nav3Route, RouteStep as Nav3Step } from '@/lib/navigation/model';
 
 // Metres east/north of a point in the Lake District, as lat/lng
@@ -7775,8 +7777,26 @@ test('guidance session: start → navigating on the first fix → arrived → Do
   assert.equal(e.s.map.route, null);
 });
 
-test('guidance session: off route needs repeated, accurate, travelling fixes; one bad point never does it', () => {
-  const h = nav3Session();
+/** A route server whose answers the test gives out, one request at a time */
+function routeServer3() {
+  const pending: Array<{ resolve: (v: ServerRoutes) => void; reject: (e: unknown) => void }> = [];
+  return {
+    pending,
+    fetch: () => new Promise<ServerRoutes>((resolve, reject) => { pending.push({ resolve, reject }); }),
+    answer(v: ServerRoutes) { pending.shift()!.resolve(v); },
+    fail(code: string) { pending.shift()!.reject(Object.assign(new Error(code), { code })); },
+  };
+}
+/** Lets answered requests land */
+const settle3 = () => new Promise<void>((r) => setImmediate(r));
+/** A new route from just past the missed left turn: north, then west and back south to the destination */
+const FRESH3 = () => route3(polyline3([[0, 1050], [0, 1500], [-600, 1500], [-600, 1400]]), [
+  { at: 0, type: 'depart' }, { at: 45, type: 'turn', modifier: 'left' }, { at: 105, type: 'turn', modifier: 'left' }, { at: 115, type: 'arrive' },
+], 'n:0');
+
+test('guidance session: off route needs repeated, accurate, travelling fixes; one bad point never does it', async () => {
+  const srv = routeServer3();
+  const h = nav3Session({ fetch: srv.fetch });
   void h.s.start({ route: L_ROUTE(), destination: N3_DEST });
   h.feed(drive3(L_PTS, { to: 600 }));
   assert.equal(h.s.phase, 'navigating');
@@ -7790,16 +7810,24 @@ test('guidance session: off route needs repeated, accurate, travelling fixes; on
   h.feed(Array.from({ length: 20 }, (_, i) => fix3(120, 710 + i * 2, t2 + 1000 * (i + 1), { accuracyM: 80, headingDeg: 0 })));
   assert.notEqual(h.s.phase, 'offRoute');
   assert.equal(active3(h.s.state)!.gps, 'weak');
-  // Missing the left turn and carrying on north: off route within a few seconds of leaving it
+  assert.equal(h.bodies.length, 0, 'noise never asks for a route');
+  // Missing the left turn and carrying on north: off route within a few
+  // seconds of leaving it, and a new route is on its way by itself
   const t3 = h.clock.t;
   h.feed(drive3(polyline3([[0, 720], [0, 1400]]), { t0: t3 + 1000, noise: 3 }));
-  assert.equal(h.s.phase, 'offRoute');
-  // How far past the junction before it was called: not instantly, not late
+  assert.ok(h.phases.includes('offRoute'));
+  assert.equal(h.s.phase, 'rerouting');
+  assert.equal(h.bodies.length, 1);
   const offAt = h.states.findIndex((st) => st.phase === 'offRoute');
   assert.ok(offAt > 0);
-  // Back onto the route: navigating again
+  // Back onto the route before the answer: that answer is dropped, the route stays
+  const route = active3(h.s.state)!.route;
   h.feed(drive3(L_PTS, { from: 1100, to: 1300, t0: h.clock.t + 1000 }));
+  srv.answer(serverRoutes3(FRESH3()));
+  await settle3();
   assert.equal(h.s.phase, 'navigating');
+  assert.equal(active3(h.s.state)!.route, route, 'back on the route: the old route is still the one');
+  assert.equal(h.bodies.length, 1);
 });
 
 test('off-route detector: thresholds, confirmation, accuracy suppression, wrong way, back on', () => {
@@ -7842,47 +7870,194 @@ test('off-route detector: thresholds, confirmation, accuracy suppression, wrong 
   assert.equal(g.state, 'on');
 });
 
-test('guidance session: Update Route makes exactly one request, keeps the old route until the new one is in', async () => {
-  let resolve!: (v: ServerRoutes) => void;
-  let reject!: (e: unknown) => void;
-  const h = nav3Session({ fetch: () => new Promise((res, rej) => { resolve = res; reject = rej; }) });
+/** Missing the left turn and driving on north, one fix a second (noise-free) */
+const offNorth3 = (t0: number, toY = 1400, speed = 13) => drive3(polyline3([[0, 720], [0, toY]]), { t0, noise: 0, speed });
+/** Feeds fixes one at a time; when each route request was made (clock ms) */
+function feedWatching3(h: ReturnType<typeof nav3Session>, fixes: GpsFix[], until?: () => boolean) {
+  const at: number[] = [];
+  for (const f of fixes) {
+    const before = h.bodies.length;
+    h.feed([f]);
+    if (h.bodies.length > before) at.push(h.clock.t);
+    if (until?.()) break;
+  }
+  return at;
+}
+
+test('auto reroute: once confirmed off route, exactly one request, from the car (position, heading, speed, accuracy); the new route replaces the old', async () => {
+  const srv = routeServer3();
+  const h = nav3Session({ fetch: srv.fetch });
   void h.s.start({ route: L_ROUTE(), destination: N3_DEST });
   h.feed(drive3(L_PTS, { to: 700 }));
-  h.feed(drive3(polyline3([[0, 720], [0, 1400]]), { t0: h.clock.t + 1000 }));
-  assert.equal(h.s.phase, 'offRoute');
   const oldRoute = active3(h.s.state)!.route;
-  const origin = { coordinate: at3(0, 1400), headingDeg: 0 };
-  const a = h.s.reroute(origin);
-  void h.s.reroute(origin);
-  void h.s.reroute(origin);
-  assert.equal(h.bodies.length, 1, 'three taps, one request');
+  const off = offNorth3(h.clock.t + 1000);
+  const reqAt = feedWatching3(h, off);
+  assert.equal(reqAt.length, 1, 'one request, however many off-route fixes follow');
+  const sentFix = off.find((f) => f.time === reqAt[0])!;
+  assert.ok(off.indexOf(sentFix) >= OFF_ROUTE.confirmFixes, 'never on the first fix away from the route');
+  assert.ok(h.phases.indexOf('offRoute') < h.phases.indexOf('rerouting'), "You're off route, then Updating route");
+  // From the fix that confirmed it: where the car is, the way it's heading, its speed and accuracy
+  const body = h.bodies[0] as { origin: { lat: number; lng: number; headingDeg: number | null; speedMs?: number; accuracyM?: number }; destination: unknown };
+  assert.equal(body.origin.lat, sentFix.latitude);
+  assert.equal(body.origin.lng, sentFix.longitude);
+  assert.equal(body.origin.headingDeg, sentFix.headingDeg, 'north');
+  assert.equal(body.origin.speedMs, 13);
+  assert.equal(body.origin.accuracyM, 8);
+  assert.deepEqual(body.destination, { lat: N3_DEST.coordinate.latitude, lng: N3_DEST.coordinate.longitude });
+  // Meanwhile the old route stays on screen
   assert.equal(h.s.phase, 'rerouting');
-  assert.equal(active3(h.s.state)!.route, oldRoute, 'the old route stays meanwhile');
-  assert.deepEqual((h.bodies[0] as { destination: unknown }).destination, { lat: N3_DEST.coordinate.latitude, lng: N3_DEST.coordinate.longitude });
-  // A new route from where the car is
-  const fresh = route3(polyline3([[0, 1400], [0, 1500], [-600, 1500], [-600, 1400]]), [{ at: 0, type: 'depart' }, { at: 10, type: 'turn', modifier: 'left' }, { at: 70, type: 'turn', modifier: 'left' }, { at: 80, type: 'arrive' }], 'r:0');
-  resolve(serverRoutes3(fresh));
-  await a;
+  assert.equal(active3(h.s.state)!.route, oldRoute);
+  const fresh = FRESH3();
+  srv.answer(serverRoutes3(fresh));
+  await settle3();
+  const st = active3(h.s.state)!;
   assert.equal(h.s.phase, 'navigating');
-  assert.notEqual(active3(h.s.state)!.route, oldRoute);
-  assert.equal(active3(h.s.state)!.route.geometry.length, fresh.geometry.length);
-  // A failed update keeps guiding on the route there is, and says so
-  h.feed(drive3(polyline3([[0, 1400], [200, 1400]]), { t0: h.clock.t + 1000 }));
+  assert.notEqual(st.route, oldRoute);
+  assert.equal(st.route.geometry.length, fresh.geometry.length);
+  assert.ok(st.progress, 'the car is found on the new route straight away');
+  assert.equal(st.updateFailed, false);
+  assert.equal(h.s.map.route, st.route, 'the map draws the new route');
+  // The new route's own line is what's drawn now (from where the car is on it)
+  assert.ok(h.s.map.remaining!.length <= prepareRoute(st.route).n);
+});
+
+test('auto reroute: a cooldown after each new route; off again soon after waits for it', async () => {
+  const srv = routeServer3();
+  const h = nav3Session({ fetch: srv.fetch });
+  void h.s.start({ route: L_ROUTE(), destination: N3_DEST });
+  h.feed(drive3(L_PTS, { to: 700 }));
+  const off = offNorth3(h.clock.t + 1000);
+  feedWatching3(h, off, () => h.bodies.length === 1);
+  srv.answer(serverRoutes3(FRESH3()));
+  await settle3();
+  const doneAt = h.clock.t;
+  assert.equal(h.s.phase, 'navigating');
+  // Straight away off the new route as well (east, into a side road): off route again within the cooldown
+  const y = (off.find((f) => f.time === doneAt)!.latitude - N3_BASE.latitude) * N3_M;
+  const again = drive3(polyline3([[0, y], [800, y]]), { t0: h.clock.t + 1000, noise: 0 });
+  let offWhileCooling = false;
+  const reqAt = feedWatching3(h, again, () => {
+    if (h.s.phase === 'offRoute' && h.clock.t - doneAt < REROUTE.cooldownMs) offWhileCooling = true;
+    return h.bodies.length === 2;
+  });
+  assert.ok(offWhileCooling, 'off route again inside the cooldown: no request yet');
+  assert.equal(reqAt.length, 1);
+  assert.ok(reqAt[0]! - doneAt >= REROUTE.cooldownMs, `asked ${reqAt[0]! - doneAt} ms after the last new route`);
+  assert.ok(reqAt[0]! - doneAt < REROUTE.cooldownMs + 2000, 'and soon after it ends');
+});
+
+test('auto reroute: a failure keeps the old route ("Route update unavailable"); waits grow; Try Again after repeated failures; a cap per ten minutes', async () => {
+  const srv = routeServer3();
+  const h = nav3Session({ fetch: srv.fetch });
+  void h.s.start({ route: L_ROUTE(), destination: N3_DEST });
+  h.feed(drive3(L_PTS, { to: 700 }));
+  const oldRoute = active3(h.s.state)!.route;
+  // A long way off the route: 13 m/s north for 12 minutes
+  const off = offNorth3(h.clock.t + 1000, 720 + 13 * 720);
+  let i = 0;
+  const next = () => {
+    const before = h.bodies.length;
+    while (i < off.length && h.bodies.length === before) h.feed([off[i++]!]);
+    assert.ok(h.bodies.length > before, 'another request came');
+    return h.clock.t;
+  };
+  const times = [next()];
+  srv.fail('offline');
+  await settle3();
+  let st = active3(h.s.state)!;
   assert.equal(h.s.phase, 'offRoute');
-  const kept = active3(h.s.state)!.route;
-  const b = h.s.reroute(origin);
-  reject(Object.assign(new Error('offline'), { code: 'offline' }));
-  await b;
-  assert.equal(h.s.phase, 'offRoute');
-  assert.equal(active3(h.s.state)!.route, kept);
-  assert.equal(active3(h.s.state)!.notice, 'offline');
-  assert.equal(h.bodies.length, 2);
-  // Ended while a request is in flight: its answer is ignored
-  const c = h.s.reroute(origin);
+  assert.equal(st.route, oldRoute, 'the old route stays');
+  assert.equal(st.updateFailed, true);
+  assert.equal(st.notice, 'Route update unavailable');
+  assert.equal(st.canRetry, false, 'no button after one failure');
+  // 10 s, then 20 s, then 40 s...
+  times.push(next());
+  srv.fail('offline');
+  await settle3();
+  times.push(next());
+  srv.fail('offline');
+  await settle3();
+  st = active3(h.s.state)!;
+  assert.equal(st.canRetry, true, 'Try Again only after repeated failures');
+  const gaps = times.slice(1).map((t, k) => t - times[k]!);
+  assert.ok(gaps[0]! >= 10_000 && gaps[0]! < 12_000, `first wait ${gaps[0]}`);
+  assert.ok(gaps[1]! >= 20_000 && gaps[1]! < 22_000, `second wait ${gaps[1]}`);
+  // Try Again: one request now, however often it's tapped
+  const retry = h.s.retryReroute();
+  void h.s.retryReroute();
+  assert.equal(h.bodies.length, 4);
+  srv.fail('rate_limited');
+  await retry;
+  // The API's own limit: the longest wait
+  times.push(h.clock.t);
+  times.push(next());
+  assert.ok(times[4]! - times[3]! >= REROUTE.maxBackoffMs, 'after rate_limited, a minute');
+  srv.fail('offline');
+  await settle3();
+  times.push(next());
+  srv.fail('offline');
+  await settle3();
+  times.push(next());
+  srv.fail('offline');
+  await settle3();
+  // Six automatic requests in ten minutes at most (the retry was the user's)
+  const auto = times.filter((_, k) => k !== 3);
+  assert.equal(auto.length, 6);
+  const before = h.bodies.length;
+  while (i < off.length && h.bodies.length === before) h.feed([off[i++]!]);
+  assert.ok(h.bodies.length > before, 'a seventh, once ten minutes have passed');
+  assert.ok(h.clock.t - auto[0]! >= REROUTE.windowMs, `the seventh came ${h.clock.t - auto[0]!} ms after the first`);
+  assert.equal(active3(h.s.state)!.route, oldRoute, 'every failure kept the old route');
+  // Back on the route: the failure no longer shows
+  srv.fail('offline');
+  await settle3();
+  h.feed(drive3(L_PTS, { from: 1100, to: 1300, t0: h.clock.t + 1000 }));
+  st = active3(h.s.state)!;
+  assert.equal(h.s.phase, 'navigating');
+  assert.equal(st.updateFailed, false);
+  assert.equal(st.notice, null);
+  assert.equal(st.canRetry, false);
+});
+
+test('auto reroute: stale answers are dropped; off screen too (background guidance); slow cars send no heading', async () => {
+  // Ended while a request is in flight: its answer does nothing
+  const srv = routeServer3();
+  const h = nav3Session({ fetch: srv.fetch });
+  void h.s.start({ route: L_ROUTE(), destination: N3_DEST });
+  h.feed(drive3(L_PTS, { to: 700 }));
+  // Off screen (the app in the background, fed by the background task):
+  // the same confirmation, one request
+  h.s.setForeground(false);
+  const off = offNorth3(h.clock.t + 1000);
+  feedWatching3(h, off.slice(0, 40));
+  assert.ok(h.phases.includes('offRoute'));
+  assert.equal(h.bodies.length, 1, 'off screen: one request, as on screen');
+  h.s.setForeground(true);
+  feedWatching3(h, off.slice(40, 42));
+  assert.equal(h.bodies.length, 1, 'back on screen while it is out: still one');
   h.s.end('user');
-  resolve(serverRoutes3(fresh));
-  await c;
+  srv.answer(serverRoutes3(FRESH3()));
+  await settle3();
   assert.equal(h.s.phase, 'idle');
+  assert.equal(h.s.map.route, null);
+  // Replaced by a new navigation meanwhile: the old answer is not the new one's route
+  const r = nav3Session({ fetch: srv.fetch });
+  void r.s.start({ route: L_ROUTE(), destination: N3_DEST });
+  r.feed(drive3(L_PTS, { to: 700 }));
+  feedWatching3(r, offNorth3(r.clock.t + 1000), () => r.bodies.length === 1);
+  const second = L_ROUTE();
+  void r.s.start({ route: second, destination: N3_DEST });
+  srv.answer(serverRoutes3(FRESH3()));
+  await settle3();
+  assert.equal(active3(r.s.state)!.route, second);
+  // Below about 10 km/h the GPS course is noise: no heading constraint
+  const slow = nav3Session({ fetch: srv.fetch });
+  void slow.s.start({ route: L_ROUTE(), destination: N3_DEST });
+  slow.feed(drive3(L_PTS, { to: 700 }));
+  feedWatching3(slow, offNorth3(slow.clock.t + 1000, 1400, 2.5), () => slow.bodies.length === 1);
+  const o = (slow.bodies[0] as { origin: { headingDeg: number | null; speedMs?: number } }).origin;
+  assert.equal(o.headingDeg, null);
+  assert.equal(o.speedMs, 2.5);
 });
 
 test('guidance session: arrival is conservative: close, accurate, and confirmed', () => {
@@ -8094,9 +8269,12 @@ test('guidance privacy: nothing is stored; the diagnostics journal has events, n
   // Round the first turn (a step change), then off the route heading north
   h.feed(drive3(L_PTS, { to: 1300 }));
   h.feed(drive3(polyline3([[-300, 1000], [-300, 1400]]), { t0: h.clock.t + 1000 }));
-  assert.equal(h.s.phase, 'offRoute');
-  await h.s.reroute({ coordinate: at3(0, 1400), headingDeg: 0 });
-  await h.s.reroute({ coordinate: at3(0, 1400), headingDeg: 0 });
+  assert.ok(h.phases.includes('offRoute'));
+  // The automatic update fails (offline); Try Again gets one
+  await settle3();
+  assert.equal(h.bodies.length, 1);
+  await h.s.retryReroute();
+  assert.equal(h.bodies.length, 2);
   h.advance(NAVIGATION.gpsLostMs + 1);
   h.s.end('user');
   await journal.flush();
@@ -8116,23 +8294,38 @@ test('guidance privacy: nothing is stored; the diagnostics journal has events, n
   }
 });
 
-test('guidance and recording stay separate: neither starts, stops or changes the other', () => {
+test('guidance and recording: navigation uses the one existing recorder, only through Start Drive and End Drive', () => {
   const read = (rel: string) => readFileSync(toPath(new URL(rel, import.meta.url)), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
-  for (const f of ['lib/navigation/session.ts', 'lib/navigation/routeProgress.ts', 'lib/navigation/offRoute.ts', 'components/navigation/GuidanceBar.tsx', 'components/navigation/GuidanceBanner.tsx']) {
+  // No navigation module reaches into recording internals or sharing
+  for (const f of ['lib/navigation/session.ts', 'lib/navigation/routeProgress.ts', 'lib/navigation/offRoute.ts', 'lib/navigation/startNavigation.ts', 'components/navigation/GuidanceBar.tsx', 'components/navigation/GuidanceBanner.tsx']) {
     const src = read(`../${f}`);
-    assert.ok(!/journeyRecorder|cloudSync|updateDriveCoordinate|endDrive|discardDrive|liveLocation|presence/.test(src), `${f} reaches into recording or sharing`);
+    assert.ok(!/journeyRecorder|cloudSync|updateDriveCoordinate|endDrive|discardDrive|liveLocation|presence|startDrive/.test(src), `${f} reaches into recording or sharing`);
   }
+  // Start Navigation's recorder is the app's own Start Drive, nothing else
+  const ctx = read('../context/NavigationContext.tsx');
+  const recorder = ctx.slice(ctx.indexOf('export function useStartNavigation()'), ctx.indexOf('export function useRetryReroute()'));
+  assert.ok(/startRecording: \(\) => app\.current\.startDrive\(\)/.test(recorder));
+  assert.ok(/canRecord: \(\) => !app\.current\.isPassengerMode/.test(recorder));
+  assert.ok(!/cloud|endDrive|discardDrive|liveLocation|presence/.test(recorder));
   const bar = read('../components/navigation/GuidanceBar.tsx');
-  assert.ok(!/startDrive|endDrive/.test(bar), 'the bar only asks the screen to record (onRecord)');
+  assert.ok(/onRecord/.test(bar) && /onFinishDrive/.test(bar), 'the bar asks the screen to record or finish');
   const drive = read('../app/(tabs)/(drive)/index.tsx');
   // Recording still gets the raw fix, exactly as before
   assert.ok(/updateDriveCoordinate\(\{\s*latitude: lat,\s*longitude: lon,/.test(drive));
-  // Nothing on the screen ends navigation because of a drive (or a drive because of navigation)
-  assert.ok(!/navSession\.end\(|useEndNavigation/.test(drive));
+  // Navigation finishes a drive only through the screen's usual End Drive (saved, Drive Complete)
+  const nav = drive.slice(drive.indexOf('const navOwnsDrive = () =>'), drive.indexOf('function handlePause()'));
+  assert.ok(nav.length > 0);
+  assert.ok(!/endDrive\(|discardDrive|router\.push/.test(nav.replace(/handleEndDrive\(|endDriveRef\.current\(/g, '')), 'no second completion path');
+  assert.equal((drive.match(/navSession\.end\(/g) ?? []).length, 3, 'End-and-finish, the panel End Drive, arriving');
+  assert.equal((nav.match(/navSession\.end\(/g) ?? []).length, 3);
+  assert.ok(/st\.recording !== "navigation"\) return;\s*navSession\.end\("arrived"\);\s*endDriveRef\.current\(\);/.test(nav), 'arriving finishes only a drive navigation started');
+  assert.ok(/if \(was && !isDriving\) navSession\.recordingEnded\(\);/.test(nav));
+  assert.ok(/onEndDrive=\{handlePanelEndDrive\}/.test(drive));
+  assert.ok(/onFinishDrive=\{handleFinishNavigationDrive\}/.test(drive));
+  // Recording by hand while navigating, where there's none alongside
+  assert.ok(/onRecord=\{handleStartDrive\}/.test(drive));
   const drivingEffect = drive.slice(drive.indexOf('if (isDriving && routePreviewStore.phase !== "idle")'), drive.indexOf('if (isDriving && routePreviewStore.phase !== "idle")') + 200);
   assert.ok(!/navSession/.test(drivingEffect));
-  // Recording is started only by the user's Record tap
-  assert.ok(/onRecord=\{handleStartDrive\}/.test(drive));
   // The session copies each fix and never changes it
   const h = nav3Session();
   void h.s.start({ route: L_ROUTE(), destination: N3_DEST });
@@ -8208,6 +8401,1538 @@ test('guidance performance: a long route, thousands of fixes, local scans only',
   for (const f of fixes.slice(0, 500)) { t2.commit(f, t2.match(f)!); scans.push(t2.lastScan); }
   assert.ok(Math.max(...scans.slice(1)) < 120, `local scan ${Math.max(...scans.slice(1))} segments`);
   assert.equal(tracker.progress!.stepIndex, specs.length - 2);
+});
+
+// ─── Navigation Phase 3.1: route consumption, auto recording ───────────────
+
+/** Length (m) of a drawn line of [longitude, latitude] points */
+function lineLength3(line: readonly (readonly [number, number])[]): number {
+  let d = 0;
+  for (let i = 1; i < line.length; i++) {
+    d += distanceM({ latitude: line[i - 1]![1], longitude: line[i - 1]![0] }, { latitude: line[i]![1], longitude: line[i]![0] });
+  }
+  return d;
+}
+
+test('route line: only the part still to drive is drawn, from just behind the car; the route itself is never changed', () => {
+  const route = L_ROUTE();
+  const geometry = JSON.stringify(route.geometry);
+  const p = prepareRoute(route);
+  const h = nav3Session();
+  void h.s.start({ route, destination: N3_DEST });
+  assert.equal(h.s.map.remaining!.length, p.n, 'before the first fix: all of it');
+  let prev = h.s.map.remaining;
+  let lastStart = -1;
+  let redraws = 0;
+  const fixes = drive3(L_PTS, { to: 1900, noise: 4 });
+  for (const f of fixes) {
+    h.feed([f]);
+    const line = h.s.map.remaining!;
+    if (line === prev) continue;
+    prev = line;
+    redraws++;
+    const start = p.total - lineLength3(line);
+    const along = active3(h.s.state)!.progress!.along;
+    assert.ok(start >= lastStart - 0.5, 'never grows back');
+    assert.ok(start <= along + 0.5, 'never starts ahead of the car');
+    assert.ok(along - start <= REMAINING_LINE.behindM + REMAINING_LINE.redrawEveryM + 1, `starts ${(along - start).toFixed(1)} m behind`);
+    assert.deepEqual(line[line.length - 1], p.coords[p.n - 1], 'and still ends at the destination');
+    lastStart = start;
+  }
+  assert.ok(lastStart > 1850, `the travelled line is gone (${lastStart.toFixed(0)} m of 2000)`);
+  assert.ok(redraws < fixes.length, `${redraws} redraws for ${fixes.length} fixes`);
+  assert.ok(redraws <= Math.ceil(1900 / REMAINING_LINE.redrawEveryM) + 2);
+  // The route itself is untouched: same object, same points
+  assert.equal(JSON.stringify(route.geometry), geometry);
+  assert.equal(active3(h.s.state)!.route, route);
+  assert.equal(h.s.map.route, route);
+  // Stopped (no progress): no redraw
+  const still = h.s.map.remaining;
+  const last = fixes[fixes.length - 1]!;
+  h.feed([{ ...last, time: h.clock.t + 1000, speedMs: 0 }]);
+  assert.equal(h.s.map.remaining, still);
+  // Arrived: nothing left to draw
+  h.feed(drive3(L_PTS, { from: 1910, t0: h.clock.t + 1000 }));
+  assert.equal(h.s.phase, 'arrived');
+  assert.equal(h.s.map.route, null);
+  assert.equal(h.s.map.remaining, null);
+  // remainingLine itself
+  assert.equal(remainingLine(p, 0), p.coords, 'at the start: the prepared points, no copy');
+  const mid = remainingLine(p, 1000);
+  const from = pointAt(p, 1000 - REMAINING_LINE.behindM);
+  assert.deepEqual(mid[0], [from.longitude, from.latitude]);
+  assert.equal(mid[1], p.coords[segmentAt(p, 1000 - REMAINING_LINE.behindM) + 1], "then the route's own points");
+  assert.ok(Math.abs(lineLength3(mid) - (p.total - 995)) < 0.5);
+  assert.equal(remainingLine(p, p.total + 50).length, 2);
+  assert.equal(p.coords.length, p.n, 'the prepared points are never changed');
+});
+
+test('route line: after a reroute the new route is drawn whole, then consumed the same way', async () => {
+  const srv = routeServer3();
+  const h = nav3Session({ fetch: srv.fetch });
+  void h.s.start({ route: L_ROUTE(), destination: N3_DEST });
+  h.feed(drive3(L_PTS, { to: 700 }));
+  const consumed = h.s.map.remaining!.length;
+  assert.ok(consumed < prepareRoute(L_ROUTE()).n);
+  feedWatching3(h, offNorth3(h.clock.t + 1000), () => h.bodies.length === 1);
+  // While updating, the old route's remainder stays
+  assert.equal(h.s.map.route, active3(h.s.state)!.route);
+  srv.answer(serverRoutes3(FRESH3()));
+  await settle3();
+  const fresh = prepareRoute(active3(h.s.state)!.route);
+  const line = h.s.map.remaining!;
+  assert.deepEqual(line[line.length - 1], fresh.coords[fresh.n - 1], "the new route's line");
+  assert.ok(lineLength3(line) <= fresh.total + 0.5);
+});
+
+test('route line performance: a 6,000-point route is trimmed cheaply, and redrawn only as the car moves on', () => {
+  const corners: Array<[number, number]> = [];
+  for (let i = 0; i <= 30; i++) corners.push([(i % 2) * 300, i * 2000]);
+  const pts = polyline3(corners, 10);
+  assert.ok(pts.length > 6000, `${pts.length} points`);
+  const specs: StepSpec[] = [{ at: 0, type: 'depart' }];
+  for (let i = 1; i < 30; i++) specs.push({ at: Math.round((i * pts.length) / 30), type: 'turn', modifier: i % 2 ? 'slight right' : 'slight left' });
+  specs.push({ at: pts.length - 1, type: 'arrive' });
+  const route = route3(pts, specs);
+  const p = prepareRoute(route);
+  // The trim itself
+  const t0 = performance.now();
+  for (let k = 0; k < 1000; k++) remainingLine(p, (k * 61.3) % p.total);
+  const trimMs = (performance.now() - t0) / 1000;
+  assert.ok(trimMs < 0.5, `${trimMs.toFixed(3)} ms per trim`);
+  // A whole drive: every fix, with the map view kept up to date
+  const h = nav3Session();
+  void h.s.start({ route, destination: N3_DEST });
+  let redraws = 0;
+  let last = h.s.map.remaining;
+  h.s.subscribe(() => { if (h.s.map.remaining !== last) { redraws++; last = h.s.map.remaining; } });
+  const fixes = drive3(pts, { speed: 25, noise: 6 }).slice(0, 2000);
+  const t1 = performance.now();
+  h.feed(fixes);
+  const perFixMs = (performance.now() - t1) / fixes.length;
+  assert.ok(perFixMs < 1.5, `${perFixMs.toFixed(3)} ms per fix`);
+  const driven = active3(h.s.state)!.progress!.along;
+  assert.ok(redraws <= fixes.length, 'at most once per fix, never per frame');
+  assert.ok(redraws <= driven / REMAINING_LINE.redrawEveryM + 2, `${redraws} redraws over ${driven.toFixed(0)} m`);
+  assert.equal(JSON.stringify(route.geometry.slice(0, 3)), JSON.stringify(pts.slice(0, 3).map(([x, y]) => at3(x, y))), 'route untouched');
+  assert.equal(route.geometry.length, pts.length);
+});
+
+/** The app's recorder, as Start Navigation sees it */
+function fakeRecorder3(o: { recording?: boolean; passenger?: boolean } = {}) {
+  const r = { recording: o.recording ?? false, passenger: o.passenger ?? false, starts: 0 };
+  const recorder: NavigationRecorder = {
+    isRecording: () => r.recording,
+    canRecord: () => !r.passenger,
+    startRecording: () => { r.starts++; r.recording = true; },
+  };
+  return { r, recorder };
+}
+async function preview3(route: Nav3Route = L_ROUTE()) {
+  const preview = new RoutePreviewStore({
+    fetchRoutes: async () => serverRoutes3(route),
+    describe: (e) => ({ code: 'x', message: String(e) }),
+    now: () => 1_000_000, setTimer: () => 1, clearTimer: () => {},
+  });
+  await preview.open(N3_DEST, { coordinate: at3(0, 0), headingDeg: null });
+  return preview;
+}
+const here3 = async () => ({ coordinate: at3(0, 0), headingDeg: null });
+const recordingOf3 = (st: NavigationState) => (st.phase === 'idle' ? null : st.recording);
+
+test('auto recording: Start Navigation records one drive with the existing recorder; a drive already recording is attached to, never duplicated', async () => {
+  // Nothing recording: one drive, owned by navigation
+  const a = fakeRecorder3();
+  const h = nav3Session();
+  assert.equal(await startFromPreview(await preview3(), h.s, here3, a.recorder), true);
+  assert.equal(a.r.starts, 1, 'one drive');
+  assert.equal(recordingOf3(h.s.state), 'navigation');
+  // Starting another navigation while that drive records: no second drive,
+  // and it's still navigation's drive (finished on arriving)
+  assert.equal(await startFromPreview(await preview3(), h.s, here3, a.recorder), true);
+  assert.equal(a.r.starts, 1);
+  assert.equal(recordingOf3(h.s.state), 'navigation');
+  // A drive the user started: attached to, not started again
+  const b = fakeRecorder3({ recording: true });
+  const h2 = nav3Session();
+  await startFromPreview(await preview3(), h2.s, here3, b.recorder);
+  assert.equal(b.r.starts, 0);
+  assert.equal(recordingOf3(h2.s.state), 'existing');
+  // Passenger Mode records nothing, here as everywhere
+  const c = fakeRecorder3({ passenger: true });
+  const h3 = nav3Session();
+  await startFromPreview(await preview3(), h3.s, here3, c.recorder);
+  assert.equal(c.r.starts, 0);
+  assert.equal(recordingOf3(h3.s.state), 'none');
+  // A route that can't be followed starts no drive
+  const d = fakeRecorder3();
+  const h4 = nav3Session();
+  await startFromPreview(await preview3({ ...L_ROUTE(), geometry: [at3(0, 0), at3(0, 0)] }), h4.s, here3, d.recorder);
+  assert.equal(h4.s.phase, 'error');
+  assert.equal(d.r.starts, 0);
+  assert.equal(recordingOf3(h4.s.state), 'none');
+  // No recorder at all: as before
+  const h5 = nav3Session();
+  await startFromPreview(await preview3(), h5.s, here3);
+  assert.equal(recordingOf3(h5.s.state), 'none');
+  assert.equal(recordingForStart(null), 'none');
+  assert.equal(recordingForStart(fakeRecorder3().recorder), 'navigation');
+  assert.equal(recordingForStart(fakeRecorder3({ recording: true, passenger: true }).recorder), 'existing');
+  assert.equal(recordingForStart(fakeRecorder3({ recording: true }).recorder, 'existing'), 'existing');
+  assert.equal(recordingForStart(fakeRecorder3({ recording: true }).recorder, 'navigation'), 'navigation');
+});
+
+test('auto recording: ownership lasts to arrival (finish the drive) or not (leave it); the session itself never stops a drive', () => {
+  for (const recording of ['navigation', 'existing', 'none'] as const) {
+    const h = nav3Session();
+    void h.s.start({ route: L_ROUTE(), destination: N3_DEST, recording });
+    h.feed(drive3(L_PTS));
+    assert.equal(h.s.phase, 'arrived');
+    assert.equal(recordingOf3(h.s.state), recording, 'the Drive screen reads this on arriving');
+  }
+  // The drive finished from the drive panel (or failed to start): navigation carries on without one
+  const h = nav3Session();
+  void h.s.start({ route: L_ROUTE(), destination: N3_DEST, recording: 'navigation' });
+  h.feed(drive3(L_PTS, { to: 500 }));
+  h.s.recordingEnded();
+  assert.equal(h.s.phase, 'navigating');
+  assert.equal(recordingOf3(h.s.state), 'none');
+  // A fresh-route start keeps what happened to the recording meanwhile
+  const r = nav3Session({ fetch: () => new Promise(() => {}) });
+  void r.s.start({ route: L_ROUTE(), destination: N3_DEST, refreshFrom: { coordinate: at3(0, 0), headingDeg: null }, recording: 'navigation' });
+  assert.equal(recordingOf3(r.s.state), 'navigation');
+  // The session has no recorder: ending navigation can't stop or delete a drive
+  const src = readFileSync(toPath(new URL('../lib/navigation/session.ts', import.meta.url)), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+  assert.ok(!/startDrive|endDrive|discardDrive|deleteJourney|recorder/i.test(src));
+});
+
+test('navigation UI: passive off-route states, End asks before finishing a drive navigation started, Record only with none alongside', () => {
+  const read = (rel: string) => readFileSync(toPath(new URL(rel, import.meta.url)), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+  const banner = read('../components/navigation/GuidanceBanner.tsx');
+  assert.ok(!/Update Route/.test(banner), 'no Update Route button');
+  for (const text of ["You're off route", 'Updating route…', 'Route update unavailable']) assert.ok(banner.includes(text), text);
+  assert.ok(/!updating && state\.canRetry \?/.test(banner), 'Try again only after repeated failures');
+  assert.ok(!/useRerouteNavigation|currentOrigin/.test(banner));
+  const bar = read('../components/navigation/GuidanceBar.tsx');
+  assert.ok(bar.includes('"End navigation and finish drive", onPress: onFinishDrive'));
+  assert.ok(bar.includes('{ text: "Continue navigation", style: "cancel" }'));
+  assert.ok(/if \(ownsDrive && onFinishDrive\) \{[\s\S]*?return;\s*\}\s*end\("user"\);/.test(bar), 'otherwise End ends navigation only');
+  assert.ok(/ownsDrive=\{state\.recording === "navigation"\} onFinishDrive=\{onFinishDrive\}/.test(bar));
+  assert.ok(/<EndButton ownsDrive=\{false\} \/>/.test(bar), 'the bar shows only without a recording');
+  assert.ok(/state\.recording === "none" \? \(\s*<GlassButton\s*accessibilityLabel="Record this drive"/.test(bar));
+  // The map draws the remaining line, not the whole route
+  const map = read('../components/MapboxDriveMap.tsx');
+  const layer = map.slice(map.indexOf('const NavigationRouteLayers = memo('), map.indexOf('const MapboxDriveMap = forwardRef'));
+  assert.ok(/view\.remaining \?\?/.test(layer) && /\[view\.route, view\.remaining\]/.test(layer));
+});
+
+// ─── Navigation Phase 4: foreground voice guidance ──────────────────────────
+// Mapbox's own prompts, spoken from route progress at Mapbox's distances,
+// once each; rerouting, off route, arrival, foreground only, settings.
+
+import { VoiceGuidance, VOICE, promptKind, type Speaker } from '@/lib/navigation/voice';
+import { VoicePreferences, voicePrefsKey } from '@/lib/navigation/voicePrefs';
+
+/** The L route with Mapbox-like prompts: depart, advance, preparation, immediate; arrival */
+function voiceRoute3(id = 'v:0'): Nav3Route {
+  const r = L_ROUTE();
+  r.routeId = id;
+  const steps = r.legs[0]!.steps;
+  steps[0]!.voice = [
+    { distanceBeforeM: 1000, text: 'Head north on Lake Road, then in 1000 yards, turn left onto Chestnut Hill' },
+    { distanceBeforeM: 800, text: 'In half a mile, turn left onto Chestnut Hill' },
+    { distanceBeforeM: 400, text: 'In a quarter of a mile, turn left onto Chestnut Hill' },
+    { distanceBeforeM: 60, text: 'Turn left onto Chestnut Hill' },
+  ];
+  steps[1]!.voice = [
+    { distanceBeforeM: 600, text: 'Continue for 600 yards, then turn right onto Brow Top' },
+    { distanceBeforeM: 300, text: 'In 300 yards, turn right onto Brow Top' },
+    { distanceBeforeM: 50, text: 'Turn right onto Brow Top' },
+  ];
+  steps[2]!.voice = [
+    { distanceBeforeM: 400, text: 'In a quarter of a mile, you will arrive at your destination' },
+    { distanceBeforeM: 30, text: 'You have arrived at your destination' },
+  ];
+  return r;
+}
+const OLD_TEXTS3 = voiceRoute3().legs[0]!.steps.flatMap((st) => st.voice.map((v) => v.text));
+/** A new route from just past the missed turn, with its own prompts */
+function freshVoice3(): Nav3Route {
+  const r = FRESH3();
+  r.legs[0]!.steps.forEach((st, k) => { st.voice = [{ distanceBeforeM: 2000, text: `NEW depart ${k}` }, { distanceBeforeM: 300, text: `NEW prepare ${k}` }, { distanceBeforeM: 40, text: `NEW now ${k}` }]; });
+  return r;
+}
+/** A navigation session with voice guidance on a fake speaker */
+function voice3(opts: { fetch?: (body: unknown) => Promise<ServerRoutes> } = {}) {
+  const h = nav3Session(opts);
+  const said: Array<{ text: string; along: number | null; t: number }> = [];
+  const logs: Array<Record<string, unknown>> = [];
+  let stops = 0;
+  const speaker: Speaker = {
+    speak: (text) => {
+      const st = h.s.state;
+      said.push({ text, along: active3(st)?.progress?.along ?? null, t: h.clock.t });
+    },
+    stop: () => { stops++; },
+  };
+  const v = new VoiceGuidance({ session: h.s, speaker, now: () => h.clock.t, journal: { log: (event, data) => logs.push({ event, ...data }) } });
+  v.attach();
+  return { ...h, v, said, logs, texts: () => said.map((x) => x.text), stops: () => stops };
+}
+/** One fix every `step` m along the L route, noise-free */
+const walk3 = (from: number, to: number, t0: number, step = 10) => drive3(L_PTS, { from, to, t0, speed: step, noise: 0 });
+
+test('voice: Mapbox prompts fire from route progress at their distances: depart, advance, preparation, immediate, arrival', () => {
+  const h = voice3();
+  void h.s.start({ route: voiceRoute3(), destination: N3_DEST });
+  assert.equal(h.said.length, 0, 'nothing before the car is on the route');
+  h.feed(walk3(0, 1995, 1_000_000));
+  h.feed(walk3(1996, 2000, h.clock.t + 1000, 2));
+  assert.equal(h.s.phase, 'arrived');
+  assert.deepEqual(h.texts(), [
+    'Head north on Lake Road, then in 1000 yards, turn left onto Chestnut Hill',
+    'In half a mile, turn left onto Chestnut Hill',
+    'In a quarter of a mile, turn left onto Chestnut Hill',
+    'Turn left onto Chestnut Hill',
+    'Continue for 600 yards, then turn right onto Brow Top',
+    'In 300 yards, turn right onto Brow Top',
+    'Turn right onto Brow Top',
+    'In a quarter of a mile, you will arrive at your destination',
+    'You have arrived at your destination',
+  ]);
+  // Each at its threshold (within one fix of it), never early
+  const turnAt = [1000, 1000, 1000, 1000, 1600, 1600, 1600, 2000];
+  const before = [1000, 800, 400, 60, 600, 300, 50, 400];
+  for (let k = 1; k < 8; k++) {
+    const due = turnAt[k]! - before[k]!;
+    const along = h.said[k]!.along!;
+    assert.ok(along >= due - 0.5 && along < due + 12, `${h.said[k]!.text}: said at ${along.toFixed(0)} m, due at ${due} m`);
+  }
+  // The kinds the diagnostics use
+  assert.equal(promptKind(0, 4), 'advance');
+  assert.equal(promptKind(2, 4), 'preparation');
+  assert.equal(promptKind(3, 4), 'immediate');
+  assert.equal(promptKind(0, 2), 'preparation');
+  assert.equal(promptKind(0, 1), 'immediate');
+  // Arrival is spoken once, even with more updates and Done; Done doesn't cut it off
+  const stops = h.stops();
+  h.advance(30_000);
+  h.s.end('arrived');
+  assert.equal(h.texts().filter((t) => /arrived/.test(t)).length, 1);
+  assert.equal(h.stops(), stops, 'navigation handing over to Drive Complete leaves the arrival to finish');
+});
+
+test('voice: GPS jitter and going slightly backwards never replay a prompt', () => {
+  const h = voice3();
+  void h.s.start({ route: voiceRoute3(), destination: N3_DEST });
+  h.feed(walk3(0, 590, 1_000_000));
+  const t = h.clock.t;
+  // Wobbling across the 400 m prompt's threshold (600 m along), forwards and back
+  const wobble = [595, 603, 598, 606, 597, 611, 602, 615, 605, 620];
+  h.feed(wobble.map((d, i) => fix3(0 + (i % 2 ? 4 : -4), d, t + 1000 * (i + 1), { headingDeg: 0, speedMs: 5 })));
+  // Noisy driving on to the turn
+  h.feed(drive3(L_PTS, { from: 625, to: 990, t0: h.clock.t + 1000, noise: 8, seed: 3 }));
+  const texts = h.texts();
+  assert.equal(new Set(texts).size, texts.length, `repeated: ${texts.join(' | ')}`);
+  assert.equal(texts.filter((x) => x === 'In a quarter of a mile, turn left onto Chestnut Hill').length, 1);
+  // Even a bigger step back (confirmed by the tracker) says nothing again
+  const n = h.said.length;
+  h.feed(drive3(L_PTS, { from: 900, to: 960, t0: h.clock.t + 1000, noise: 0 }));
+  h.feed(drive3(L_PTS, { from: 850, to: 900, t0: h.clock.t + 1000, noise: 0 }));
+  const again = h.texts().slice(n);
+  assert.ok(again.every((x) => !texts.includes(x)), `replayed: ${again.join(' | ')}`);
+});
+
+test('voice: rerouting cancels the old route, says "Updating route" once, and speaks only the new route', async () => {
+  const srv = routeServer3();
+  const h = voice3({ fetch: srv.fetch });
+  void h.s.start({ route: voiceRoute3(), destination: N3_DEST });
+  h.feed(walk3(0, 700, 1_000_000));
+  const stopsBefore = h.stops();
+  feedWatching3(h, offNorth3(h.clock.t + 1000), () => h.bodies.length === 1);
+  assert.ok(h.stops() > stopsBefore, 'queued speech for the old route is cancelled');
+  assert.equal(h.texts().filter((x) => x === VOICE.updating).length, 1);
+  // More off-route fixes while the request is out: not said again
+  feedWatching3(h, offNorth3(h.clock.t + 1000).slice(30, 40));
+  assert.equal(h.texts().filter((x) => x === VOICE.updating).length, 1);
+  const cut = h.said.length;
+  srv.answer(serverRoutes3(freshVoice3()));
+  await settle3();
+  assert.equal(h.s.phase, 'navigating');
+  const after = h.texts().slice(cut);
+  assert.ok(after.length >= 1, 'the new route speaks straight away');
+  assert.ok(after.every((x) => x.startsWith('NEW')), `after the reroute: ${after.join(' | ')}`);
+  // Driving the new route: its prompts, never the old ones
+  h.feed(drive3(polyline3([[0, 1250], [0, 1500], [-600, 1500]]), { t0: h.clock.t + 1000, noise: 0 }));
+  const later = h.texts().slice(cut);
+  assert.ok(later.every((x) => !OLD_TEXTS3.includes(x)), `old route spoken: ${later.join(' | ')}`);
+  assert.ok(later.includes('NEW now 1'), 'the new route\'s turn');
+  assert.ok(h.logs.some((l) => l.event === 'nav_voice' && l.reason === 'off_route'));
+});
+
+test('voice: off route again within a minute is not announced again', async () => {
+  const srv = routeServer3();
+  const h = voice3({ fetch: srv.fetch });
+  void h.s.start({ route: voiceRoute3(), destination: N3_DEST });
+  h.feed(walk3(0, 700, 1_000_000));
+  const off = offNorth3(h.clock.t + 1000);
+  feedWatching3(h, off, () => h.bodies.length === 1);
+  srv.answer(serverRoutes3(freshVoice3()));
+  await settle3();
+  const firstAt = h.said.find((x) => x.text === VOICE.updating)!.t;
+  // Straight off the new route too (east, into a side road)
+  const y = (off.find((f) => f.time === h.clock.t)!.latitude - N3_BASE.latitude) * N3_M;
+  h.feed(drive3(polyline3([[0, y], [500, y]]), { t0: h.clock.t + 1000, noise: 0 }).slice(0, 20));
+  assert.ok(h.phases.lastIndexOf('offRoute') > h.phases.indexOf('navigating'));
+  assert.ok(h.clock.t - firstAt < VOICE.offRouteGapMs);
+  assert.equal(h.texts().filter((x) => x === VOICE.updating).length, 1, 'once a minute at most');
+});
+
+test('voice: foreground only: leaving stops speech, nothing is said away, coming back replays nothing', () => {
+  const h = voice3();
+  void h.s.start({ route: voiceRoute3(), destination: N3_DEST });
+  h.feed(walk3(0, 150, 1_000_000));
+  const stops = h.stops();
+  h.v.setForeground(false);
+  assert.equal(h.stops(), stops + 1, 'leaving the foreground stops speech');
+  assert.ok(h.logs.some((l) => l.event === 'nav_voice' && l.action === 'cancelled' && l.reason === 'background'));
+  const n = h.said.length;
+  // Away: past the 800 m and 400 m prompts
+  h.feed(walk3(160, 700, h.clock.t + 1000));
+  assert.equal(h.said.length, n, 'nothing spoken in the background');
+  h.v.setForeground(true);
+  assert.equal(h.said.length, n, 'coming back replays nothing');
+  h.feed(walk3(710, 950, h.clock.t + 1000));
+  assert.deepEqual(h.texts().slice(n), ['Turn left onto Chestnut Hill'], 'only what is still ahead');
+});
+
+test('voice: mute stops at once and says nothing; unmute speaks what is still ahead; Alerts only', () => {
+  const h = voice3();
+  void h.s.start({ route: voiceRoute3(), destination: N3_DEST });
+  h.feed(walk3(0, 150, 1_000_000));
+  const stops = h.stops();
+  h.v.setMode('off');
+  assert.equal(h.stops(), stops + 1, 'muting cancels what is queued');
+  const n = h.said.length;
+  h.feed(walk3(160, 700, h.clock.t + 1000));
+  assert.equal(h.said.length, n, 'muted: nothing');
+  h.v.setMode('normal');
+  assert.equal(h.said.length, n, 'unmuting replays nothing');
+  h.feed(walk3(710, 1300, h.clock.t + 1000));
+  assert.deepEqual(h.texts().slice(n), ['Turn left onto Chestnut Hill', 'Continue for 600 yards, then turn right onto Brow Top', 'In 300 yards, turn right onto Brow Top']);
+  assert.ok(h.logs.some((l) => l.state === 'disabled') && h.logs.some((l) => l.state === 'enabled'));
+  // Alerts only: just the prompt at each manoeuvre
+  const a = voice3();
+  a.v.setMode('alerts');
+  void a.s.start({ route: voiceRoute3(), destination: N3_DEST });
+  a.feed(walk3(0, 1995, 1_000_000));
+  a.feed(walk3(1996, 2000, a.clock.t + 1000, 2));
+  assert.deepEqual(a.texts(), ['Turn left onto Chestnut Hill', 'Turn right onto Brow Top', 'You have arrived at your destination']);
+});
+
+test('voice: arrival without a Mapbox arrival prompt says "You have arrived", once; End stops speech', () => {
+  const h = voice3();
+  const r = voiceRoute3();
+  r.legs[0]!.steps[2]!.voice = [];
+  void h.s.start({ route: r, destination: N3_DEST });
+  h.feed(walk3(0, 1995, 1_000_000));
+  h.feed(walk3(1996, 2000, h.clock.t + 1000, 2));
+  assert.equal(h.texts().filter((x) => x === VOICE.arrived).length, 1);
+  assert.equal(h.texts()[h.said.length - 1], VOICE.arrived);
+  // Ending part way stops speech
+  const e = voice3();
+  void e.s.start({ route: voiceRoute3(), destination: N3_DEST });
+  e.feed(walk3(0, 300, 1_000_000));
+  const stops = e.stops();
+  e.s.end('user');
+  assert.equal(e.stops(), stops + 1);
+  e.feed(walk3(310, 900, e.clock.t + 1000));
+  assert.equal(e.texts().length, 2, 'nothing after End');
+});
+
+test('voice preference: Normal by default, kept per user on this device, mute remembers the last choice', async () => {
+  const store = new MemoryStore();
+  const a = new VoicePreferences(store, 'u1');
+  await a.load();
+  assert.equal(a.mode, 'normal');
+  await a.setMode('alerts');
+  const b = new VoicePreferences(store, 'u1');
+  await b.load();
+  assert.equal(b.mode, 'alerts', 'persisted');
+  await b.toggleMute();
+  assert.equal(b.mode, 'off');
+  const c = new VoicePreferences(store, 'u1');
+  await c.load();
+  assert.equal(c.mode, 'off');
+  await c.toggleMute();
+  assert.equal(c.mode, 'alerts', 'unmute: back to the last spoken choice');
+  // Another user on the same phone has their own
+  const other = new VoicePreferences(store, 'u2');
+  await other.load();
+  assert.equal(other.mode, 'normal');
+  // Nonsense stored: the default
+  await store.setItem(voicePrefsKey('u3'), '{"mode":"loud"}');
+  const d = new VoicePreferences(store, 'u3');
+  await d.load();
+  assert.equal(d.mode, 'normal');
+  // Cleared with the user's other device data at sign-out
+  const sync = readFileSync(toPath(new URL('../lib/backend/cloudSync.ts', import.meta.url)), 'utf8');
+  assert.ok(sync.includes("userKey(this.deps.userId, 'nav/voice/v1')"));
+  assert.equal(voicePrefsKey('u1'), userKey('u1', 'nav/voice/v1'));
+});
+
+test('voice: diagnostics have steps, kinds and reasons, never the words, roads, destination or position', async () => {
+  const srv = routeServer3();
+  const h = voice3({ fetch: srv.fetch });
+  void h.s.start({ route: voiceRoute3(), destination: { ...N3_DEST, name: 'Secret Café' } });
+  h.feed(walk3(0, 700, 1_000_000));
+  feedWatching3(h, offNorth3(h.clock.t + 1000), () => h.bodies.length === 1);
+  srv.answer(serverRoutes3(freshVoice3()));
+  await settle3();
+  h.v.setForeground(false);
+  h.v.noteSpeechError('speech_error');
+  const spoken = h.logs.filter((l) => l.event === 'nav_voice' && l.action === 'spoken');
+  assert.ok(h.logs.some((l) => (l as Record<string, unknown>).step === 1 && (l as Record<string, unknown>).kind === 'advance'));
+  assert.ok(h.logs.some((l) => l.reason === 'off_route'));
+  assert.ok(h.logs.some((l) => l.reason === 'background'));
+  assert.ok(h.logs.some((l) => l.code === 'speech_error'));
+  assert.ok(spoken.length > 3);
+  const text = JSON.stringify(h.logs);
+  for (const secret of ['Chestnut', 'Lake Road', 'Brow Top', 'Secret Café', 'NEW', 'yards', 'Updating route', '54.6', '-3.1']) {
+    assert.ok(!text.includes(secret), `the voice log holds "${secret}"`);
+  }
+});
+
+test('voice is a reader only: navigation, rerouting, progress and recording behave the same with it', async () => {
+  const run = async (withVoice: boolean) => {
+    const srv = routeServer3();
+    const h = withVoice ? voice3({ fetch: srv.fetch }) : nav3Session({ fetch: srv.fetch });
+    void h.s.start({ route: voiceRoute3(), destination: N3_DEST, recording: 'navigation' });
+    h.feed(walk3(0, 700, 1_000_000));
+    feedWatching3(h, offNorth3(h.clock.t + 1000), () => h.bodies.length === 1);
+    srv.answer(serverRoutes3(freshVoice3()));
+    await settle3();
+    h.feed(drive3(polyline3([[0, 1250], [0, 1500], [-600, 1500], [-600, 1400]]), { t0: h.clock.t + 1000, noise: 0 }));
+    return { phases: h.phases, bodies: JSON.stringify(h.bodies), states: h.states.map((st) => `${st.phase}:${active3(st)?.progress?.along.toFixed(2) ?? '-'}:${st.phase === 'idle' ? '' : st.recording}`) };
+  };
+  const a = await run(false);
+  const b = await run(true);
+  assert.deepEqual(b.phases, a.phases);
+  assert.equal(b.bodies, a.bodies);
+  assert.deepEqual(b.states, a.states);
+  // Nothing in voice reaches recording, sharing, presence or the camera; navigation doesn't know about voice
+  const read = (rel: string) => readFileSync(toPath(new URL(rel, import.meta.url)), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+  for (const f of ['lib/navigation/voice.ts', 'lib/navigation/voicePrefs.ts', 'lib/navigation/speech.ts']) {
+    const src = read(`../${f}`);
+    assert.ok(!/startDrive|endDrive|cloudSync|journeyRecorder|liveLocation|presence|setCamera|Camera|reroute\(|noteFix\(|\.end\(/.test(src), f);
+  }
+  assert.ok(!/voice/i.test(read('../lib/navigation/session.ts').replace(/voice[A-Za-z]*:/g, '')), 'the session has no voice in it');
+  const drive = read('../app/(tabs)/(drive)/index.tsx');
+  assert.ok(!/Voice|Speech|speech/.test(drive), 'the Drive screen is untouched by voice');
+});
+
+test('voice native impact: expo-speech and expo-audio (iOS only), the app\'s own session for speech, British English', async () => {
+  const read = (rel: string) => readFileSync(toPath(new URL(rel, import.meta.url)), 'utf8');
+  const speech = read('../lib/navigation/speech.ts');
+  assert.ok(/useApplicationAudioSession: appSession,/.test(speech), "on the app's session where there is one, the system's otherwise");
+  assert.ok(/language: 'en-GB'/.test(speech));
+  assert.ok(/requireOptionalNativeModule\('ExpoSpeech'\) \?/.test(speech), 'a binary without the module stays quiet, never crashes');
+  assert.ok(/Platform\.OS === 'ios' && requireOptionalNativeModule\('ExpoAudio'\) \?/.test(speech), 'expo-audio is looked for first, on iOS only');
+  // The session: Playback (heard in silent mode, allowed in the background), ducking, no microphone, no earpiece
+  const session = speech.slice(speech.indexOf('configure: () => a.setAudioModeAsync({'), speech.indexOf('setActive: (active)'));
+  for (const setting of ['playsInSilentMode: true', 'shouldPlayInBackground: true', "interruptionMode: 'duckOthers'", 'allowsRecording: false', 'shouldRouteThroughEarpiece: false']) {
+    assert.ok(session.includes(setting), setting);
+  }
+  const pkg = JSON.parse(read('../package.json')) as { dependencies: Record<string, string>; expo?: { autolinking?: { android?: { exclude?: string[] } } } };
+  assert.equal(pkg.dependencies['expo-speech'], '~57.0.3');
+  assert.equal(pkg.dependencies['expo-audio'], '~57.0.5');
+  assert.ok(!pkg.dependencies['expo-av'], 'no second audio library');
+  assert.deepEqual(pkg.expo?.autolinking?.android?.exclude, ['expo-audio'], 'linked on iOS only: Android unchanged');
+  // Config: only the iOS "audio" background mode added to what's there, and the microphone string (never asked)
+  const req = createRequire(import.meta.url);
+  const app = JSON.parse(read('../app.json')) as { expo: Record<string, unknown> };
+  assert.ok(!/expo-audio|expo-speech/.test(JSON.stringify(app.expo.plugins)), "neither package's config plugin (expo-audio's adds Android services)");
+  const appConfig = req('../app.config.js') as (a: { config: object }) => { mods: { ios: { infoPlist(c: object): Promise<{ modResults: Record<string, unknown> }> } }; android?: { permissions?: string[] } };
+  const cfg = appConfig({ config: app.expo });
+  const plist = await cfg.mods.ios.infoPlist({
+    ...cfg, modResults: { UIBackgroundModes: ['fetch', 'location'] },
+    modRequest: { platform: 'ios', modName: 'infoPlist', projectRoot: '.', platformProjectRoot: './ios', introspect: true },
+  });
+  assert.deepEqual(plist.modResults.UIBackgroundModes, ['fetch', 'location', 'audio'], 'audio added; location and fetch kept');
+  assert.match(String(plist.modResults.NSMicrophoneUsageDescription), /doesn't use your microphone/);
+  const again = await cfg.mods.ios.infoPlist({
+    ...cfg, modResults: { UIBackgroundModes: ['location', 'audio'] },
+    modRequest: { platform: 'ios', modName: 'infoPlist', projectRoot: '.', platformProjectRoot: './ios', introspect: true },
+  });
+  assert.deepEqual(again.modResults.UIBackgroundModes, ['location', 'audio'], 'never duplicated');
+  assert.ok(!(cfg.android?.permissions ?? []).some((p) => /AUDIO|MEDIA_PLAYBACK|BACKGROUND_LOCATION/.test(p)), 'no Android permission change');
+  // The app never records or asks for the microphone
+  const appCode = ['context', 'lib', 'app', 'components', 'hooks'].flatMap((dir) => {
+    const out: string[] = [];
+    const walk = (d: string) => {
+      for (const e of readdirSync(join(MOBILE, d), { withFileTypes: true })) {
+        if (e.isDirectory()) walk(join(d, e.name));
+        else if (/\.(ts|tsx)$/.test(e.name)) out.push(readFileSync(join(MOBILE, d, e.name), 'utf8'));
+      }
+    };
+    walk(dir);
+    return out;
+  }).join('\n');
+  assert.ok(!/useAudioRecorder|AudioRecorder|requestRecordingPermissionsAsync|getRecordingPermissionsAsync|RecordingPresets|createAudioPlayer|useAudioPlayer/.test(appCode), 'no recording, no players');
+});
+
+// ─── Navigation: background guidance ────────────────────────────────────────
+// One background location stream (the recorder's task), read by navigation
+// off screen: progress, rerouting and arrival carry on; nothing is drawn,
+// spoken or stored there; recording is unchanged.
+
+import { SharedLocationUpdates, type LocationUser, type NativeLocationUpdates } from '@/lib/backend/sharedLocationUpdates';
+import { BackgroundNavigation, type BackgroundFix } from '@/lib/navigation/background';
+
+/** The platform's background updates, recording which user started them */
+class FakeNativeUpdates implements NativeLocationUpdates {
+  running = false;
+  starts: LocationUser[] = [];
+  stops = 0;
+  relabels: LocationUser[] = [];
+  /** What starting for navigation answers (navigation never asks for access) */
+  navigationAnswer: 'on' | 'denied' = 'on';
+  async start(user: LocationUser) {
+    this.starts.push(user);
+    if (user === 'navigation' && this.navigationAnswer !== 'on') return this.navigationAnswer;
+    this.running = true;
+    return 'on' as const;
+  }
+  async stop() { this.stops++; this.running = false; }
+  async isRunning() { return this.running; }
+  async relabel(user: LocationUser) { this.relabels.push(user); }
+}
+
+/** CloudSync and the recorder on the shared updates, as driveBackgroundLocation wires them */
+function sharedRecorderApp() {
+  const store = new MemoryStore();
+  const clock = { t: Date.now() - 60 * 60_000 };
+  const server = new FakeServer();
+  const native = new FakeNativeUpdates();
+  // eslint-disable-next-line prefer-const
+  let tracker: BackgroundDriveRecorder;
+  const shared = new SharedLocationUpdates(native, { driveInUse: async () => (await tracker.running()) !== null });
+  tracker = new BackgroundDriveRecorder({ store, updates: shared.drive, now: () => clock.t, othersUsingUpdates: () => shared.navigationActive });
+  let id = 0;
+  const app = new CloudSync({
+    ep: server.ep(), store, userId: 'u1', publishableKey: 'sb_publishable_x', newId: () => `id-${++id}-${Math.random()}`,
+    timezone: () => 'UTC', now: () => clock.t, tracker,
+    prepareFile: async () => ({ body: new Uint8Array([1]), size: 1, mimeType: 'image/jpeg' }),
+  });
+  return { app, tracker, shared, native, store, clock, server };
+}
+
+test('background location: navigation reads the recording\'s own updates; the end of a drive mid-route keeps them for navigation', async () => {
+  const b = sharedRecorderApp();
+  await b.app.start();
+  await b.app.startDrive(null);
+  await settle();
+  assert.deepEqual(b.native.starts, ['drive'], 'the drive starts them, as before');
+  // Navigating with the drive: no second stream, nothing started
+  assert.equal(await b.shared.holdForNavigation(false), 'shared');
+  assert.deepEqual(b.native.starts, ['drive']);
+  for (let s = 0; s < 30; s++) { b.clock.t += 1000; b.app.addFix(roadFix(b.clock, s)); }
+  // The drive is finished from the panel; navigation carries on
+  await b.app.endDrive();
+  assert.equal(b.native.running, true, 'kept on for navigation');
+  assert.equal(b.native.stops, 0);
+  assert.deepEqual(b.native.relabels, ['navigation'], "Android's notification says Navigating now");
+  // Background fixes with no drive: not recorded, and not taken for leftover updates
+  b.clock.t += 1000;
+  await b.tracker.deliver([roadFix(b.clock, 31)]);
+  assert.equal(b.native.running, true);
+  assert.equal(b.app.isDriving, false);
+  // Navigation ends: nothing uses them, they stop
+  await b.shared.releaseForNavigation();
+  assert.equal(b.native.running, false);
+  assert.equal(b.native.stops, 1);
+  // Without navigation, the recorder behaves exactly as before: leftover updates are stopped
+  b.native.running = true;
+  await b.tracker.deliver([roadFix(b.clock, 32)]);
+  assert.equal(b.native.running, false, 'leftover updates with no drive and no navigation: stopped');
+});
+
+test('background location: navigation starts updates only with no recording alongside, never asks, and never stops a drive\'s', async () => {
+  const b = sharedRecorderApp();
+  await b.app.start();
+  // Passenger Mode (no recording): navigation starts them, with access already given
+  assert.equal(await b.shared.holdForNavigation(true), 'started');
+  assert.deepEqual(b.native.starts, ['navigation']);
+  // A drive starts meanwhile: the same updates, now the drive's
+  await b.app.startDrive(null);
+  await settle();
+  assert.deepEqual(b.native.starts, ['navigation', 'drive']);
+  // Navigation ends: the drive still needs them
+  await b.shared.releaseForNavigation();
+  assert.equal(b.native.running, true, 'a drive in progress keeps them');
+  for (let s = 0; s < 30; s++) { b.clock.t += 1000; b.app.addFix(roadFix(b.clock, s)); }
+  await b.app.endDrive();
+  assert.equal(b.native.running, false, 'and they stop when it ends, as before');
+  // No access (navigation never asks): no updates, navigation stays on screen only
+  const c = sharedRecorderApp();
+  c.native.navigationAnswer = 'denied';
+  assert.equal(await c.shared.holdForNavigation(true), 'denied');
+  assert.equal(c.native.running, false);
+  await c.shared.releaseForNavigation();
+  assert.equal(c.native.stops, 1, 'nothing left half-started');
+  // The app's adapter: navigation only reads permissions, never requests them
+  const src = readFileSync(toPath(new URL('../lib/driveBackgroundLocation.ts', import.meta.url)), 'utf8');
+  const access = src.slice(src.indexOf('async function navigationAccess'), src.indexOf('const updates: NativeLocationUpdates'));
+  assert.ok(/getForegroundPermissionsAsync/.test(access) && /hasBackground\(\)/.test(access));
+  assert.ok(!/request|ensureBackgroundAccess/.test(access), 'navigation never prompts');
+  assert.ok(/if \(Platform\.OS === 'android'\) return AppState\.currentState === 'active';/.test(access), 'Android services start from the screen only');
+  // The task: navigation reads first, then the recorder exactly as before
+  assert.ok(/sharedLocation\.deliver\(fixes\);\s*\/\/ Awaited, so the system keeps the app awake until the fixes are stored\.\s*await driveTracker\.deliver\(fixes\);/.test(src));
+  assert.equal((src.match(/startLocationUpdatesAsync\(/g) ?? []).length, 3, 'one task: drive, navigation, relabel');
+  assert.equal((src.match(/watchPositionAsync|defineTask</g) ?? []).length, 1, 'one task definition, no watcher');
+  // A reader's failure never reaches recording
+  const shared = new SharedLocationUpdates(new FakeNativeUpdates(), { driveInUse: async () => false });
+  const got: GpsFix[][] = [];
+  shared.subscribe(() => { throw new Error('reader broke'); });
+  shared.subscribe((f) => got.push(f));
+  const batch = [roadFix({ t: 1 }, 1)];
+  shared.deliver(batch);
+  assert.equal(got.length, 1);
+  assert.notEqual(got[0]![0], batch[0], 'readers get copies');
+});
+
+/** Navigation with background guidance on a fake background task */
+function bgNav3(opts: { fetch?: (body: unknown) => Promise<ServerRoutes> } = {}) {
+  const h = nav3Session(opts);
+  const listeners = new Set<(f: BackgroundFix[]) => void>();
+  const src = {
+    holds: [] as boolean[],
+    releases: 0,
+    holdForNavigation: async (start: boolean) => { src.holds.push(start); return start ? 'started' : 'shared'; },
+    releaseForNavigation: async () => { src.releases++; },
+    subscribe: (fn: (f: BackgroundFix[]) => void) => { listeners.add(fn); return () => { listeners.delete(fn); }; },
+  };
+  const logs: Array<Record<string, unknown>> = [];
+  let lastTime = -Infinity;
+  const bg = new BackgroundNavigation({
+    session: h.s,
+    source: src,
+    // As NavigationContext.noteFix: each moment once, in order
+    feed: (f) => {
+      if (f.timestamp <= lastTime) return;
+      lastTime = f.timestamp;
+      h.s.noteFix({ latitude: f.latitude, longitude: f.longitude, accuracyM: f.accuracyM ?? null, speedMs: f.speedMs, headingDeg: f.headingDeg ?? null, time: f.timestamp });
+    },
+    now: () => h.clock.t,
+    journal: { log: (event, data) => logs.push({ event, ...data }) },
+  });
+  bg.attach();
+  const toBg = (f: GpsFix): BackgroundFix => ({ latitude: f.latitude, longitude: f.longitude, speedMs: f.speedMs, headingDeg: f.headingDeg, accuracyM: f.accuracyM, timestamp: f.time });
+  /** The task delivering `fixes` in batches (iOS defers them a few seconds) */
+  const task = (fixes: GpsFix[], batch = 5) => {
+    for (let i = 0; i < fixes.length; i += batch) {
+      const chunk = fixes.slice(i, i + batch);
+      h.advance(Math.max(0, chunk[chunk.length - 1]!.time - h.clock.t));
+      for (const fn of [...listeners]) fn(chunk.map(toBg));
+    }
+  };
+  return { ...h, bg, src, logs, task, bgLogs: () => logs.filter((l) => l.event === 'nav_background') };
+}
+
+test('background guidance: locked or in another app, navigation carries on from the background task\'s fixes; on screen they\'re ignored', async () => {
+  const h = bgNav3();
+  void h.s.start({ route: L_ROUTE(), destination: N3_DEST, recording: 'navigation' });
+  await settle3();
+  h.feed(drive3(L_PTS, { to: 300 }));
+  const fullLine = h.s.map.remaining!.length;
+  // On screen: the Drive screen's watcher feeds navigation; the task's fixes are ignored
+  h.task(drive3(L_PTS, { from: 310, to: 400, t0: h.clock.t + 1000 }));
+  assert.equal(h.bg.fed, 0);
+  const at = active3(h.s.state)!.progress!.along;
+  // Locked: still navigating, fed by the task
+  h.bg.setAppState('background');
+  assert.equal(h.s.phase, 'navigating', 'locking the phone never ends navigation');
+  h.task(drive3(L_PTS, { from: at + 13, to: 1300, t0: h.clock.t + 1000 }));
+  const st = active3(h.s.state)!;
+  assert.equal(h.s.phase, 'navigating');
+  assert.ok(st.progress!.along > 1250, `progress ${st.progress!.along.toFixed(0)} m`);
+  assert.equal(st.progress!.stepIndex, 1, 'the left turn was passed in the background');
+  assert.equal(st.progress!.next.instruction, 'Turn right onto Brow Top');
+  assert.ok(h.s.map.remaining!.length < fullLine / 2, 'the travelled line keeps being consumed');
+  assert.ok(h.bg.fed > 60);
+  // Back on screen: the current state is there at once; nothing stale
+  h.bg.setAppState('active');
+  const logs = h.bgLogs();
+  assert.deepEqual(logs.map((l) => l.action), ['location', 'entered', 'fixes', 'step', 'returned']);
+  const returned = logs[logs.length - 1]!;
+  assert.equal(returned.steps, 1);
+  assert.ok((returned.fixes as number) > 60);
+  // Inactive (a call banner, Control Centre) counts as off screen for the task's fixes too
+  h.bg.setAppState('inactive');
+  const fed = h.bg.fed;
+  h.task(drive3(L_PTS, { from: 1310, to: 1400, t0: h.clock.t + 1000 }));
+  assert.ok(h.bg.fed > fed);
+});
+
+test('background guidance: off route off screen reroutes with the same confirmation, one request, cooldown and stale answers dropped', async () => {
+  const srv = routeServer3();
+  const h = bgNav3({ fetch: srv.fetch });
+  void h.s.start({ route: L_ROUTE(), destination: N3_DEST, recording: 'navigation' });
+  h.feed(drive3(L_PTS, { to: 600 }));
+  h.bg.setAppState('background');
+  // One wild fix in a batch: nothing
+  h.task([fix3(120, 620, h.clock.t + 1000, { headingDeg: 0 }), ...drive3(L_PTS, { from: 630, to: 700, t0: h.clock.t + 2000 })]);
+  assert.equal(h.bodies.length, 0);
+  assert.equal(h.s.phase, 'navigating');
+  // Missing the turn: confirmed off route, one request, however many batches follow
+  const off = offNorth3(h.clock.t + 1000);
+  h.task(off.slice(0, 40));
+  assert.equal(h.bodies.length, 1);
+  h.task(off.slice(40));
+  assert.equal(h.bodies.length, 1, 'one request at a time');
+  const oldRoute = active3(h.s.state)!.route;
+  srv.answer(serverRoutes3(FRESH3()));
+  await settle3();
+  assert.notEqual(active3(h.s.state)!.route, oldRoute, 'the new route is ready for the return');
+  assert.equal(h.s.map.route, active3(h.s.state)!.route);
+  const doneAt = h.clock.t;
+  // Straight off the new route too: the cooldown holds off screen as on screen
+  const y = (off[off.length - 1]!.latitude - N3_BASE.latitude) * N3_M;
+  h.task(drive3(polyline3([[0, y], [700, y]]), { t0: h.clock.t + 1000, noise: 0 }), 1);
+  assert.equal(h.bodies.length, 2);
+  const second = h.bgLogs().filter((l) => l.action === 'reroute' && l.result === 'requested').length;
+  assert.equal(second, 2);
+  assert.ok(h.clock.t - doneAt >= REROUTE.cooldownMs);
+  // Back on the old line before the answer: dropped, the route stays
+  const now = active3(h.s.state)!.route;
+  h.task(drive3(polyline3([[0, 1250], [0, 1500], [-600, 1500]]), { t0: h.clock.t + 1000, noise: 0 }), 1);
+  srv.answer(serverRoutes3(L_ROUTE()));
+  await settle3();
+  assert.equal(active3(h.s.state)!.route, now, 'stale answer dropped');
+  const results = h.bgLogs().filter((l) => l.action === 'reroute').map((l) => l.result);
+  assert.deepEqual(results, ['requested', 'ok', 'requested', 'dropped']);
+});
+
+test('background guidance: backoff after failures holds off screen too', async () => {
+  const srv = routeServer3();
+  const h = bgNav3({ fetch: srv.fetch });
+  void h.s.start({ route: L_ROUTE(), destination: N3_DEST, recording: 'navigation' });
+  h.feed(drive3(L_PTS, { to: 700 }));
+  h.bg.setAppState('background');
+  const off = offNorth3(h.clock.t + 1000, 720 + 13 * 120);
+  const times: number[] = [];
+  for (let i = 0; i < off.length; i++) {
+    const n = h.bodies.length;
+    h.task([off[i]!], 1);
+    if (h.bodies.length > n) { times.push(h.clock.t); srv.fail('offline'); await settle3(); }
+  }
+  assert.ok(times.length >= 3 && times.length <= 4, `${times.length} requests in two minutes`);
+  assert.ok(times[1]! - times[0]! >= 10_000 && times[2]! - times[1]! >= 20_000, 'the waits grow, off screen as on screen');
+  assert.equal(active3(h.s.state)!.updateFailed, true);
+});
+
+test('background guidance: arrival off screen; the updates are let go; the drive finishes the usual way only if navigation started it', () => {
+  for (const recording of ['navigation', 'existing', 'none'] as const) {
+    const h = bgNav3();
+    void h.s.start({ route: L_ROUTE(), destination: N3_DEST, recording });
+    assert.deepEqual(h.src.holds, [recording === 'none'], 'started for navigation only with no recording alongside');
+    h.feed(drive3(L_PTS, { to: 500 }));
+    h.bg.setAppState('background');
+    h.task(drive3(L_PTS, { from: 513, t0: h.clock.t + 1000 }));
+    assert.equal(h.s.phase, 'arrived', recording);
+    assert.equal((h.s.state as { recording: string }).recording, recording, 'the Drive screen reads this, as on screen');
+    assert.equal(h.src.releases, 1, 'nothing to guide: the updates are let go');
+    assert.ok(h.bgLogs().some((l) => l.action === 'arrival' && l.recording === recording));
+    // Fixes after arrival do nothing
+    const fed = h.bg.fed;
+    h.task(drive3(L_PTS, { from: 1990, t0: h.clock.t + 1000 }));
+    assert.equal(h.bg.fed, fed);
+  }
+  // The Drive screen's arrival effect is the same on screen or off: it ends
+  // navigation and finishes only a drive navigation started, through End Drive
+  const drive = readFileSync(toPath(new URL('../app/(tabs)/(drive)/index.tsx', import.meta.url)), 'utf8');
+  assert.ok(/st\.recording !== "navigation"\) return;\s*navSession\.end\("arrived"\);\s*endDriveRef\.current\(\);/.test(drive));
+  // The recording finished from the panel mid-route: navigation asks for the updates itself
+  const r = bgNav3();
+  void r.s.start({ route: L_ROUTE(), destination: N3_DEST, recording: 'navigation' });
+  r.s.recordingEnded();
+  assert.deepEqual(r.src.holds, [false, true]);
+  r.s.end('user');
+  assert.equal(r.src.releases, 1);
+});
+
+test('background guidance and voice: nothing is spoken off screen; back on screen only the word at a turn still ahead', () => {
+  const run = (backAt: number) => {
+    const h = bgNav3();
+    const said: string[] = [];
+    const voice = new VoiceGuidance({ session: h.s, speaker: { speak: (t) => said.push(t), stop: () => {} }, now: () => h.clock.t });
+    voice.attach();
+    void h.s.start({ route: voiceRoute3(), destination: N3_DEST, recording: 'navigation' });
+    h.feed(walk3(0, 150, 1_000_000));
+    const before = said.length;
+    voice.setForeground(false);
+    h.bg.setAppState('background');
+    h.task(walk3(160, backAt, h.clock.t + 1000));
+    assert.equal(said.length, before, 'nothing spoken (or queued) in the background');
+    voice.setForeground(true);
+    h.bg.setAppState('active');
+    return said.slice(before);
+  };
+  assert.deepEqual(run(700), [], 'prompts passed while away are not replayed');
+  assert.deepEqual(run(950), ['Turn left onto Chestnut Hill'], 'the turn is 50 m ahead: that one is still worth saying');
+  assert.deepEqual(run(995), [], 'at the turn itself: too late, nothing');
+  assert.deepEqual(run(1200), [], 'past it: the next turn\'s prompts were passed too, silently');
+});
+
+test('background guidance: the same session as on screen, nothing drawn, spoken, stored or shared from it', () => {
+  // Fed one fix at a time, background guidance gives exactly the on-screen states
+  const a = nav3Session();
+  void a.s.start({ route: L_ROUTE(), destination: N3_DEST });
+  a.feed(drive3(L_PTS, { noise: 5 }));
+  const b = bgNav3();
+  void b.s.start({ route: L_ROUTE(), destination: N3_DEST });
+  b.bg.setAppState('background');
+  b.task(drive3(L_PTS, { noise: 5 }), 1);
+  const sig = (st: NavigationState[]) => st.map((x) => `${x.phase}:${active3(x)?.progress?.along.toFixed(2) ?? '-'}`);
+  assert.deepEqual(sig(b.states), sig(a.states));
+  // Privacy: lifecycle facts only
+  const text = JSON.stringify(b.logs);
+  for (const secret of ['54.6', '-3.1', 'Chestnut', 'Lake Road', 'Brow Top', N3_DEST.name]) assert.ok(!text.includes(secret), secret);
+  // No camera, map, storage, sharing or presence in the background path
+  const read = (rel: string) => readFileSync(toPath(new URL(rel, import.meta.url)), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+  for (const f of ['lib/navigation/background.ts', 'lib/backend/sharedLocationUpdates.ts', 'hooks/useOnScreenSnapshot.ts']) {
+    const src = read(`../${f}`);
+    assert.ok(!/Camera|setCamera|mapboxRef|AsyncStorage|SecureStore|setItem|writeJson|liveLocation|LiveLocation|presence|Presence|setLocationShare|console\./.test(src), f);
+  }
+  // The guidance UI and the route line hold still in the background, current again on return
+  const ctx = read('../context/NavigationContext.tsx');
+  assert.ok(/export function useNavigationState\(\): NavigationState \{\s*const session = useNavigationSession\(\);\s*return useOnScreenSnapshot\(/.test(ctx));
+  assert.ok(/if \(lastFix\.current && fix\.time <= lastFix\.current\.time\) return;/.test(ctx), 'each moment once, in order');
+  assert.ok(/source: sharedLocation,/.test(ctx));
+  const map = read('../components/MapboxDriveMap.tsx');
+  const layer = map.slice(map.indexOf('const NavigationRouteLayers = memo('), map.indexOf('const MapboxDriveMap = forwardRef'));
+  assert.ok(/useOnScreenSnapshot\(/.test(layer));
+  const hook = read('../hooks/useOnScreenSnapshot.ts');
+  assert.ok(/state !== 'background'/.test(hook), 'only the background holds it: an inactive app is still visible');
+  // Coming back: the camera starts from the newest fix (the drive's or navigation's), through the follow camera
+  const drive = read('../app/(tabs)/(drive)/index.tsx');
+  assert.ok(/const navFix = navSession\.guiding \? latestNavigationFix\(\) : null;/.test(drive));
+  // No new location permission (the background audio mode is voice's, checked with it)
+  for (const f of ['../app.json', '../app.config.js']) assert.ok(!/ACCESS_BACKGROUND_LOCATION|isAndroidBackgroundLocationEnabled/.test(read(f)), f);
+});
+
+// ─── Navigation: background voice (audio session) ──────────────────────────
+// The voice engine decides what and when; the audio controller plays it on
+// the app's session (iOS): activate, speak, release; one at a time; cut-offs
+// handled; off screen and locked too.
+
+import { NavigationSpeaker, AUDIO, type AudioSessionControl, type SpeechEngine, type SpeechEvents } from '@/lib/navigation/audioSession';
+
+/** A hand-driven clock and timers */
+function timers3() {
+  const clock = { t: 0 };
+  const list: Array<{ fn: () => void; at: number; id: number }> = [];
+  let tid = 0;
+  const run = () => {
+    for (;;) {
+      const due = list.filter((x) => x.at <= clock.t).sort((a, b) => a.at - b.at)[0];
+      if (!due) break;
+      list.splice(list.indexOf(due), 1);
+      due.fn();
+    }
+  };
+  return {
+    clock,
+    setTimer: (fn: () => void, ms: number) => { const id = ++tid; list.push({ fn, at: clock.t + ms, id }); return id; },
+    clearTimer: (id: unknown) => { const i = list.findIndex((x) => x.id === id); if (i >= 0) list.splice(i, 1); },
+    advance: (ms: number) => { clock.t += ms; run(); },
+  };
+}
+/** The audio controller on a fake engine and session, with everything that happened in order */
+function audio3(o: { session?: boolean; background?: boolean } = {}) {
+  const t = timers3();
+  const log: string[] = [];
+  const jlog: Array<Record<string, unknown>> = [];
+  let current: SpeechEvents | null = null;
+  const session = {
+    failActivate: false,
+    active: false,
+    configure: async () => { log.push('configure'); },
+    setActive: async (a: boolean) => {
+      if (a && session.failActivate) { log.push('active:refused'); throw new Error('call in progress'); }
+      session.active = a;
+      log.push(`active:${a}`);
+    },
+  };
+  const engine: SpeechEngine = {
+    speak: (text, appSession, events) => { log.push(`speak:${text}${appSession ? '' : ' (system session)'}`); current = events; events.onStart(); },
+    stop: () => { log.push('stop'); const e = current; current = null; e?.onStopped(); },
+  };
+  const speaker = new NavigationSpeaker({
+    engine, session: o.session === false ? null : (session as AudioSessionControl), background: o.background ?? true,
+    setTimer: t.setTimer, clearTimer: t.clearTimer, journal: { log: (event, data) => jlog.push({ event, ...data }) },
+  });
+  const flush = async () => { for (let i = 0; i < 5; i++) await Promise.resolve(); };
+  /** The engine finishes the prompt being spoken (normally, or cut off by the system) */
+  const finish = (how: 'done' | 'stopped' | 'error' = 'done') => { const e = current; current = null; if (how === 'done') e?.onDone(); else if (how === 'error') e?.onError(); else e?.onStopped(); };
+  return { speaker, session, log, jlog, ...t, flush, finish, actions: () => jlog.map((l) => l.action) };
+}
+
+test('audio session: set up once, activated before each prompt, released straight after; never left active', async () => {
+  const a = audio3();
+  a.speaker.speak('Turn left');
+  await a.flush();
+  assert.deepEqual(a.log, ['configure', 'active:true', 'speak:Turn left']);
+  assert.equal(a.session.active, true, 'other audio ducks while it speaks');
+  a.finish();
+  assert.equal(a.session.active, true, 'held a moment, in case another prompt follows');
+  a.advance(AUDIO.releaseDelayMs);
+  await a.flush();
+  assert.equal(a.session.active, false, 'released: other audio comes back up');
+  // The next prompt: no set-up again
+  a.speaker.speak('Turn right');
+  await a.flush();
+  a.finish();
+  a.advance(AUDIO.releaseDelayMs);
+  await a.flush();
+  assert.deepEqual(a.log.slice(4), ['active:true', 'speak:Turn right', 'active:false']);
+  assert.equal(a.log.filter((x) => x === 'configure').length, 1);
+  // Two prompts close together share one activation (no duck, unduck, duck)
+  a.speaker.speak('Updating route');
+  await a.flush();
+  a.finish();
+  a.advance(100);
+  a.speaker.speak('Head north');
+  await a.flush();
+  a.finish();
+  a.advance(AUDIO.releaseDelayMs);
+  await a.flush();
+  assert.deepEqual(a.log.slice(7), ['active:true', 'speak:Updating route', 'speak:Head north', 'active:false']);
+  assert.deepEqual(a.actions(), ['activated', 'started', 'released', 'activated', 'started', 'released', 'activated', 'started', 'started', 'released']);
+  for (const l of a.jlog) assert.ok(!JSON.stringify(l).match(/Turn|Head|Updating/), 'never the words');
+});
+
+test('audio session: one prompt at a time; a newer one waits (replacing an older waiting one); stop drops both', async () => {
+  const a = audio3();
+  a.speaker.speak('In 300 yards, turn left');
+  await a.flush();
+  a.speaker.speak('Old prompt');
+  a.speaker.speak('Turn left');
+  assert.ok(a.actions().includes('replaced'));
+  assert.deepEqual(a.log, ['configure', 'active:true', 'speak:In 300 yards, turn left'], 'nothing talks over it');
+  a.finish();
+  await a.flush();
+  assert.deepEqual(a.log.slice(3), ['speak:Turn left'], 'then only the newest');
+  // stop() (reroute, mute, end): the one speaking and the one waiting both go, and the session is released
+  a.speaker.speak('Waiting');
+  a.speaker.stop();
+  assert.ok(a.log.includes('stop'));
+  a.advance(AUDIO.releaseDelayMs);
+  await a.flush();
+  assert.equal(a.session.active, false);
+  assert.ok(!a.log.includes('speak:Waiting'));
+  assert.equal(a.speaker.busy, false);
+});
+
+test('audio session: a call or Siri cuts a prompt off: nothing waiting is replayed, the session is released (and again later), the next prompt resumes', async () => {
+  const a = audio3();
+  a.speaker.speak('In half a mile, turn left');
+  await a.flush();
+  a.speaker.speak('In 300 yards, turn left');
+  // The system cuts it off
+  a.finish('stopped');
+  await a.flush();
+  assert.ok(a.actions().includes('interrupted'));
+  assert.ok(!a.log.includes('speak:In 300 yards, turn left'), 'what was waiting is out of date: dropped');
+  a.advance(AUDIO.releaseDelayMs);
+  await a.flush();
+  assert.equal(a.session.active, false);
+  // iOS re-activates the session when the interruption ends: the sweep releases it again
+  a.session.active = true;
+  a.advance(AUDIO.sweepAfterMs[0]!);
+  await a.flush();
+  assert.equal(a.session.active, false, 'other audio is never left ducked');
+  // During the call: activation is refused, the prompt is lost (never kept for later)
+  a.session.failActivate = true;
+  a.speaker.speak('Turn left');
+  await a.flush();
+  assert.ok(!a.log.includes('speak:Turn left'));
+  assert.equal(a.jlog.filter((l) => l.action === 'failed' && l.stage === 'activate').length, 1);
+  // After it: the next prompt is spoken, and that's "resumed"
+  a.session.failActivate = false;
+  a.speaker.speak('Turn right');
+  await a.flush();
+  a.finish();
+  assert.ok(a.log.includes('speak:Turn right'));
+  assert.ok(a.actions().includes('resumed'));
+  assert.ok(!a.log.slice(a.log.indexOf('speak:Turn right')).includes('speak:Turn left'), 'never replayed');
+  // A prompt that never finishes is ended by the watchdog and released
+  a.advance(AUDIO.releaseDelayMs);
+  await a.flush();
+  a.speaker.speak('Stuck');
+  await a.flush();
+  a.advance(AUDIO.watchdogMaxMs);
+  await a.flush();
+  a.advance(AUDIO.releaseDelayMs);
+  await a.flush();
+  assert.ok(a.jlog.some((l) => l.action === 'interrupted' && l.how === 'watchdog'));
+  assert.equal(a.session.active, false);
+  assert.equal(a.speaker.busy, false);
+  // Coming back on screen also releases a session an interruption may have re-activated
+  a.speaker.setAppState('background');
+  a.session.active = true;
+  a.speaker.setAppState('active');
+  await a.flush();
+  assert.equal(a.session.active, false);
+});
+
+test('audio session: stopped while it was coming up, it is still let go; a session that cannot be set up falls back to the system one', async () => {
+  // A slow activation, and a reroute (stop) meanwhile
+  const a = audio3();
+  let release!: () => void;
+  const realSetActive = a.session.setActive;
+  a.session.setActive = (on: boolean) => on ? new Promise<void>((r) => { release = () => { void realSetActive(on).then(r); }; }) : realSetActive(on);
+  a.speaker.speak('Old route prompt');
+  await a.flush();
+  a.speaker.stop();
+  a.advance(AUDIO.releaseDelayMs);
+  release();
+  await a.flush();
+  a.advance(AUDIO.releaseDelayMs);
+  await a.flush();
+  assert.ok(!a.log.includes('speak:Old route prompt'), 'never spoken');
+  assert.equal(a.session.active, false, 'and the session is not left active');
+  // configure() fails (an unexpected session error): spoken on the system's session rather than not at all
+  const b = audio3();
+  b.session.configure = async () => { throw new Error('session error'); };
+  b.speaker.speak('Turn left');
+  await b.flush();
+  assert.deepEqual(b.log, ['speak:Turn left (system session)']);
+  assert.ok(b.jlog.some((l) => l.action === 'failed' && l.stage === 'configure'));
+});
+
+test('audio session: without one (Android, or a build without expo-audio) prompts are spoken as before', async () => {
+  const a = audio3({ session: false, background: false });
+  a.speaker.speak('Turn left');
+  await a.flush();
+  assert.deepEqual(a.log, ['speak:Turn left (system session)']);
+  assert.equal(a.speaker.background, false, 'iOS without the session: foreground only, as before');
+  a.finish();
+  a.advance(AUDIO.releaseDelayMs);
+  assert.deepEqual(a.log, ['speak:Turn left (system session)'], 'nothing to activate or release');
+  assert.equal(audio3({ session: false, background: true }).speaker.background, true, "Android: speech plays from the background as it is");
+});
+
+/** Voice guidance with background guidance and the audio controller, as NavigationContext wires them */
+function bgVoice3(o: { fetch?: (body: unknown) => Promise<ServerRoutes>; mode?: 'normal' | 'alerts' | 'off' } = {}) {
+  /** Prompts finish by themselves (each takes well under a fix's worth of driving) unless held */
+  const control = { hold: false };
+  const h = bgNav3({ fetch: o.fetch });
+  const said: Array<{ text: string; along: number | null; onScreen: boolean }> = [];
+  const audioLog: string[] = [];
+  const jlog: Array<Record<string, unknown>> = [];
+  let onScreen = true;
+  let current: SpeechEvents | null = null;
+  const session = { active: false, configure: async () => {}, setActive: async (on: boolean) => { session.active = on; audioLog.push(`active:${on}`); } };
+  const engine: SpeechEngine = {
+    speak: (text, _app, events) => {
+      // The previous prompt had finished long ago (each lasts well under a second of driving here)
+      said.push({ text, along: active3(h.s.state)?.progress?.along ?? null, onScreen });
+      current = events;
+      events.onStart();
+      if (!control.hold) queueMicrotask(() => { if (current === events) { current = null; events.onDone(); } });
+    },
+    stop: () => { audioLog.push('stop'); const e = current; current = null; e?.onStopped(); },
+  };
+  const speaker = new NavigationSpeaker({
+    engine, session, background: true,
+    setTimer: (fn, ms) => setTimeout(fn, ms), clearTimer: (t) => clearTimeout(t as ReturnType<typeof setTimeout>),
+    journal: { log: (event, data) => jlog.push({ event, ...data }) },
+  });
+  const voice = new VoiceGuidance({ session: h.s, speaker, now: () => h.clock.t, journal: { log: (event, data) => jlog.push({ event, ...data }) } });
+  voice.setBackgroundSpeech(speaker.background);
+  if (o.mode) voice.setMode(o.mode);
+  voice.attach();
+  /** The app's state, as NavigationContext passes it on */
+  const app = (state: 'active' | 'inactive' | 'background') => {
+    onScreen = state === 'active';
+    voice.setForeground(state === 'active');
+    speaker.setAppState(state);
+    h.bg.setAppState(state);
+  };
+  /** The prompt being spoken finishes now */
+  const finishSpeaking = () => { const e = current; current = null; e?.onDone(); };
+  return { ...h, voice, speaker, session, said, audioLog, jlog, app, control, finishSpeaking, texts: () => said.map((x) => x.text) };
+}
+/** Feeds fixes one at a time, letting each prompt finish (microtasks) before the next fix */
+async function walkAsync3(h: ReturnType<typeof bgVoice3>, fixes: GpsFix[], viaTask: boolean) {
+  for (const f of fixes) {
+    if (viaTask) h.task([f], 1);
+    else h.feed([f]);
+    await settle3();
+  }
+}
+const L_SAID3 = [
+  'Head north on Lake Road, then in 1000 yards, turn left onto Chestnut Hill',
+  'In half a mile, turn left onto Chestnut Hill',
+  'In a quarter of a mile, turn left onto Chestnut Hill',
+  'Turn left onto Chestnut Hill',
+  'Continue for 600 yards, then turn right onto Brow Top',
+  'In 300 yards, turn right onto Brow Top',
+  'Turn right onto Brow Top',
+  'In a quarter of a mile, you will arrive at your destination',
+  'You have arrived at your destination',
+];
+
+test('background voice: with the app in the background or the phone locked, every prompt fires at its threshold, once, as on screen', async () => {
+  for (const state of ['background', 'inactive'] as const) {
+    const h = bgVoice3();
+    void h.s.start({ route: voiceRoute3(), destination: N3_DEST, recording: 'navigation' });
+    await walkAsync3(h, walk3(0, 50, 1_000_000), false);
+    // Locked (background) or Control Centre / a call banner (inactive): off screen
+    h.app(state);
+    await walkAsync3(h, walk3(60, 1995, h.clock.t + 1000), true);
+    await walkAsync3(h, walk3(1996, 2000, h.clock.t + 1000, 2), true);
+    assert.equal(h.s.phase, 'arrived');
+    assert.deepEqual(h.texts(), L_SAID3, state);
+    assert.ok(h.said.slice(1).every((x) => !x.onScreen), 'spoken off screen');
+    // The same thresholds as on screen
+    const due = [1000 - 800, 1000 - 400, 1000 - 60, 1600 - 600, 1600 - 300, 1600 - 50, 2000 - 400];
+    for (let k = 1; k < 8; k++) {
+      const along = h.said[k]!.along!;
+      assert.ok(along >= due[k - 1]! - 0.5 && along < due[k - 1]! + 12, `${h.said[k]!.text}: ${along.toFixed(0)} m`);
+    }
+    // Each prompt: the session activated before it and released after
+    assert.equal(h.audioLog[0], 'active:true');
+    await new Promise((r) => setTimeout(r, AUDIO.releaseDelayMs + 50));
+    assert.equal(h.session.active, false, 'never left active: music back to full volume');
+    assert.ok(!h.jlog.some((l) => l.reason === 'background'), 'nothing cancelled for being off screen');
+  }
+});
+
+test('background voice: a gap in fixes off screen skips the prompts it made stale, and nothing is replayed', async () => {
+  const h = bgVoice3();
+  void h.s.start({ route: voiceRoute3(), destination: N3_DEST, recording: 'navigation' });
+  await walkAsync3(h, walk3(0, 150, 1_000_000), false);
+  h.app('background');
+  // No fixes for a while (a tunnel), then the car is 120 m from the turn: "In a quarter of a mile" would be wrong now
+  await walkAsync3(h, walk3(880, 900, h.clock.t + 50_000), true);
+  await walkAsync3(h, walk3(910, 990, h.clock.t + 1000), true);
+  const texts = h.texts();
+  assert.ok(!texts.includes('In a quarter of a mile, turn left onto Chestnut Hill'), 'stale: skipped');
+  assert.ok(!texts.includes('In half a mile, turn left onto Chestnut Hill'));
+  assert.equal(texts.filter((x) => x === 'Turn left onto Chestnut Hill').length, 1, 'the turn itself, once');
+  assert.equal(new Set(texts).size, texts.length);
+});
+
+test('background voice: a reroute off screen cancels the old route\'s speech, says "Updating route" once, then the new route\'s prompt', async () => {
+  const srv = routeServer3();
+  const h = bgVoice3({ fetch: srv.fetch });
+  void h.s.start({ route: voiceRoute3(), destination: N3_DEST, recording: 'navigation' });
+  await walkAsync3(h, walk3(0, 700, 1_000_000), false);
+  h.app('background');
+  const stops = h.audioLog.filter((x) => x === 'stop').length;
+  const off = offNorth3(h.clock.t + 1000);
+  let i = 0;
+  for (; i < off.length; i++) { h.task([off[i]!], 1); await settle3(); if (h.bodies.length) break; }
+  void stops;
+  assert.ok(h.jlog.some((l) => l.event === 'nav_voice' && l.action === 'cancelled' && l.reason === 'off_route'), "the old route's speech is cancelled");
+  // Still off route while the request is out: not said again
+  for (const f of off.slice(i + 1, i + 4)) { h.task([f], 1); await settle3(); }
+  assert.equal(h.texts().filter((x) => x === VOICE.updating).length, 1, 'once');
+  const cut = h.said.length;
+  srv.answer(serverRoutes3(freshVoice3()));
+  await settle3();
+  await settle3();
+  assert.ok(h.texts().slice(cut).every((x) => x.startsWith('NEW')), 'only the new route from here');
+  await walkAsync3(h, drive3(polyline3([[0, 1250], [0, 1500], [-600, 1500]]), { t0: h.clock.t + 1000, noise: 0 }), true);
+  const later = h.texts().slice(cut);
+  assert.ok(later.every((x) => !OLD_TEXTS3.includes(x)), 'never an old-route prompt');
+  assert.ok(later.includes('NEW now 1'));
+  assert.ok(h.said.slice(cut).every((x) => !x.onScreen));
+});
+
+test('background voice: Off stays silent, Alerts only stays alerts, and muting on screen holds with the phone locked', async () => {
+  const run = async (mode: 'normal' | 'alerts' | 'off', muteOnScreen = false) => {
+    const h = bgVoice3({ mode });
+    void h.s.start({ route: voiceRoute3(), destination: N3_DEST, recording: 'navigation' });
+    await walkAsync3(h, walk3(0, 50, 1_000_000), false);
+    if (muteOnScreen) h.voice.setMode('off');
+    h.app('background');
+    await walkAsync3(h, walk3(60, 1995, h.clock.t + 1000), true);
+    await walkAsync3(h, walk3(1996, 2000, h.clock.t + 1000, 2), true);
+    return { texts: h.texts(), activations: h.audioLog.filter((x) => x === 'active:true').length };
+  };
+  const off = await run('off');
+  assert.deepEqual(off.texts, []);
+  assert.equal(off.activations, 0, 'the session is never even activated');
+  assert.deepEqual((await run('alerts')).texts, ['Turn left onto Chestnut Hill', 'Turn right onto Brow Top', 'You have arrived at your destination']);
+  const muted = await run('normal', true);
+  assert.deepEqual(muted.texts, ['Head north on Lake Road, then in 1000 yards, turn left onto Chestnut Hill'], 'muted on screen, still muted when locked');
+});
+
+test('background voice: arrival off screen is spoken once, and finishing the drive is never held up by it', async () => {
+  const h = bgVoice3();
+  void h.s.start({ route: voiceRoute3(), destination: N3_DEST, recording: 'navigation' });
+  await walkAsync3(h, walk3(0, 1800, 1_000_000), false);
+  h.app('background');
+  const stopsBefore = h.audioLog.filter((x) => x === 'stop').length;
+  // The arrival prompt (the only one left) is still being spoken when the
+  // Drive screen ends navigation and finishes the drive
+  h.control.hold = true;
+  await walkAsync3(h, walk3(1810, 1995, h.clock.t + 1000), true);
+  h.task(walk3(1996, 2000, h.clock.t + 1000, 2), 1);
+  await settle3();
+  assert.equal(h.s.phase, 'arrived');
+  h.s.end('arrived');
+  assert.equal(h.s.phase, 'idle', 'navigation ends at once');
+  assert.equal(h.audioLog.filter((x) => x === 'stop').length, stopsBefore, 'the arrival is not cut off');
+  assert.equal(h.texts().filter((x) => /arrived at your destination/.test(x)).length, 1);
+  assert.equal(h.speaker.busy, true, 'still speaking while the drive finishes');
+  h.finishSpeaking();
+  await new Promise((r2) => setTimeout(r2, AUDIO.releaseDelayMs + 50));
+  assert.equal(h.session.active, false, 'released after the last word');
+});
+
+test('background voice: the voice engine and navigation are unchanged by the audio layer; it only plays', async () => {
+  // On screen, the same prompts at the same places as with the plain speaker (Phase 4)
+  const plain = voice3();
+  void plain.s.start({ route: voiceRoute3(), destination: N3_DEST });
+  plain.feed(walk3(0, 1995, 1_000_000));
+  plain.feed(walk3(1996, 2000, plain.clock.t + 1000, 2));
+  const h = bgVoice3();
+  void h.s.start({ route: voiceRoute3(), destination: N3_DEST });
+  await walkAsync3(h, walk3(0, 1995, 1_000_000), false);
+  await walkAsync3(h, walk3(1996, 2000, h.clock.t + 1000, 2), false);
+  assert.deepEqual(h.texts(), plain.texts());
+  assert.deepEqual(h.said.map((x) => x.along?.toFixed(1)), plain.said.map((x) => x.along?.toFixed(1)));
+  assert.deepEqual(h.phases, plain.phases);
+  // The audio layer knows nothing of routes, recording, sharing or the camera; voice keeps the decisions
+  const read = (rel: string) => readFileSync(toPath(new URL(rel, import.meta.url)), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+  const audioSrc = read('../lib/navigation/audioSession.ts');
+  assert.ok(!/session\.state|progress|route|Maneuver|startDrive|endDrive|liveLocation|presence|Camera|AsyncStorage|setItem/.test(audioSrc));
+  // Off screen no longer silences voice where the speaker can play there
+  const ctx = read('../context/NavigationContext.tsx');
+  assert.ok(/voice\.setBackgroundSpeech\(speaker\.background\);/.test(ctx));
+  assert.ok(/speaker\.setAppState\(state\);/.test(ctx));
+  const voiceSrc = read('../lib/navigation/voice.ts');
+  assert.ok(/if \(this\.backgroundSpeech\) return;/.test(voiceSrc));
+  assert.ok(/return this\.mode !== 'off' && \(this\.foreground \|\| this\.backgroundSpeech\);/.test(voiceSrc));
+});
+
+// ─── Navigation: lane guidance ──────────────────────────────────────────────
+// The provider's structured lane data, normalised once; the junction at the
+// manoeuvre found by position; shown close to it, stable, gone once passed.
+
+import { LANES, LaneTracker, laneShowWithinM, lanesAt, normalizeLaneJunctions, type Lane } from '@/lib/navigation/lanes';
+
+type ServerLane = { indications: string[]; valid: boolean; active: boolean; validIndication: string | null };
+const sl = (indications: string[], valid: boolean, active = false, validIndication: string | null = null): ServerLane => ({ indications, valid, active, validIndication });
+/** A route as the API sends it, with lane junctions added to its steps (server format) */
+function withLanesServer3(route: Nav3Route, lanes: Record<number, Array<{ at: [number, number]; lanes: ServerLane[] }>>): ServerRoutes {
+  const server = serverRoutes3(route);
+  server.routes[0]!.legs[0]!.steps.forEach((st, k) => {
+    const js = lanes[k];
+    if (js) st.lanes = js.map((j) => ({ location: { lat: at3(...j.at).latitude, lng: at3(...j.at).longitude }, lanes: j.lanes }));
+  });
+  return server;
+}
+function withLanes3(route: Nav3Route, lanes: Record<number, Array<{ at: [number, number]; lanes: ServerLane[] }>>): Nav3Route {
+  return routesFromServer(withLanesServer3(route, lanes), route.routeId)[0]!;
+}
+// The L route: a junction halfway up the first road (lanes for going straight
+// through it: not the manoeuvre's); the left turn's approach lanes (on the
+// turn's own step, as Mapbox puts them); the right turn's, two lanes to use
+const LEFT_LANES3 = [sl(['left'], true, true, 'left'), sl(['straight', 'left'], true, false, 'left'), sl(['straight'], false)];
+const RIGHT_LANES3 = [sl(['straight'], false), sl(['straight', 'right'], true, true, 'right'), sl(['right'], true, true, 'right')];
+const laneRoute3 = (id = 'lanes:0') => withLanes3({ ...L_ROUTE(), routeId: id }, {
+  0: [{ at: [0, 500], lanes: [sl(['left'], false), sl(['straight'], true, true, 'straight'), sl(['straight'], true)] }],
+  1: [{ at: [0, 1000], lanes: LEFT_LANES3 }],
+  2: [{ at: [-600, 1000], lanes: RIGHT_LANES3 }],
+});
+const laneDirs3 = (lanes: readonly Lane[] | null | undefined) => lanes?.map((l) => `${l.directions.join('+')}${l.recommended ? '*' : ''}${l.preferred ? '!' : ''}`).join(' ') ?? null;
+
+test('lane model: every provider indication normalised, several per lane kept, recommended and preferred lanes, bad data dropped', () => {
+  const j = normalizeLaneJunctions([{
+    location: { lat: 54.6, lng: -3.1 },
+    lanes: [
+      sl(['uturn', 'left'], true, false, 'uturn'),
+      sl(['sharp left', 'slight left'], false),
+      sl(['straight', 'none', 'bogus', 'straight'], true, true, 'straight'),
+      sl(['slight right', 'right', 'sharp right'], true, true, 'right'),
+      sl([], true, false, null),
+    ],
+  }])!;
+  assert.equal(j.length, 1);
+  assert.deepEqual(j[0]!.lanes.map((l) => l.directions), [
+    ['uturn', 'left'], ['sharpLeft', 'slightLeft'], ['straight'], ['slightRight', 'right', 'sharpRight'], [],
+  ], 'every indication, in a fixed left-to-right order; unknown and "none" dropped; an unmarked lane has none');
+  assert.deepEqual(j[0]!.lanes.map((l) => [l.recommended, l.preferred, l.use]), [
+    [true, false, 'uturn'], [false, false, null], [true, true, 'straight'], [true, true, 'right'], [true, false, null],
+  ], 'several recommended, preferred among them, and the direction the route takes');
+  // A use the lane doesn't have is ignored rather than drawn
+  assert.equal(normalizeLaneJunctions([{ location: { lat: 0, lng: 0 }, lanes: [sl(['straight'], true, false, 'left')] }])![0]!.lanes[0]!.use, null);
+  // Nothing trustworthy: no guidance at all
+  for (const bad of [
+    undefined, null, 'lanes', [],
+    [{ location: { lat: 0, lng: 0 }, lanes: [] }],
+    [{ location: { lat: 0, lng: 0 }, lanes: [sl(['left'], false), sl(['straight'], false)] }],
+    [{ location: { lat: 0, lng: 0 }, lanes: [sl(['left'], true), 'lane'] }],
+    [{ location: { lat: 0, lng: 0 }, lanes: [{ indications: ['left'] }] }],
+    [{ location: { lat: 'x', lng: 0 }, lanes: [sl(['left'], true)] }],
+    [{ location: { lat: 0, lng: 0 }, lanes: Array.from({ length: LANES.maxLanes + 1 }, () => sl(['straight'], true)) }],
+  ]) assert.equal(normalizeLaneJunctions(bad), undefined, JSON.stringify(bad));
+  // A route without lane data: no lanes field, nothing changes
+  const plain = routesFromServer(serverRoutes3(L_ROUTE()), 'x')[0]!;
+  assert.ok(plain.legs[0]!.steps.every((st) => !('lanes' in st)));
+  assert.ok(prepareRoute(plain).maneuvers.every((m) => m.lanes === null));
+});
+
+test('lane model: the junction at the manoeuvre is chosen by position, never the one just driven through or one along the way', () => {
+  const p = prepareRoute(laneRoute3());
+  assert.equal(laneDirs3(p.maneuvers[0]!.lanes), null, 'departure: never');
+  assert.equal(laneDirs3(p.maneuvers[1]!.lanes), 'left*! left+straight* straight', "the left turn's own approach lanes, not the junction 500 m before it");
+  assert.equal(laneDirs3(p.maneuvers[2]!.lanes), 'straight straight+right*! right*!', 'two lanes for the right turn');
+  assert.equal(laneDirs3(p.maneuvers[3]!.lanes), null, 'arrival: never');
+  // On the step leading to it or on its own: both found; too far from the manoeuvre point: not used
+  const turn = at3(0, 1000);
+  const junction = (x: number, y: number) => ({ location: at3(x, y), lanes: LEFT_LANES3.map((l) => ({ directions: [], recommended: l.valid, preferred: false, use: null })) });
+  assert.ok(lanesAt('turn', turn, [junction(0, 990)]));
+  assert.equal(lanesAt('turn', turn, [junction(0, 950)]), null, '50 m away: another junction');
+  assert.equal(lanesAt('roundaboutExit', turn, [junction(0, 1000)]), null, "a roundabout's exit: never");
+});
+
+test('lane visibility: by speed and manoeuvre, stable around the threshold, gone once passed', () => {
+  assert.equal(laneShowWithinM(5, 'turn'), LANES.townM);
+  assert.equal(laneShowWithinM(15, 'turn'), LANES.fastRoadM);
+  assert.equal(laneShowWithinM(30, 'turn'), LANES.motorwayM);
+  assert.equal(laneShowWithinM(30, 'offRamp'), LANES.motorwayExitM, 'a motorway exit: earlier');
+  assert.equal(laneShowWithinM(30, 'fork'), LANES.motorwayExitM);
+  assert.equal(laneShowWithinM(null, 'offRamp'), LANES.townM);
+  const m = prepareRoute(laneRoute3()).maneuvers[1]!;
+  const t = new LaneTracker();
+  assert.equal(t.update('r', m, 450, false, 15), null, 'too far: nothing');
+  const shown = t.update('r', m, 399, false, 15);
+  assert.ok(shown);
+  // Jitter around the threshold, and the speed dropping: no flicker, and the same object (no re-render)
+  for (const [d, v] of [[405, 15], [395, 15], [420, 9], [480, 12], [300, 4]] as const) assert.equal(t.update('r', m, d, false, v), shown, `${d} m`);
+  assert.equal(t.update('r', m, 400 * LANES.hideFactor + 1, false, 15), null, 'well beyond it again: hidden');
+  // On the roundabout itself: hidden
+  assert.ok(t.update('r', m, 100, false, 10));
+  assert.equal(t.update('r', m, 100, true, 10), null);
+  // A different route (a reroute): never the old view
+  const again = t.update('r2', m, 100, false, 10);
+  assert.ok(again && again !== shown && again.key.startsWith('r2|'));
+});
+
+test('lane guidance in navigation: from route progress, for the manoeuvre coming up only, and gone once it is passed', () => {
+  const h = nav3Session();
+  void h.s.start({ route: laneRoute3(), destination: N3_DEST });
+  const seen: Array<{ along: number; lanes: string | null; step: number | null }> = [];
+  for (const f of drive3(L_PTS, { speed: 13, noise: 3 })) {
+    h.feed([f]);
+    const st = active3(h.s.state);
+    if (st?.progress) seen.push({ along: st.progress.along, lanes: laneDirs3(st.lanes?.lanes), step: st.lanes?.stepIndex ?? null });
+  }
+  const at = (lo: number, hi: number) => seen.filter((x) => x.along >= lo && x.along < hi);
+  assert.ok(at(0, 590).every((x) => x.lanes === null), 'nothing far from the turn, nor for the junction along the way');
+  assert.ok(at(610, 995).every((x) => x.lanes === 'left*! left+straight* straight' && x.step === 1), 'the left turn\'s lanes within 400 m (30 mph+)');
+  assert.ok(at(1010, 1190).every((x) => x.lanes === null), 'passed: gone, and the right turn is still too far');
+  assert.ok(at(1210, 1595).every((x) => x.lanes === 'straight straight+right*! right*!' && x.step === 2));
+  assert.ok(at(1610, 2001).every((x) => x.lanes === null), 'arriving: none');
+  // Shown continuously once shown (no flicker on a noisy drive)
+  const left = seen.filter((x) => x.step === 1);
+  const first = seen.indexOf(left[0]!);
+  assert.ok(seen.slice(first, first + left.length).every((x) => x.step === 1));
+  // Off route: none
+  const o = nav3Session({ fetch: () => new Promise(() => {}) });
+  void o.s.start({ route: laneRoute3(), destination: N3_DEST });
+  o.feed(drive3(L_PTS, { to: 900 }));
+  assert.ok(active3(o.s.state)!.lanes);
+  o.feed(offNorth3(o.clock.t + 1000).filter((f) => f.latitude > at3(0, 950).latitude));
+  assert.ok(o.phases.includes('offRoute'));
+  assert.equal(active3(o.s.state)!.lanes, null, 'off route or updating: no lanes');
+});
+
+test('lane guidance: a reroute drops the old route\'s lanes and uses the new route\'s', async () => {
+  const srv = routeServer3();
+  const h = nav3Session({ fetch: srv.fetch });
+  void h.s.start({ route: laneRoute3(), destination: N3_DEST });
+  h.feed(drive3(L_PTS, { to: 900 }));
+  const old = active3(h.s.state)!.lanes;
+  assert.ok(old);
+  feedWatching3(h, offNorth3(h.clock.t + 1000), () => h.bodies.length === 1);
+  assert.equal(active3(h.s.state)!.lanes, null);
+  // The new route turns left at (0, 1500): its own lane data there
+  srv.answer(withLanesServer3(FRESH3(), { 1: [{ at: [0, 1500], lanes: [sl(['left'], true, true, 'left'), sl(['straight'], false)] }] }));
+  await settle3();
+  h.feed(drive3(polyline3([[0, 1250], [0, 1480]]), { t0: h.clock.t + 1000, noise: 0 }));
+  const now = active3(h.s.state)!.lanes;
+  assert.ok(now && now !== old);
+  assert.equal(laneDirs3(now.lanes), 'left*! straight');
+  assert.ok(now.key.includes(active3(h.s.state)!.route.routeId), 'the new route\'s');
+});
+
+test('lane guidance: roundabout approach lanes while approaching, none once on it; none for its exit', () => {
+  const { route, pts, entry } = roundabout3('E');
+  const r = withLanes3(route, { 1: [{ at: pts[entry]!, lanes: [sl(['straight', 'left'], false), sl(['right'], true, true, 'right')] }] });
+  const h = nav3Session();
+  void h.s.start({ route: r, destination: N3_DEST });
+  const states: Array<{ round: boolean; lanes: string | null; kind: string }> = [];
+  for (const f of drive3(pts, { speed: 8, noise: 0 })) {
+    h.feed([f]);
+    const st = active3(h.s.state);
+    if (st?.progress) states.push({ round: st.progress.onRoundabout, lanes: laneDirs3(st.lanes?.lanes), kind: st.progress.next.kind });
+  }
+  assert.ok(states.some((x) => !x.round && x.kind === 'roundabout' && x.lanes === 'left+straight right*!'), 'shown on the approach');
+  assert.ok(states.filter((x) => x.round).every((x) => x.lanes === null), 'hidden on the roundabout');
+  assert.ok(states.filter((x) => x.kind !== 'roundabout').every((x) => x.lanes === null));
+  // The exit number and instruction are untouched
+  assert.equal(prepareRoute(r).maneuvers[1]!.exit, 3);
+});
+
+test('lane guidance in the background: kept current from background fixes, so the return shows the right lanes', () => {
+  const h = bgNav3();
+  void h.s.start({ route: laneRoute3(), destination: N3_DEST, recording: 'navigation' });
+  h.feed(drive3(L_PTS, { to: 800 }));
+  assert.equal(active3(h.s.state)!.lanes!.stepIndex, 1);
+  h.bg.setAppState('background');
+  h.task(drive3(L_PTS, { from: 813, to: 1400, t0: h.clock.t + 1000 }));
+  h.bg.setAppState('active');
+  const st = active3(h.s.state)!;
+  assert.equal(st.lanes!.stepIndex, 2, 'the right turn\'s lanes, not the left turn\'s from before');
+  assert.equal(laneDirs3(st.lanes!.lanes), 'straight straight+right*! right*!');
+  // The banner reads the state, held in the background and current on return
+  const ctx = readFileSync(toPath(new URL('../context/NavigationContext.tsx', import.meta.url)), 'utf8');
+  assert.ok(/return useOnScreenSnapshot\(/.test(ctx));
+});
+
+test('lane guidance changes nothing else: progress, banner, voice, rerouting; diagnostics are counts only', () => {
+  const journal = { entries: [] as Array<Record<string, unknown>>, log(event: string, data?: Record<string, unknown>) { this.entries.push({ event, ...data }); } };
+  // The same route through the API (the same line), without lane data
+  const a = nav3Session();
+  void a.s.start({ route: routesFromServer(serverRoutes3(L_ROUTE()), 'lanes')[0]!, destination: N3_DEST });
+  a.feed(drive3(L_PTS, { noise: 4 }));
+  const b = nav3Session({ journal: journal as unknown as DiagnosticsJournal });
+  void b.s.start({ route: laneRoute3(), destination: N3_DEST });
+  b.feed(drive3(L_PTS, { noise: 4 }));
+  const sig = (st: NavigationState[]) => st.map((x) => `${x.phase}:${active3(x)?.progress?.along.toFixed(2) ?? '-'}:${active3(x)?.progress?.next.instruction ?? ''}`);
+  assert.deepEqual(sig(b.states), sig(a.states), 'the same progress and the same manoeuvre banner');
+  const lanes = journal.entries.filter((e) => e.event === 'nav_lanes');
+  assert.deepEqual(lanes.map((e) => [e.step, e.lanes, e.recommended]), [[1, 3, 2], [2, 3, 2]], 'once per manoeuvre: step, lanes, recommended');
+  assert.ok(!/54\.|-3\.|Chestnut|Brow|left|right|straight/.test(JSON.stringify(lanes)), 'nothing about where or which way');
+  // Voice: Mapbox's words only; lanes never add a phrase
+  const read = (rel: string) => readFileSync(toPath(new URL(rel, import.meta.url)), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+  assert.ok(!/lane/i.test(read('../lib/navigation/voice.ts')), 'voice never speaks lanes');
+  // The strip: vector arrows from the manoeuvre icon's own drawing, no emoji or text arrows; one per lane, in the banner
+  const banner = read('../components/navigation/GuidanceBanner.tsx');
+  assert.ok(/<LaneIcon lane=\{lane\}/.test(banner) && !/[←→↑↓↖↗↘↙⬆⬅➡]/.test(banner));
+  assert.ok(/\{state\.lanes && state\.lanes\.stepIndex === next\.stepIndex \? <LaneStrip view=\{state\.lanes\} \/> : null\}/.test(banner));
+  const icon = read('../components/navigation/ManeuverIcon.tsx');
+  assert.ok(/export const LaneIcon = memo\(/.test(icon) && /<TurnArrow key=\{d\}/.test(icon) && /<UTurn key=\{d\}/.test(icon));
+  // Normalised once, when the route comes in; the session only reads the prepared lanes
+  assert.ok(/normalizeLaneJunctions\(lanes\)/.test(read('../lib/navigation/model.ts')));
+  assert.ok(!/normalizeLaneJunctions|indications/.test(read('../lib/navigation/session.ts')));
 });
 
 // ─── iOS build number: one source of truth (app.json ios.buildNumber) ───────

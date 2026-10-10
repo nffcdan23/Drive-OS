@@ -16,7 +16,11 @@ const router = Router();
 // only when the user asks for a route (the app never polls).
 const directions = new DirectionsClient(config.directions, { log: logger });
 
-/** Reads the request body: origin {lat, lng, headingDeg?}, destination {lat, lng} */
+/**
+ * Reads the request body: origin {lat, lng, headingDeg?, speedMs?, accuracyM?},
+ * destination {lat, lng}. Speed and accuracy come with a reroute while
+ * driving; an older app doesn't send them.
+ */
 export function readRouteRequest(body: Body): RouteRequest {
   const origin = body.object("origin")!;
   const destination = body.object("destination")!;
@@ -25,6 +29,8 @@ export function readRouteRequest(body: Body): RouteRequest {
       lat: origin.num("lat", { min: -90, max: 90 })!,
       lng: origin.num("lng", { min: -180, max: 180 })!,
       headingDeg: origin.num("headingDeg", { optional: true, nullable: true, min: 0, max: 360 }) ?? null,
+      speedMs: origin.num("speedMs", { optional: true, nullable: true, min: 0, max: 150 }) ?? null,
+      accuracyM: origin.num("accuracyM", { optional: true, nullable: true, min: 0, max: 10_000 }) ?? null,
     },
     destination: {
       lat: destination.num("lat", { min: -90, max: 90 })!,

@@ -5,16 +5,22 @@
  * straight after, and the road the car is on.
  *
  * It reads the navigation state itself, so its updates on every GPS fix
- * re-render this banner only, never the Drive screen. Off route it says so
- * and offers Update Route (one tap, one request); it never reroutes itself.
+ * re-render this banner only, never the Drive screen.
+ *
+ * Off route it only says what is happening, with nothing to press: "You're
+ * off route", then "Updating route…" while the session fetches a new one by
+ * itself, then guidance on the new route; or "Route update unavailable" if
+ * that failed (the old route stays). After several failures in a row a small
+ * Try Again is offered too.
  */
-import React, { memo, useEffect, useState } from "react";
+import React, { memo } from "react";
 import { ActivityIndicator, StyleSheet, Text, TouchableOpacity, View, type LayoutChangeEvent } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
 import { GlassSurface } from "@/components/Glass";
-import { ARRIVAL_ICON, ManeuverIcon } from "@/components/navigation/ManeuverIcon";
-import { useNavigationState, useRerouteNavigation } from "@/context/NavigationContext";
+import { ARRIVAL_ICON, LaneIcon, ManeuverIcon } from "@/components/navigation/ManeuverIcon";
+import type { LaneView } from "@/lib/navigation/lanes";
+import { useNavigationState, useRetryReroute } from "@/context/NavigationContext";
 import { formatGuidanceDistance, NOW_WITHIN_M } from "@/lib/navigation/format";
 import type { Maneuver } from "@/lib/navigation/maneuver";
 import type { ResolvedUnitSystem } from "@/lib/units";
@@ -41,6 +47,25 @@ const Status = memo(function Status({ icon, text, busy }: { icon?: keyof typeof 
   );
 });
 
+/**
+ * Lane guidance under the manoeuvre: one arrow per lane, left to right, the
+ * lanes to use bright on a soft highlight, the others faint. Only the
+ * provider's lane data; re-renders only when the lanes change.
+ */
+const LaneStrip = memo(function LaneStrip({ view }: { view: LaneView }) {
+  const use = view.lanes.map((l, i) => (l.recommended ? i + 1 : 0)).filter(Boolean);
+  const label = `Lanes: use ${use.length === 1 ? `lane ${use[0]}` : `lanes ${use.join(", ")}`} of ${view.lanes.length}, counting from the left`;
+  return (
+    <View style={styles.lanes} accessible accessibilityLabel={label}>
+      {view.lanes.map((lane, i) => (
+        <View key={i} style={[styles.lane, i > 0 && styles.laneDivider, lane.recommended && styles.laneUse]}>
+          <LaneIcon lane={lane} drivingSide={view.drivingSide} size={30} color={FG} />
+        </View>
+      ))}
+    </View>
+  );
+});
+
 export function GuidanceBanner({
   unitSystem,
   onHeight,
@@ -50,18 +75,10 @@ export function GuidanceBanner({
   onHeight?: (height: number) => void;
 }) {
   const state = useNavigationState();
-  const reroute = useRerouteNavigation();
-  const [problem, setProblem] = useState<string | null>(null);
-  const key = state.phase === "idle" ? null : state.sessionId;
-  useEffect(() => setProblem(null), [key]);
+  const retry = useRetryReroute();
   if (state.phase === "idle") return null;
 
   const layout = onHeight ? (e: LayoutChangeEvent) => onHeight(e.nativeEvent.layout.height) : undefined;
-  const updateRoute = () => {
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    setProblem(null);
-    reroute().catch((err: unknown) => setProblem(err instanceof Error ? err.message : "Couldn't find where you are."));
-  };
 
   if (state.phase === "arrived" || state.phase === "error") {
     const arrived = state.phase === "arrived";
@@ -94,33 +111,48 @@ export function GuidanceBanner({
         ? <Status icon="cellular-outline" text="Weak GPS signal" />
         : null;
 
-  // Off the route: say so, and offer Update Route
-  if (state.phase === "offRoute" || (state.phase === "rerouting" && !progress)) {
-    const busy = state.phase === "rerouting";
+  // Off the route: passive, nothing to press (the session updates the route itself)
+  if (state.phase === "offRoute" || state.phase === "rerouting") {
+    const updating = state.phase === "rerouting";
+    const title = updating ? "Updating route…" : "You're off route";
+    const detail = updating
+      ? "You're off route"
+      : state.updateFailed
+        ? "Route update unavailable"
+        : "Your route will update automatically";
     return (
       <GlassSurface material="dense" style={styles.banner} onLayout={layout}>
-        <View style={styles.row}>
-          <Ionicons name="git-branch-outline" size={42} color={WARN} />
+        <View style={styles.row} accessible accessibilityRole="summary" accessibilityLabel={`${title}. ${detail}`} accessibilityLiveRegion="polite">
+          {updating ? (
+            <View style={styles.offIcon}>
+              <ActivityIndicator color={ACCENT} />
+            </View>
+          ) : (
+            <Ionicons name="git-branch-outline" size={42} color={WARN} />
+          )}
           <View style={styles.text}>
             <Text style={styles.title} accessibilityRole="header">
-              {progress ? "You're off route" : "You're away from the route"}
+              {title}
             </Text>
             <Text style={styles.road} numberOfLines={2}>
-              {problem ?? notice ?? "Get back on the highlighted route, or update it from here."}
+              {detail}
             </Text>
           </View>
+          {!updating && state.canRetry ? (
+            <TouchableOpacity
+              accessibilityRole="button"
+              accessibilityLabel="Try updating the route again"
+              onPress={() => {
+                Haptics.selectionAsync();
+                void retry();
+              }}
+              style={styles.retry}
+              hitSlop={8}
+            >
+              <Text style={styles.retryText}>Try again</Text>
+            </TouchableOpacity>
+          ) : null}
         </View>
-        <TouchableOpacity
-          accessibilityRole="button"
-          accessibilityLabel="Update route from here"
-          accessibilityState={{ busy, disabled: busy }}
-          disabled={busy}
-          onPress={updateRoute}
-          style={styles.action}
-        >
-          {busy ? <ActivityIndicator color="#10161C" /> : <Ionicons name="refresh" size={18} color="#10161C" />}
-          <Text style={styles.actionText}>{busy ? "Updating route…" : "Update Route"}</Text>
-        </TouchableOpacity>
         {gpsNote}
       </GlassSurface>
     );
@@ -166,6 +198,7 @@ export function GuidanceBanner({
           ) : null}
         </View>
       </View>
+      {state.lanes && state.lanes.stepIndex === next.stepIndex ? <LaneStrip view={state.lanes} /> : null}
       {progress.then ? (
         <View style={styles.thenRow} accessible accessibilityLabel={`Then ${progress.then.instruction}`}>
           <Text style={styles.thenText}>Then</Text>
@@ -177,8 +210,7 @@ export function GuidanceBanner({
           On {progress.currentRoad}
         </Text>
       ) : null}
-      {state.phase === "rerouting" ? <Status busy text="Updating route…" /> : null}
-      {problem ?? notice ? <Status icon="information-circle-outline" text={(problem ?? notice)!} /> : null}
+      {notice ? <Status icon="information-circle-outline" text={notice} /> : null}
       {gpsNote}
     </GlassSurface>
   );
@@ -211,16 +243,30 @@ const styles = StyleSheet.create({
   },
   thenText: { color: FG, fontSize: 13, fontWeight: "600" },
   current: { color: MUTED, fontSize: 13 },
+  lanes: {
+    flexDirection: "row",
+    alignSelf: "center",
+    borderRadius: 12,
+    backgroundColor: "rgba(0,0,0,0.22)",
+    paddingHorizontal: 4,
+    paddingVertical: 3,
+  },
+  lane: { paddingHorizontal: 4, paddingVertical: 1, borderRadius: 8 },
+  // A lane line between lanes, like the road markings
+  laneDivider: { borderLeftWidth: StyleSheet.hairlineWidth, borderLeftColor: "rgba(255,255,255,0.28)" },
+  laneUse: { backgroundColor: "rgba(0,207,232,0.22)" },
   statusRow: { flexDirection: "row", alignItems: "center", gap: 6 },
   statusText: { color: MUTED, fontSize: 13, flexShrink: 1 },
-  action: {
-    flexDirection: "row",
+  offIcon: { width: 42, height: 42, alignItems: "center", justifyContent: "center" },
+  // Secondary, after repeated failures only: small and quiet
+  retry: {
+    height: 32,
+    paddingHorizontal: 12,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: "rgba(243,245,247,0.35)",
     alignItems: "center",
     justifyContent: "center",
-    gap: 8,
-    height: 44,
-    borderRadius: 14,
-    backgroundColor: ACCENT,
   },
-  actionText: { color: "#10161C", fontSize: 16, fontWeight: "700" },
+  retryText: { color: FG, fontSize: 14, fontWeight: "600" },
 });

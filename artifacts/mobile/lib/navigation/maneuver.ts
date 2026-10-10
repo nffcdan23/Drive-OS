@@ -13,12 +13,15 @@
 // gave none. The roundabout exit is Mapbox's structured exit number, never
 // read out of the text.
 //
-// Kept for later phases: the voice prompts and their distances (Phase 5
-// voice) and lane data (Phase 6, null until the API forwards it).
+// The voice prompts and their distances are what voice guidance speaks
+// (Phase 4, voice.ts). The lanes are the provider's lane data for the
+// junction at the manoeuvre (lanes.ts), found once here when the route is
+// prepared.
 //
 // No React Native imports, so it is unit-tested under node.
 
 import type { LatLng, RouteStep } from './model';
+import { lanesAt, type Lane } from './lanes';
 
 export type ManeuverKind =
   | 'depart'
@@ -46,12 +49,6 @@ export type ManeuverDirection =
   | 'sharpRight'
   | 'uturn';
 
-/** A lane at a junction (Phase 6). Not sent by the API yet. */
-export interface LaneInfo {
-  indications: string[];
-  valid: boolean;
-  active: boolean;
-}
 
 export interface VoicePrompt {
   /** How far before the manoeuvre it should be spoken (m) */
@@ -84,8 +81,8 @@ export interface Maneuver {
   bearingAfter: number | null;
   /** Spoken prompts for this manoeuvre, farthest first (Phase 5) */
   voice: VoicePrompt[];
-  /** Lanes approaching it (Phase 6); null until the API sends them */
-  lanes: LaneInfo[] | null;
+  /** The lanes approaching it, left to right, where the provider gave them (lanes.ts); else null */
+  lanes: Lane[] | null;
 }
 
 const KINDS: Record<string, ManeuverKind> = {
@@ -208,7 +205,8 @@ export function maneuverFor(steps: readonly RouteStep[], index: number): Maneuve
   const direction = kind === 'uturn' ? 'uturn' : maneuverDirection(m.modifier);
   const exit = isRoundabout(kind) || kind === 'roundaboutExit' ? m.exit : null;
   const road = roadLabel(step);
-  const lanes = (step as RouteStep & { lanes?: LaneInfo[] | null }).lanes ?? null;
+  // The lane junction at this manoeuvre's point, from the step leading to it or its own
+  const lanes = lanesAt(kind, m.location, [...(before?.lanes ?? []), ...(step.lanes ?? [])]);
   return {
     stepIndex: index,
     kind,
@@ -225,7 +223,7 @@ export function maneuverFor(steps: readonly RouteStep[], index: number): Maneuve
     location: m.location,
     bearingAfter: m.bearingAfter,
     voice: [...(before?.voice ?? [])].sort((a, b) => b.distanceBeforeM - a.distanceBeforeM),
-    lanes: Array.isArray(lanes) ? lanes : null,
+    lanes,
   };
 }
 

@@ -7,6 +7,7 @@
 //
 // No React Native imports, so it is unit-tested under node.
 
+import { normalizeLaneJunctions, type LaneJunction } from './lanes';
 import { decodePolyline } from '../backend/geo';
 import type { ServerRoute, ServerRoutes } from '../backend/endpoints';
 
@@ -47,6 +48,15 @@ export function canStoreDestination(d: Pick<Destination, 'source'>): boolean {
 export interface RouteOrigin {
   coordinate: LatLng;
   headingDeg: number | null;
+  /**
+   * A reroute while driving also sends the speed (m/s) and the fix's accuracy
+   * (m): the server then asks for a route that doesn't start with a
+   * manoeuvre the car can't safely make at that speed, and allows for the
+   * position being that uncertain. Directions makes the route; nothing here
+   * builds a turn or a U-turn.
+   */
+  speedMs?: number | null;
+  accuracyM?: number | null;
 }
 
 export interface RouteManeuver {
@@ -74,6 +84,8 @@ export interface RouteStep {
   drivingSide: 'left' | 'right' | null;
   banner: { primary: string; secondary: string | null } | null;
   voice: Array<{ distanceBeforeM: number; text: string }>;
+  /** Junctions along this step with lane data (lanes.ts); absent when the provider gave none */
+  lanes?: LaneJunction[];
 }
 
 export interface RouteLeg {
@@ -117,7 +129,11 @@ function routeFromServer(r: ServerRoute, requestId: string): NavRoute {
       summary: l.summary,
       congestion: l.congestion,
       maxspeedKmh: l.maxspeedKmh,
-      steps: l.steps.map((s) => ({ ...s, maneuver: { ...s.maneuver, location: point(s.maneuver.location) } })),
+      steps: l.steps.map(({ lanes, ...s }) => {
+        // Lane data normalised once, here (lanes.ts); a step without any has no field at all
+        const junctions = normalizeLaneJunctions(lanes);
+        return { ...s, maneuver: { ...s.maneuver, location: point(s.maneuver.location) }, ...(junctions ? { lanes: junctions } : {}) };
+      }),
     })),
   };
 }
@@ -139,6 +155,8 @@ export function routeRequestBody(origin: RouteOrigin, destination: Destination) 
       lat: origin.coordinate.latitude,
       lng: origin.coordinate.longitude,
       headingDeg: origin.headingDeg,
+      ...(origin.speedMs != null && Number.isFinite(origin.speedMs) && origin.speedMs >= 0 ? { speedMs: origin.speedMs } : {}),
+      ...(origin.accuracyM != null && Number.isFinite(origin.accuracyM) && origin.accuracyM >= 0 ? { accuracyM: origin.accuracyM } : {}),
     },
     destination: { lat: destination.coordinate.latitude, lng: destination.coordinate.longitude },
   };

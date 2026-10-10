@@ -99,7 +99,12 @@ function mapboxRoute(distance, duration) {
       distance, duration, summary: "A591",
       steps: [
         { distance, duration, name: "Lake Road", ref: "A591", driving_side: "left",
-          maneuver: { type: "depart", bearing_before: 0, bearing_after: 180, location: [-3.1, 54.6], instruction: "Head south on Lake Road." } },
+          maneuver: { type: "depart", bearing_before: 0, bearing_after: 180, location: [-3.1, 54.6], instruction: "Head south on Lake Road." },
+          intersections: [
+            { location: [-3.1, 54.6], bearings: [180], entry: [true], out: 0 },
+            { location: [-3.0, 54.5], bearings: [0, 180, 270], entry: [false, true, true], in: 0, out: 1, classes: ["trunk"],
+              lanes: [{ valid: false, active: false, indications: ["left"] }, { valid: true, active: true, valid_indication: "straight", indications: ["straight"] }] },
+          ] },
         { distance: 0, duration: 0, name: "", driving_side: "left", maneuver: { type: "arrive", location: [-2.96, 54.43] } },
       ],
       annotation: { congestion: ["low"], maxspeed: [{ speed: 30, unit: "mph" }] },
@@ -1418,6 +1423,8 @@ test("routes: signed-in users only; the body is validated", async () => {
     [{ origin: { lat: 91, lng: 0 }, destination: AMBLESIDE }, "latitude out of range"],
     [{ origin: KESWICK, destination: { lat: 54, lng: "x" } }, "longitude not a number"],
     [{ origin: { ...KESWICK, headingDeg: 400 }, destination: AMBLESIDE }, "heading out of range"],
+    [{ origin: { ...KESWICK, speedMs: -1 }, destination: AMBLESIDE }, "negative speed"],
+    [{ origin: { ...KESWICK, accuracyM: "good" }, destination: AMBLESIDE }, "accuracy not a number"],
     [{ origin: "here", destination: AMBLESIDE }, "origin not an object"],
   ]) {
     const r = await routes(u, body);
@@ -1444,6 +1451,36 @@ test("routes: a preview comes back in Derwent's format; Mapbox gets UK English a
   assert.equal(call.query.geometries, "polyline6");
   assert.equal(call.query.bearings, "180,45;");
   assert.ok(!JSON.stringify(r.body).includes(MAPBOX_TOKEN), "the token never reaches the app");
+});
+
+test("routes: lane guidance comes through as an optional, trimmed field; steps without it are unchanged", async () => {
+  const r = await routes(await newUser(), { origin: KESWICK, destination: AMBLESIDE });
+  expect(r, 200, "routes");
+  const [depart, arrive] = r.body.routes[0].legs[0].steps;
+  assert.deepEqual(depart.lanes, [{
+    location: { lat: 54.5, lng: -3.0 },
+    lanes: [
+      { indications: ["left"], valid: false, active: false, validIndication: null },
+      { indications: ["straight"], valid: true, active: true, validIndication: "straight" },
+    ],
+  }]);
+  assert.ok(!("lanes" in arrive), "no lane data: no field");
+  assert.ok(!JSON.stringify(r.body).includes("intersections") && !JSON.stringify(r.body).includes("bearings"), "never the raw intersections");
+});
+
+test("routes: a reroute from a moving car asks Mapbox for a safe start; a preview doesn't", async () => {
+  const u = await newUser();
+  expect(await routes(u, { origin: KESWICK, destination: AMBLESIDE }), 200, "preview");
+  let call = mapboxCalls.at(-1);
+  assert.equal(call.query.avoid_maneuver_radius, undefined);
+  assert.equal(call.query.radiuses, undefined);
+  expect(await routes(u, { origin: { ...KESWICK, headingDeg: 90, speedMs: 20, accuracyM: 10 }, destination: AMBLESIDE }), 200, "reroute");
+  call = mapboxCalls.at(-1);
+  assert.equal(call.query.avoid_maneuver_radius, "160");
+  assert.equal(call.query.radiuses, "50;unlimited");
+  assert.equal(call.query.bearings, "90,45;");
+  // An older app's body (no speed or accuracy) is still a preview
+  expect(await routes(u, { origin: { ...KESWICK, headingDeg: null }, destination: AMBLESIDE }), 200, "old body");
 });
 
 test("routes: Mapbox outcomes become typed errors", async () => {
