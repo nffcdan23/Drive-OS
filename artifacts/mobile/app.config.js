@@ -5,7 +5,36 @@
  * The app's name, scheme and bundle identifier come from app.identity.js,
  * which holds PLACEHOLDERS until the final name is chosen — see that file.
  */
+const { withXcodeProject } = require('expo/config-plugins');
 const { identity } = require('./app.identity');
+
+/**
+ * The iOS build number has one source: `ios.buildNumber` in app.json. Raise
+ * it there (by one) before each TestFlight build made in Xcode.
+ *
+ * `expo prebuild` writes it into Info.plist as CFBundleVersion (the value
+ * App Store Connect reads); without it, prebuild writes "1". This plugin also
+ * writes it into the Xcode project's CURRENT_PROJECT_VERSION (and the version
+ * into MARKETING_VERSION), so Xcode's General tab shows the same numbers as
+ * Info.plist and nothing needs editing by hand before Archive.
+ *
+ * EAS builds (the fallback) ignore it: eas.json keeps the build number on
+ * EAS's servers (appVersionSource "remote", autoIncrement).
+ */
+function withXcodeVersionFromConfig(config) {
+  return withXcodeProject(config, (cfg) => {
+    const configurations = cfg.modResults.pbxXCBuildConfigurationSection();
+    for (const entry of Object.values(configurations)) {
+      const settings = entry && typeof entry === 'object' ? entry.buildSettings : null;
+      // The app target's Debug and Release configurations
+      if (!settings || settings.PRODUCT_BUNDLE_IDENTIFIER === undefined) continue;
+      // As prebuild writes Info.plist: "1" when app.json has none
+      settings.CURRENT_PROJECT_VERSION = cfg.ios?.buildNumber ?? '1';
+      settings.MARKETING_VERSION = cfg.version;
+    }
+    return cfg;
+  });
+}
 
 /**
  * True for values that must only ever live on a server: a Supabase secret or
@@ -90,7 +119,15 @@ module.exports = ({ config }) => {
     }
   }
 
-  return {
+  // A whole number App Store Connect will accept (it must also be higher than
+  // the last uploaded build: raise it in app.json for each build). The
+  // committed app.json always has one (a unit test checks).
+  const buildNumber = config.ios?.buildNumber;
+  if (buildNumber !== undefined && !/^[1-9]\d*$/.test(String(buildNumber))) {
+    throw new Error(`app.json ios.buildNumber must be a whole number like "24" (it is ${JSON.stringify(config.ios?.buildNumber)}).`);
+  }
+
+  return withXcodeVersionFromConfig({
     ...config,
     ...(id.owner ? { owner: id.owner } : {}),
     name: id.appName,
@@ -145,5 +182,5 @@ module.exports = ({ config }) => {
       displayName: name,
       identityIsPlaceholder: id.usingPlaceholders,
     },
-  };
+  });
 };

@@ -66,6 +66,7 @@ npx eas-cli@latest build --platform ios --profile testflight --auto-submit
 ```
 
 - The build number goes up by itself (`autoIncrement`, stored by EAS). The version stays `1.0.0` until changed in `app.json`.
+- EAS ignores `ios.buildNumber` in `app.json` (that's for local Xcode builds, below). If you switch between the two, first make EAS's number match the last upload: `npx eas-cli@latest build:version:set --platform ios`.
 - `--auto-submit` uploads the build to App Store Connect. On the first run, it offers to create the App Store Connect record and an App Store Connect API key: use the name, SKU and language from step 1.
 - The export-compliance question is already answered in the build (`ITSAppUsesNonExemptEncryption = false`).
 
@@ -97,3 +98,26 @@ npx eas-cli@latest build --platform ios --profile testflight --auto-submit
   - DVLA credentials.
 - The app itself refuses to start with a secret key.
 - CI scans the source, and a built iOS bundle, for secrets and for the DVLA key.
+
+## Local Xcode build (the usual way)
+
+TestFlight builds are made in Xcode on the Intel Mac (EAS above is the fallback). The build number has **one** source: `ios.buildNumber` in `artifacts/mobile/app.json`.
+
+- **Before each build, raise it by one** and commit. It must be higher than the last build uploaded to App Store Connect. (Build 23 was uploaded by hand; the repo starts at `24`.)
+- `expo prebuild` writes it into `ios/Derwent/Info.plist` (`CFBundleVersion`) and into the Xcode project (`CURRENT_PROJECT_VERSION`), so Xcode shows the same number and nothing needs editing by hand. The version (`CFBundleShortVersionString` / `MARKETING_VERSION`) comes from `version` in `app.json`.
+- `ios/` is generated and never committed. Prebuild also adds `expo`, `react` and `react-native` to `package.json`: put it back with `git restore artifacts/mobile/package.json`.
+
+```sh
+cd ~/path/to/Drive-OS
+git checkout main && git pull
+pnpm install --frozen-lockfile        # also applies patches/ (the Xcode 26 fix for expo-modules-jsi)
+cd artifacts/mobile
+cat .env                              # unchanged from Build 23: Supabase URL + publishable key, API URL, Mapbox pk. token + style URL
+npx expo prebuild -p ios --clean
+git restore package.json
+grep -A1 CFBundleVersion ios/Derwent/Info.plist   # the number from app.json
+open ios/Derwent.xcworkspace
+```
+
+In Xcode: target **Derwent** → Signing & Capabilities: your team, bundle id `uk.co.starscale.drive.staging`. General shows the version and build. Then **Any iOS Device (arm64)** → Product → **Archive** → Organizer → **Distribute App** → **App Store Connect** → Upload.
+

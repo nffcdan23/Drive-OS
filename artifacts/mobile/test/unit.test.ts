@@ -8209,3 +8209,24 @@ test('guidance performance: a long route, thousands of fixes, local scans only',
   assert.ok(Math.max(...scans.slice(1)) < 120, `local scan ${Math.max(...scans.slice(1))} segments`);
   assert.equal(tracker.progress!.stepIndex, specs.length - 2);
 });
+
+// ─── iOS build number: one source of truth (app.json ios.buildNumber) ───────
+// `expo prebuild` writes ios.buildNumber into Info.plist (CFBundleVersion);
+// without it, "1". app.config.js also writes it into the Xcode project's
+// CURRENT_PROJECT_VERSION, so a local Archive needs no hand edits.
+
+test('the iOS build number comes from app.json, is a whole number, and reaches Xcode too', () => {
+  const req = createRequire(import.meta.url);
+  const app = JSON.parse(readFileSync(toPath(new URL('../app.json', import.meta.url)), 'utf8')) as { expo: { version: string; ios: { buildNumber?: string } } };
+  assert.match(String(app.expo.ios.buildNumber), /^[1-9]\d*$/, 'app.json ios.buildNumber');
+  const appConfig = req('../app.config.js') as (a: { config: object }) => { ios: { buildNumber: string }; version: string; mods?: { ios?: { xcodeproj?: unknown } } };
+  const cfg = appConfig({ config: app.expo });
+  assert.equal(cfg.ios.buildNumber, app.expo.ios.buildNumber);
+  assert.equal(typeof cfg.mods?.ios?.xcodeproj, 'function', 'the Xcode version plugin is applied');
+  for (const bad of ['', '0', '24.1', 'abc', '-3']) {
+    assert.throws(() => appConfig({ config: { ...app.expo, ios: { ...app.expo.ios, buildNumber: bad } } }), /ios\.buildNumber must be a whole number/, String(bad));
+  }
+  const src = readFileSync(toPath(new URL('../app.config.js', import.meta.url)), 'utf8');
+  assert.ok(/settings\.CURRENT_PROJECT_VERSION = cfg\.ios\?\.buildNumber \?\? '1';/.test(src));
+  assert.ok(/settings\.MARKETING_VERSION = cfg\.version;/.test(src));
+});
