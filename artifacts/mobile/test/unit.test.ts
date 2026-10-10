@@ -9720,6 +9720,221 @@ test('background voice: the voice engine and navigation are unchanged by the aud
   assert.ok(/return this\.mode !== 'off' && \(this\.foreground \|\| this\.backgroundSpeech\);/.test(voiceSrc));
 });
 
+// ─── Navigation: lane guidance ──────────────────────────────────────────────
+// The provider's structured lane data, normalised once; the junction at the
+// manoeuvre found by position; shown close to it, stable, gone once passed.
+
+import { LANES, LaneTracker, laneShowWithinM, lanesAt, normalizeLaneJunctions, type Lane } from '@/lib/navigation/lanes';
+
+type ServerLane = { indications: string[]; valid: boolean; active: boolean; validIndication: string | null };
+const sl = (indications: string[], valid: boolean, active = false, validIndication: string | null = null): ServerLane => ({ indications, valid, active, validIndication });
+/** A route as the API sends it, with lane junctions added to its steps (server format) */
+function withLanesServer3(route: Nav3Route, lanes: Record<number, Array<{ at: [number, number]; lanes: ServerLane[] }>>): ServerRoutes {
+  const server = serverRoutes3(route);
+  server.routes[0]!.legs[0]!.steps.forEach((st, k) => {
+    const js = lanes[k];
+    if (js) st.lanes = js.map((j) => ({ location: { lat: at3(...j.at).latitude, lng: at3(...j.at).longitude }, lanes: j.lanes }));
+  });
+  return server;
+}
+function withLanes3(route: Nav3Route, lanes: Record<number, Array<{ at: [number, number]; lanes: ServerLane[] }>>): Nav3Route {
+  return routesFromServer(withLanesServer3(route, lanes), route.routeId)[0]!;
+}
+// The L route: a junction halfway up the first road (lanes for going straight
+// through it: not the manoeuvre's); the left turn's approach lanes (on the
+// turn's own step, as Mapbox puts them); the right turn's, two lanes to use
+const LEFT_LANES3 = [sl(['left'], true, true, 'left'), sl(['straight', 'left'], true, false, 'left'), sl(['straight'], false)];
+const RIGHT_LANES3 = [sl(['straight'], false), sl(['straight', 'right'], true, true, 'right'), sl(['right'], true, true, 'right')];
+const laneRoute3 = (id = 'lanes:0') => withLanes3({ ...L_ROUTE(), routeId: id }, {
+  0: [{ at: [0, 500], lanes: [sl(['left'], false), sl(['straight'], true, true, 'straight'), sl(['straight'], true)] }],
+  1: [{ at: [0, 1000], lanes: LEFT_LANES3 }],
+  2: [{ at: [-600, 1000], lanes: RIGHT_LANES3 }],
+});
+const laneDirs3 = (lanes: readonly Lane[] | null | undefined) => lanes?.map((l) => `${l.directions.join('+')}${l.recommended ? '*' : ''}${l.preferred ? '!' : ''}`).join(' ') ?? null;
+
+test('lane model: every provider indication normalised, several per lane kept, recommended and preferred lanes, bad data dropped', () => {
+  const j = normalizeLaneJunctions([{
+    location: { lat: 54.6, lng: -3.1 },
+    lanes: [
+      sl(['uturn', 'left'], true, false, 'uturn'),
+      sl(['sharp left', 'slight left'], false),
+      sl(['straight', 'none', 'bogus', 'straight'], true, true, 'straight'),
+      sl(['slight right', 'right', 'sharp right'], true, true, 'right'),
+      sl([], true, false, null),
+    ],
+  }])!;
+  assert.equal(j.length, 1);
+  assert.deepEqual(j[0]!.lanes.map((l) => l.directions), [
+    ['uturn', 'left'], ['sharpLeft', 'slightLeft'], ['straight'], ['slightRight', 'right', 'sharpRight'], [],
+  ], 'every indication, in a fixed left-to-right order; unknown and "none" dropped; an unmarked lane has none');
+  assert.deepEqual(j[0]!.lanes.map((l) => [l.recommended, l.preferred, l.use]), [
+    [true, false, 'uturn'], [false, false, null], [true, true, 'straight'], [true, true, 'right'], [true, false, null],
+  ], 'several recommended, preferred among them, and the direction the route takes');
+  // A use the lane doesn't have is ignored rather than drawn
+  assert.equal(normalizeLaneJunctions([{ location: { lat: 0, lng: 0 }, lanes: [sl(['straight'], true, false, 'left')] }])![0]!.lanes[0]!.use, null);
+  // Nothing trustworthy: no guidance at all
+  for (const bad of [
+    undefined, null, 'lanes', [],
+    [{ location: { lat: 0, lng: 0 }, lanes: [] }],
+    [{ location: { lat: 0, lng: 0 }, lanes: [sl(['left'], false), sl(['straight'], false)] }],
+    [{ location: { lat: 0, lng: 0 }, lanes: [sl(['left'], true), 'lane'] }],
+    [{ location: { lat: 0, lng: 0 }, lanes: [{ indications: ['left'] }] }],
+    [{ location: { lat: 'x', lng: 0 }, lanes: [sl(['left'], true)] }],
+    [{ location: { lat: 0, lng: 0 }, lanes: Array.from({ length: LANES.maxLanes + 1 }, () => sl(['straight'], true)) }],
+  ]) assert.equal(normalizeLaneJunctions(bad), undefined, JSON.stringify(bad));
+  // A route without lane data: no lanes field, nothing changes
+  const plain = routesFromServer(serverRoutes3(L_ROUTE()), 'x')[0]!;
+  assert.ok(plain.legs[0]!.steps.every((st) => !('lanes' in st)));
+  assert.ok(prepareRoute(plain).maneuvers.every((m) => m.lanes === null));
+});
+
+test('lane model: the junction at the manoeuvre is chosen by position, never the one just driven through or one along the way', () => {
+  const p = prepareRoute(laneRoute3());
+  assert.equal(laneDirs3(p.maneuvers[0]!.lanes), null, 'departure: never');
+  assert.equal(laneDirs3(p.maneuvers[1]!.lanes), 'left*! left+straight* straight', "the left turn's own approach lanes, not the junction 500 m before it");
+  assert.equal(laneDirs3(p.maneuvers[2]!.lanes), 'straight straight+right*! right*!', 'two lanes for the right turn');
+  assert.equal(laneDirs3(p.maneuvers[3]!.lanes), null, 'arrival: never');
+  // On the step leading to it or on its own: both found; too far from the manoeuvre point: not used
+  const turn = at3(0, 1000);
+  const junction = (x: number, y: number) => ({ location: at3(x, y), lanes: LEFT_LANES3.map((l) => ({ directions: [], recommended: l.valid, preferred: false, use: null })) });
+  assert.ok(lanesAt('turn', turn, [junction(0, 990)]));
+  assert.equal(lanesAt('turn', turn, [junction(0, 950)]), null, '50 m away: another junction');
+  assert.equal(lanesAt('roundaboutExit', turn, [junction(0, 1000)]), null, "a roundabout's exit: never");
+});
+
+test('lane visibility: by speed and manoeuvre, stable around the threshold, gone once passed', () => {
+  assert.equal(laneShowWithinM(5, 'turn'), LANES.townM);
+  assert.equal(laneShowWithinM(15, 'turn'), LANES.fastRoadM);
+  assert.equal(laneShowWithinM(30, 'turn'), LANES.motorwayM);
+  assert.equal(laneShowWithinM(30, 'offRamp'), LANES.motorwayExitM, 'a motorway exit: earlier');
+  assert.equal(laneShowWithinM(30, 'fork'), LANES.motorwayExitM);
+  assert.equal(laneShowWithinM(null, 'offRamp'), LANES.townM);
+  const m = prepareRoute(laneRoute3()).maneuvers[1]!;
+  const t = new LaneTracker();
+  assert.equal(t.update('r', m, 450, false, 15), null, 'too far: nothing');
+  const shown = t.update('r', m, 399, false, 15);
+  assert.ok(shown);
+  // Jitter around the threshold, and the speed dropping: no flicker, and the same object (no re-render)
+  for (const [d, v] of [[405, 15], [395, 15], [420, 9], [480, 12], [300, 4]] as const) assert.equal(t.update('r', m, d, false, v), shown, `${d} m`);
+  assert.equal(t.update('r', m, 400 * LANES.hideFactor + 1, false, 15), null, 'well beyond it again: hidden');
+  // On the roundabout itself: hidden
+  assert.ok(t.update('r', m, 100, false, 10));
+  assert.equal(t.update('r', m, 100, true, 10), null);
+  // A different route (a reroute): never the old view
+  const again = t.update('r2', m, 100, false, 10);
+  assert.ok(again && again !== shown && again.key.startsWith('r2|'));
+});
+
+test('lane guidance in navigation: from route progress, for the manoeuvre coming up only, and gone once it is passed', () => {
+  const h = nav3Session();
+  void h.s.start({ route: laneRoute3(), destination: N3_DEST });
+  const seen: Array<{ along: number; lanes: string | null; step: number | null }> = [];
+  for (const f of drive3(L_PTS, { speed: 13, noise: 3 })) {
+    h.feed([f]);
+    const st = active3(h.s.state);
+    if (st?.progress) seen.push({ along: st.progress.along, lanes: laneDirs3(st.lanes?.lanes), step: st.lanes?.stepIndex ?? null });
+  }
+  const at = (lo: number, hi: number) => seen.filter((x) => x.along >= lo && x.along < hi);
+  assert.ok(at(0, 590).every((x) => x.lanes === null), 'nothing far from the turn, nor for the junction along the way');
+  assert.ok(at(610, 995).every((x) => x.lanes === 'left*! left+straight* straight' && x.step === 1), 'the left turn\'s lanes within 400 m (30 mph+)');
+  assert.ok(at(1010, 1190).every((x) => x.lanes === null), 'passed: gone, and the right turn is still too far');
+  assert.ok(at(1210, 1595).every((x) => x.lanes === 'straight straight+right*! right*!' && x.step === 2));
+  assert.ok(at(1610, 2001).every((x) => x.lanes === null), 'arriving: none');
+  // Shown continuously once shown (no flicker on a noisy drive)
+  const left = seen.filter((x) => x.step === 1);
+  const first = seen.indexOf(left[0]!);
+  assert.ok(seen.slice(first, first + left.length).every((x) => x.step === 1));
+  // Off route: none
+  const o = nav3Session({ fetch: () => new Promise(() => {}) });
+  void o.s.start({ route: laneRoute3(), destination: N3_DEST });
+  o.feed(drive3(L_PTS, { to: 900 }));
+  assert.ok(active3(o.s.state)!.lanes);
+  o.feed(offNorth3(o.clock.t + 1000).filter((f) => f.latitude > at3(0, 950).latitude));
+  assert.ok(o.phases.includes('offRoute'));
+  assert.equal(active3(o.s.state)!.lanes, null, 'off route or updating: no lanes');
+});
+
+test('lane guidance: a reroute drops the old route\'s lanes and uses the new route\'s', async () => {
+  const srv = routeServer3();
+  const h = nav3Session({ fetch: srv.fetch });
+  void h.s.start({ route: laneRoute3(), destination: N3_DEST });
+  h.feed(drive3(L_PTS, { to: 900 }));
+  const old = active3(h.s.state)!.lanes;
+  assert.ok(old);
+  feedWatching3(h, offNorth3(h.clock.t + 1000), () => h.bodies.length === 1);
+  assert.equal(active3(h.s.state)!.lanes, null);
+  // The new route turns left at (0, 1500): its own lane data there
+  srv.answer(withLanesServer3(FRESH3(), { 1: [{ at: [0, 1500], lanes: [sl(['left'], true, true, 'left'), sl(['straight'], false)] }] }));
+  await settle3();
+  h.feed(drive3(polyline3([[0, 1250], [0, 1480]]), { t0: h.clock.t + 1000, noise: 0 }));
+  const now = active3(h.s.state)!.lanes;
+  assert.ok(now && now !== old);
+  assert.equal(laneDirs3(now.lanes), 'left*! straight');
+  assert.ok(now.key.includes(active3(h.s.state)!.route.routeId), 'the new route\'s');
+});
+
+test('lane guidance: roundabout approach lanes while approaching, none once on it; none for its exit', () => {
+  const { route, pts, entry } = roundabout3('E');
+  const r = withLanes3(route, { 1: [{ at: pts[entry]!, lanes: [sl(['straight', 'left'], false), sl(['right'], true, true, 'right')] }] });
+  const h = nav3Session();
+  void h.s.start({ route: r, destination: N3_DEST });
+  const states: Array<{ round: boolean; lanes: string | null; kind: string }> = [];
+  for (const f of drive3(pts, { speed: 8, noise: 0 })) {
+    h.feed([f]);
+    const st = active3(h.s.state);
+    if (st?.progress) states.push({ round: st.progress.onRoundabout, lanes: laneDirs3(st.lanes?.lanes), kind: st.progress.next.kind });
+  }
+  assert.ok(states.some((x) => !x.round && x.kind === 'roundabout' && x.lanes === 'left+straight right*!'), 'shown on the approach');
+  assert.ok(states.filter((x) => x.round).every((x) => x.lanes === null), 'hidden on the roundabout');
+  assert.ok(states.filter((x) => x.kind !== 'roundabout').every((x) => x.lanes === null));
+  // The exit number and instruction are untouched
+  assert.equal(prepareRoute(r).maneuvers[1]!.exit, 3);
+});
+
+test('lane guidance in the background: kept current from background fixes, so the return shows the right lanes', () => {
+  const h = bgNav3();
+  void h.s.start({ route: laneRoute3(), destination: N3_DEST, recording: 'navigation' });
+  h.feed(drive3(L_PTS, { to: 800 }));
+  assert.equal(active3(h.s.state)!.lanes!.stepIndex, 1);
+  h.bg.setAppState('background');
+  h.task(drive3(L_PTS, { from: 813, to: 1400, t0: h.clock.t + 1000 }));
+  h.bg.setAppState('active');
+  const st = active3(h.s.state)!;
+  assert.equal(st.lanes!.stepIndex, 2, 'the right turn\'s lanes, not the left turn\'s from before');
+  assert.equal(laneDirs3(st.lanes!.lanes), 'straight straight+right*! right*!');
+  // The banner reads the state, held in the background and current on return
+  const ctx = readFileSync(toPath(new URL('../context/NavigationContext.tsx', import.meta.url)), 'utf8');
+  assert.ok(/return useOnScreenSnapshot\(/.test(ctx));
+});
+
+test('lane guidance changes nothing else: progress, banner, voice, rerouting; diagnostics are counts only', () => {
+  const journal = { entries: [] as Array<Record<string, unknown>>, log(event: string, data?: Record<string, unknown>) { this.entries.push({ event, ...data }); } };
+  // The same route through the API (the same line), without lane data
+  const a = nav3Session();
+  void a.s.start({ route: routesFromServer(serverRoutes3(L_ROUTE()), 'lanes')[0]!, destination: N3_DEST });
+  a.feed(drive3(L_PTS, { noise: 4 }));
+  const b = nav3Session({ journal: journal as unknown as DiagnosticsJournal });
+  void b.s.start({ route: laneRoute3(), destination: N3_DEST });
+  b.feed(drive3(L_PTS, { noise: 4 }));
+  const sig = (st: NavigationState[]) => st.map((x) => `${x.phase}:${active3(x)?.progress?.along.toFixed(2) ?? '-'}:${active3(x)?.progress?.next.instruction ?? ''}`);
+  assert.deepEqual(sig(b.states), sig(a.states), 'the same progress and the same manoeuvre banner');
+  const lanes = journal.entries.filter((e) => e.event === 'nav_lanes');
+  assert.deepEqual(lanes.map((e) => [e.step, e.lanes, e.recommended]), [[1, 3, 2], [2, 3, 2]], 'once per manoeuvre: step, lanes, recommended');
+  assert.ok(!/54\.|-3\.|Chestnut|Brow|left|right|straight/.test(JSON.stringify(lanes)), 'nothing about where or which way');
+  // Voice: Mapbox's words only; lanes never add a phrase
+  const read = (rel: string) => readFileSync(toPath(new URL(rel, import.meta.url)), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+  assert.ok(!/lane/i.test(read('../lib/navigation/voice.ts')), 'voice never speaks lanes');
+  // The strip: vector arrows from the manoeuvre icon's own drawing, no emoji or text arrows; one per lane, in the banner
+  const banner = read('../components/navigation/GuidanceBanner.tsx');
+  assert.ok(/<LaneIcon lane=\{lane\}/.test(banner) && !/[←→↑↓↖↗↘↙⬆⬅➡]/.test(banner));
+  assert.ok(/\{state\.lanes && state\.lanes\.stepIndex === next\.stepIndex \? <LaneStrip view=\{state\.lanes\} \/> : null\}/.test(banner));
+  const icon = read('../components/navigation/ManeuverIcon.tsx');
+  assert.ok(/export const LaneIcon = memo\(/.test(icon) && /<TurnArrow key=\{d\}/.test(icon) && /<UTurn key=\{d\}/.test(icon));
+  // Normalised once, when the route comes in; the session only reads the prepared lanes
+  assert.ok(/normalizeLaneJunctions\(lanes\)/.test(read('../lib/navigation/model.ts')));
+  assert.ok(!/normalizeLaneJunctions|indications/.test(read('../lib/navigation/session.ts')));
+});
+
 // ─── iOS build number: one source of truth (app.json ios.buildNumber) ───────
 // `expo prebuild` writes ios.buildNumber into Info.plist (CFBundleVersion);
 // without it, "1". app.config.js also writes it into the Xcode project's

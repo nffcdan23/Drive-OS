@@ -163,7 +163,37 @@ export interface RouteStepDto {
   banner: { primary: string; secondary: string | null } | null;
   /** Spoken prompts: text, and how far before the manoeuvre (m) */
   voice: Array<{ distanceBeforeM: number; text: string }>;
+  /**
+   * Lane guidance: the junctions along this step that come with lane data
+   * (from Mapbox's intersections), each with its lanes in road order, left
+   * to right. Absent when Mapbox gave none (the usual case away from
+   * junctions with marked lanes); older apps ignore it.
+   */
+  lanes?: LaneJunctionDto[];
 }
+
+/** One lane approaching a junction */
+export interface LaneDto {
+  /** What its road markings allow: straight, left, slight left, sharp left, right, slight right, sharp right, uturn */
+  indications: LaneIndication[];
+  /** It can be used for this route's manoeuvre at the junction */
+  valid: boolean;
+  /** Of the valid lanes, the preferred one(s) */
+  active: boolean;
+  /** Which of its indications the route takes, when Mapbox says */
+  validIndication: LaneIndication | null;
+}
+
+export interface LaneJunctionDto {
+  location: LatLng;
+  lanes: LaneDto[];
+}
+
+export const LANE_INDICATIONS = ["straight", "slight left", "left", "sharp left", "slight right", "right", "sharp right", "uturn"] as const;
+export type LaneIndication = (typeof LANE_INDICATIONS)[number];
+/** More than this many lanes, or lane junctions per step, is not believable */
+export const MAX_LANES = 16;
+export const MAX_LANE_JUNCTIONS = 12;
 
 export interface RouteLegDto {
   distanceM: number;
@@ -267,6 +297,44 @@ const location = (v: unknown): LatLng => {
 
 const CONGESTION: Record<string, number> = { unknown: 0, low: 1, moderate: 2, heavy: 3, severe: 4 };
 
+const isIndication = (v: unknown): v is LaneIndication => typeof v === "string" && (LANE_INDICATIONS as readonly string[]).includes(v);
+
+/**
+ * The lane-bearing intersections of a step, with only what lane guidance
+ * needs (never bearings, classes, tolls or the rest). An intersection whose
+ * lanes look wrong (no lanes, too many, a lane that isn't an object, no
+ * valid lane) is left out: no guidance is better than wrong guidance.
+ * Unknown indications are dropped ("none", a plain lane, keeps none).
+ */
+function parseLaneJunctions(intersections: unknown): LaneJunctionDto[] {
+  if (!Array.isArray(intersections)) return [];
+  const out: LaneJunctionDto[] = [];
+  for (const x of intersections) {
+    if (out.length >= MAX_LANE_JUNCTIONS) break;
+    if (!isObj(x) || !Array.isArray(x.lanes) || !x.lanes.length || x.lanes.length > MAX_LANES) continue;
+    let loc: LatLng;
+    try {
+      loc = location(x.location);
+    } catch {
+      continue;
+    }
+    const lanes: LaneDto[] = [];
+    for (const l of x.lanes) {
+      if (!isObj(l) || typeof l.valid !== "boolean") { lanes.length = 0; break; }
+      const indications = Array.isArray(l.indications) ? [...new Set(l.indications.filter(isIndication))] : [];
+      lanes.push({
+        indications,
+        valid: l.valid,
+        active: l.valid && l.active === true,
+        validIndication: isIndication(l.valid_indication) ? l.valid_indication : null,
+      });
+    }
+    if (!lanes.length || !lanes.some((l) => l.valid)) continue;
+    out.push({ location: loc, lanes });
+  }
+  return out;
+}
+
 function parseStep(s: unknown, startDistanceM: number): RouteStepDto {
   if (!isObj(s) || !isObj(s.maneuver)) throw new BadResponse("step");
   const m = s.maneuver;
@@ -282,6 +350,7 @@ function parseStep(s: unknown, startDistanceM: number): RouteStepDto {
       })
     : [];
   const side = s.driving_side === "left" || s.driving_side === "right" ? s.driving_side : null;
+  const lanes = parseLaneJunctions(s.intersections);
   return {
     maneuver: {
       type: optText(m.type, 50) ?? "unknown",
@@ -302,6 +371,8 @@ function parseStep(s: unknown, startDistanceM: number): RouteStepDto {
     drivingSide: side,
     banner: primary ? { primary, secondary } : null,
     voice,
+    // Only when there are some: a lane-less step looks exactly as before
+    ...(lanes.length ? { lanes } : {}),
   };
 }
 

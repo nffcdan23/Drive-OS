@@ -42,6 +42,7 @@ import type { ServerRoutes } from '../backend/endpoints';
 import type { Journal } from '../backend/journal';
 import { routeRequestBody, routesFromServer, type Destination, type NavRoute, type RouteOrigin } from './model';
 import { OffRouteDetector, OFF_ROUTE, awayThresholdM } from './offRoute';
+import { LANES, LaneTracker, type LaneView } from './lanes';
 import type { PreviewError } from './previewStore';
 import {
   REMAINING_LINE, RouteTracker, UnusableRouteError, pointAt, prepareRoute, remainingLine, usableFix,
@@ -120,6 +121,12 @@ export interface ActiveNavigation extends Common {
   updateFailed: boolean;
   /** Several updates failed in a row: Try Again is offered too */
   canRetry: boolean;
+  /**
+   * Lane guidance for the manoeuvre coming up (lanes.ts), when the provider
+   * gave lane data for it and it's close enough; null otherwise (and always
+   * while off route or rerouting). The same object while it doesn't change.
+   */
+  lanes: LaneView | null;
 }
 
 export type NavigationState =
@@ -177,6 +184,8 @@ export class NavigationSession {
   private lastFix: GpsFix | null = null;
   private arriving = 0;
   private stepLogs = 0;
+  private laneTracker = new LaneTracker();
+  private laneLogs = 0;
   private foreground = true;
   /** The map's view of the session: changes with the route, the destination, or every REMAINING_LINE.redrawEveryM of progress */
   private mapView: NavigationMapView = { route: null, remaining: null, destination: null, arrived: false };
@@ -260,6 +269,8 @@ export class NavigationSession {
     const { destination } = input;
     const recording = input.recording ?? 'none';
     this.stepLogs = 0;
+    this.laneLogs = 0;
+    this.laneTracker.reset();
     this.arriving = 0;
     this.lostAt = null;
     this.detector.reset();
@@ -268,7 +279,7 @@ export class NavigationSession {
       // Show the earlier route while the fresh one comes
       this.set({
         phase: 'starting', sessionId, destination, startedAt, recording, route: input.route, progress: null,
-        gps: this.gpsNow(), starting: 'refreshing', notice: null, updateFailed: false, canRetry: false,
+        gps: this.gpsNow(), starting: 'refreshing', notice: null, updateFailed: false, canRetry: false, lanes: null,
       });
       const requestId = ++this.nextRequest;
       let fresh: NavRoute | null = null;
@@ -307,7 +318,7 @@ export class NavigationSession {
     this.tracker = new RouteTracker(this.prepared);
     this.set({
       phase: 'starting', sessionId, destination, startedAt, recording, route, progress: null,
-      gps: this.gpsNow(), starting: 'locating', notice, updateFailed: false, canRetry: false,
+      gps: this.gpsNow(), starting: 'locating', notice, updateFailed: false, canRetry: false, lanes: null,
     });
     this.log('nav_started', {
       source: destination.source,
@@ -370,7 +381,7 @@ export class NavigationSession {
         return;
       }
       if (s.phase !== 'offRoute') this.log('nav_off_route', { state: 'entered', step: before?.stepIndex ?? null });
-      this.set({ ...s, phase: 'offRoute', gps, starting: null });
+      this.set({ ...s, phase: 'offRoute', gps, starting: null, lanes: null });
       // Confirmed off the route, on a good fix: a new route, when allowed
       this.maybeAutoReroute(fix);
       return;
@@ -393,12 +404,27 @@ export class NavigationSession {
       this.arrive(s);
       return;
     }
+    const rerouting = s.phase === 'rerouting';
     this.set({
       ...s,
       ...rejoined,
-      phase: s.phase === 'rerouting' ? 'rerouting' : 'navigating',
+      phase: rerouting ? 'rerouting' : 'navigating',
       progress, gps, starting: null,
+      // Lanes for the manoeuvre coming up, from the same progress (none while a new route is on its way)
+      lanes: rerouting ? null : this.lanesFor(s, progress, fix.speedMs),
     });
+  }
+
+  private lanesFor(s: ActiveNavigation, progress: RouteProgress, speedMs: number | null): LaneView | null {
+    const view = this.laneTracker.update(
+      `${s.sessionId}|${s.route.routeId}`, progress.next, progress.distanceToNextM, progress.onRoundabout, speedMs,
+    );
+    if (view && view !== s.lanes && this.laneLogs < LANES.maxLogs) {
+      this.laneLogs++;
+      // How many lanes and recommended only: never where
+      this.log('nav_lanes', { step: view.stepIndex, lanes: view.lanes.length, recommended: view.recommended });
+    }
+    return view;
   }
 
   /** Back on the route after being off it: a failed update no longer matters */
@@ -508,7 +534,7 @@ export class NavigationSession {
     if (!isActive(s) || s.phase === 'rerouting' || s.phase === 'starting') return;
     const back = s.phase;
     const requestId = ++this.nextRequest;
-    this.set({ ...s, phase: 'rerouting', notice: null });
+    this.set({ ...s, phase: 'rerouting', notice: null, lanes: null });
     this.log('nav_reroute', { result: 'requested', from: back, trigger });
     let route: NavRoute | null = null;
     let error: PreviewError | null = null;
@@ -560,7 +586,9 @@ export class NavigationSession {
     this.tracker = new RouteTracker(prepared);
     this.detector.reset();
     this.arriving = 0;
-    this.set({ ...now, phase: 'navigating', route, progress: null, starting: 'locating', notice: null, updateFailed: false, canRetry: false });
+    // The old route's lanes go with it
+    this.laneTracker.reset();
+    this.set({ ...now, phase: 'navigating', route, progress: null, starting: 'locating', notice: null, updateFailed: false, canRetry: false, lanes: null });
     const fix = this.lastFix;
     if (fix && this.deps.now() - fix.time <= 10_000) this.noteFix(fix);
   }

@@ -7,6 +7,7 @@
 import React, { memo } from "react";
 import Svg, { Circle, G, Path, Text as SvgText } from "react-native-svg";
 import type { Maneuver, ManeuverDirection } from "@/lib/navigation/maneuver";
+import type { Lane } from "@/lib/navigation/lanes";
 
 /** What the icon needs of a manoeuvre */
 export type IconManeuver = Pick<Maneuver, "kind" | "direction" | "exit" | "drivingSide">;
@@ -37,11 +38,11 @@ function head(x: number, y: number, angle: number, size = 7) {
   return `M${x.toFixed(2)} ${y.toFixed(2)} L${(bx + c * size * 0.8).toFixed(2)} ${(by + s * size * 0.8).toFixed(2)} L${(bx - c * size * 0.8).toFixed(2)} ${(by - s * size * 0.8).toFixed(2)} Z`;
 }
 
-function TurnArrow({ angle, color }: { angle: number; color: string }) {
+function TurnArrow({ angle, color, width = 5 }: { angle: number; color: string; width?: number }) {
   if (angle === 0) {
     return (
       <G>
-        <Path d="M24 42 L24 14" stroke={color} strokeWidth={5} strokeLinecap="round" fill="none" />
+        <Path d="M24 42 L24 14" stroke={color} strokeWidth={width} strokeLinecap="round" fill="none" />
         <Path d={head(24, 7, 0, 9)} fill={color} />
       </G>
     );
@@ -56,7 +57,7 @@ function TurnArrow({ angle, color }: { angle: number; color: string }) {
       <Path
         d={`M24 42 L24 22 L${ex.toFixed(2)} ${ey.toFixed(2)}`}
         stroke={color}
-        strokeWidth={5}
+        strokeWidth={width}
         strokeLinecap="round"
         strokeLinejoin="round"
         fill="none"
@@ -66,7 +67,7 @@ function TurnArrow({ angle, color }: { angle: number; color: string }) {
   );
 }
 
-function UTurn({ side, color }: { side: "left" | "right"; color: string }) {
+function UTurn({ side, color, width = 5 }: { side: "left" | "right"; color: string; width?: number }) {
   // Where traffic drives on the left, a U-turn swings right (and vice versa)
   const flip = side === "left" ? 1 : -1;
   const x0 = 24 - 7 * flip;
@@ -76,7 +77,7 @@ function UTurn({ side, color }: { side: "left" | "right"; color: string }) {
       <Path
         d={`M${x0} 42 L${x0} 20 A7 7 0 0 ${flip > 0 ? 1 : 0} ${x1} 20 L${x1} 30`}
         stroke={color}
-        strokeWidth={5}
+        strokeWidth={width}
         strokeLinecap="round"
         fill="none"
       />
@@ -168,6 +169,43 @@ export const ManeuverIcon = memo(function ManeuverIcon({
   return (
     <Svg width={size} height={size} viewBox="0 0 48 48" accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
       {body}
+    </Svg>
+  );
+});
+
+/**
+ * One lane of the lane strip: the arrow(s) its road markings show, drawn
+ * like the manoeuvre arrow. Several markings share one stem (straight and
+ * left, say). A recommended lane draws the direction the route takes in
+ * full colour (all of them if the provider didn't say which) and the rest
+ * faintly; any other lane is all faint. An unmarked lane draws straight.
+ */
+export const LaneIcon = memo(function LaneIcon({
+  lane,
+  drivingSide,
+  size = 30,
+  color = "#FFFFFF",
+  muted = "rgba(255,255,255,0.32)",
+}: {
+  lane: Lane;
+  drivingSide: "left" | "right";
+  size?: number;
+  color?: string;
+  muted?: string;
+}) {
+  const directions = lane.directions.length ? lane.directions : (["straight"] as ManeuverDirection[]);
+  const bright = (d: ManeuverDirection) => lane.recommended && (lane.use == null || lane.use === d || !lane.directions.length);
+  // Faint ones underneath, the one(s) to follow on top
+  const ordered = [...directions].sort((a, b) => Number(bright(a)) - Number(bright(b)));
+  return (
+    <Svg width={size} height={size} viewBox="0 0 48 48" accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
+      {ordered.map((d) =>
+        d === "uturn" ? (
+          <UTurn key={d} side={drivingSide} color={bright(d) ? color : muted} width={6} />
+        ) : (
+          <TurnArrow key={d} angle={ANGLE[d]} color={bright(d) ? color : muted} width={6} />
+        ),
+      )}
     </Svg>
   );
 });

@@ -7,6 +7,7 @@
 //
 // No React Native imports, so it is unit-tested under node.
 
+import { normalizeLaneJunctions, type LaneJunction } from './lanes';
 import { decodePolyline } from '../backend/geo';
 import type { ServerRoute, ServerRoutes } from '../backend/endpoints';
 
@@ -83,6 +84,8 @@ export interface RouteStep {
   drivingSide: 'left' | 'right' | null;
   banner: { primary: string; secondary: string | null } | null;
   voice: Array<{ distanceBeforeM: number; text: string }>;
+  /** Junctions along this step with lane data (lanes.ts); absent when the provider gave none */
+  lanes?: LaneJunction[];
 }
 
 export interface RouteLeg {
@@ -126,7 +129,11 @@ function routeFromServer(r: ServerRoute, requestId: string): NavRoute {
       summary: l.summary,
       congestion: l.congestion,
       maxspeedKmh: l.maxspeedKmh,
-      steps: l.steps.map((s) => ({ ...s, maneuver: { ...s.maneuver, location: point(s.maneuver.location) } })),
+      steps: l.steps.map(({ lanes, ...s }) => {
+        // Lane data normalised once, here (lanes.ts); a step without any has no field at all
+        const junctions = normalizeLaneJunctions(lanes);
+        return { ...s, maneuver: { ...s.maneuver, location: point(s.maneuver.location) }, ...(junctions ? { lanes: junctions } : {}) };
+      }),
     })),
   };
 }

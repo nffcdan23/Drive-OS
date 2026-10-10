@@ -184,6 +184,58 @@ test("parse: routes become Derwent's format (alternatives, steps, UK details, an
   assert.equal(sparse.routes[0]!.legs[0]!.congestion, null);
 });
 
+test("parse: lane guidance keeps only lane-bearing junctions and the lane fields Derwent needs", () => {
+  // An M6 exit as Mapbox describes it: three lanes, the left two for the slip road
+  const motorway = {
+    location: [-2.75, 54.33], bearings: [10, 190, 220], entry: [true, false, true], in: 1, out: 2, geometry_index: 5,
+    classes: ["motorway"], mapbox_streets_v8: { class: "motorway" }, toll_collection: { type: "toll_booth" },
+    lanes: [
+      { valid: true, active: true, valid_indication: "slight left", indications: ["slight left"] },
+      { valid: true, active: false, valid_indication: "slight left", indications: ["straight", "slight left"] },
+      { valid: false, active: false, indications: ["straight"] },
+    ],
+  };
+  const plain = { location: [-2.76, 54.32], bearings: [0, 180], entry: [true, true], in: 1, out: 0 };
+  const r = parseDirectionsResponse({ code: "Ok", routes: [route({ legs: [{ distance: 1, duration: 1, steps: [
+    step({ intersections: [plain, motorway] }),
+    step({ maneuver: { type: "arrive", location: [-2.961234, 54.428765] } }),
+  ] }] })] });
+  const [first, second] = r.routes[0]!.legs[0]!.steps;
+  assert.deepEqual(first!.lanes, [{
+    location: { lat: 54.33, lng: -2.75 },
+    lanes: [
+      { indications: ["slight left"], valid: true, active: true, validIndication: "slight left" },
+      { indications: ["straight", "slight left"], valid: true, active: false, validIndication: "slight left" },
+      { indications: ["straight"], valid: false, active: false, validIndication: null },
+    ],
+  }], "only the junction with lanes, only the lane fields: no bearings, classes, tolls or geometry indexes");
+  assert.ok(!("lanes" in second!), "a step without lane data looks exactly as before");
+  // Every indication Mapbox uses; "none" and unknown ones are dropped, repeats folded
+  const all = parseDirectionsResponse({ code: "Ok", routes: [route({ legs: [{ distance: 1, duration: 1, steps: [step({ intersections: [{ location: [0, 0], lanes: [
+    { valid: true, active: false, indications: ["uturn", "sharp left", "left", "slight left", "straight", "slight right", "right", "sharp right", "none", "bogus", "left"] },
+  ] }] })] }] })] }).routes[0]!.legs[0]!.steps[0]!.lanes!;
+  assert.deepEqual(all[0]!.lanes[0]!.indications, ["uturn", "sharp left", "left", "slight left", "straight", "slight right", "right", "sharp right"]);
+  // Malformed or useless lane data is left out entirely (better nothing than wrong guidance)
+  for (const [x, why] of [
+    [{ location: [0, 0], lanes: [] }, "no lanes"],
+    [{ location: [0, 0], lanes: [{ valid: false, indications: ["left"] }, { valid: false, indications: ["straight"] }] }, "no valid lane"],
+    [{ location: [0, 0], lanes: [{ valid: true, indications: ["left"] }, "lane"] }, "a lane that isn't one"],
+    [{ location: [0, 0], lanes: [{ indications: ["left"] }] }, "validity missing"],
+    [{ location: "here", lanes: [{ valid: true, indications: ["left"] }] }, "no location"],
+    [{ location: [0, 0], lanes: Array.from({ length: 17 }, () => ({ valid: true, indications: ["straight"] })) }, "17 lanes"],
+  ] as const) {
+    const st = parseDirectionsResponse({ code: "Ok", routes: [route({ legs: [{ distance: 1, duration: 1, steps: [step({ intersections: [x] })] }] })] }).routes[0]!.legs[0]!.steps[0]!;
+    assert.ok(!("lanes" in st), why);
+  }
+  // active only ever marks a valid lane
+  const odd = parseDirectionsResponse({ code: "Ok", routes: [route({ legs: [{ distance: 1, duration: 1, steps: [step({ intersections: [{ location: [0, 0], lanes: [
+    { valid: true, active: false, indications: ["left"] }, { valid: false, active: true, indications: ["straight"] },
+  ] }] })] }] })] }).routes[0]!.legs[0]!.steps[0]!.lanes!;
+  assert.equal(odd[0]!.lanes[1]!.active, false);
+  // The existing route fixture (no intersections) is unchanged
+  assert.ok(!("lanes" in parseDirectionsResponse(OK).routes[0]!.legs[0]!.steps[0]!));
+});
+
 test("parse: no route, no road nearby and impossible requests are typed; garbage is a bad response", () => {
   assert.throws(() => parseDirectionsResponse({ code: "NoRoute", routes: [] }), (e: unknown) => e instanceof RoutingError && e.code === "route_not_found");
   assert.throws(() => parseDirectionsResponse({ code: "NoSegment" }), (e: unknown) => e instanceof RoutingError && e.code === "route_no_road");

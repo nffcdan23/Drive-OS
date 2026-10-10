@@ -37,6 +37,11 @@ export interface ServerRouteStep {
   drivingSide: 'left' | 'right' | null;
   banner: { primary: string; secondary: string | null } | null;
   voice: Array<{ distanceBeforeM: number; text: string }>;
+  /** Lane guidance (newer servers; absent when there's none) */
+  lanes?: Array<{
+    location: { lat: number; lng: number };
+    lanes: Array<{ indications: string[]; valid: boolean; active: boolean; validIndication: string | null }>;
+  }>;
 }
 
 export interface ServerRouteLeg {

@@ -18,7 +18,8 @@ import { ActivityIndicator, StyleSheet, Text, TouchableOpacity, View, type Layou
 import { Ionicons } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
 import { GlassSurface } from "@/components/Glass";
-import { ARRIVAL_ICON, ManeuverIcon } from "@/components/navigation/ManeuverIcon";
+import { ARRIVAL_ICON, LaneIcon, ManeuverIcon } from "@/components/navigation/ManeuverIcon";
+import type { LaneView } from "@/lib/navigation/lanes";
 import { useNavigationState, useRetryReroute } from "@/context/NavigationContext";
 import { formatGuidanceDistance, NOW_WITHIN_M } from "@/lib/navigation/format";
 import type { Maneuver } from "@/lib/navigation/maneuver";
@@ -42,6 +43,25 @@ const Status = memo(function Status({ icon, text, busy }: { icon?: keyof typeof 
       <Text style={styles.statusText} numberOfLines={2}>
         {text}
       </Text>
+    </View>
+  );
+});
+
+/**
+ * Lane guidance under the manoeuvre: one arrow per lane, left to right, the
+ * lanes to use bright on a soft highlight, the others faint. Only the
+ * provider's lane data; re-renders only when the lanes change.
+ */
+const LaneStrip = memo(function LaneStrip({ view }: { view: LaneView }) {
+  const use = view.lanes.map((l, i) => (l.recommended ? i + 1 : 0)).filter(Boolean);
+  const label = `Lanes: use ${use.length === 1 ? `lane ${use[0]}` : `lanes ${use.join(", ")}`} of ${view.lanes.length}, counting from the left`;
+  return (
+    <View style={styles.lanes} accessible accessibilityLabel={label}>
+      {view.lanes.map((lane, i) => (
+        <View key={i} style={[styles.lane, i > 0 && styles.laneDivider, lane.recommended && styles.laneUse]}>
+          <LaneIcon lane={lane} drivingSide={view.drivingSide} size={30} color={FG} />
+        </View>
+      ))}
     </View>
   );
 });
@@ -178,6 +198,7 @@ export function GuidanceBanner({
           ) : null}
         </View>
       </View>
+      {state.lanes && state.lanes.stepIndex === next.stepIndex ? <LaneStrip view={state.lanes} /> : null}
       {progress.then ? (
         <View style={styles.thenRow} accessible accessibilityLabel={`Then ${progress.then.instruction}`}>
           <Text style={styles.thenText}>Then</Text>
@@ -222,6 +243,18 @@ const styles = StyleSheet.create({
   },
   thenText: { color: FG, fontSize: 13, fontWeight: "600" },
   current: { color: MUTED, fontSize: 13 },
+  lanes: {
+    flexDirection: "row",
+    alignSelf: "center",
+    borderRadius: 12,
+    backgroundColor: "rgba(0,0,0,0.22)",
+    paddingHorizontal: 4,
+    paddingVertical: 3,
+  },
+  lane: { paddingHorizontal: 4, paddingVertical: 1, borderRadius: 8 },
+  // A lane line between lanes, like the road markings
+  laneDivider: { borderLeftWidth: StyleSheet.hairlineWidth, borderLeftColor: "rgba(255,255,255,0.28)" },
+  laneUse: { backgroundColor: "rgba(0,207,232,0.22)" },
   statusRow: { flexDirection: "row", alignItems: "center", gap: 6 },
   statusText: { color: MUTED, fontSize: 13, flexShrink: 1 },
   offIcon: { width: 42, height: 42, alignItems: "center", justifyContent: "center" },
