@@ -88,8 +88,51 @@ export function readDirectionsConfig(env: Record<string, string | undefined>): D
 export interface LatLng { lat: number; lng: number }
 
 export interface RouteRequest {
-  origin: LatLng & { headingDeg?: number | null };
+  /**
+   * speedMs and accuracyM come with a reroute while driving (the app sends
+   * them only then): see rerouteParams.
+   */
+  origin: LatLng & { headingDeg?: number | null; speedMs?: number | null; accuracyM?: number | null };
   destination: LatLng;
+}
+
+/**
+ * A route from a moving car (a reroute) starts where the car can safely go:
+ *
+ *  - avoid_maneuver_radius: no manoeuvre within the distance the car covers
+ *    in about 8 s at its speed (50 to 300 m), so the new route doesn't begin
+ *    with a turn the car is already past or a U-turn. Directions decides
+ *    the route (and returns one anyway if it can't avoid a manoeuvre there);
+ *    nothing is built by hand.
+ *  - radiuses: the start may snap to a road within the fix's uncertainty
+ *    (3 × its accuracy, 50 to 200 m), so a poor fix doesn't start the route
+ *    on the wrong road far away; the destination's is unlimited.
+ *
+ * Previews (no speed or accuracy) are requested exactly as before.
+ */
+export const REROUTE_PARAMS = {
+  maneuverMinSpeedMs: 4,
+  maneuverSeconds: 8,
+  maneuverRadiusM: { min: 50, max: 300 },
+  radiusAccuracyFactor: 3,
+  radiusM: { min: 50, max: 200 },
+} as const;
+
+const clamp = (v: number, lo: number, hi: number) => Math.min(Math.max(v, lo), hi);
+
+/** The extra Directions parameters for a route from a moving car (empty for a preview) */
+export function rerouteParams(origin: RouteRequest["origin"]): Record<string, string> {
+  const out: Record<string, string> = {};
+  const r = REROUTE_PARAMS;
+  const v = origin.speedMs;
+  if (v != null && Number.isFinite(v) && v >= r.maneuverMinSpeedMs) {
+    out.avoid_maneuver_radius = String(Math.round(clamp(v * r.maneuverSeconds, r.maneuverRadiusM.min, r.maneuverRadiusM.max)));
+  }
+  const a = origin.accuracyM;
+  if (a != null && Number.isFinite(a) && a >= 0) {
+    out.radiuses = `${Math.round(clamp(a * r.radiusAccuracyFactor, r.radiusM.min, r.radiusM.max))};unlimited`;
+  }
+  return out;
 }
 
 /** One manoeuvre of a route, in Derwent's provider-neutral format */
@@ -190,6 +233,7 @@ export function directionsUrl(req: RouteRequest, token: string, origin: string =
     // Leave in the direction the car is pointing (±45°), not with a U-turn
     params.set("bearings", `${Math.round(h)},45;`);
   }
+  for (const [k, v] of Object.entries(rerouteParams(req.origin))) params.set(k, v);
   params.set("access_token", token);
   return `${origin}${DIRECTIONS_PATH}${c(req.origin)};${c(req.destination)}.json?${params.toString()}`;
 }

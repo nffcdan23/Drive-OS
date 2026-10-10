@@ -12,7 +12,8 @@ export type Visibility = 'private' | 'friends' | 'public';
 
 /** POST /navigation/routes body: where from (with heading when moving) and where to */
 export interface RouteRequestBody {
-  origin: { lat: number; lng: number; headingDeg?: number | null };
+  /** speedMs and accuracyM: a reroute while driving (older servers ignore them) */
+  origin: { lat: number; lng: number; headingDeg?: number | null; speedMs?: number; accuracyM?: number };
   destination: { lat: number; lng: number };
 }
 

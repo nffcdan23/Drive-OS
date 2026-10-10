@@ -1418,6 +1418,8 @@ test("routes: signed-in users only; the body is validated", async () => {
     [{ origin: { lat: 91, lng: 0 }, destination: AMBLESIDE }, "latitude out of range"],
     [{ origin: KESWICK, destination: { lat: 54, lng: "x" } }, "longitude not a number"],
     [{ origin: { ...KESWICK, headingDeg: 400 }, destination: AMBLESIDE }, "heading out of range"],
+    [{ origin: { ...KESWICK, speedMs: -1 }, destination: AMBLESIDE }, "negative speed"],
+    [{ origin: { ...KESWICK, accuracyM: "good" }, destination: AMBLESIDE }, "accuracy not a number"],
     [{ origin: "here", destination: AMBLESIDE }, "origin not an object"],
   ]) {
     const r = await routes(u, body);
@@ -1444,6 +1446,21 @@ test("routes: a preview comes back in Derwent's format; Mapbox gets UK English a
   assert.equal(call.query.geometries, "polyline6");
   assert.equal(call.query.bearings, "180,45;");
   assert.ok(!JSON.stringify(r.body).includes(MAPBOX_TOKEN), "the token never reaches the app");
+});
+
+test("routes: a reroute from a moving car asks Mapbox for a safe start; a preview doesn't", async () => {
+  const u = await newUser();
+  expect(await routes(u, { origin: KESWICK, destination: AMBLESIDE }), 200, "preview");
+  let call = mapboxCalls.at(-1);
+  assert.equal(call.query.avoid_maneuver_radius, undefined);
+  assert.equal(call.query.radiuses, undefined);
+  expect(await routes(u, { origin: { ...KESWICK, headingDeg: 90, speedMs: 20, accuracyM: 10 }, destination: AMBLESIDE }), 200, "reroute");
+  call = mapboxCalls.at(-1);
+  assert.equal(call.query.avoid_maneuver_radius, "160");
+  assert.equal(call.query.radiuses, "50;unlimited");
+  assert.equal(call.query.bearings, "90,45;");
+  // An older app's body (no speed or accuracy) is still a preview
+  expect(await routes(u, { origin: { ...KESWICK, headingDeg: null }, destination: AMBLESIDE }), 200, "old body");
 });
 
 test("routes: Mapbox outcomes become typed errors", async () => {

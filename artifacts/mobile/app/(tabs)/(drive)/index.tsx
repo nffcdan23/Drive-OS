@@ -1898,6 +1898,47 @@ export default function MapScreen() {
     router.push("/drive-summary");
   }
 
+  // ── Navigation and its drive (Phase 3.1) ──
+  // Start Navigation records the drive with the same Start Drive as the
+  // button (lib/navigation/startNavigation); the session only remembers that
+  // it did. Finishing that drive is always handleEndDrive above (saved, Drive
+  // Complete, or the usual too-short rule), never a path of its own. A drive
+  // the user started themselves is never finished by navigation.
+  const navOwnsDrive = () => {
+    const st = navSession.state;
+    return isDriving && st.phase !== "idle" && st.recording === "navigation";
+  };
+  /** End, confirmed, with a drive navigation started: both end */
+  function handleFinishNavigationDrive() {
+    navSession.end("user");
+    handleEndDrive();
+  }
+  /** The drive panel's End Drive: a drive navigation started takes navigation with it */
+  function handlePanelEndDrive() {
+    if (navOwnsDrive()) navSession.end("user");
+    handleEndDrive();
+  }
+  const endDriveRef = useRef(handleEndDrive);
+  endDriveRef.current = handleEndDrive;
+  // Arriving, with a drive navigation started: navigation ends and the drive
+  // finishes the usual way. Otherwise the arrival shows, with Done, and a
+  // drive being recorded carries on.
+  useEffect(() => {
+    if (navPhase !== "arrived" || !isDriving) return;
+    const st = navSession.state;
+    if (st.phase !== "arrived" || st.recording !== "navigation") return;
+    navSession.end("arrived");
+    endDriveRef.current();
+  }, [navPhase, isDriving, navSession]);
+  // The drive stopped (finished from the panel, or it couldn't start):
+  // navigation carries on with no recording alongside
+  const wasDrivingRef = useRef(isDriving);
+  useEffect(() => {
+    const was = wasDrivingRef.current;
+    wasDrivingRef.current = isDriving;
+    if (was && !isDriving) navSession.recordingEnded();
+  }, [isDriving, navSession]);
+
   function handlePause() {
     setIsPaused(true);
     setDrivePaused(true);
@@ -2735,7 +2776,7 @@ export default function MapScreen() {
           insets={insets}
           onPause={handlePause}
           onResume={handleResume}
-          onEndDrive={handleEndDrive}
+          onEndDrive={handlePanelEndDrive}
           onSavePoint={handleSavePoint}
           onLocateButton={handleLocateButton}
           onResumeFollowing={handleResumeFollowing}
@@ -2745,7 +2786,12 @@ export default function MapScreen() {
           // Navigating too: the banner is above, a slim strip below
           topContentOffset={navigating ? guidanceBannerHeight + 8 : 0}
           navigationStrip={
-            navigating ? <GuidanceStrip unitSystem={resolvedUnitSystem} /> : null
+            navigating ? (
+              <GuidanceStrip
+                unitSystem={resolvedUnitSystem}
+                onFinishDrive={handleFinishNavigationDrive}
+              />
+            ) : null
           }
         />
       )}

@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
   DIRECTIONS_PARAMS, DirectionsClient, DirectionsConfigError, MAPBOX_API_ORIGIN, RoutingError,
-  directionsUrl, parseDirectionsResponse, readDirectionsConfig, type DirectionsConfig, type RouteRequest,
+  REROUTE_PARAMS, directionsUrl, parseDirectionsResponse, rerouteParams, readDirectionsConfig, type DirectionsConfig, type RouteRequest,
 } from "../src/lib/mapboxDirections.ts";
 import { encodePolyline } from "../src/lib/geo.ts";
 
@@ -120,6 +120,31 @@ test("request: driving-traffic, UK English, British imperial voice units, altern
   assert.deepEqual(Object.keys(DIRECTIONS_PARAMS).sort(), [...new Set([...p.keys()])].filter((k) => k !== "bearings" && k !== "access_token").sort());
   // No heading (or a nonsense one): no bearing constraint
   assert.equal(new URL(directionsUrl({ ...REQ, origin: { ...REQ.origin, headingDeg: null } }, TOKEN)).searchParams.get("bearings"), null);
+});
+
+test("request: a reroute from a moving car avoids an immediate manoeuvre and snaps within the fix's accuracy", () => {
+  // A preview (no speed, no accuracy): exactly as before
+  const preview = new URL(directionsUrl(REQ, TOKEN)).searchParams;
+  assert.equal(preview.get("avoid_maneuver_radius"), null);
+  assert.equal(preview.get("radiuses"), null);
+  assert.deepEqual(rerouteParams(REQ.origin), {});
+  // 30 mph (13.4 m/s), 8 m accuracy: ~107 m clear of manoeuvres; the start snaps within 50 m
+  const p = new URL(directionsUrl({ ...REQ, origin: { ...REQ.origin, speedMs: 13.4, accuracyM: 8 } }, TOKEN)).searchParams;
+  assert.equal(p.get("avoid_maneuver_radius"), "107");
+  assert.equal(p.get("radiuses"), "50;unlimited", "one per coordinate; the destination unlimited");
+  assert.equal(p.get("bearings"), "182,45;", "still leaves the way the car points");
+  // Scaled by speed within 50..300 m; none when crawling
+  assert.equal(rerouteParams({ ...REQ.origin, speedMs: 5 }).avoid_maneuver_radius, "50");
+  assert.equal(rerouteParams({ ...REQ.origin, speedMs: 31 }).avoid_maneuver_radius, "248");
+  assert.equal(rerouteParams({ ...REQ.origin, speedMs: 80 }).avoid_maneuver_radius, String(REROUTE_PARAMS.maneuverRadiusM.max));
+  assert.equal(rerouteParams({ ...REQ.origin, speedMs: 2 }).avoid_maneuver_radius, undefined);
+  // Radius follows the accuracy within 50..200 m
+  assert.equal(rerouteParams({ ...REQ.origin, accuracyM: 30 }).radiuses, "90;unlimited");
+  assert.equal(rerouteParams({ ...REQ.origin, accuracyM: 500 }).radiuses, "200;unlimited");
+  // Nonsense is ignored rather than sent
+  assert.deepEqual(rerouteParams({ ...REQ.origin, speedMs: Number.NaN, accuracyM: -1 }), {});
+  // Only Directions' own parameters: no hand-built manoeuvres or waypoints
+  assert.equal(new URL(directionsUrl({ ...REQ, origin: { ...REQ.origin, speedMs: 13.4, accuracyM: 8 } }, TOKEN)).pathname.split(";").length, 2);
 });
 
 test("parse: routes become Derwent's format (alternatives, steps, UK details, annotations)", () => {

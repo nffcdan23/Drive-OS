@@ -2,20 +2,28 @@
  * The bottom of the Drive screen while navigating (Navigation Phase 3).
  *
  * GuidanceBar, with no drive being recorded: arrival time, time and distance
- * left, End, and the camera (Recenter / Overview) and Record buttons, in
- * place of the drive actions. Compact, so the map stays the screen.
+ * left, End, and the camera (Recenter / Overview) buttons, in place of the
+ * drive actions, and Record when navigation has no recording alongside.
+ * Compact, so the map stays the screen.
  *
- * GuidanceStrip, while recording: one slim row (arrival, what's left, End)
- * that sits above the drive panel, rather than a second panel stacked on it.
+ * GuidanceStrip, while recording (Start Navigation records the drive): one
+ * slim row (arrival, what's left, End) that sits above the drive panel,
+ * rather than a second panel stacked on it.
+ *
+ * End, when navigation started the drive being recorded, asks first: "End
+ * navigation and finish drive" (the Drive screen's usual End Drive, so the
+ * drive is saved and Drive Complete opens) or "Continue navigation". With a
+ * drive the user started themselves, End ends navigation only.
  *
  * On arriving both say so, with Done, and Save Place where the destination
- * may be saved (not a search result: Mapbox's terms) and isn't already.
+ * may be saved (not a search result: Mapbox's terms) and isn't already. (A
+ * drive navigation started is finished by the Drive screen on arriving.)
  *
  * Both read the navigation state themselves; the Drive screen doesn't
- * re-render as it changes. Ending navigation never touches a recording.
+ * re-render as it changes. They never start or stop a recording themselves.
  */
 import React, { useEffect, useState } from "react";
-import { StyleSheet, Text, TouchableOpacity, View } from "react-native";
+import { Alert, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
 import { GlassButton, GlassSurface } from "@/components/Glass";
@@ -98,14 +106,31 @@ function Arrived({ state, compact }: { state: Extract<NavigationState, { phase: 
   );
 }
 
-function EndButton({ compact }: { compact?: boolean }) {
+/**
+ * End. `onFinishDrive` is given only while a drive navigation started is
+ * being recorded: then End asks before finishing it (never deleting it).
+ */
+function EndButton({ compact, ownsDrive, onFinishDrive }: { compact?: boolean; ownsDrive: boolean; onFinishDrive?: () => void }) {
   const end = useEndNavigation();
   return (
     <TouchableOpacity
       accessibilityRole="button"
       accessibilityLabel="End navigation"
+      accessibilityHint={ownsDrive && onFinishDrive ? "Asks whether to finish the drive too" : undefined}
       onPress={() => {
         Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+        if (ownsDrive && onFinishDrive) {
+          Alert.alert(
+            "End navigation?",
+            "Your drive will be finished and saved.",
+            [
+              { text: "Continue navigation", style: "cancel" },
+              { text: "End navigation and finish drive", onPress: onFinishDrive },
+            ],
+            { cancelable: true },
+          );
+          return;
+        }
         end("user");
       }}
       style={[styles.end, compact && styles.endCompact]}
@@ -160,7 +185,7 @@ export function GuidanceBar({
   following: boolean;
   onRecenter: () => void;
   onOverview: () => void;
-  /** Start recording the drive too (never automatic) */
+  /** Start recording the drive (navigation has none alongside: Passenger Mode, or it was finished) */
   onRecord: () => void;
 }) {
   const state = useNavigationState();
@@ -173,7 +198,7 @@ export function GuidanceBar({
         <>
           <View style={styles.row}>
             <Summary state={state} unitSystem={unitSystem} compact={false} />
-            <EndButton />
+            <EndButton ownsDrive={false} />
           </View>
           {state.phase !== "error" ? (
             <View style={styles.actions}>
@@ -189,15 +214,17 @@ export function GuidanceBar({
                 <Ionicons name={following ? "map-outline" : "navigate"} size={16} color={FG} />
                 <Text style={styles.pillText}>{following ? "Overview" : "Recenter"}</Text>
               </GlassButton>
-              <GlassButton
-                accessibilityLabel="Record this drive"
-                accessibilityHint="Starts recording your drive. Navigation carries on."
-                style={styles.pill}
-                onPress={onRecord}
-              >
-                <View style={styles.recDot} />
-                <Text style={styles.pillText}>Record</Text>
-              </GlassButton>
+              {state.recording === "none" ? (
+                <GlassButton
+                  accessibilityLabel="Record this drive"
+                  accessibilityHint="Starts recording your drive. Navigation carries on."
+                  style={styles.pill}
+                  onPress={onRecord}
+                >
+                  <View style={styles.recDot} />
+                  <Text style={styles.pillText}>Record</Text>
+                </GlassButton>
+              ) : null}
             </View>
           ) : null}
         </>
@@ -207,7 +234,14 @@ export function GuidanceBar({
 }
 
 /** Navigation while recording: one slim row above the drive panel */
-export function GuidanceStrip({ unitSystem }: { unitSystem: ResolvedUnitSystem }) {
+export function GuidanceStrip({
+  unitSystem,
+  onFinishDrive,
+}: {
+  unitSystem: ResolvedUnitSystem;
+  /** End navigation and finish the drive navigation started (the Drive screen's End Drive) */
+  onFinishDrive: () => void;
+}) {
   const state = useNavigationState();
   if (state.phase === "idle") return null;
   return (
@@ -217,7 +251,7 @@ export function GuidanceStrip({ unitSystem }: { unitSystem: ResolvedUnitSystem }
       ) : (
         <View style={[styles.row, styles.compactRow]}>
           <Summary state={state} unitSystem={unitSystem} compact />
-          <EndButton compact />
+          <EndButton compact ownsDrive={state.recording === "navigation"} onFinishDrive={onFinishDrive} />
         </View>
       )}
     </GlassSurface>

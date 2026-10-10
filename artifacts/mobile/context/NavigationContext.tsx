@@ -20,7 +20,8 @@
  * And the active navigation session (Phase 3, lib/navigation/session.ts):
  * Start Navigation turns the preview into turn-by-turn guidance, fed the
  * same accepted fixes, read only. In memory only: the app closing (or the
- * user signing out) ends it. The Drive screen reads only its phase; the
+ * user signing out) ends it. Starting it records the drive with the app's
+ * existing Start Drive when nothing is recording (Phase 3.1). The Drive screen reads only its phase; the
  * guidance banner and bar read the rest.
  */
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
@@ -33,7 +34,8 @@ import { deviceStorage } from '@/lib/secureStorage';
 import { RecentDestinations, type RecentDestination } from '@/lib/navigation/recents';
 import { DestinationSearch, type SearchState } from '@/lib/navigation/search';
 import { NavigationSession, type EndReason, type NavigationState, type NavPhase } from '@/lib/navigation/session';
-import { startFromPreview } from '@/lib/navigation/startNavigation';
+import { startFromPreview, type NavigationRecorder } from '@/lib/navigation/startNavigation';
+import { useApp } from '@/context/AppContext';
 import { journal } from '@/lib/diagnostics';
 import { RoutePreviewStore, type PreviewError, type PreviewPhase, type PreviewState } from '@/lib/navigation/previewStore';
 import type { Destination, LatLng, RouteOrigin } from '@/lib/navigation/model';
@@ -78,8 +80,9 @@ export function NavigationProvider({ userId, children }: { userId: string; child
     setTimer: (fn, ms) => setTimeout(fn, ms),
     clearTimer: (t) => clearTimeout(t as ReturnType<typeof setTimeout>),
   }), []);
-  // Guidance: the same route requests as previews, only ever on the user's
-  // action (Start with an out-of-date route, Update Route)
+  // Guidance: the same route requests as previews: Start with an
+  // out-of-date route, and automatic rerouting once confirmed off the route
+  // (limited by the session: lib/navigation/session.ts REROUTE)
   const session = useMemo(() => new NavigationSession({
     fetchRoutes: (body) => {
       if (!ep) return Promise.reject(new Error('The app is not connected to a server.'));
@@ -246,23 +249,37 @@ export function useNavigationState(): NavigationState {
 
 /**
  * Start Navigation: the preview's chosen route becomes guidance (with one
- * fresh route request first only if the preview was out of date).
+ * fresh route request first only if the preview was out of date), and the
+ * drive is recorded with the app's existing Start Drive unless one already
+ * is (or Passenger Mode is on).
  */
 export function useStartNavigation() {
   const { store, session, currentOrigin } = useNavigation();
-  return useCallback(() => startFromPreview(store, session, currentOrigin), [store, session, currentOrigin]);
+  const { isDriving, isPassengerMode, startDrive } = useApp();
+  const app = useRef({ isDriving, isPassengerMode, startDrive });
+  app.current = { isDriving, isPassengerMode, startDrive };
+  const recorder = useMemo<NavigationRecorder>(() => ({
+    isRecording: () => app.current.isDriving,
+    canRecord: () => !app.current.isPassengerMode,
+    startRecording: () => app.current.startDrive(),
+  }), []);
+  return useCallback(() => startFromPreview(store, session, currentOrigin, recorder), [store, session, currentOrigin, recorder]);
 }
 
-/** Update Route while navigating: one tap, one request, from where the phone is now */
-export function useRerouteNavigation() {
-  const { session, currentOrigin } = useNavigation();
-  return useCallback(async () => {
-    const origin = await currentOrigin();
-    await session.reroute(origin);
-  }, [session, currentOrigin]);
+/**
+ * Try Again, offered off route only after several automatic updates failed:
+ * one request from the latest fix (the session reroutes by itself otherwise)
+ */
+export function useRetryReroute() {
+  const session = useNavigationSession();
+  return useCallback(() => session.retryReroute(), [session]);
 }
 
-/** End navigation (End, or Done on arriving). A drive being recorded carries on. */
+/**
+ * End navigation (End, or Done on arriving). It never stops a drive itself:
+ * the Drive screen finishes one navigation started, through its usual End
+ * Drive, when the user chooses to (or on arriving).
+ */
 export function useEndNavigation() {
   const session = useNavigationSession();
   return useCallback((reason: EndReason = 'user') => session.end(reason), [session]);
