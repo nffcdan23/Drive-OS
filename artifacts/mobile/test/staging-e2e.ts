@@ -573,6 +573,65 @@ async function run() {
     check('voice text is plain (no SSML)', !/<speak|<prosody|<say-as/i.test(voice));
     const leak = process.env.LEAK_CHECK_MAPBOX_TOKEN?.trim();
     if (leak) check('route responses never contain the Mapbox token', !JSON.stringify(routed).includes(leak));
+    // The request above is exactly what Build 24 sends (origin with a null
+    // heading, no speed or accuracy): it still gets the full response
+    check('a Build 24 request (no speed or accuracy) still gets routes', routes.length >= 1 && steps.length > 2);
+
+    // Automatic reroute from a moving car (Navigation 3.1): a point on the
+    // route above, heading the way the road goes there, at 45 mph, 10 m accuracy
+    let cum = 0;
+    let k = 1;
+    for (; k < points.length - 1 && cum < 3000; k++) {
+      const a = points[k - 1]!, b = points[k]!;
+      cum += Math.hypot((b.latitude - a.latitude) * 111_320, (b.longitude - a.longitude) * 111_320 * Math.cos((a.latitude * Math.PI) / 180));
+    }
+    const from = points[k]!;
+    const to = points[Math.min(k + 3, points.length - 1)]!;
+    const dy = to.latitude - from.latitude;
+    const dx = (to.longitude - from.longitude) * Math.cos((from.latitude * Math.PI) / 180);
+    const heading = ((Math.atan2(dx, dy) * 180) / Math.PI + 360) % 360;
+    const rerouted = await p1.ep.getRoutes({
+      origin: { lat: from.latitude, lng: from.longitude, headingDeg: Math.round(heading), speedMs: 20, accuracyM: 10 },
+      destination: { lat: 54.4287, lng: -2.9612 },
+    }).catch((e) => e);
+    if (rerouted instanceof Error) {
+      check('a reroute with heading, speed and accuracy is accepted', false, (rerouted as ApiError).code ?? rerouted.message);
+    } else {
+      const r0 = rerouted.routes[0];
+      check('a reroute with heading, speed and accuracy is accepted', !!r0 && r0.legs[0]!.steps.length >= 2);
+      const rSteps = r0 ? r0.legs.flatMap((l) => l.steps) : [];
+      const depart = rSteps[0]?.maneuver.bearingAfter;
+      const diff = depart == null ? 999 : Math.abs(((depart - heading + 540) % 360) - 180);
+      check('it leaves the way the car is heading (bearing respected)', diff <= 50, `${Math.round(diff)}° off`);
+      // avoid_maneuver_radius at 20 m/s: nothing to do in the first ~160 m, and no U-turn to start with
+      const early = rSteps.slice(1).filter((st) => st.startDistanceM < 150 && st.maneuver.type !== 'arrive');
+      const uturn = rSteps.slice(0, 3).some((st) => st.maneuver.modifier === 'uturn' || /u-?turn/i.test(st.maneuver.instruction ?? ''));
+      check('no immediate manoeuvre or U-turn at the start of a reroute', early.length === 0 && !uturn, `${early.length} early, uturn ${uturn}`);
+    }
+
+    // Lane guidance (Navigation lanes): a motorway run with junctions
+    // (Penrith → Carlisle by the M6), plus the A591 route above
+    const motorway = await p1.ep.getRoutes({
+      origin: { lat: 54.6641, lng: -2.7520, headingDeg: null },
+      destination: { lat: 54.8925, lng: -2.9329 },
+    }).catch((e) => e);
+    const laneSteps = [routed, motorway].flatMap((res) => (res instanceof Error ? [] : res.routes.flatMap((r) => r.legs.flatMap((l) => l.steps))))
+      .filter((st) => Array.isArray(st.lanes));
+    const junctions = laneSteps.flatMap((st) => st.lanes ?? []);
+    const KNOWN = new Set(['straight', 'slight left', 'left', 'sharp left', 'slight right', 'right', 'sharp right', 'uturn']);
+    console.log(`     lane data: ${junctions.length} junction(s) on ${laneSteps.length} step(s)`);
+    check('Mapbox lane data reaches the route response', junctions.length > 0, 'none on these routes');
+    check('lane data is only the trimmed fields (location; lanes of indications, valid, active, validIndication)', junctions.every((j) =>
+      Object.keys(j).sort().join() === 'lanes,location'
+      && typeof j.location.lat === 'number' && typeof j.location.lng === 'number'
+      && j.lanes.length > 0 && j.lanes.length <= 16 && j.lanes.some((l) => l.valid)
+      && j.lanes.every((l) => Object.keys(l).sort().join() === 'active,indications,valid,validIndication'
+        && typeof l.valid === 'boolean' && typeof l.active === 'boolean' && (!l.active || l.valid)
+        && l.indications.every((i) => KNOWN.has(i)) && (l.validIndication === null || KNOWN.has(l.validIndication)))));
+    const raw = JSON.stringify([routed, motorway]);
+    check('raw intersection data never reaches the app', !/"(intersections|bearings|entry|geometry_index|classes|toll_collection|mapbox_streets_v8)"/.test(raw));
+    check('steps without lane data carry no lanes field', [routed, motorway].every((res) => res instanceof Error
+      || res.routes.every((r) => r.legs.every((l) => l.steps.every((st) => !('lanes' in st) || (Array.isArray(st.lanes) && st.lanes.length > 0))))));
   }
   check('a route request never marks the API as down', p1.connection !== 'server_error', String(p1.connection));
 

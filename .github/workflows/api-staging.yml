@@ -382,5 +382,10 @@ jobs:
           if grep -qE "access_token=[ps]k\." "$logs"; then
             rm -f "$logs"; echo "::error::A Mapbox access token appears in the staging logs"; exit 1
           fi
+          # Nor where anyone was going: the route requests test:staging just made
+          # (Keswick, Ambleside, Penrith, Carlisle) never appear in the logs
+          if grep -qE "54\.6001|-3\.1345|54\.4287|-2\.9612|54\.6641|-2\.752|54\.8925|-2\.9329|directions/v5" "$logs"; then
+            rm -f "$logs"; echo "::error::Route coordinates or a Directions URL appear in the staging logs"; exit 1
+          fi
           rm -f "$logs"
-          echo "Checked $lines lines of staging runtime and build logs: no Mapbox Directions token."
+          echo "Checked $lines lines of staging runtime and build logs: no Mapbox Directions token, route coordinates or Directions URL."
