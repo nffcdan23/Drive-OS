@@ -67,6 +67,7 @@
     "@rnmapbox/maps": "10.3.5",
     "@supabase/supabase-js": "2.117.0",
     "expo-apple-authentication": "57.0.2",
+    "expo-audio": "~57.0.5",
     "expo-crypto": "~57.0.3",
     "expo-image-manipulator": "57.0.20",
     "expo-keep-awake": "57.0.2",
@@ -76,5 +77,14 @@
     "expo-task-manager": "~57.0.21",
     "idb": "^8.0.3",
     "react-native-maps": "1.27.2"
+  },
+  "expo": {
+    "autolinking": {
+      "android": {
+        "exclude": [
+          "expo-audio"
+        ]
+      }
+    }
   }
 }

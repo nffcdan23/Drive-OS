@@ -26,8 +26,9 @@
  *
  * Voice guidance (Phase 4, lib/navigation/voice.ts) follows the session from
  * here, so it lives as long as the session does (other tabs don't reset
- * it): it speaks Mapbox's prompts while the app is in the foreground and
- * stops the moment it isn't. Its preference (Normal / Alerts only / Off) is
+ * it). It speaks Mapbox's prompts on screen and, where the speaker can
+ * (lib/navigation/speech.ts: iOS with its audio session, Android), off
+ * screen and with the phone locked too. Its preference (Normal / Alerts only / Off) is
  * kept on this device for this user (lib/navigation/voicePrefs.ts).
  *
  * Background guidance (lib/navigation/background.ts): with the app off screen
@@ -124,24 +125,31 @@ export function NavigationProvider({ userId, children }: { userId: string; child
   // Voice guidance: reads the session only; foreground only
   const voicePrefs = useMemo(() => new VoicePreferences(deviceStorage, userId), [userId]);
   useEffect(() => {
-    const voice: VoiceGuidance = new VoiceGuidance({
-      session,
-      speaker: createSpeaker((code) => voice.noteSpeechError(code)),
-      now: Date.now,
-      journal,
-    });
+    // The audio side (lib/navigation/audioSession.ts): one prompt at a time,
+    // on the app's own audio session where there is one (iOS), so it's heard
+    // off screen and with the phone locked, ducking other audio
+    const speaker = createSpeaker({ onError: (code) => voice.noteSpeechError(code), journal });
+    const voice: VoiceGuidance = new VoiceGuidance({ session, speaker, now: Date.now, journal });
+    voice.setBackgroundSpeech(speaker.background);
     voice.setForeground(AppState.currentState === 'active');
+    speaker.setAppState(AppState.currentState);
     const apply = () => voice.setMode(voicePrefs.mode);
     apply();
     const offPrefs = voicePrefs.subscribe(apply);
     void voicePrefs.load();
-    // Anything but on screen and active (background, a call, Control Centre): quiet
-    const app = AppState.addEventListener('change', (state) => voice.setForeground(state === 'active'));
+    // Off screen no longer silences guidance where the speaker can play
+    // there; where it can't, anything but active (background, a call,
+    // Control Centre) is quiet, as before
+    const app = AppState.addEventListener('change', (state) => {
+      voice.setForeground(state === 'active');
+      speaker.setAppState(state);
+    });
     const detach = voice.attach();
     return () => {
       app.remove();
       offPrefs();
       detach();
+      speaker.dispose();
     };
   }, [session, voicePrefs]);
   const lastFix = useRef<{ origin: RouteOrigin; time: number; fix: BackgroundFix } | null>(null);

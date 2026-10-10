@@ -8931,23 +8931,54 @@ test('voice is a reader only: navigation, rerouting, progress and recording beha
   assert.ok(!/Voice|Speech|speech/.test(drive), 'the Drive screen is untouched by voice');
 });
 
-test('voice native impact: expo-speech only, own iOS speech session, British English, no background audio', () => {
+test('voice native impact: expo-speech and expo-audio (iOS only), the app\'s own session for speech, British English', async () => {
   const read = (rel: string) => readFileSync(toPath(new URL(rel, import.meta.url)), 'utf8');
   const speech = read('../lib/navigation/speech.ts');
-  assert.ok(/useApplicationAudioSession: false/.test(speech), "iOS's own ducking speech session, not the app's");
+  assert.ok(/useApplicationAudioSession: appSession,/.test(speech), "on the app's session where there is one, the system's otherwise");
   assert.ok(/language: 'en-GB'/.test(speech));
   assert.ok(/requireOptionalNativeModule\('ExpoSpeech'\) \?/.test(speech), 'a binary without the module stays quiet, never crashes');
-  const pkg = JSON.parse(read('../package.json')) as { dependencies: Record<string, string> };
-  assert.equal(pkg.dependencies['expo-speech'], '~57.0.3');
-  assert.ok(!pkg.dependencies['expo-av'] && !pkg.dependencies['expo-audio'], 'no app audio session library');
-  for (const f of ['../app.json', '../app.config.js']) {
-    const src = read(f);
-    assert.ok(!/["']audio["']/.test(src), `${f}: no background audio mode`);
-    assert.ok(!/expo-speech|AVAudioSession|NSMicrophone/.test(src), `${f}: no speech plugin or audio config`);
+  assert.ok(/Platform\.OS === 'ios' && requireOptionalNativeModule\('ExpoAudio'\) \?/.test(speech), 'expo-audio is looked for first, on iOS only');
+  // The session: Playback (heard in silent mode, allowed in the background), ducking, no microphone, no earpiece
+  const session = speech.slice(speech.indexOf('configure: () => a.setAudioModeAsync({'), speech.indexOf('setActive: (active)'));
+  for (const setting of ['playsInSilentMode: true', 'shouldPlayInBackground: true', "interruptionMode: 'duckOthers'", 'allowsRecording: false', 'shouldRouteThroughEarpiece: false']) {
+    assert.ok(session.includes(setting), setting);
   }
-  // Foreground only, in the context: anything but "active" is quiet
-  const ctx = read('../context/NavigationContext.tsx');
-  assert.ok(/AppState\.addEventListener\('change', \(state\) => voice\.setForeground\(state === 'active'\)\)/.test(ctx));
+  const pkg = JSON.parse(read('../package.json')) as { dependencies: Record<string, string>; expo?: { autolinking?: { android?: { exclude?: string[] } } } };
+  assert.equal(pkg.dependencies['expo-speech'], '~57.0.3');
+  assert.equal(pkg.dependencies['expo-audio'], '~57.0.5');
+  assert.ok(!pkg.dependencies['expo-av'], 'no second audio library');
+  assert.deepEqual(pkg.expo?.autolinking?.android?.exclude, ['expo-audio'], 'linked on iOS only: Android unchanged');
+  // Config: only the iOS "audio" background mode added to what's there, and the microphone string (never asked)
+  const req = createRequire(import.meta.url);
+  const app = JSON.parse(read('../app.json')) as { expo: Record<string, unknown> };
+  assert.ok(!/expo-audio|expo-speech/.test(JSON.stringify(app.expo.plugins)), "neither package's config plugin (expo-audio's adds Android services)");
+  const appConfig = req('../app.config.js') as (a: { config: object }) => { mods: { ios: { infoPlist(c: object): Promise<{ modResults: Record<string, unknown> }> } }; android?: { permissions?: string[] } };
+  const cfg = appConfig({ config: app.expo });
+  const plist = await cfg.mods.ios.infoPlist({
+    ...cfg, modResults: { UIBackgroundModes: ['fetch', 'location'] },
+    modRequest: { platform: 'ios', modName: 'infoPlist', projectRoot: '.', platformProjectRoot: './ios', introspect: true },
+  });
+  assert.deepEqual(plist.modResults.UIBackgroundModes, ['fetch', 'location', 'audio'], 'audio added; location and fetch kept');
+  assert.match(String(plist.modResults.NSMicrophoneUsageDescription), /doesn't use your microphone/);
+  const again = await cfg.mods.ios.infoPlist({
+    ...cfg, modResults: { UIBackgroundModes: ['location', 'audio'] },
+    modRequest: { platform: 'ios', modName: 'infoPlist', projectRoot: '.', platformProjectRoot: './ios', introspect: true },
+  });
+  assert.deepEqual(again.modResults.UIBackgroundModes, ['location', 'audio'], 'never duplicated');
+  assert.ok(!(cfg.android?.permissions ?? []).some((p) => /AUDIO|MEDIA_PLAYBACK|BACKGROUND_LOCATION/.test(p)), 'no Android permission change');
+  // The app never records or asks for the microphone
+  const appCode = ['context', 'lib', 'app', 'components', 'hooks'].flatMap((dir) => {
+    const out: string[] = [];
+    const walk = (d: string) => {
+      for (const e of readdirSync(join(MOBILE, d), { withFileTypes: true })) {
+        if (e.isDirectory()) walk(join(d, e.name));
+        else if (/\.(ts|tsx)$/.test(e.name)) out.push(readFileSync(join(MOBILE, d, e.name), 'utf8'));
+      }
+    };
+    walk(dir);
+    return out;
+  }).join('\n');
+  assert.ok(!/useAudioRecorder|AudioRecorder|requestRecordingPermissionsAsync|getRecordingPermissionsAsync|RecordingPresets|createAudioPlayer|useAudioPlayer/.test(appCode), 'no recording, no players');
 });
 
 // ─── Navigation: background guidance ────────────────────────────────────────
@@ -9286,8 +9317,407 @@ test('background guidance: the same session as on screen, nothing drawn, spoken,
   // Coming back: the camera starts from the newest fix (the drive's or navigation's), through the follow camera
   const drive = read('../app/(tabs)/(drive)/index.tsx');
   assert.ok(/const navFix = navSession\.guiding \? latestNavigationFix\(\) : null;/.test(drive));
-  // No background audio, no new permission
-  for (const f of ['../app.json', '../app.config.js']) assert.ok(!/["']audio["']|ACCESS_BACKGROUND_LOCATION|isAndroidBackgroundLocationEnabled/.test(read(f)), f);
+  // No new location permission (the background audio mode is voice's, checked with it)
+  for (const f of ['../app.json', '../app.config.js']) assert.ok(!/ACCESS_BACKGROUND_LOCATION|isAndroidBackgroundLocationEnabled/.test(read(f)), f);
+});
+
+// ─── Navigation: background voice (audio session) ──────────────────────────
+// The voice engine decides what and when; the audio controller plays it on
+// the app's session (iOS): activate, speak, release; one at a time; cut-offs
+// handled; off screen and locked too.
+
+import { NavigationSpeaker, AUDIO, type AudioSessionControl, type SpeechEngine, type SpeechEvents } from '@/lib/navigation/audioSession';
+
+/** A hand-driven clock and timers */
+function timers3() {
+  const clock = { t: 0 };
+  const list: Array<{ fn: () => void; at: number; id: number }> = [];
+  let tid = 0;
+  const run = () => {
+    for (;;) {
+      const due = list.filter((x) => x.at <= clock.t).sort((a, b) => a.at - b.at)[0];
+      if (!due) break;
+      list.splice(list.indexOf(due), 1);
+      due.fn();
+    }
+  };
+  return {
+    clock,
+    setTimer: (fn: () => void, ms: number) => { const id = ++tid; list.push({ fn, at: clock.t + ms, id }); return id; },
+    clearTimer: (id: unknown) => { const i = list.findIndex((x) => x.id === id); if (i >= 0) list.splice(i, 1); },
+    advance: (ms: number) => { clock.t += ms; run(); },
+  };
+}
+/** The audio controller on a fake engine and session, with everything that happened in order */
+function audio3(o: { session?: boolean; background?: boolean } = {}) {
+  const t = timers3();
+  const log: string[] = [];
+  const jlog: Array<Record<string, unknown>> = [];
+  let current: SpeechEvents | null = null;
+  const session = {
+    failActivate: false,
+    active: false,
+    configure: async () => { log.push('configure'); },
+    setActive: async (a: boolean) => {
+      if (a && session.failActivate) { log.push('active:refused'); throw new Error('call in progress'); }
+      session.active = a;
+      log.push(`active:${a}`);
+    },
+  };
+  const engine: SpeechEngine = {
+    speak: (text, appSession, events) => { log.push(`speak:${text}${appSession ? '' : ' (system session)'}`); current = events; events.onStart(); },
+    stop: () => { log.push('stop'); const e = current; current = null; e?.onStopped(); },
+  };
+  const speaker = new NavigationSpeaker({
+    engine, session: o.session === false ? null : (session as AudioSessionControl), background: o.background ?? true,
+    setTimer: t.setTimer, clearTimer: t.clearTimer, journal: { log: (event, data) => jlog.push({ event, ...data }) },
+  });
+  const flush = async () => { for (let i = 0; i < 5; i++) await Promise.resolve(); };
+  /** The engine finishes the prompt being spoken (normally, or cut off by the system) */
+  const finish = (how: 'done' | 'stopped' | 'error' = 'done') => { const e = current; current = null; if (how === 'done') e?.onDone(); else if (how === 'error') e?.onError(); else e?.onStopped(); };
+  return { speaker, session, log, jlog, ...t, flush, finish, actions: () => jlog.map((l) => l.action) };
+}
+
+test('audio session: set up once, activated before each prompt, released straight after; never left active', async () => {
+  const a = audio3();
+  a.speaker.speak('Turn left');
+  await a.flush();
+  assert.deepEqual(a.log, ['configure', 'active:true', 'speak:Turn left']);
+  assert.equal(a.session.active, true, 'other audio ducks while it speaks');
+  a.finish();
+  assert.equal(a.session.active, true, 'held a moment, in case another prompt follows');
+  a.advance(AUDIO.releaseDelayMs);
+  await a.flush();
+  assert.equal(a.session.active, false, 'released: other audio comes back up');
+  // The next prompt: no set-up again
+  a.speaker.speak('Turn right');
+  await a.flush();
+  a.finish();
+  a.advance(AUDIO.releaseDelayMs);
+  await a.flush();
+  assert.deepEqual(a.log.slice(4), ['active:true', 'speak:Turn right', 'active:false']);
+  assert.equal(a.log.filter((x) => x === 'configure').length, 1);
+  // Two prompts close together share one activation (no duck, unduck, duck)
+  a.speaker.speak('Updating route');
+  await a.flush();
+  a.finish();
+  a.advance(100);
+  a.speaker.speak('Head north');
+  await a.flush();
+  a.finish();
+  a.advance(AUDIO.releaseDelayMs);
+  await a.flush();
+  assert.deepEqual(a.log.slice(7), ['active:true', 'speak:Updating route', 'speak:Head north', 'active:false']);
+  assert.deepEqual(a.actions(), ['activated', 'started', 'released', 'activated', 'started', 'released', 'activated', 'started', 'started', 'released']);
+  for (const l of a.jlog) assert.ok(!JSON.stringify(l).match(/Turn|Head|Updating/), 'never the words');
+});
+
+test('audio session: one prompt at a time; a newer one waits (replacing an older waiting one); stop drops both', async () => {
+  const a = audio3();
+  a.speaker.speak('In 300 yards, turn left');
+  await a.flush();
+  a.speaker.speak('Old prompt');
+  a.speaker.speak('Turn left');
+  assert.ok(a.actions().includes('replaced'));
+  assert.deepEqual(a.log, ['configure', 'active:true', 'speak:In 300 yards, turn left'], 'nothing talks over it');
+  a.finish();
+  await a.flush();
+  assert.deepEqual(a.log.slice(3), ['speak:Turn left'], 'then only the newest');
+  // stop() (reroute, mute, end): the one speaking and the one waiting both go, and the session is released
+  a.speaker.speak('Waiting');
+  a.speaker.stop();
+  assert.ok(a.log.includes('stop'));
+  a.advance(AUDIO.releaseDelayMs);
+  await a.flush();
+  assert.equal(a.session.active, false);
+  assert.ok(!a.log.includes('speak:Waiting'));
+  assert.equal(a.speaker.busy, false);
+});
+
+test('audio session: a call or Siri cuts a prompt off: nothing waiting is replayed, the session is released (and again later), the next prompt resumes', async () => {
+  const a = audio3();
+  a.speaker.speak('In half a mile, turn left');
+  await a.flush();
+  a.speaker.speak('In 300 yards, turn left');
+  // The system cuts it off
+  a.finish('stopped');
+  await a.flush();
+  assert.ok(a.actions().includes('interrupted'));
+  assert.ok(!a.log.includes('speak:In 300 yards, turn left'), 'what was waiting is out of date: dropped');
+  a.advance(AUDIO.releaseDelayMs);
+  await a.flush();
+  assert.equal(a.session.active, false);
+  // iOS re-activates the session when the interruption ends: the sweep releases it again
+  a.session.active = true;
+  a.advance(AUDIO.sweepAfterMs[0]!);
+  await a.flush();
+  assert.equal(a.session.active, false, 'other audio is never left ducked');
+  // During the call: activation is refused, the prompt is lost (never kept for later)
+  a.session.failActivate = true;
+  a.speaker.speak('Turn left');
+  await a.flush();
+  assert.ok(!a.log.includes('speak:Turn left'));
+  assert.equal(a.jlog.filter((l) => l.action === 'failed' && l.stage === 'activate').length, 1);
+  // After it: the next prompt is spoken, and that's "resumed"
+  a.session.failActivate = false;
+  a.speaker.speak('Turn right');
+  await a.flush();
+  a.finish();
+  assert.ok(a.log.includes('speak:Turn right'));
+  assert.ok(a.actions().includes('resumed'));
+  assert.ok(!a.log.slice(a.log.indexOf('speak:Turn right')).includes('speak:Turn left'), 'never replayed');
+  // A prompt that never finishes is ended by the watchdog and released
+  a.advance(AUDIO.releaseDelayMs);
+  await a.flush();
+  a.speaker.speak('Stuck');
+  await a.flush();
+  a.advance(AUDIO.watchdogMaxMs);
+  await a.flush();
+  a.advance(AUDIO.releaseDelayMs);
+  await a.flush();
+  assert.ok(a.jlog.some((l) => l.action === 'interrupted' && l.how === 'watchdog'));
+  assert.equal(a.session.active, false);
+  assert.equal(a.speaker.busy, false);
+  // Coming back on screen also releases a session an interruption may have re-activated
+  a.speaker.setAppState('background');
+  a.session.active = true;
+  a.speaker.setAppState('active');
+  await a.flush();
+  assert.equal(a.session.active, false);
+});
+
+test('audio session: stopped while it was coming up, it is still let go; a session that cannot be set up falls back to the system one', async () => {
+  // A slow activation, and a reroute (stop) meanwhile
+  const a = audio3();
+  let release!: () => void;
+  const realSetActive = a.session.setActive;
+  a.session.setActive = (on: boolean) => on ? new Promise<void>((r) => { release = () => { void realSetActive(on).then(r); }; }) : realSetActive(on);
+  a.speaker.speak('Old route prompt');
+  await a.flush();
+  a.speaker.stop();
+  a.advance(AUDIO.releaseDelayMs);
+  release();
+  await a.flush();
+  a.advance(AUDIO.releaseDelayMs);
+  await a.flush();
+  assert.ok(!a.log.includes('speak:Old route prompt'), 'never spoken');
+  assert.equal(a.session.active, false, 'and the session is not left active');
+  // configure() fails (an unexpected session error): spoken on the system's session rather than not at all
+  const b = audio3();
+  b.session.configure = async () => { throw new Error('session error'); };
+  b.speaker.speak('Turn left');
+  await b.flush();
+  assert.deepEqual(b.log, ['speak:Turn left (system session)']);
+  assert.ok(b.jlog.some((l) => l.action === 'failed' && l.stage === 'configure'));
+});
+
+test('audio session: without one (Android, or a build without expo-audio) prompts are spoken as before', async () => {
+  const a = audio3({ session: false, background: false });
+  a.speaker.speak('Turn left');
+  await a.flush();
+  assert.deepEqual(a.log, ['speak:Turn left (system session)']);
+  assert.equal(a.speaker.background, false, 'iOS without the session: foreground only, as before');
+  a.finish();
+  a.advance(AUDIO.releaseDelayMs);
+  assert.deepEqual(a.log, ['speak:Turn left (system session)'], 'nothing to activate or release');
+  assert.equal(audio3({ session: false, background: true }).speaker.background, true, "Android: speech plays from the background as it is");
+});
+
+/** Voice guidance with background guidance and the audio controller, as NavigationContext wires them */
+function bgVoice3(o: { fetch?: (body: unknown) => Promise<ServerRoutes>; mode?: 'normal' | 'alerts' | 'off' } = {}) {
+  /** Prompts finish by themselves (each takes well under a fix's worth of driving) unless held */
+  const control = { hold: false };
+  const h = bgNav3({ fetch: o.fetch });
+  const said: Array<{ text: string; along: number | null; onScreen: boolean }> = [];
+  const audioLog: string[] = [];
+  const jlog: Array<Record<string, unknown>> = [];
+  let onScreen = true;
+  let current: SpeechEvents | null = null;
+  const session = { active: false, configure: async () => {}, setActive: async (on: boolean) => { session.active = on; audioLog.push(`active:${on}`); } };
+  const engine: SpeechEngine = {
+    speak: (text, _app, events) => {
+      // The previous prompt had finished long ago (each lasts well under a second of driving here)
+      said.push({ text, along: active3(h.s.state)?.progress?.along ?? null, onScreen });
+      current = events;
+      events.onStart();
+      if (!control.hold) queueMicrotask(() => { if (current === events) { current = null; events.onDone(); } });
+    },
+    stop: () => { audioLog.push('stop'); const e = current; current = null; e?.onStopped(); },
+  };
+  const speaker = new NavigationSpeaker({
+    engine, session, background: true,
+    setTimer: (fn, ms) => setTimeout(fn, ms), clearTimer: (t) => clearTimeout(t as ReturnType<typeof setTimeout>),
+    journal: { log: (event, data) => jlog.push({ event, ...data }) },
+  });
+  const voice = new VoiceGuidance({ session: h.s, speaker, now: () => h.clock.t, journal: { log: (event, data) => jlog.push({ event, ...data }) } });
+  voice.setBackgroundSpeech(speaker.background);
+  if (o.mode) voice.setMode(o.mode);
+  voice.attach();
+  /** The app's state, as NavigationContext passes it on */
+  const app = (state: 'active' | 'inactive' | 'background') => {
+    onScreen = state === 'active';
+    voice.setForeground(state === 'active');
+    speaker.setAppState(state);
+    h.bg.setAppState(state);
+  };
+  /** The prompt being spoken finishes now */
+  const finishSpeaking = () => { const e = current; current = null; e?.onDone(); };
+  return { ...h, voice, speaker, session, said, audioLog, jlog, app, control, finishSpeaking, texts: () => said.map((x) => x.text) };
+}
+/** Feeds fixes one at a time, letting each prompt finish (microtasks) before the next fix */
+async function walkAsync3(h: ReturnType<typeof bgVoice3>, fixes: GpsFix[], viaTask: boolean) {
+  for (const f of fixes) {
+    if (viaTask) h.task([f], 1);
+    else h.feed([f]);
+    await settle3();
+  }
+}
+const L_SAID3 = [
+  'Head north on Lake Road, then in 1000 yards, turn left onto Chestnut Hill',
+  'In half a mile, turn left onto Chestnut Hill',
+  'In a quarter of a mile, turn left onto Chestnut Hill',
+  'Turn left onto Chestnut Hill',
+  'Continue for 600 yards, then turn right onto Brow Top',
+  'In 300 yards, turn right onto Brow Top',
+  'Turn right onto Brow Top',
+  'In a quarter of a mile, you will arrive at your destination',
+  'You have arrived at your destination',
+];
+
+test('background voice: with the app in the background or the phone locked, every prompt fires at its threshold, once, as on screen', async () => {
+  for (const state of ['background', 'inactive'] as const) {
+    const h = bgVoice3();
+    void h.s.start({ route: voiceRoute3(), destination: N3_DEST, recording: 'navigation' });
+    await walkAsync3(h, walk3(0, 50, 1_000_000), false);
+    // Locked (background) or Control Centre / a call banner (inactive): off screen
+    h.app(state);
+    await walkAsync3(h, walk3(60, 1995, h.clock.t + 1000), true);
+    await walkAsync3(h, walk3(1996, 2000, h.clock.t + 1000, 2), true);
+    assert.equal(h.s.phase, 'arrived');
+    assert.deepEqual(h.texts(), L_SAID3, state);
+    assert.ok(h.said.slice(1).every((x) => !x.onScreen), 'spoken off screen');
+    // The same thresholds as on screen
+    const due = [1000 - 800, 1000 - 400, 1000 - 60, 1600 - 600, 1600 - 300, 1600 - 50, 2000 - 400];
+    for (let k = 1; k < 8; k++) {
+      const along = h.said[k]!.along!;
+      assert.ok(along >= due[k - 1]! - 0.5 && along < due[k - 1]! + 12, `${h.said[k]!.text}: ${along.toFixed(0)} m`);
+    }
+    // Each prompt: the session activated before it and released after
+    assert.equal(h.audioLog[0], 'active:true');
+    await new Promise((r) => setTimeout(r, AUDIO.releaseDelayMs + 50));
+    assert.equal(h.session.active, false, 'never left active: music back to full volume');
+    assert.ok(!h.jlog.some((l) => l.reason === 'background'), 'nothing cancelled for being off screen');
+  }
+});
+
+test('background voice: a gap in fixes off screen skips the prompts it made stale, and nothing is replayed', async () => {
+  const h = bgVoice3();
+  void h.s.start({ route: voiceRoute3(), destination: N3_DEST, recording: 'navigation' });
+  await walkAsync3(h, walk3(0, 150, 1_000_000), false);
+  h.app('background');
+  // No fixes for a while (a tunnel), then the car is 120 m from the turn: "In a quarter of a mile" would be wrong now
+  await walkAsync3(h, walk3(880, 900, h.clock.t + 50_000), true);
+  await walkAsync3(h, walk3(910, 990, h.clock.t + 1000), true);
+  const texts = h.texts();
+  assert.ok(!texts.includes('In a quarter of a mile, turn left onto Chestnut Hill'), 'stale: skipped');
+  assert.ok(!texts.includes('In half a mile, turn left onto Chestnut Hill'));
+  assert.equal(texts.filter((x) => x === 'Turn left onto Chestnut Hill').length, 1, 'the turn itself, once');
+  assert.equal(new Set(texts).size, texts.length);
+});
+
+test('background voice: a reroute off screen cancels the old route\'s speech, says "Updating route" once, then the new route\'s prompt', async () => {
+  const srv = routeServer3();
+  const h = bgVoice3({ fetch: srv.fetch });
+  void h.s.start({ route: voiceRoute3(), destination: N3_DEST, recording: 'navigation' });
+  await walkAsync3(h, walk3(0, 700, 1_000_000), false);
+  h.app('background');
+  const stops = h.audioLog.filter((x) => x === 'stop').length;
+  const off = offNorth3(h.clock.t + 1000);
+  let i = 0;
+  for (; i < off.length; i++) { h.task([off[i]!], 1); await settle3(); if (h.bodies.length) break; }
+  void stops;
+  assert.ok(h.jlog.some((l) => l.event === 'nav_voice' && l.action === 'cancelled' && l.reason === 'off_route'), "the old route's speech is cancelled");
+  // Still off route while the request is out: not said again
+  for (const f of off.slice(i + 1, i + 4)) { h.task([f], 1); await settle3(); }
+  assert.equal(h.texts().filter((x) => x === VOICE.updating).length, 1, 'once');
+  const cut = h.said.length;
+  srv.answer(serverRoutes3(freshVoice3()));
+  await settle3();
+  await settle3();
+  assert.ok(h.texts().slice(cut).every((x) => x.startsWith('NEW')), 'only the new route from here');
+  await walkAsync3(h, drive3(polyline3([[0, 1250], [0, 1500], [-600, 1500]]), { t0: h.clock.t + 1000, noise: 0 }), true);
+  const later = h.texts().slice(cut);
+  assert.ok(later.every((x) => !OLD_TEXTS3.includes(x)), 'never an old-route prompt');
+  assert.ok(later.includes('NEW now 1'));
+  assert.ok(h.said.slice(cut).every((x) => !x.onScreen));
+});
+
+test('background voice: Off stays silent, Alerts only stays alerts, and muting on screen holds with the phone locked', async () => {
+  const run = async (mode: 'normal' | 'alerts' | 'off', muteOnScreen = false) => {
+    const h = bgVoice3({ mode });
+    void h.s.start({ route: voiceRoute3(), destination: N3_DEST, recording: 'navigation' });
+    await walkAsync3(h, walk3(0, 50, 1_000_000), false);
+    if (muteOnScreen) h.voice.setMode('off');
+    h.app('background');
+    await walkAsync3(h, walk3(60, 1995, h.clock.t + 1000), true);
+    await walkAsync3(h, walk3(1996, 2000, h.clock.t + 1000, 2), true);
+    return { texts: h.texts(), activations: h.audioLog.filter((x) => x === 'active:true').length };
+  };
+  const off = await run('off');
+  assert.deepEqual(off.texts, []);
+  assert.equal(off.activations, 0, 'the session is never even activated');
+  assert.deepEqual((await run('alerts')).texts, ['Turn left onto Chestnut Hill', 'Turn right onto Brow Top', 'You have arrived at your destination']);
+  const muted = await run('normal', true);
+  assert.deepEqual(muted.texts, ['Head north on Lake Road, then in 1000 yards, turn left onto Chestnut Hill'], 'muted on screen, still muted when locked');
+});
+
+test('background voice: arrival off screen is spoken once, and finishing the drive is never held up by it', async () => {
+  const h = bgVoice3();
+  void h.s.start({ route: voiceRoute3(), destination: N3_DEST, recording: 'navigation' });
+  await walkAsync3(h, walk3(0, 1800, 1_000_000), false);
+  h.app('background');
+  const stopsBefore = h.audioLog.filter((x) => x === 'stop').length;
+  // The arrival prompt (the only one left) is still being spoken when the
+  // Drive screen ends navigation and finishes the drive
+  h.control.hold = true;
+  await walkAsync3(h, walk3(1810, 1995, h.clock.t + 1000), true);
+  h.task(walk3(1996, 2000, h.clock.t + 1000, 2), 1);
+  await settle3();
+  assert.equal(h.s.phase, 'arrived');
+  h.s.end('arrived');
+  assert.equal(h.s.phase, 'idle', 'navigation ends at once');
+  assert.equal(h.audioLog.filter((x) => x === 'stop').length, stopsBefore, 'the arrival is not cut off');
+  assert.equal(h.texts().filter((x) => /arrived at your destination/.test(x)).length, 1);
+  assert.equal(h.speaker.busy, true, 'still speaking while the drive finishes');
+  h.finishSpeaking();
+  await new Promise((r2) => setTimeout(r2, AUDIO.releaseDelayMs + 50));
+  assert.equal(h.session.active, false, 'released after the last word');
+});
+
+test('background voice: the voice engine and navigation are unchanged by the audio layer; it only plays', async () => {
+  // On screen, the same prompts at the same places as with the plain speaker (Phase 4)
+  const plain = voice3();
+  void plain.s.start({ route: voiceRoute3(), destination: N3_DEST });
+  plain.feed(walk3(0, 1995, 1_000_000));
+  plain.feed(walk3(1996, 2000, plain.clock.t + 1000, 2));
+  const h = bgVoice3();
+  void h.s.start({ route: voiceRoute3(), destination: N3_DEST });
+  await walkAsync3(h, walk3(0, 1995, 1_000_000), false);
+  await walkAsync3(h, walk3(1996, 2000, h.clock.t + 1000, 2), false);
+  assert.deepEqual(h.texts(), plain.texts());
+  assert.deepEqual(h.said.map((x) => x.along?.toFixed(1)), plain.said.map((x) => x.along?.toFixed(1)));
+  assert.deepEqual(h.phases, plain.phases);
+  // The audio layer knows nothing of routes, recording, sharing or the camera; voice keeps the decisions
+  const read = (rel: string) => readFileSync(toPath(new URL(rel, import.meta.url)), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+  const audioSrc = read('../lib/navigation/audioSession.ts');
+  assert.ok(!/session\.state|progress|route|Maneuver|startDrive|endDrive|liveLocation|presence|Camera|AsyncStorage|setItem/.test(audioSrc));
+  // Off screen no longer silences voice where the speaker can play there
+  const ctx = read('../context/NavigationContext.tsx');
+  assert.ok(/voice\.setBackgroundSpeech\(speaker\.background\);/.test(ctx));
+  assert.ok(/speaker\.setAppState\(state\);/.test(ctx));
+  const voiceSrc = read('../lib/navigation/voice.ts');
+  assert.ok(/if \(this\.backgroundSpeech\) return;/.test(voiceSrc));
+  assert.ok(/return this\.mode !== 'off' && \(this\.foreground \|\| this\.backgroundSpeech\);/.test(voiceSrc));
 });
 
 // ─── iOS build number: one source of truth (app.json ios.buildNumber) ───────

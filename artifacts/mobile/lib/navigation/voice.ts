@@ -27,11 +27,17 @@
 // route", once per time off route (and not again within a minute); the old
 // route's prompts stop. Arrival: once.
 //
-// Foreground only: leaving the foreground cancels speech and nothing is
-// queued while away (guidance itself carries on in the background,
-// background.ts). Coming back, prompts passed meanwhile are marked as done
-// silently; only the prompt at the next manoeuvre is said, and only if the
-// car still hasn't reached it. Then those still ahead, as usual.
+// Off screen: where the speaker can play with the app in the background or
+// the phone locked (backgroundSpeech: iOS with its audio session,
+// audioSession.ts; Android), prompts carry on exactly as on screen: the
+// same thresholds, once each, the same reroute and arrival handling. Being
+// off screen silences nothing there; an interruption (a call, Siri) only
+// loses the prompts it covered, which are never replayed. Where the speaker
+// can't (an app build without the audio session), it stays foreground only:
+// leaving the foreground cancels speech and nothing is queued while away;
+// coming back, prompts passed meanwhile are marked as done silently, only
+// the prompt at the next manoeuvre is said, and only if the car still hasn't
+// reached it. Then those still ahead, as usual.
 //
 // The diagnostics journal gets step numbers, prompt kinds and reasons only:
 // never the sentence, a road, the destination or a position.
@@ -92,6 +98,8 @@ export interface VoiceGuidanceDeps {
 export class VoiceGuidance {
   private mode: VoiceMode = 'normal';
   private foreground = true;
+  /** The speaker can play off screen: being in the background silences nothing */
+  private backgroundSpeech = false;
   /** Coming back to the foreground: prompts already passed are marked, not spoken */
   private silentCatchUp = false;
   /** Prompts spoken or passed, for the route below */
@@ -147,10 +155,17 @@ export class VoiceGuidance {
     }
   }
 
+  /** Whether the speaker can play with the app off screen (set once, from the speaker) */
+  setBackgroundSpeech(capable: boolean): void {
+    this.backgroundSpeech = capable;
+  }
+
   /** The app came to the foreground, or left it */
   setForeground(live: boolean): void {
     if (live === this.foreground) return;
     this.foreground = live;
+    // Spoken off screen too: nothing to stop, nothing to catch up
+    if (this.backgroundSpeech) return;
     if (!live) {
       this.cancel('background');
     } else {
@@ -217,7 +232,7 @@ export class VoiceGuidance {
   }
 
   private speaking(): boolean {
-    return this.mode !== 'off' && this.foreground;
+    return this.mode !== 'off' && (this.foreground || this.backgroundSpeech);
   }
 
   /** Called on every session change (fixes, phases, routes): cheap, no timers */
