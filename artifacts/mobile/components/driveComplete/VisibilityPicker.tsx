@@ -47,7 +47,7 @@ export default function VisibilityPicker({
             >
               <View style={styles.top}>
                 <View style={[styles.icon, selected && styles.iconOn]}>
-                  <Glyph sf={o.sf} ion={o.ion} size={20} color="#FFFFFF" />
+                  <Glyph sf={o.sf} ion={o.ion} size={18} color="#FFFFFF" />
                 </View>
                 <View style={[styles.radio, selected && styles.radioOn]}>
                   {selected && <View style={styles.radioDot} />}
@@ -65,12 +65,12 @@ export default function VisibilityPicker({
 }
 
 const styles = StyleSheet.create({
-  card: { borderRadius: 22, padding: 14, paddingTop: 16 },
-  title: { color: "#FFFFFF", fontSize: 19, fontWeight: "600" },
-  options: { flexDirection: "row", gap: 10, marginTop: 12 },
+  card: { borderRadius: 22, padding: 13, paddingTop: 15 },
+  title: { color: "#FFFFFF", fontSize: 17.5, fontWeight: "600" },
+  options: { flexDirection: "row", gap: 10, marginTop: 11 },
   option: {
     flex: 1,
-    minHeight: 84,
+    minHeight: 78,
     padding: 10,
     borderRadius: 18,
     borderWidth: 1,
@@ -88,9 +88,9 @@ const styles = StyleSheet.create({
   },
   top: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start" },
   icon: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: "rgba(255,255,255,0.08)",
@@ -107,5 +107,5 @@ const styles = StyleSheet.create({
   },
   radioOn: { borderColor: CYAN },
   radioDot: { width: 10, height: 10, borderRadius: 5, backgroundColor: CYAN },
-  optionTitle: { color: "#FFFFFF", fontSize: 15.5, fontWeight: "600", marginTop: 10 },
+  optionTitle: { color: "#FFFFFF", fontSize: 14.5, fontWeight: "600", marginTop: 9 },
 });

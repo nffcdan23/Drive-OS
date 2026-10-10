@@ -5,8 +5,8 @@ import { GlassSurface } from "@/components/Glass";
 import { Glyph } from "@/components/Glyph";
 import { LEVEL_XP } from "@/lib/driveRewards";
 
-const RING = 84;
-const STROKE = 7;
+const RING = 78;
+const STROKE = 6.5;
 
 /** Thousands separators without relying on the JS engine's Intl support. */
 function grouped(n: number): string {
@@ -90,7 +90,7 @@ export default function RewardsCard({
         accessibilityLabel={`${streakDays} day streak`}
         style={styles.streak}
       >
-        <Glyph sf="flame.fill" ion="flame" size={28} color="#FF8A3D" />
+        <Glyph sf="flame.fill" ion="flame" size={25} color="#FF8A3D" />
         <Text style={styles.streakValue}>{streakDays}</Text>
         <Text style={styles.streakLabel} numberOfLines={1}>Day Streak</Text>
       </View>
@@ -99,15 +99,15 @@ export default function RewardsCard({
 }
 
 const styles = StyleSheet.create({
-  card: { flexDirection: "row", alignItems: "center", borderRadius: 22, paddingVertical: 12, paddingLeft: 14, paddingRight: 8, gap: 14 },
+  card: { flexDirection: "row", alignItems: "center", borderRadius: 22, paddingVertical: 11, paddingLeft: 13, paddingRight: 8, gap: 13 },
   ring: { width: RING, height: RING, alignItems: "center", justifyContent: "center" },
-  xpValue: { color: "#FFFFFF", fontSize: 20, fontWeight: "700", maxWidth: RING - 22, fontVariant: ["tabular-nums"] },
-  xpLabel: { color: "rgba(214,224,234,0.72)", fontSize: 12, marginTop: 1 },
-  level: { flex: 1, minWidth: 0, gap: 9 },
-  levelTitle: { color: "#FFFFFF", fontSize: 17, fontWeight: "600" },
+  xpValue: { color: "#FFFFFF", fontSize: 18, fontWeight: "700", maxWidth: RING - 22, fontVariant: ["tabular-nums"] },
+  xpLabel: { color: "rgba(214,224,234,0.72)", fontSize: 11, marginTop: 1 },
+  level: { flex: 1, minWidth: 0, gap: 8 },
+  levelTitle: { color: "#FFFFFF", fontSize: 15.5, fontWeight: "600" },
   bar: { height: 7, borderRadius: 4, backgroundColor: "rgba(214,224,234,0.14)", overflow: "hidden" },
   barFill: { height: "100%", borderRadius: 4, backgroundColor: "#3FD6F5" },
-  levelXp: { color: "rgba(214,224,234,0.72)", fontSize: 13, fontVariant: ["tabular-nums"] },
+  levelXp: { color: "rgba(214,224,234,0.72)", fontSize: 12, fontVariant: ["tabular-nums"] },
   streak: {
     width: 92,
     alignItems: "center",
@@ -116,6 +116,6 @@ const styles = StyleSheet.create({
     borderLeftWidth: StyleSheet.hairlineWidth,
     borderLeftColor: "rgba(220,232,244,0.18)",
   },
-  streakValue: { color: "#FFFFFF", fontSize: 22, fontWeight: "700", marginTop: 4, fontVariant: ["tabular-nums"] },
-  streakLabel: { color: "rgba(214,224,234,0.78)", fontSize: 13 },
+  streakValue: { color: "#FFFFFF", fontSize: 20, fontWeight: "700", marginTop: 4, fontVariant: ["tabular-nums"] },
+  streakLabel: { color: "rgba(214,224,234,0.78)", fontSize: 12 },
 });
