@@ -28,8 +28,10 @@
 // route's prompts stop. Arrival: once.
 //
 // Foreground only: leaving the foreground cancels speech and nothing is
-// queued while away; coming back, prompts passed meanwhile are marked as
-// done silently, and only those still ahead are spoken.
+// queued while away (guidance itself carries on in the background,
+// background.ts). Coming back, prompts passed meanwhile are marked as done
+// silently; only the prompt at the next manoeuvre is said, and only if the
+// car still hasn't reached it. Then those still ahead, as usual.
 //
 // The diagnostics journal gets step numbers, prompt kinds and reasons only:
 // never the sentence, a road, the destination or a position.
@@ -57,6 +59,8 @@ export const VOICE = {
   staleShare: 0.25,
   /** The arrive prompt this close (m) is kept for the confirmed arrival */
   arrivalPromptWithinM: 60,
+  /** Coming back: the prompt at the next manoeuvre is still worth saying this far (m) or more before it */
+  relevantWithinM: 15,
   /** "Updating route" at most once in this long (ms) */
   offRouteGapMs: 60_000,
   /** Prompts logged per session (the journal is shared) */
@@ -92,6 +96,8 @@ export class VoiceGuidance {
   private silentCatchUp = false;
   /** Prompts spoken or passed, for the route below */
   private done = new Set<string>();
+  /** Of those, the ones passed without a word (off screen, or muted) */
+  private quiet = new Set<string>();
   private route: unknown = null;
   private routeKey = '';
   private sessionId: number | null = null;
@@ -152,7 +158,11 @@ export class VoiceGuidance {
     }
   }
 
-  /** Marks the prompts already passed as done, without a word */
+  /**
+   * Marks the prompts already passed as done, without a word; then says the
+   * prompt at the next manoeuvre if it was passed quietly and the car still
+   * hasn't reached it.
+   */
   private catchUpSilently() {
     this.silentCatchUp = true;
     try {
@@ -160,6 +170,27 @@ export class VoiceGuidance {
     } finally {
       this.silentCatchUp = false;
     }
+    this.sayCurrentIfStillRelevant();
+  }
+
+  private sayCurrentIfStillRelevant() {
+    const s = this.deps.session.state;
+    if (!this.speaking() || (s.phase !== 'navigating' && s.phase !== 'starting')) return;
+    const p = s.progress;
+    if (!p || p.onRoundabout || s.gps === 'lost') return;
+    const prompts = triggerable(p.next);
+    const j = prompts.length - 1;
+    if (j < 0 || promptKind(j, p.next.voice.length) !== 'immediate') return;
+    const key = this.keyOf(p.next.stepIndex, j);
+    if (!this.quiet.has(key)) return;
+    if (p.distanceToNextM < VOICE.relevantWithinM || p.distanceToNextM > prompts[j]!.distanceBeforeM) return;
+    this.quiet.delete(key);
+    this.say(prompts[j]!.text);
+    this.logPrompt({ action: 'spoken', step: p.next.stepIndex, prompt: j, kind: 'immediate', maneuver: p.next.kind, late: true });
+  }
+
+  private keyOf(step: number, prompt: number) {
+    return `${this.routeKey}|${step}|${prompt}`;
   }
 
   private log(event: string, data: Record<string, string | number | boolean | null>) {
@@ -202,6 +233,7 @@ export class VoiceGuidance {
         this.sessionId = null;
         this.route = null;
         this.done.clear();
+        this.quiet.clear();
       }
       return;
     }
@@ -212,6 +244,7 @@ export class VoiceGuidance {
       this.sessionId = s.sessionId;
       this.route = null;
       this.done.clear();
+      this.quiet.clear();
       this.arrivedFor = null;
       this.logs = 0;
     }
@@ -236,6 +269,7 @@ export class VoiceGuidance {
       this.route = s.route;
       this.routeKey = `${s.sessionId}|${s.route.routeId}`;
       this.done.clear();
+      this.quiet.clear();
       this.arrivalText = arrivalPrompt(s.route);
       // Anything still queued for the old route goes (off route, it already went: "Updating route" may finish)
       if (replaced && !offRoute(prevPhase)) this.cancel('reroute');
@@ -263,7 +297,7 @@ export class VoiceGuidance {
   private consider(next: Maneuver, distanceM: number, onRoundabout: boolean) {
     const prompts = triggerable(next);
     if (!prompts.length) return;
-    const key = (j: number) => `${this.routeKey}|${next.stepIndex}|${j}`;
+    const key = (j: number) => this.keyOf(next.stepIndex, j);
     // Circulating a roundabout: its own prompts are behind the car
     if (onRoundabout) {
       for (let j = 0; j < prompts.length; j++) this.done.add(key(j));
@@ -278,7 +312,16 @@ export class VoiceGuidance {
     if (due < 0) return;
     for (let j = 0; j <= due; j++) this.done.add(key(j));
     const prompt = prompts[due]!;
-    if (this.silentCatchUp || !this.speaking()) return;
+    if (!this.speaking()) {
+      // Passed without a word: remembered, so coming back can still say the turn itself if it's ahead
+      this.quiet.add(key(due));
+      return;
+    }
+    // Coming back (or unmuted): nothing that was passed (see sayCurrentIfStillRelevant)
+    if (this.silentCatchUp) {
+      this.quiet.add(key(due));
+      return;
+    }
     const kind = promptKind(due, next.voice.length);
     if (this.mode === 'alerts' && kind !== 'immediate') return;
     // Overshot by far (a gap in fixes): "in 400 yards" would be wrong now, unless it's the last word before the turn

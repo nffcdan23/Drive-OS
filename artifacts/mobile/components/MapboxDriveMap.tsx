@@ -73,6 +73,7 @@ import {
 import { LatestPoseWriter, sameFollowPose } from "@/lib/cameraWriter";
 import type { RoutePreviewStore } from "@/lib/navigation/previewStore";
 import type { NavigationSession } from "@/lib/navigation/session";
+import { useOnScreenSnapshot } from "@/hooks/useOnScreenSnapshot";
 import {
   ROUTE_COLORS,
   routePreviewFeatures,
@@ -382,9 +383,11 @@ const RouteLayers = memo(function RouteLayers({ store }: { store: RoutePreviewSt
  * location component.
  */
 const NavigationRouteLayers = memo(function NavigationRouteLayers({ session }: { session: NavigationSession }) {
-  const view = useSyncExternalStore(
+  // Held still in the background (background guidance keeps the session
+  // current); the line as it is now arrives in one update on return
+  const view = useOnScreenSnapshot(
     useCallback((fn: () => void) => session.subscribe(fn), [session]),
-    () => session.map,
+    useCallback(() => session.map, [session]),
   );
   const line = useMemo(
     () => ({

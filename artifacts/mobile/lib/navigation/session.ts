@@ -25,7 +25,9 @@
 // the car has left the route, automatically, from the car's position,
 // heading and speed (REROUTE: one request in flight, a cooldown after each
 // new route, a growing wait after a failure, a cap per ten minutes, only
-// while still off the route and with the app on screen). An answer that
+// while still off the route). The same in the background (fed the background
+// location task's fixes, lib/navigation/background.ts), so the route is
+// right when the app comes back. An answer that
 // comes after the car is back on the route, or after navigation ended, is
 // dropped. A failed update keeps the old route.
 //
@@ -472,12 +474,13 @@ export class NavigationSession {
   /**
    * Off the route (confirmed by the detector) on this fix: request a new
    * route from it, unless one is already on its way, the cooldown or the
-   * wait after a failure hasn't passed, the cap is reached, or the app isn't
-   * on screen. The next confirmed-off fix tries again.
+   * wait after a failure hasn't passed, or the cap is reached. On screen or
+   * off it (background guidance), with the same limits. The next
+   * confirmed-off fix tries again.
    */
   private maybeAutoReroute(fix: GpsFix) {
     const s = this.current;
-    if (s.phase !== 'offRoute' || this.detector.state !== 'off' || !this.foreground) return;
+    if (s.phase !== 'offRoute' || this.detector.state !== 'off') return;
     const now = this.deps.now();
     if (now < this.nextAutoAt || now - fix.time > REROUTE.maxFixAgeMs) return;
     this.autoTimes = this.autoTimes.filter((t) => now - t < REROUTE.windowMs);

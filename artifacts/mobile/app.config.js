@@ -143,9 +143,10 @@ module.exports = ({ config }) => {
         NSLocationWhenInUseUsageDescription: `${name} uses your location to show your position on the map and to record your drives.`,
         // "Always": asked for when the first drive starts, so a drive keeps
         // recording while you use other apps or lock your phone. Only used
-        // between Start Drive and End Drive.
-        NSLocationAlwaysAndWhenInUseUsageDescription: `${name} records the route of a drive you've started while you use other apps or your phone is locked. Location is only used in the background until you end the drive.`,
-        NSLocationAlwaysUsageDescription: `${name} records the route of a drive you've started while you use other apps or your phone is locked. Location is only used in the background until you end the drive.`,
+        // between Start Drive and End Drive, and (with Always already
+        // allowed; navigation never asks) while navigation is guiding.
+        NSLocationAlwaysAndWhenInUseUsageDescription: `${name} records the route of a drive you've started, and keeps navigation directions up to date, while you use other apps or your phone is locked. Location is only used in the background until you end the drive or navigation.`,
+        NSLocationAlwaysUsageDescription: `${name} records the route of a drive you've started, and keeps navigation directions up to date, while you use other apps or your phone is locked. Location is only used in the background until you end the drive or navigation.`,
         NSPhotoLibraryUsageDescription: `${name} needs access to your photos to set your vehicle and profile pictures.`,
         NSPhotoLibraryAddUsageDescription: `${name} needs to save journey photos to your library.`,
         // Required, but never shown: expo-location compiles Core Motion

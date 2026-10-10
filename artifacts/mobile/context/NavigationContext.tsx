@@ -29,6 +29,13 @@
  * it): it speaks Mapbox's prompts while the app is in the foreground and
  * stops the moment it isn't. Its preference (Normal / Alerts only / Off) is
  * kept on this device for this user (lib/navigation/voicePrefs.ts).
+ *
+ * Background guidance (lib/navigation/background.ts): with the app off screen
+ * or the phone locked, navigation is fed the fixes of the one background
+ * location task (the drive recorder's; lib/backend/sharedLocationUpdates), so
+ * progress, rerouting and arrival carry on. The guidance UI and the map's
+ * route line hold still in the background and catch up in one update on
+ * return (hooks/useOnScreenSnapshot); the camera is never touched.
  */
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { AppState } from 'react-native';
@@ -42,6 +49,10 @@ import { RecentDestinations, type RecentDestination } from '@/lib/navigation/rec
 import { DestinationSearch, type SearchState } from '@/lib/navigation/search';
 import { NavigationSession, type EndReason, type NavigationState, type NavPhase } from '@/lib/navigation/session';
 import { startFromPreview, type NavigationRecorder } from '@/lib/navigation/startNavigation';
+import { BackgroundNavigation, type BackgroundFix } from '@/lib/navigation/background';
+import { sharedLocation } from '@/lib/driveBackgroundLocation';
+import { useOnScreenSnapshot } from '@/hooks/useOnScreenSnapshot';
+import { msToKmh } from '@/lib/units';
 import { createSpeaker } from '@/lib/navigation/speech';
 import { VoiceGuidance, type VoiceMode } from '@/lib/navigation/voice';
 import { VoicePreferences } from '@/lib/navigation/voicePrefs';
@@ -69,6 +80,8 @@ interface NavigationContextValue {
   recentPosition(): LatLng | null;
   recents: RecentDestinations;
   voicePrefs: VoicePreferences;
+  /** The newest fix navigation was given (screen or background), if any */
+  latestFix(): BackgroundFix | null;
 }
 
 const NavigationContext = createContext<NavigationContextValue | null>(null);
@@ -131,18 +144,49 @@ export function NavigationProvider({ userId, children }: { userId: string; child
       detach();
     };
   }, [session, voicePrefs]);
-  const lastFix = useRef<{ origin: RouteOrigin; time: number } | null>(null);
+  const lastFix = useRef<{ origin: RouteOrigin; time: number; fix: BackgroundFix } | null>(null);
 
   const noteFix = useCallback<NavigationContextValue['noteFix']>((fix) => {
+    // The screen's watcher and the background task can both deliver around
+    // a switch: each moment once, in order
+    if (lastFix.current && fix.time <= lastFix.current.time) return;
     const coordinate: LatLng = { latitude: fix.latitude, longitude: fix.longitude };
     const moving = fix.speedKmh >= HEADING_MIN_KMH && fix.headingDeg != null && fix.headingDeg >= 0;
-    lastFix.current = { origin: { coordinate, headingDeg: moving ? fix.headingDeg : null }, time: fix.time };
+    lastFix.current = {
+      origin: { coordinate, headingDeg: moving ? fix.headingDeg : null },
+      time: fix.time,
+      fix: { ...coordinate, speedMs: fix.speedMs, headingDeg: fix.headingDeg, accuracyM: fix.accuracyM, timestamp: fix.time },
+    };
     store.noteFix(coordinate, fix.time);
     session.noteFix({
       latitude: fix.latitude, longitude: fix.longitude, accuracyM: fix.accuracyM,
       speedMs: fix.speedMs, headingDeg: fix.headingDeg, time: fix.time,
     });
   }, [store, session]);
+
+  // Background guidance: the background task's fixes, while the app is off screen
+  useEffect(() => {
+    const background = new BackgroundNavigation({
+      session,
+      source: sharedLocation,
+      feed: (f) => noteFix({
+        latitude: f.latitude, longitude: f.longitude,
+        speedKmh: msToKmh(f.speedMs),
+        speedMs: f.speedMs, headingDeg: f.headingDeg ?? null, accuracyM: f.accuracyM ?? null, time: f.timestamp,
+      }),
+      now: Date.now,
+      journal,
+    });
+    background.setAppState(AppState.currentState);
+    const app = AppState.addEventListener('change', (state) => background.setAppState(state));
+    const detach = background.attach();
+    return () => {
+      app.remove();
+      detach();
+    };
+  }, [session, noteFix]);
+
+  const latestFix = useCallback(() => lastFix.current?.fix ?? null, []);
 
   const currentOrigin = useCallback(async (): Promise<RouteOrigin> => {
     const recent = lastFix.current;
@@ -163,8 +207,8 @@ export function NavigationProvider({ userId, children }: { userId: string; child
   useEffect(() => { void recents.load(); }, [recents]);
 
   const value = useMemo(
-    () => ({ store, session, noteFix, currentOrigin, recentPosition, recents, voicePrefs }),
-    [store, session, noteFix, currentOrigin, recentPosition, recents, voicePrefs],
+    () => ({ store, session, noteFix, currentOrigin, recentPosition, recents, voicePrefs, latestFix }),
+    [store, session, noteFix, currentOrigin, recentPosition, recents, voicePrefs, latestFix],
   );
   return <NavigationContext.Provider value={value}>{children}</NavigationContext.Provider>;
 }
@@ -276,10 +320,22 @@ export function useNavigationPhase(): NavPhase {
   return useSyncExternalStore(useCallback((fn: () => void) => session.subscribe(fn), [session]), () => session.phase);
 }
 
-/** The whole navigation state (it changes with every fix): for the guidance banner and bar only */
+/**
+ * The whole navigation state (it changes with every fix): for the guidance
+ * banner and bar only. Held still while the app is in the background (no
+ * renders there), and current again the moment it's back.
+ */
 export function useNavigationState(): NavigationState {
   const session = useNavigationSession();
-  return useSyncExternalStore(useCallback((fn: () => void) => session.subscribe(fn), [session]), () => session.state);
+  return useOnScreenSnapshot(
+    useCallback((fn: () => void) => session.subscribe(fn), [session]),
+    useCallback(() => session.state, [session]),
+  );
+}
+
+/** The newest fix navigation has (on screen or from the background), for the camera on coming back */
+export function useLatestNavigationFix(): () => BackgroundFix | null {
+  return useNavigation().latestFix;
 }
 
 /**

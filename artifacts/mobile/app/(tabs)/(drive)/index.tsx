@@ -74,6 +74,7 @@ import {
 } from "@/lib/locationSmoothing";
 import {
   canPreviewRoutes,
+  useLatestNavigationFix,
   useNavigationPhase,
   useNavigationSession,
   useNoteRouteFix,
@@ -575,6 +576,7 @@ export default function MapScreen() {
   // only: recording, the arrow and sharing keep the raw positions.
   const navSession = useNavigationSession();
   const navPhase = useNavigationPhase();
+  const latestNavigationFix = useLatestNavigationFix();
   const navigating = USING_MAPBOX && navPhase !== "idle";
   // While guiding, the follow camera turns with the car and takes its zoom
   // from speed and the next turn (lib/navigation/guidanceCamera)
@@ -1047,8 +1049,14 @@ export default function MapScreen() {
     if (!prev.live && next.live) {
       mapboxRef.current?.setVisualsLive(true);
       const now = Date.now();
-      // Background tracking kept recording: start from its newest fix
-      const fix = latestDriveFix();
+      // Background tracking kept recording (or guidance kept following the
+      // car): start from the newest fix, never from where the app was left
+      const driveFix = latestDriveFix();
+      const navFix = navSession.guiding ? latestNavigationFix() : null;
+      const fix =
+        navFix && (!driveFix || navFix.timestamp > driveFix.timestamp)
+          ? navFix
+          : driveFix;
       if (fix && fix.timestamp > lastScreenFixAtRef.current) {
         locationSmoother.addFix(
           {

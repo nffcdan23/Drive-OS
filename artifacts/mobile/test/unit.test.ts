@@ -5794,7 +5794,7 @@ test('the journal is wired in: launch noted first, fatal JS errors saved synchro
   assert.match(diag, /setGlobalHandler\(\(error, isFatal\) => \{\s*if \(isFatal\) \{\s*try \{\s*SecureStore\.setItem\(LAST_FATAL_KEY/);
   assert.match(diag, /previous\(error, isFatal\);/);
   assert.match(diag, /journal\.log\('fatal_js_error'/);
-  assert.match(readFileSync(join(MOBILE, 'lib/driveBackgroundLocation.ts'), 'utf8'), /new BackgroundDriveRecorder\(\{ store: deviceStorage, updates, journal \}\)/);
+  assert.match(readFileSync(join(MOBILE, 'lib/driveBackgroundLocation.ts'), 'utf8'), /new BackgroundDriveRecorder\(\{\s*store: deviceStorage,\s*updates: sharedLocation\.drive,\s*journal,/);
   assert.match(readFileSync(join(MOBILE, 'context/AppContext.tsx'), 'utf8'), /tracker: driveTracker, journal,/);
 });
 
@@ -8019,21 +8019,22 @@ test('auto reroute: a failure keeps the old route ("Route update unavailable"); 
   assert.equal(st.canRetry, false);
 });
 
-test('auto reroute: stale answers are dropped; never while off screen; slow cars send no heading', async () => {
+test('auto reroute: stale answers are dropped; off screen too (background guidance); slow cars send no heading', async () => {
   // Ended while a request is in flight: its answer does nothing
   const srv = routeServer3();
   const h = nav3Session({ fetch: srv.fetch });
   void h.s.start({ route: L_ROUTE(), destination: N3_DEST });
   h.feed(drive3(L_PTS, { to: 700 }));
-  // Off screen (the app in the background): off route, but no request
+  // Off screen (the app in the background, fed by the background task):
+  // the same confirmation, one request
   h.s.setForeground(false);
   const off = offNorth3(h.clock.t + 1000);
   feedWatching3(h, off.slice(0, 40));
-  assert.equal(h.s.phase, 'offRoute');
-  assert.equal(h.bodies.length, 0, 'nothing requested off screen');
+  assert.ok(h.phases.includes('offRoute'));
+  assert.equal(h.bodies.length, 1, 'off screen: one request, as on screen');
   h.s.setForeground(true);
   feedWatching3(h, off.slice(40, 42));
-  assert.equal(h.bodies.length, 1, 'back on screen and still off route: one request');
+  assert.equal(h.bodies.length, 1, 'back on screen while it is out: still one');
   h.s.end('user');
   srv.answer(serverRoutes3(FRESH3()));
   await settle3();
@@ -8947,6 +8948,346 @@ test('voice native impact: expo-speech only, own iOS speech session, British Eng
   // Foreground only, in the context: anything but "active" is quiet
   const ctx = read('../context/NavigationContext.tsx');
   assert.ok(/AppState\.addEventListener\('change', \(state\) => voice\.setForeground\(state === 'active'\)\)/.test(ctx));
+});
+
+// ─── Navigation: background guidance ────────────────────────────────────────
+// One background location stream (the recorder's task), read by navigation
+// off screen: progress, rerouting and arrival carry on; nothing is drawn,
+// spoken or stored there; recording is unchanged.
+
+import { SharedLocationUpdates, type LocationUser, type NativeLocationUpdates } from '@/lib/backend/sharedLocationUpdates';
+import { BackgroundNavigation, type BackgroundFix } from '@/lib/navigation/background';
+
+/** The platform's background updates, recording which user started them */
+class FakeNativeUpdates implements NativeLocationUpdates {
+  running = false;
+  starts: LocationUser[] = [];
+  stops = 0;
+  relabels: LocationUser[] = [];
+  /** What starting for navigation answers (navigation never asks for access) */
+  navigationAnswer: 'on' | 'denied' = 'on';
+  async start(user: LocationUser) {
+    this.starts.push(user);
+    if (user === 'navigation' && this.navigationAnswer !== 'on') return this.navigationAnswer;
+    this.running = true;
+    return 'on' as const;
+  }
+  async stop() { this.stops++; this.running = false; }
+  async isRunning() { return this.running; }
+  async relabel(user: LocationUser) { this.relabels.push(user); }
+}
+
+/** CloudSync and the recorder on the shared updates, as driveBackgroundLocation wires them */
+function sharedRecorderApp() {
+  const store = new MemoryStore();
+  const clock = { t: Date.now() - 60 * 60_000 };
+  const server = new FakeServer();
+  const native = new FakeNativeUpdates();
+  // eslint-disable-next-line prefer-const
+  let tracker: BackgroundDriveRecorder;
+  const shared = new SharedLocationUpdates(native, { driveInUse: async () => (await tracker.running()) !== null });
+  tracker = new BackgroundDriveRecorder({ store, updates: shared.drive, now: () => clock.t, othersUsingUpdates: () => shared.navigationActive });
+  let id = 0;
+  const app = new CloudSync({
+    ep: server.ep(), store, userId: 'u1', publishableKey: 'sb_publishable_x', newId: () => `id-${++id}-${Math.random()}`,
+    timezone: () => 'UTC', now: () => clock.t, tracker,
+    prepareFile: async () => ({ body: new Uint8Array([1]), size: 1, mimeType: 'image/jpeg' }),
+  });
+  return { app, tracker, shared, native, store, clock, server };
+}
+
+test('background location: navigation reads the recording\'s own updates; the end of a drive mid-route keeps them for navigation', async () => {
+  const b = sharedRecorderApp();
+  await b.app.start();
+  await b.app.startDrive(null);
+  await settle();
+  assert.deepEqual(b.native.starts, ['drive'], 'the drive starts them, as before');
+  // Navigating with the drive: no second stream, nothing started
+  assert.equal(await b.shared.holdForNavigation(false), 'shared');
+  assert.deepEqual(b.native.starts, ['drive']);
+  for (let s = 0; s < 30; s++) { b.clock.t += 1000; b.app.addFix(roadFix(b.clock, s)); }
+  // The drive is finished from the panel; navigation carries on
+  await b.app.endDrive();
+  assert.equal(b.native.running, true, 'kept on for navigation');
+  assert.equal(b.native.stops, 0);
+  assert.deepEqual(b.native.relabels, ['navigation'], "Android's notification says Navigating now");
+  // Background fixes with no drive: not recorded, and not taken for leftover updates
+  b.clock.t += 1000;
+  await b.tracker.deliver([roadFix(b.clock, 31)]);
+  assert.equal(b.native.running, true);
+  assert.equal(b.app.isDriving, false);
+  // Navigation ends: nothing uses them, they stop
+  await b.shared.releaseForNavigation();
+  assert.equal(b.native.running, false);
+  assert.equal(b.native.stops, 1);
+  // Without navigation, the recorder behaves exactly as before: leftover updates are stopped
+  b.native.running = true;
+  await b.tracker.deliver([roadFix(b.clock, 32)]);
+  assert.equal(b.native.running, false, 'leftover updates with no drive and no navigation: stopped');
+});
+
+test('background location: navigation starts updates only with no recording alongside, never asks, and never stops a drive\'s', async () => {
+  const b = sharedRecorderApp();
+  await b.app.start();
+  // Passenger Mode (no recording): navigation starts them, with access already given
+  assert.equal(await b.shared.holdForNavigation(true), 'started');
+  assert.deepEqual(b.native.starts, ['navigation']);
+  // A drive starts meanwhile: the same updates, now the drive's
+  await b.app.startDrive(null);
+  await settle();
+  assert.deepEqual(b.native.starts, ['navigation', 'drive']);
+  // Navigation ends: the drive still needs them
+  await b.shared.releaseForNavigation();
+  assert.equal(b.native.running, true, 'a drive in progress keeps them');
+  for (let s = 0; s < 30; s++) { b.clock.t += 1000; b.app.addFix(roadFix(b.clock, s)); }
+  await b.app.endDrive();
+  assert.equal(b.native.running, false, 'and they stop when it ends, as before');
+  // No access (navigation never asks): no updates, navigation stays on screen only
+  const c = sharedRecorderApp();
+  c.native.navigationAnswer = 'denied';
+  assert.equal(await c.shared.holdForNavigation(true), 'denied');
+  assert.equal(c.native.running, false);
+  await c.shared.releaseForNavigation();
+  assert.equal(c.native.stops, 1, 'nothing left half-started');
+  // The app's adapter: navigation only reads permissions, never requests them
+  const src = readFileSync(toPath(new URL('../lib/driveBackgroundLocation.ts', import.meta.url)), 'utf8');
+  const access = src.slice(src.indexOf('async function navigationAccess'), src.indexOf('const updates: NativeLocationUpdates'));
+  assert.ok(/getForegroundPermissionsAsync/.test(access) && /hasBackground\(\)/.test(access));
+  assert.ok(!/request|ensureBackgroundAccess/.test(access), 'navigation never prompts');
+  assert.ok(/if \(Platform\.OS === 'android'\) return AppState\.currentState === 'active';/.test(access), 'Android services start from the screen only');
+  // The task: navigation reads first, then the recorder exactly as before
+  assert.ok(/sharedLocation\.deliver\(fixes\);\s*\/\/ Awaited, so the system keeps the app awake until the fixes are stored\.\s*await driveTracker\.deliver\(fixes\);/.test(src));
+  assert.equal((src.match(/startLocationUpdatesAsync\(/g) ?? []).length, 3, 'one task: drive, navigation, relabel');
+  assert.equal((src.match(/watchPositionAsync|defineTask</g) ?? []).length, 1, 'one task definition, no watcher');
+  // A reader's failure never reaches recording
+  const shared = new SharedLocationUpdates(new FakeNativeUpdates(), { driveInUse: async () => false });
+  const got: GpsFix[][] = [];
+  shared.subscribe(() => { throw new Error('reader broke'); });
+  shared.subscribe((f) => got.push(f));
+  const batch = [roadFix({ t: 1 }, 1)];
+  shared.deliver(batch);
+  assert.equal(got.length, 1);
+  assert.notEqual(got[0]![0], batch[0], 'readers get copies');
+});
+
+/** Navigation with background guidance on a fake background task */
+function bgNav3(opts: { fetch?: (body: unknown) => Promise<ServerRoutes> } = {}) {
+  const h = nav3Session(opts);
+  const listeners = new Set<(f: BackgroundFix[]) => void>();
+  const src = {
+    holds: [] as boolean[],
+    releases: 0,
+    holdForNavigation: async (start: boolean) => { src.holds.push(start); return start ? 'started' : 'shared'; },
+    releaseForNavigation: async () => { src.releases++; },
+    subscribe: (fn: (f: BackgroundFix[]) => void) => { listeners.add(fn); return () => { listeners.delete(fn); }; },
+  };
+  const logs: Array<Record<string, unknown>> = [];
+  let lastTime = -Infinity;
+  const bg = new BackgroundNavigation({
+    session: h.s,
+    source: src,
+    // As NavigationContext.noteFix: each moment once, in order
+    feed: (f) => {
+      if (f.timestamp <= lastTime) return;
+      lastTime = f.timestamp;
+      h.s.noteFix({ latitude: f.latitude, longitude: f.longitude, accuracyM: f.accuracyM ?? null, speedMs: f.speedMs, headingDeg: f.headingDeg ?? null, time: f.timestamp });
+    },
+    now: () => h.clock.t,
+    journal: { log: (event, data) => logs.push({ event, ...data }) },
+  });
+  bg.attach();
+  const toBg = (f: GpsFix): BackgroundFix => ({ latitude: f.latitude, longitude: f.longitude, speedMs: f.speedMs, headingDeg: f.headingDeg, accuracyM: f.accuracyM, timestamp: f.time });
+  /** The task delivering `fixes` in batches (iOS defers them a few seconds) */
+  const task = (fixes: GpsFix[], batch = 5) => {
+    for (let i = 0; i < fixes.length; i += batch) {
+      const chunk = fixes.slice(i, i + batch);
+      h.advance(Math.max(0, chunk[chunk.length - 1]!.time - h.clock.t));
+      for (const fn of [...listeners]) fn(chunk.map(toBg));
+    }
+  };
+  return { ...h, bg, src, logs, task, bgLogs: () => logs.filter((l) => l.event === 'nav_background') };
+}
+
+test('background guidance: locked or in another app, navigation carries on from the background task\'s fixes; on screen they\'re ignored', async () => {
+  const h = bgNav3();
+  void h.s.start({ route: L_ROUTE(), destination: N3_DEST, recording: 'navigation' });
+  await settle3();
+  h.feed(drive3(L_PTS, { to: 300 }));
+  const fullLine = h.s.map.remaining!.length;
+  // On screen: the Drive screen's watcher feeds navigation; the task's fixes are ignored
+  h.task(drive3(L_PTS, { from: 310, to: 400, t0: h.clock.t + 1000 }));
+  assert.equal(h.bg.fed, 0);
+  const at = active3(h.s.state)!.progress!.along;
+  // Locked: still navigating, fed by the task
+  h.bg.setAppState('background');
+  assert.equal(h.s.phase, 'navigating', 'locking the phone never ends navigation');
+  h.task(drive3(L_PTS, { from: at + 13, to: 1300, t0: h.clock.t + 1000 }));
+  const st = active3(h.s.state)!;
+  assert.equal(h.s.phase, 'navigating');
+  assert.ok(st.progress!.along > 1250, `progress ${st.progress!.along.toFixed(0)} m`);
+  assert.equal(st.progress!.stepIndex, 1, 'the left turn was passed in the background');
+  assert.equal(st.progress!.next.instruction, 'Turn right onto Brow Top');
+  assert.ok(h.s.map.remaining!.length < fullLine / 2, 'the travelled line keeps being consumed');
+  assert.ok(h.bg.fed > 60);
+  // Back on screen: the current state is there at once; nothing stale
+  h.bg.setAppState('active');
+  const logs = h.bgLogs();
+  assert.deepEqual(logs.map((l) => l.action), ['location', 'entered', 'fixes', 'step', 'returned']);
+  const returned = logs[logs.length - 1]!;
+  assert.equal(returned.steps, 1);
+  assert.ok((returned.fixes as number) > 60);
+  // Inactive (a call banner, Control Centre) counts as off screen for the task's fixes too
+  h.bg.setAppState('inactive');
+  const fed = h.bg.fed;
+  h.task(drive3(L_PTS, { from: 1310, to: 1400, t0: h.clock.t + 1000 }));
+  assert.ok(h.bg.fed > fed);
+});
+
+test('background guidance: off route off screen reroutes with the same confirmation, one request, cooldown and stale answers dropped', async () => {
+  const srv = routeServer3();
+  const h = bgNav3({ fetch: srv.fetch });
+  void h.s.start({ route: L_ROUTE(), destination: N3_DEST, recording: 'navigation' });
+  h.feed(drive3(L_PTS, { to: 600 }));
+  h.bg.setAppState('background');
+  // One wild fix in a batch: nothing
+  h.task([fix3(120, 620, h.clock.t + 1000, { headingDeg: 0 }), ...drive3(L_PTS, { from: 630, to: 700, t0: h.clock.t + 2000 })]);
+  assert.equal(h.bodies.length, 0);
+  assert.equal(h.s.phase, 'navigating');
+  // Missing the turn: confirmed off route, one request, however many batches follow
+  const off = offNorth3(h.clock.t + 1000);
+  h.task(off.slice(0, 40));
+  assert.equal(h.bodies.length, 1);
+  h.task(off.slice(40));
+  assert.equal(h.bodies.length, 1, 'one request at a time');
+  const oldRoute = active3(h.s.state)!.route;
+  srv.answer(serverRoutes3(FRESH3()));
+  await settle3();
+  assert.notEqual(active3(h.s.state)!.route, oldRoute, 'the new route is ready for the return');
+  assert.equal(h.s.map.route, active3(h.s.state)!.route);
+  const doneAt = h.clock.t;
+  // Straight off the new route too: the cooldown holds off screen as on screen
+  const y = (off[off.length - 1]!.latitude - N3_BASE.latitude) * N3_M;
+  h.task(drive3(polyline3([[0, y], [700, y]]), { t0: h.clock.t + 1000, noise: 0 }), 1);
+  assert.equal(h.bodies.length, 2);
+  const second = h.bgLogs().filter((l) => l.action === 'reroute' && l.result === 'requested').length;
+  assert.equal(second, 2);
+  assert.ok(h.clock.t - doneAt >= REROUTE.cooldownMs);
+  // Back on the old line before the answer: dropped, the route stays
+  const now = active3(h.s.state)!.route;
+  h.task(drive3(polyline3([[0, 1250], [0, 1500], [-600, 1500]]), { t0: h.clock.t + 1000, noise: 0 }), 1);
+  srv.answer(serverRoutes3(L_ROUTE()));
+  await settle3();
+  assert.equal(active3(h.s.state)!.route, now, 'stale answer dropped');
+  const results = h.bgLogs().filter((l) => l.action === 'reroute').map((l) => l.result);
+  assert.deepEqual(results, ['requested', 'ok', 'requested', 'dropped']);
+});
+
+test('background guidance: backoff after failures holds off screen too', async () => {
+  const srv = routeServer3();
+  const h = bgNav3({ fetch: srv.fetch });
+  void h.s.start({ route: L_ROUTE(), destination: N3_DEST, recording: 'navigation' });
+  h.feed(drive3(L_PTS, { to: 700 }));
+  h.bg.setAppState('background');
+  const off = offNorth3(h.clock.t + 1000, 720 + 13 * 120);
+  const times: number[] = [];
+  for (let i = 0; i < off.length; i++) {
+    const n = h.bodies.length;
+    h.task([off[i]!], 1);
+    if (h.bodies.length > n) { times.push(h.clock.t); srv.fail('offline'); await settle3(); }
+  }
+  assert.ok(times.length >= 3 && times.length <= 4, `${times.length} requests in two minutes`);
+  assert.ok(times[1]! - times[0]! >= 10_000 && times[2]! - times[1]! >= 20_000, 'the waits grow, off screen as on screen');
+  assert.equal(active3(h.s.state)!.updateFailed, true);
+});
+
+test('background guidance: arrival off screen; the updates are let go; the drive finishes the usual way only if navigation started it', () => {
+  for (const recording of ['navigation', 'existing', 'none'] as const) {
+    const h = bgNav3();
+    void h.s.start({ route: L_ROUTE(), destination: N3_DEST, recording });
+    assert.deepEqual(h.src.holds, [recording === 'none'], 'started for navigation only with no recording alongside');
+    h.feed(drive3(L_PTS, { to: 500 }));
+    h.bg.setAppState('background');
+    h.task(drive3(L_PTS, { from: 513, t0: h.clock.t + 1000 }));
+    assert.equal(h.s.phase, 'arrived', recording);
+    assert.equal((h.s.state as { recording: string }).recording, recording, 'the Drive screen reads this, as on screen');
+    assert.equal(h.src.releases, 1, 'nothing to guide: the updates are let go');
+    assert.ok(h.bgLogs().some((l) => l.action === 'arrival' && l.recording === recording));
+    // Fixes after arrival do nothing
+    const fed = h.bg.fed;
+    h.task(drive3(L_PTS, { from: 1990, t0: h.clock.t + 1000 }));
+    assert.equal(h.bg.fed, fed);
+  }
+  // The Drive screen's arrival effect is the same on screen or off: it ends
+  // navigation and finishes only a drive navigation started, through End Drive
+  const drive = readFileSync(toPath(new URL('../app/(tabs)/(drive)/index.tsx', import.meta.url)), 'utf8');
+  assert.ok(/st\.recording !== "navigation"\) return;\s*navSession\.end\("arrived"\);\s*endDriveRef\.current\(\);/.test(drive));
+  // The recording finished from the panel mid-route: navigation asks for the updates itself
+  const r = bgNav3();
+  void r.s.start({ route: L_ROUTE(), destination: N3_DEST, recording: 'navigation' });
+  r.s.recordingEnded();
+  assert.deepEqual(r.src.holds, [false, true]);
+  r.s.end('user');
+  assert.equal(r.src.releases, 1);
+});
+
+test('background guidance and voice: nothing is spoken off screen; back on screen only the word at a turn still ahead', () => {
+  const run = (backAt: number) => {
+    const h = bgNav3();
+    const said: string[] = [];
+    const voice = new VoiceGuidance({ session: h.s, speaker: { speak: (t) => said.push(t), stop: () => {} }, now: () => h.clock.t });
+    voice.attach();
+    void h.s.start({ route: voiceRoute3(), destination: N3_DEST, recording: 'navigation' });
+    h.feed(walk3(0, 150, 1_000_000));
+    const before = said.length;
+    voice.setForeground(false);
+    h.bg.setAppState('background');
+    h.task(walk3(160, backAt, h.clock.t + 1000));
+    assert.equal(said.length, before, 'nothing spoken (or queued) in the background');
+    voice.setForeground(true);
+    h.bg.setAppState('active');
+    return said.slice(before);
+  };
+  assert.deepEqual(run(700), [], 'prompts passed while away are not replayed');
+  assert.deepEqual(run(950), ['Turn left onto Chestnut Hill'], 'the turn is 50 m ahead: that one is still worth saying');
+  assert.deepEqual(run(995), [], 'at the turn itself: too late, nothing');
+  assert.deepEqual(run(1200), [], 'past it: the next turn\'s prompts were passed too, silently');
+});
+
+test('background guidance: the same session as on screen, nothing drawn, spoken, stored or shared from it', () => {
+  // Fed one fix at a time, background guidance gives exactly the on-screen states
+  const a = nav3Session();
+  void a.s.start({ route: L_ROUTE(), destination: N3_DEST });
+  a.feed(drive3(L_PTS, { noise: 5 }));
+  const b = bgNav3();
+  void b.s.start({ route: L_ROUTE(), destination: N3_DEST });
+  b.bg.setAppState('background');
+  b.task(drive3(L_PTS, { noise: 5 }), 1);
+  const sig = (st: NavigationState[]) => st.map((x) => `${x.phase}:${active3(x)?.progress?.along.toFixed(2) ?? '-'}`);
+  assert.deepEqual(sig(b.states), sig(a.states));
+  // Privacy: lifecycle facts only
+  const text = JSON.stringify(b.logs);
+  for (const secret of ['54.6', '-3.1', 'Chestnut', 'Lake Road', 'Brow Top', N3_DEST.name]) assert.ok(!text.includes(secret), secret);
+  // No camera, map, storage, sharing or presence in the background path
+  const read = (rel: string) => readFileSync(toPath(new URL(rel, import.meta.url)), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+  for (const f of ['lib/navigation/background.ts', 'lib/backend/sharedLocationUpdates.ts', 'hooks/useOnScreenSnapshot.ts']) {
+    const src = read(`../${f}`);
+    assert.ok(!/Camera|setCamera|mapboxRef|AsyncStorage|SecureStore|setItem|writeJson|liveLocation|LiveLocation|presence|Presence|setLocationShare|console\./.test(src), f);
+  }
+  // The guidance UI and the route line hold still in the background, current again on return
+  const ctx = read('../context/NavigationContext.tsx');
+  assert.ok(/export function useNavigationState\(\): NavigationState \{\s*const session = useNavigationSession\(\);\s*return useOnScreenSnapshot\(/.test(ctx));
+  assert.ok(/if \(lastFix\.current && fix\.time <= lastFix\.current\.time\) return;/.test(ctx), 'each moment once, in order');
+  assert.ok(/source: sharedLocation,/.test(ctx));
+  const map = read('../components/MapboxDriveMap.tsx');
+  const layer = map.slice(map.indexOf('const NavigationRouteLayers = memo('), map.indexOf('const MapboxDriveMap = forwardRef'));
+  assert.ok(/useOnScreenSnapshot\(/.test(layer));
+  const hook = read('../hooks/useOnScreenSnapshot.ts');
+  assert.ok(/state !== 'background'/.test(hook), 'only the background holds it: an inactive app is still visible');
+  // Coming back: the camera starts from the newest fix (the drive's or navigation's), through the follow camera
+  const drive = read('../app/(tabs)/(drive)/index.tsx');
+  assert.ok(/const navFix = navSession\.guiding \? latestNavigationFix\(\) : null;/.test(drive));
+  // No background audio, no new permission
+  for (const f of ['../app.json', '../app.config.js']) assert.ok(!/["']audio["']|ACCESS_BACKGROUND_LOCATION|isAndroidBackgroundLocationEnabled/.test(read(f)), f);
 });
 
 // ─── iOS build number: one source of truth (app.json ios.buildNumber) ───────

@@ -14,13 +14,20 @@
  * asked for when the first drive starts (see ensureBackgroundAccess).
  * Without it the drive is recorded by the Drive screen while the app is open.
  * The background location capability is turned on in app.json.
+ *
+ * Navigation reads the same fixes (lib/backend/sharedLocationUpdates): no
+ * second location stream. While it guides, the updates aren't stopped by the
+ * end of a drive; with no recording alongside it may start them itself, but
+ * only with background access already granted (it never asks), and only from
+ * the foreground.
  */
 import { AppState, Platform } from 'react-native';
 import * as Location from 'expo-location';
 import * as TaskManager from 'expo-task-manager';
 import {
-  BackgroundDriveRecorder, ensureBackgroundAccess, type LocationPermissions, type LocationUpdates,
+  BackgroundDriveRecorder, ensureBackgroundAccess, type LocationPermissions,
 } from '@/lib/backend/driveTracking';
+import { SharedLocationUpdates, type LocationUser, type NativeLocationUpdates } from '@/lib/backend/sharedLocationUpdates';
 import type { GpsFix } from '@/lib/backend/journeyRecorder';
 import { requestBackgroundLocation, requestForegroundLocation } from '@/lib/locationPermission';
 import { journal } from '@/lib/diagnostics';
@@ -57,6 +64,19 @@ const OPTIONS: Location.LocationTaskOptions = {
   },
 };
 
+/**
+ * The same settings while navigating with no drive being recorded: only
+ * Android's notification says so instead.
+ */
+const NAVIGATION_OPTIONS: Location.LocationTaskOptions = {
+  ...OPTIONS,
+  foregroundService: {
+    notificationTitle: 'Navigating',
+    notificationBody: 'Derwent is guiding you to your destination until you end navigation.',
+    killServiceOnDestroy: false,
+  },
+};
+
 const permissions: LocationPermissions = {
   async requestForeground() {
     return (await requestForegroundLocation()).status === 'granted';
@@ -78,11 +98,24 @@ const permissions: LocationPermissions = {
   },
 };
 
-const updates: LocationUpdates = {
-  async start() {
+/** Navigation never asks: only access the user already gave */
+async function navigationAccess(): Promise<boolean> {
+  if ((await Location.getForegroundPermissionsAsync()).status !== 'granted') return false;
+  // Android: a foreground service, which may only be started from the screen
+  if (Platform.OS === 'android') return AppState.currentState === 'active';
+  return permissions.hasBackground();
+}
+
+const updates: NativeLocationUpdates = {
+  async start(user: LocationUser) {
     if (Platform.OS === 'web') return 'unavailable';
     // Expo Go, or a build made without the background location capability.
     if (!TaskManager.isTaskDefined(DRIVE_LOCATION_TASK) || !(await TaskManager.isAvailableAsync())) return 'unavailable';
+    if (user === 'navigation') {
+      if (!(await navigationAccess())) return 'denied';
+      await Location.startLocationUpdatesAsync(DRIVE_LOCATION_TASK, NAVIGATION_OPTIONS);
+      return 'on';
+    }
     // Android runs the updates as a foreground service started from the
     // screen, which needs only foreground access.
     const access = Platform.OS === 'ios'
@@ -100,9 +133,27 @@ const updates: LocationUpdates = {
     if (Platform.OS === 'web') return false;
     return Location.hasStartedLocationUpdatesAsync(DRIVE_LOCATION_TASK);
   },
+  async relabel(user: LocationUser) {
+    // Only Android shows anything (the service's notification); restarting
+    // the service is only allowed from the screen. iOS's settings are the same.
+    if (Platform.OS !== 'android' || AppState.currentState !== 'active') return;
+    await Location.startLocationUpdatesAsync(DRIVE_LOCATION_TASK, user === 'navigation' ? NAVIGATION_OPTIONS : OPTIONS);
+  },
 };
 
-export const driveTracker = new BackgroundDriveRecorder({ store: deviceStorage, updates, journal });
+/** The one background location stream: the drive recorder's, which navigation also reads */
+export const sharedLocation: SharedLocationUpdates = new SharedLocationUpdates(updates, {
+  // A drive in progress is using them ('unknown' counts as in use)
+  driveInUse: async (): Promise<boolean> => (await driveTracker.running()) !== null,
+  journal,
+});
+
+export const driveTracker: BackgroundDriveRecorder = new BackgroundDriveRecorder({
+  store: deviceStorage,
+  updates: sharedLocation.drive,
+  journal,
+  othersUsingUpdates: () => sharedLocation.navigationActive,
+});
 
 function toFix(loc: Location.LocationObject): GpsFix {
   return {
@@ -122,6 +173,8 @@ if (Platform.OS !== 'web') {
     // updates carry on and the next fix continues the route.
     if (error || !data?.locations?.length) return;
     const fixes = [...data.locations].sort((a, b) => a.timestamp - b.timestamp).map(toFix);
+    // Navigation reads them (in memory, at once); recording is untouched by it
+    sharedLocation.deliver(fixes);
     // Awaited, so the system keeps the app awake until the fixes are stored.
     await driveTracker.deliver(fixes);
   });
