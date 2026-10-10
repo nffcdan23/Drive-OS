@@ -12,15 +12,35 @@ import type { ServerRoute, ServerRoutes } from '../backend/endpoints';
 
 export interface LatLng { latitude: number; longitude: number }
 
-/** Where a preview goes: one of the user's own places, for now */
+/**
+ * Where a destination came from:
+ *  - saved, spot: the user's own places and Beauty Spots (Derwent data)
+ *  - coordinates: typed or pasted by the user
+ *  - pin: a point the user chose on the map
+ *  - search: a Mapbox Search Box result. Temporary use only under Mapbox's
+ *    terms: it may be previewed and routed to, but never stored (not saved
+ *    as a place, not kept in recent destinations). See canStoreDestination.
+ */
+export type DestinationSource = 'saved' | 'spot' | 'coordinates' | 'pin' | 'search';
+
+/** Where a preview goes */
 export interface Destination {
-  /** The saved place or Beauty Spot id */
+  /** Stable for the place: `place:<id>`, `spot:<id>`, `coord:<lat>,<lng>`, `search:<ref>` */
   id: string;
   name: string;
-  /** e.g. "Saved place", "Beauty Spot · Friend" */
+  /** e.g. "Saved place", "Beauty Spot", an address */
   subtitle: string | null;
   coordinate: LatLng;
-  source: 'saved' | 'spot';
+  source: DestinationSource;
+}
+
+/**
+ * Whether a destination may be kept on the device or saved to the account.
+ * Search Box results may not (Mapbox: "only available for temporary use");
+ * the user's own places, typed coordinates and map pins may.
+ */
+export function canStoreDestination(d: Pick<Destination, 'source'>): boolean {
+  return d.source !== 'search';
 }
 
 /** Where a route starts: the phone's position, and its heading when moving */

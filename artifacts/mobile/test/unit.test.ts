@@ -226,7 +226,7 @@ class FakeServer {
       updateVehicle: async (id: string, f: Record<string, unknown>) => { self.guard(); const v = self.vehicles.find((x) => x.id === id)!; Object.assign(v, f); return v; },
       createLocation: async (f: Record<string, unknown>) => {
         self.guard();
-        const l = { id: `l${++self.n}`, ownerId: 'u1', clientRef: f.clientRef, kind: f.kind, category: null, name: f.name, description: '', address: '', lat: f.lat, lng: f.lng, routePolyline: null, visibility: f.kind === 'home' ? 'private' : (f.visibility ?? 'private'), status: 'active', coverPhotoId: null, sourceJourneyId: null, createdAt: '', updatedAt: '' } as ServerLocation;
+        const l = { id: `l${++self.n}`, ownerId: 'u1', clientRef: f.clientRef, kind: f.kind, category: null, name: f.name, description: '', address: typeof f.address === 'string' ? f.address : '', lat: f.lat, lng: f.lng, routePolyline: null, visibility: f.kind === 'home' ? 'private' : (f.visibility ?? 'private'), status: 'active', coverPhotoId: null, sourceJourneyId: null, createdAt: '', updatedAt: '' } as ServerLocation;
         self.locations.push(l);
         return l;
       },
@@ -3200,9 +3200,11 @@ test('the Drive screen moves the camera only while following; heading only turns
     assert.equal(code.split(write).length - 1, 1 + others, `${write} written elsewhere`);
     assert.ok(block.includes(write), `${write} outside the follow guard`);
   }
-  const overview = code.slice(code.indexOf('const fitRoutePreview = useCallback'), code.indexOf('const fitRoutePreviewRef'));
+  // Both overviews (a preview, and navigation's whole-route view) go through one animator
+  const overview = code.slice(code.indexOf('const animateOverview = useCallback'), code.indexOf('const fitRoutePreview = useCallback'));
   assert.ok(/setFollowCamera\(/.test(overview), 'the overview writes through the follow camera path');
   assert.ok(/followModeRef\.current === "following" \|\|[\s\S]*\)\s*return;[\s\S]*setFollowCamera\(/.test(overview), 'the overview must stop while following');
+  assert.equal(code.match(/animateOverview\(\s*overviewPose\(/g)?.length, 2, 'the preview and navigation overviews');
   // A finished gesture the controller says left follow mode ends it on screen too
   assert.ok(/frame\.kind === "left" \|\| frame\.kind === "free"\)\s*\{\s*leaveFollowRef\.current\(\);/.test(code));
   // The map reporting a gesture is noted with the controller (Apple onPanDrag, Mapbox onUserGesture)
@@ -3212,8 +3214,8 @@ test('the Drive screen moves the camera only while following; heading only turns
   // Follow mode is entered in one place, from three explicit actions only
   assert.equal(code.match(/setFollowMode\("following"\)/g)?.length, 1);
   assert.equal(code.match(/followModeRef\.current = "following"/g)?.length, 1);
-  assert.equal(code.match(/startFollowing\(true/g)?.length, 4);
-  for (const caller of ['if (isDriving) {', 'const handleResumeFollowing', 'const handleLocateButton', 'if (s.phase === "idle") {']) {
+  assert.equal(code.match(/startFollowing\(true/g)?.length, 5);
+  for (const caller of ['if (isDriving) {', 'const handleResumeFollowing', 'const handleLocateButton', 'if (s.phase === "idle") {', 'if (!guiding) {']) {
     const i = code.indexOf(caller);
     assert.ok(i > 0 && /startFollowing\(true/.test(code.slice(i, i + 900)), `${caller} doesn't start following`);
   }
@@ -3837,7 +3839,7 @@ test('no sheet with fields is a one-off Modal: every one is the shared sheet, an
     ['app/(tabs)/community.tsx', 'showCreateGroup', 'closeCreateGroup'],
     ['app/(tabs)/community.tsx', 'showCreateConvoy', 'closeCreateConvoy'],
     ['app/(tabs)/community.tsx', 'showCreateEvent', 'closeCreateEvent'],
-    ['app/search.tsx', 'visible', 'onClose'],
+    ['components/places/SavePlaceSheet.tsx', 'visible', 'onClose'],
   ] as const;
   for (const [rel, show, close] of sheets) {
     const src = read(rel).replace(/\/\/.*$/gm, '');
@@ -3850,7 +3852,7 @@ test('no sheet with fields is a one-off Modal: every one is the shared sheet, an
     assert.ok(/<SheetScrollView\b/.test(body) && /<TextInput\b/.test(body.slice(body.indexOf('<SheetScrollView'))));
     assert.ok(!/KeyboardAwareScrollView|<Modal\b/.test(body), `${rel}: ${show} nests a ScrollView or Modal`);
   }
-  for (const rel of ['app/(tabs)/community.tsx', 'app/search.tsx']) {
+  for (const rel of ['app/(tabs)/community.tsx', 'app/search.tsx', 'components/places/SavePlaceSheet.tsx']) {
     assert.ok(!/KeyboardAwareScrollViewCompat|\bModal,/.test(read(rel)), `${rel} still uses the old pattern`);
   }
 });
@@ -3877,7 +3879,7 @@ test('Create Group, Convoy and Event close without creating, reset their forms, 
     assert.ok(new RegExp(`onPress=\\{handleCreate${kind}\\}`).test(sheet), `${kind}: submit not wired`);
   }
   // Save Place: reset on every opening, Cancel and a successful save close it
-  const save = readFileSync(join(MOBILE, 'app/search.tsx'), 'utf8');
+  const save = readFileSync(join(MOBILE, 'components/places/SavePlaceSheet.tsx'), 'utf8');
   assert.ok(/if \(visible\) \{\s*setKind\(defaultKind\);\s*setName\(""\);\s*setDescription\(""\);/.test(save));
   assert.ok(/await onSave\([\s\S]*?onClose\(\);/.test(save) && /onPress=\{onClose\}[\s\S]*?Cancel/.test(save));
 });
@@ -3893,7 +3895,7 @@ test('a long sheet: scrolls only when its fields overflow, and keeps the focused
   assert.ok(/scrollable && styles\.shrink/.test(code) && /shrink: \{ flexShrink: 1 \}/.test(code));
   const community = readFileSync(join(MOBILE, 'app/(tabs)/community.tsx'), 'utf8');
   assert.ok(/modalScrollable: \{ flexShrink: 1 \}/.test(community));
-  assert.ok(/flexShrink: 1,/.test(readFileSync(join(MOBILE, 'app/search.tsx'), 'utf8')));
+  assert.ok(/flexShrink: 1,/.test(readFileSync(join(MOBILE, 'components/places/SavePlaceSheet.tsx'), 'utf8')));
 });
 
 // ─── Dragging a sheet like an iOS bottom sheet ──────────────────────────────
@@ -6969,9 +6971,10 @@ test('route previews: no camera commands, puck or viewport; the Drive screen rea
   assert.ok(!/useRoutePreview\(\)/.test(drive), 'the Drive screen must not re-render on every preview change');
   assert.ok(!/useSyncExternalStore/.test(drive));
   // The overview goes through the follow camera path, and closing returns to follow
+  const animate = drive.slice(drive.indexOf('const animateOverview = useCallback'), drive.indexOf('const fitRoutePreview = useCallback'));
   const fit = drive.slice(drive.indexOf('const fitRoutePreview = useCallback'), drive.indexOf('const fitRoutePreviewRef'));
-  assert.ok(/mapboxRef\.current\?\.setFollowCamera\(/.test(fit) && /overviewPose\(/.test(fit));
-  assert.ok(/visualsLiveRef\.current/.test(fit), 'no camera writes off screen');
+  assert.ok(/mapboxRef\.current\?\.setFollowCamera\(/.test(animate) && /animateOverview\(\s*overviewPose\(/.test(fit));
+  assert.ok(/visualsLiveRef\.current/.test(animate) && /visualsLiveRef\.current/.test(fit), 'no camera writes off screen');
   const follow = drive.slice(drive.indexOf('if (s.phase === "idle") {'), drive.indexOf('return;', drive.indexOf('if (s.phase === "idle") {')));
   assert.ok(/startFollowing\(true\)/.test(follow));
   // The panel replaces the drive actions in the screen: not a modal or sheet
@@ -6998,11 +7001,16 @@ test('route previews: fetched only when the user asks, kept in memory only, with
   assert.ok(!/this\.fetch\(|fetchRoutes|this\.open\(|this\.update\(/.test(timer));
   const noteFix = store.slice(store.indexOf('noteFix(position'), store.indexOf('get selected'));
   assert.ok(!/this\.fetch\(|fetchRoutes|this\.open\(|this\.update\(/.test(noteFix));
-  // In memory only: no storage, no logging
-  for (const f of ['../lib/navigation/previewStore.ts', '../lib/navigation/model.ts', '../context/NavigationContext.tsx', '../components/navigation/RoutePreviewPanel.tsx', '../hooks/useRouteToPlace.ts']) {
+  // Routes in memory only: no storage, no logging
+  for (const f of ['../lib/navigation/previewStore.ts', '../lib/navigation/model.ts', '../components/navigation/RoutePreviewPanel.tsx', '../hooks/useRouteToPlace.ts']) {
     const src = strip(read(f));
     assert.ok(!/AsyncStorage|SecureStore|MemoryStore|storage|FileSystem|console\./.test(src), `${f} stores or logs routes`);
   }
+  // The context stores one thing on the device: recent destinations (Phase 2B), never routes
+  const ctx = strip(read('../context/NavigationContext.tsx'));
+  assert.ok(!/AsyncStorage|SecureStore|FileSystem|console\./.test(ctx));
+  assert.deepEqual(ctx.match(/deviceStorage/g)?.length, 2, 'deviceStorage: one import, one use (recents)');
+  assert.ok(/new RecentDestinations\(deviceStorage, userId\)/.test(ctx));
   // The disclosure Mapbox asks directions apps to show, on the preview itself
   const panel = read('../components/navigation/RoutePreviewPanel.tsx');
   assert.ok(panel.includes('"Directions are a guide. Always follow road signs, signals and local traffic laws."'));
@@ -7010,14 +7018,1215 @@ test('route previews: fetched only when the user asks, kept in memory only, with
   // The entry points: saved places and Beauty Spots preview; typed searches still open the maps app
   const search = strip(read('../app/search.tsx'));
   const explore = strip(read('../app/(tabs)/(drive)/explore.tsx'));
-  assert.ok(/routeToPlace\(placeDestination\(p\)\)/.test(search) && /routeToPlace\(spotDestination\(n\)\)/.test(search));
+  assert.ok(/go\(placeDestination\(p\)\)/.test(search) && /go\(spotDestination\(n\)\)/.test(search) && /void routeToPlace\(destination\)/.test(search));
   assert.ok(/openDirections\(query\)/.test(search));
   assert.ok(/routeToPlace\(/.test(explore) && !/openDirections/.test(explore));
   const hook = strip(read('../hooks/useRouteToPlace.ts'));
-  assert.ok(/if \(!canPreviewRoutes\(isDriving\)\) \{\s*await openDirections\(/.test(hook), 'without Mapbox, or while driving, the maps app as before');
+  const fallback = hook.slice(hook.indexOf('if (!canPreviewRoutes(isDriving)) {'), hook.indexOf('try {'));
+  assert.ok(/await openDirections\(destination\.coordinate\)/.test(fallback), 'without Mapbox, or while driving, the maps app as before');
+  // ...except a Search Box result, which is never handed to another map (Mapbox's terms)
+  assert.ok(/if \(destination\.source === "search"\) \{[\s\S]*?return;\s*\}\s*await openDirections/.test(fallback));
 });
 
 test('route previews are only offered on the Mapbox map with no drive recording', () => {
   const src = readFileSync(toPath(new URL('../context/NavigationContext.tsx', import.meta.url)), 'utf8');
   assert.ok(/return DRIVE_MAPBOX != null && !isDriving;/.test(src));
+});
+
+// ─── Navigation Phase 2B: destination search and saving places ──────────────
+// Mapbox Search Box from the phone, in sessions; coordinates parsed locally;
+// recent destinations on the device; any storable destination saved as a
+// place. Search Box results are temporary use only: never stored.
+
+import { DestinationSearch, SEARCH, SearchSession, destinationFromRetrieve, resultsFromSuggest, suggestUrl, retrieveUrl, type SearchResult } from '@/lib/navigation/search';
+import { parseCoordinates, coordinateDestination, formatCoordinates } from '@/lib/navigation/coordinates';
+import { RecentDestinations, RECENTS, recentsKey } from '@/lib/navigation/recents';
+import { findSavedMatch, saveability, placeFieldsFor } from '@/lib/navigation/places';
+import { localMatches, matchesQuery, placeToDestination } from '@/lib/navigation/localResults';
+import { canStoreDestination } from '@/lib/navigation/model';
+
+const SUGGEST_BODY = {
+  suggestions: [
+    { name: 'Booths', mapbox_id: 'poi.111', feature_type: 'poi', full_address: 'Lake Road, Keswick, CA12 5DQ, United Kingdom', place_formatted: 'Keswick, England', poi_category: ['supermarket'], distance: 1234, maki: 'grocery', context: { country: { name: 'United Kingdom' } }, external_ids: { foursquare: 'x' }, metadata: { phone: '01234' } },
+    { name: 'CA12 5DQ', mapbox_id: 'postcode.222', feature_type: 'postcode', place_formatted: 'Keswick, England, United Kingdom' },
+    { name: 'Petrol stations', mapbox_id: 'category.petrol', feature_type: 'category' },
+    { name: 'Keswick', mapbox_id: 'place.333', feature_type: 'place', place_formatted: 'Cumbria, England, United Kingdom' },
+    { name: '', mapbox_id: 'poi.bad', feature_type: 'poi' },
+  ],
+  attribution: '© Mapbox', response_id: 'resp-1',
+};
+const RETRIEVE_BODY = {
+  type: 'FeatureCollection',
+  features: [{
+    type: 'Feature',
+    geometry: { type: 'Point', coordinates: [-3.1345, 54.6001] },
+    properties: {
+      name: 'Booths', mapbox_id: 'poi.111', feature_type: 'poi', full_address: 'Lake Road, Keswick, CA12 5DQ, United Kingdom',
+      coordinates: { latitude: 54.6001, longitude: -3.1345, routable_points: [{ name: 'default', latitude: 54.6003, longitude: -3.1341 }] },
+      metadata: { phone: '01234', website: 'https://example.com' }, external_ids: { foursquare: 'x' },
+    },
+  }],
+};
+
+/** A DestinationSearch with a fake Mapbox, a hand-driven clock and timers */
+function searchHarness(opts: { token?: string | null; respond?: (url: string) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }> } = {}) {
+  const clock = { t: 1_000_000 };
+  const timers: Array<{ fn: () => void; at: number; id: number }> = [];
+  let tid = 0, tokens = 0;
+  const calls: Array<{ url: string; signal: AbortSignal }> = [];
+  const respond = opts.respond ?? (async (url: string) => ({
+    ok: true, status: 200,
+    json: async () => (url.includes('/retrieve/') ? RETRIEVE_BODY : SUGGEST_BODY),
+  }));
+  const search = new DestinationSearch({
+    token: opts.token === undefined ? 'pk.test-public-token' : opts.token,
+    fetch: (url, init) => { calls.push({ url, signal: init.signal }); return respond(url); },
+    newSessionToken: () => `session-${++tokens}`,
+    now: () => clock.t,
+    setTimer: (fn, ms) => { const id = ++tid; timers.push({ fn, at: clock.t + ms, id }); return id; },
+    clearTimer: (id) => { const i = timers.findIndex((t) => t.id === id); if (i >= 0) timers.splice(i, 1); },
+  });
+  const advance = async (ms: number) => {
+    clock.t += ms;
+    for (;;) {
+      const due = timers.filter((t) => t.at <= clock.t).sort((a, b) => a.at - b.at)[0];
+      if (!due) break;
+      timers.splice(timers.indexOf(due), 1);
+      due.fn();
+    }
+    for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+  };
+  const param = (url: string, k: string) => new URL(url).searchParams.get(k);
+  return { search, calls, advance, clock, param, suggests: () => calls.filter((c) => c.url.includes('/suggest')) };
+}
+
+test('search: Search Box requests are UK-first, English, near the phone, and carry a session token', () => {
+  const url = suggestUrl('booths keswick', { token: 'pk.abc', session: 'sess-1', proximity: { latitude: 54.60012, longitude: -3.13456 } });
+  const u = new URL(url);
+  assert.equal(u.origin + u.pathname, 'https://api.mapbox.com/search/searchbox/v1/suggest');
+  assert.equal(u.searchParams.get('q'), 'booths keswick');
+  assert.equal(u.searchParams.get('country'), 'GB');
+  assert.equal(u.searchParams.get('language'), 'en');
+  assert.equal(u.searchParams.get('proximity'), '-3.1346,54.6001', 'longitude first, as Mapbox expects');
+  assert.equal(u.searchParams.get('session_token'), 'sess-1');
+  assert.equal(u.searchParams.get('limit'), String(SEARCH.limit));
+  assert.equal(u.searchParams.get('access_token'), 'pk.abc');
+  // No position known: Mapbox's own default (IP) rather than a made-up point
+  assert.equal(new URL(suggestUrl('york', { token: 'pk.abc', session: 's', proximity: null })).searchParams.get('proximity'), null);
+  const r = new URL(retrieveUrl('poi.1/x', { token: 'pk.abc', session: 'sess-1' }));
+  assert.equal(r.pathname, '/search/searchbox/v1/retrieve/poi.1%2Fx');
+  assert.equal(r.searchParams.get('session_token'), 'sess-1');
+});
+
+test('search: typing is debounced, short queries and repeats are never sent', async () => {
+  const h = searchHarness();
+  for (const q of ['k', 'ke', 'kes', 'kesw', 'keswi', 'keswick']) { h.search.setQuery(q); await h.advance(50); }
+  assert.equal(h.suggests().length, 0, 'nothing sent while typing');
+  assert.equal(h.search.state.status, 'loading');
+  await h.advance(SEARCH.debounceMs);
+  assert.equal(h.suggests().length, 1);
+  assert.equal(h.param(h.suggests()[0]!.url, 'q'), 'keswick');
+  assert.equal(h.search.state.status, 'ready');
+  // The same query again (or with different spacing/case): no new request
+  h.search.setQuery('Keswick ');
+  await h.advance(1000);
+  assert.equal(h.suggests().length, 1);
+  assert.equal(h.search.state.status, 'ready');
+  // Under three characters: nothing sent, nothing shown
+  h.search.setQuery('ke');
+  await h.advance(1000);
+  assert.equal(h.suggests().length, 1);
+  assert.equal(h.search.state.status, 'idle');
+});
+
+test('search: a newer query cancels the request in flight; its late answer is ignored', async () => {
+  const pending: Array<(v: { ok: boolean; status: number; json(): Promise<unknown> }) => void> = [];
+  const h = searchHarness({ respond: () => new Promise((resolve) => pending.push(resolve)) });
+  h.search.setQuery('kendal');
+  await h.advance(SEARCH.debounceMs);
+  h.search.setQuery('keswick');
+  await h.advance(SEARCH.debounceMs);
+  assert.equal(h.suggests().length, 2);
+  assert.equal(h.suggests()[0]!.signal.aborted, true, 'the stale request was cancelled');
+  assert.equal(h.suggests()[1]!.signal.aborted, false);
+  // The newer answer arrives, then the stale one: only the newer is shown
+  pending[1]!({ ok: true, status: 200, json: async () => ({ suggestions: [{ name: 'Keswick', mapbox_id: 'place.k', feature_type: 'place' }] }) });
+  await h.advance(0);
+  pending[0]!({ ok: true, status: 200, json: async () => ({ suggestions: [{ name: 'Kendal', mapbox_id: 'place.d', feature_type: 'place' }] }) });
+  await h.advance(0);
+  assert.deepEqual(h.search.state.results.map((r) => r.name), ['Keswick']);
+  // Closing the search cancels whatever is left and keeps nothing
+  h.search.setQuery('penrith');
+  await h.advance(SEARCH.debounceMs);
+  h.search.close();
+  assert.equal(h.suggests()[2]!.signal.aborted, true);
+  assert.equal(h.search.state.status, 'idle');
+  assert.equal(h.search.state.results.length, 0);
+});
+
+test('search: one session token per search, reused for suggestions and retrieve, then rotated', async () => {
+  const h = searchHarness();
+  h.search.setQuery('booths');
+  await h.advance(SEARCH.debounceMs);
+  h.search.setQuery('booths keswick');
+  await h.advance(SEARCH.debounceMs);
+  const [a, b] = h.suggests().map((c) => h.param(c.url, 'session_token'));
+  assert.equal(a, 'session-1');
+  assert.equal(b, 'session-1', 'the same session while typing');
+  const pick = h.search.state.results[0]!;
+  await h.search.select(pick);
+  const retrieve = h.calls.find((c) => c.url.includes('/retrieve/'))!;
+  assert.equal(h.param(retrieve.url, 'session_token'), 'session-1', 'retrieve closes the same session');
+  assert.equal(h.search.session.active, null, 'the token is dropped once a result is retrieved');
+  // The next search is a new session
+  h.search.setQuery('kendal');
+  await h.advance(SEARCH.debounceMs);
+  assert.equal(h.param(h.suggests().at(-1)!.url, 'session_token'), 'session-2');
+  // Closing ends it; reopening starts another
+  h.search.close();
+  assert.equal(h.search.session.active, null);
+  h.search.setQuery('penrith');
+  await h.advance(SEARCH.debounceMs);
+  assert.equal(h.param(h.suggests().at(-1)!.url, 'session_token'), 'session-3');
+  // Idle past Mapbox's window: a new token rather than a stale one
+  h.clock.t += SEARCH.sessionIdleMs + 1;
+  h.search.setQuery('ambleside');
+  await h.advance(SEARCH.debounceMs);
+  assert.equal(h.param(h.suggests().at(-1)!.url, 'session_token'), 'session-4');
+  // And never more than 50 suggestions on one token
+  let n = 0;
+  const session = new SearchSession(() => `t${++n}`, () => 0);
+  const used = Array.from({ length: SEARCH.maxSuggestPerSession + 1 }, () => session.use('suggest'));
+  assert.equal(new Set(used.slice(0, SEARCH.maxSuggestPerSession)).size, 1);
+  assert.equal(used.at(-1), 't2');
+});
+
+test('search: provider answers become Derwent results with only the fields the app uses', () => {
+  const results = resultsFromSuggest(SUGGEST_BODY);
+  // Category searches and nameless entries aren't places; the rest are kept
+  assert.deepEqual(results.map((r) => r.name), ['Booths', 'CA12 5DQ', 'Keswick']);
+  assert.deepEqual(results.map((r) => r.kind), ['poi', 'postcode', 'place']);
+  const booths = results[0]!;
+  assert.deepEqual(Object.keys(booths).sort(), ['category', 'distanceM', 'id', 'kind', 'name', 'providerRef', 'source', 'subtitle']);
+  assert.equal(booths.subtitle, 'Lake Road, Keswick, CA12 5DQ, United Kingdom');
+  assert.equal(booths.category, 'Supermarket');
+  assert.equal(booths.distanceM, 1234);
+  assert.equal(booths.source, 'search');
+  assert.ok(!JSON.stringify(results).includes('01234') && !JSON.stringify(results).includes('foursquare'), 'provider metadata is dropped');
+  // Retrieve: the routable point (where a car can get to), only the destination fields
+  const d = destinationFromRetrieve(RETRIEVE_BODY, booths);
+  assert.deepEqual(d, {
+    id: 'search:poi.111', name: 'Booths', subtitle: 'Lake Road, Keswick, CA12 5DQ, United Kingdom',
+    coordinate: { latitude: 54.6003, longitude: -3.1341 }, source: 'search',
+  });
+  // No routable point: the place itself; no position at all: a clear error
+  const plain = { features: [{ geometry: { coordinates: [-2.9612, 54.4287] }, properties: { name: 'Ambleside' } }] };
+  assert.deepEqual(destinationFromRetrieve(plain, booths).coordinate, { latitude: 54.4287, longitude: -2.9612 });
+  assert.throws(() => destinationFromRetrieve({ features: [] }, booths), /Couldn't find where/);
+  assert.deepEqual(resultsFromSuggest(null), []);
+  assert.deepEqual(resultsFromSuggest({ suggestions: 'nope' }), []);
+});
+
+test('search: choosing a result opens the same route preview as a saved place', async () => {
+  const h = searchHarness();
+  h.search.setQuery('booths');
+  await h.advance(SEARCH.debounceMs);
+  const destination = await h.search.select(h.search.state.results[0]!);
+  const p = previewHarness();
+  void p.store.open(destination, NAV_ORIGIN);
+  assert.equal(p.store.phase, 'routing');
+  assert.deepEqual(p.pending[0]!.body, {
+    origin: { lat: NAV_ORIGIN.coordinate.latitude, lng: NAV_ORIGIN.coordinate.longitude, headingDeg: null },
+    destination: { lat: 54.6003, lng: -3.1341 },
+  });
+  // And a saved place goes through exactly the same store and request
+  const saved = placeToDestination({ id: 'p1', kind: 'favourite_road', name: 'Honister', address: '', coordinate: { latitude: 54.51, longitude: -3.2 } });
+  void p.store.open(saved, NAV_ORIGIN);
+  assert.equal(p.store.phase, 'routing');
+  assert.deepEqual((p.pending[1]!.body as { destination: unknown }).destination, { lat: 54.51, lng: -3.2 });
+  assert.equal(saved.id, 'place:p1');
+  assert.equal(saved.source, 'saved');
+});
+
+test('search: offline, the remote half says so and the user\'s own places still match', async () => {
+  const h = searchHarness({ respond: async () => { throw new TypeError('Network request failed'); } });
+  h.search.setQuery('honister');
+  await h.advance(SEARCH.debounceMs);
+  assert.equal(h.search.state.status, 'offline');
+  assert.match(h.search.state.message!, /offline/i);
+  const local = localMatches('honister', {
+    places: [{ id: 'p1', kind: 'favourite_road', name: 'Honister Pass', coordinate: { latitude: 54.51, longitude: -3.2 } }],
+    recents: [coordinateDestination({ latitude: 54.5, longitude: -3.1 })],
+    nearby: [],
+  });
+  assert.deepEqual(local.map((m) => m.destination.name), ['Honister Pass']);
+  // Errors from Mapbox are typed for the user; none of them retry by themselves
+  for (const [status, expect] of [[429, 'error'], [401, 'unavailable'], [500, 'error']] as const) {
+    const e = searchHarness({ respond: async () => ({ ok: false, status, json: async () => ({}) }) });
+    e.search.setQuery('honister');
+    await e.advance(SEARCH.debounceMs);
+    assert.equal(e.search.state.status, expect, `HTTP ${status}`);
+    await e.advance(60_000);
+    assert.equal(e.suggests().length, 1, `HTTP ${status}: no automatic retry`);
+    e.search.retry();
+    await e.advance(SEARCH.debounceMs);
+    assert.equal(e.suggests().length, 2, 'Retry asks again');
+  }
+  // Without a token (no Mapbox map, or a drive recording) nothing is ever sent
+  const off = searchHarness({ token: null });
+  off.search.setQuery('honister pass');
+  await off.advance(1000);
+  assert.equal(off.calls.length, 0);
+  assert.equal(off.search.state.status, 'unavailable');
+});
+
+test('coordinates: typed or pasted positions are parsed on the phone; Mapbox is never asked', async () => {
+  assert.deepEqual(parseCoordinates('53.1234, -1.2345'), { latitude: 53.1234, longitude: -1.2345 });
+  assert.deepEqual(parseCoordinates('53.1234 -1.2345'), { latitude: 53.1234, longitude: -1.2345 });
+  assert.deepEqual(parseCoordinates('  53.1234,-1.2345 '), { latitude: 53.1234, longitude: -1.2345 });
+  assert.deepEqual(parseCoordinates('-33.8688, 151.2093'), { latitude: -33.8688, longitude: 151.2093 });
+  for (const bad of ['91.0, 0.5', '45.5, 181.0', '12 34', 'CA12 5DQ', '10 Downing Street', '53.1', '53.1, -1.2, 4', '', 'abc, def']) {
+    assert.equal(parseCoordinates(bad), null, bad);
+  }
+  const d = coordinateDestination({ latitude: 53.1234, longitude: -1.2345 });
+  assert.equal(d.name, 'Dropped Pin');
+  assert.equal(d.subtitle, '53.12340, -1.23450');
+  assert.equal(d.source, 'coordinates');
+  assert.equal(formatCoordinates(d.coordinate), '53.12340, -1.23450');
+  const h = searchHarness();
+  h.search.setQuery('53.1234, -1.2345');
+  await h.advance(5000);
+  assert.equal(h.calls.length, 0, 'no Search Box request for coordinates');
+  assert.deepEqual(h.search.state.coordinates, { latitude: 53.1234, longitude: -1.2345 });
+});
+
+test('recent destinations: newest first, bounded, per user, never Search Box results, cleared at sign-out', async () => {
+  const store = new MemoryStore();
+  let t = 0;
+  const recents = new RecentDestinations(store, 'u1', () => ++t);
+  const at = (i: number) => coordinateDestination({ latitude: 54 + i * 0.01, longitude: -3 });
+  for (let i = 0; i < RECENTS.max + 3; i++) await recents.record(at(i));
+  assert.equal(recents.items.length, RECENTS.max);
+  assert.equal(recents.items[0]!.coordinate.latitude, 54 + (RECENTS.max + 2) * 0.01);
+  // Going somewhere again moves it to the top (no duplicate)
+  await recents.record(at(5));
+  assert.equal(recents.items[0]!.id, at(5).id);
+  assert.equal(recents.items.filter((r) => r.id === at(5).id).length, 1);
+  // Only the destination itself is kept
+  const stored = JSON.parse(store.data.get(recentsKey('u1'))!);
+  assert.deepEqual(Object.keys(stored[0]).sort(), ['coordinate', 'id', 'name', 'source', 'subtitle', 'usedAt']);
+  // A Search Box result is never written (temporary use only)
+  const before = store.data.get(recentsKey('u1'));
+  await recents.record({ id: 'search:poi.1', name: 'Booths', subtitle: 'Keswick', coordinate: { latitude: 54.6, longitude: -3.1 }, source: 'search' });
+  assert.equal(store.data.get(recentsKey('u1')), before);
+  assert.ok(!recents.items.some((r) => r.source === 'search'));
+  // Per user: another account on the phone sees none of them
+  const other = new RecentDestinations(store, 'u2');
+  await other.load();
+  assert.equal(other.items.length, 0);
+  // Reloaded from the device
+  const again = new RecentDestinations(store, 'u1');
+  await again.load();
+  assert.equal(again.items.length, RECENTS.max);
+  // A tampered entry from search is dropped on load
+  await store.setItem(recentsKey('u3'), JSON.stringify([{ ...at(1), usedAt: 1 }, { id: 'search:x', name: 'x', subtitle: null, coordinate: { latitude: 1, longitude: 1 }, source: 'search', usedAt: 2 }]));
+  const tampered = new RecentDestinations(store, 'u3');
+  await tampered.load();
+  assert.deepEqual(tampered.items.map((r) => r.source), ['coordinates']);
+  await recents.clear();
+  assert.equal(recents.items.length, 0);
+  assert.equal(store.data.has(recentsKey('u1')), false);
+  // Sign-out (CloudSync.wipeLocal) removes them with the rest of the user's device data
+  await again.record(at(1));
+  const server = new FakeServer();
+  const app = makeSync(server, store, { t: Date.now() });
+  await app.start();
+  assert.equal(store.data.has(recentsKey('u1')), true);
+  await app.wipeLocal();
+  assert.equal(store.data.has(recentsKey('u1')), false, 'recents cleared at sign-out');
+  assert.equal(recentsKey('u1'), userKey('u1', RECENTS.name));
+});
+
+test('saving a place: any storable destination, with its address; duplicates are recognised', async () => {
+  const places = [
+    { id: 'a', name: 'Honister Pass', address: '', coordinate: { latitude: 54.5100, longitude: -3.2000 } },
+    { id: 'b', name: 'Home', address: '1 Lake Road, Keswick', coordinate: { latitude: 54.6000, longitude: -3.1300 } },
+  ];
+  const pin = coordinateDestination({ latitude: 54.7, longitude: -3.0 }, 'pin');
+  // Same spot (a few metres), whatever it's called
+  assert.equal(findSavedMatch(places, coordinateDestination({ latitude: 54.51005, longitude: -3.20005 }))?.id, 'a');
+  // Same name nearby: the same place
+  assert.equal(findSavedMatch(places, { ...pin, name: 'honister pass', coordinate: { latitude: 54.5108, longitude: -3.2 } })?.id, 'a');
+  // Same address nearby
+  assert.equal(findSavedMatch(places, { ...pin, name: 'Dropped Pin', subtitle: '1 Lake Road, Keswick', coordinate: { latitude: 54.6008, longitude: -3.13 } })?.id, 'b');
+  // A different place a street away is not merged, nor a same-named one far off
+  assert.equal(findSavedMatch(places, coordinateDestination({ latitude: 54.5110, longitude: -3.2 })), null);
+  assert.equal(findSavedMatch(places, { ...pin, name: 'Honister Pass', coordinate: { latitude: 54.6, longitude: -3.0 } }), null);
+  // The saved place itself
+  assert.equal(findSavedMatch(places, placeToDestination({ ...places[1]!, kind: 'home' }))?.id, 'b');
+  assert.deepEqual(saveability(places, pin), { kind: 'can_save' });
+  assert.deepEqual(saveability(places, placeToDestination({ ...places[0]!, kind: 'favourite_road' })), { kind: 'saved', placeId: 'a' });
+  // A Search Box result can't be saved (temporary use only), even if the app asked
+  const searched = { id: 'search:poi.1', name: 'Booths', subtitle: 'Lake Road', coordinate: { latitude: 54.7, longitude: -3.0 }, source: 'search' as const };
+  assert.equal(canStoreDestination(searched), false);
+  assert.deepEqual(saveability([], searched), { kind: 'not_storable' });
+  assert.throws(() => placeFieldsFor(searched, 'Booths'), /cannot be saved/);
+  // Saved where it is (not where the phone is), with the user's name and its address
+  const fields = placeFieldsFor({ ...pin, subtitle: '54.70000, -3.00000' }, '  Lay-by on the A591 ');
+  assert.deepEqual(fields, { name: 'Lay-by on the A591', coordinate: { latitude: 54.7, longitude: -3.0 }, address: '54.70000, -3.00000' });
+  const server = new FakeServer();
+  const app = makeSync(server, new MemoryStore(), { t: Date.now() });
+  await app.start();
+  await app.addPlace({ kind: 'poi', ...fields });
+  await app.outbox.flush();
+  const created = server.locations.at(-1)!;
+  assert.deepEqual([created.name, created.lat, created.lng, created.address, created.kind], ['Lay-by on the A591', 54.7, -3.0, '54.70000, -3.00000', 'poi']);
+  // Existing saves (where I am) are unchanged: no address unless one is given
+  await app.addPlace({ kind: 'favourite_road', name: 'Here', coordinate: { latitude: 1, longitude: 1 } });
+  await app.outbox.flush();
+  assert.equal(server.locations.at(-1)!.address, '');
+});
+
+test('local matches: word starts, names before addresses, recents and shared spots, no repeats', () => {
+  assert.ok(matchesQuery('Lake Road, Keswick', 'lake rd') === false);
+  assert.ok(matchesQuery('Lake Road, Keswick', 'lake ro'));
+  assert.ok(matchesQuery('Honister Pass', 'pass hon'));
+  assert.ok(!matchesQuery('Honister Pass', 'ass'));
+  const m = localMatches('kes', {
+    places: [
+      { id: 'w', kind: 'work', name: 'Office', address: 'Main Street, Keswick', coordinate: { latitude: 1, longitude: 1 } },
+      { id: 'k', kind: 'favourite_road', name: 'Keswick loop', coordinate: { latitude: 2, longitude: 2 } },
+    ],
+    recents: [{ ...coordinateDestination({ latitude: 3, longitude: 3 }), name: 'Keswick car park' }],
+    nearby: [{ id: 's', name: 'Kesh viewpoint', coordinate: { latitude: 4, longitude: 4 }, isOwn: false }, { id: 'k', name: 'Keswick loop', coordinate: { latitude: 2, longitude: 2 }, isOwn: true }],
+  });
+  assert.deepEqual(m.map((x) => x.destination.name), ['Keswick loop', 'Office', 'Keswick car park', 'Kesh viewpoint']);
+  assert.deepEqual(m.map((x) => x.icon), ['saved', 'work', 'recent', 'spot']);
+  assert.deepEqual(localMatches('  ', { places: [], recents: [], nearby: [] }), []);
+});
+
+test('Phase 2B wiring: search off the Drive screen, results never stored, the one preview flow reused', () => {
+  const read = (rel: string) => readFileSync(toPath(new URL(rel, import.meta.url)), 'utf8');
+  const strip = (src: string) => src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+  // The Drive screen knows nothing of search (keystrokes never re-render it)
+  const drive = strip(read('../app/(tabs)/(drive)/index.tsx'));
+  assert.ok(!/useDestinationSearch|DestinationSearch|searchbox|useRecentDestinations/.test(drive));
+  // A long press drops a pin into the same preview, never touching the camera itself
+  const press = drive.slice(drive.indexOf('const handleMapLongPress'), drive.indexOf('const handleOpenRouteInMaps'));
+  assert.ok(/openRoutePreview\(coordinateDestination\(coordinate, "pin"\)\)/.test(press));
+  assert.ok(/isDrivingRef\.current/.test(press) && !/setFollowCamera|startFollowing|setCamera/.test(press));
+  const map = strip(read('../components/MapboxDriveMap.tsx'));
+  const lp = map.slice(map.indexOf('const handleLongPress'), map.indexOf('[onLongPress]'));
+  assert.ok(lp.length > 0 && !/camera|Camera/.test(lp));
+  // Search lives in its own module; the screen opens results through the Phase 2A hook
+  const search = strip(read('../app/search.tsx'));
+  assert.ok(/useDestinationSearch\(isDriving\)/.test(search));
+  assert.ok(/const destination = await search\.select\(r\);\s*await routeToPlace\(destination\);/.test(search));
+  assert.ok(!/fetch\(|api\.mapbox\.com|AsyncStorage|deviceStorage|writeJson/.test(search), 'the screen neither calls Mapbox nor stores anything itself');
+  // Only one preview panel; it offers saving for storable destinations only
+  const panel = strip(read('../components/navigation/RoutePreviewPanel.tsx'));
+  assert.ok(/const save = saveability\(places, destination\)/.test(panel) && /save\.kind === "can_save"/.test(panel));
+  const sheet = strip(read('../components/places/SavePlaceSheet.tsx'));
+  assert.ok(/placeFieldsFor\(destination, finalName\)/.test(sheet), 'a chosen place is saved through placeFieldsFor (which refuses search results)');
+  // Search only where a result can be shown on the Mapbox map, and with the public token
+  const ctx = strip(read('../context/NavigationContext.tsx'));
+  assert.ok(/const remote = canPreviewRoutes\(isDriving\);/.test(ctx) && /token: remote \? DRIVE_MAPBOX\?\.token \?\? null : null/.test(ctx));
+  assert.ok(/return \(\) => search\.close\(\);/.test(ctx), 'the session ends with the screen');
+  // The search module stores nothing and logs nothing
+  const lib = strip(read('../lib/navigation/search.ts'));
+  assert.ok(!/storage|Storage|writeJson|console\./.test(lib));
+});
+
+// ─── Navigation Phase 3: foreground turn-by-turn guidance ───────────────────
+// Route progress from GPS fixes, step matching, roundabouts, off-route
+// detection, manual reroute, arrival, GPS loss, the session state machine,
+// camera policy, UK formatting, recording isolation and privacy.
+
+import {
+  prepareRoute, progressAt, RouteTracker, PROGRESS, segmentAt, UnusableRouteError,
+  type GpsFix,
+} from '@/lib/navigation/routeProgress';
+import { OffRouteDetector, OFF_ROUTE, awayThresholdM } from '@/lib/navigation/offRoute';
+import { NavigationSession, NAVIGATION, type NavigationState } from '@/lib/navigation/session';
+import { maneuverFor, maneuversFor, ordinal, roadLabel } from '@/lib/navigation/maneuver';
+import { guidanceZoom, GUIDANCE_CAMERA } from '@/lib/navigation/guidanceCamera';
+import { formatGuidanceDistance } from '@/lib/navigation/format';
+import { startFromPreview, canNavigate } from '@/lib/navigation/startNavigation';
+import type { NavRoute as Nav3Route, RouteStep as Nav3Step } from '@/lib/navigation/model';
+
+// Metres east/north of a point in the Lake District, as lat/lng
+const N3_BASE = { latitude: 54.6, longitude: -3.13 };
+const N3_M = 6_371_000 * Math.PI / 180;
+const at3 = (x: number, y: number) => ({
+  latitude: N3_BASE.latitude + y / N3_M,
+  longitude: N3_BASE.longitude + x / (N3_M * Math.cos(N3_BASE.latitude * Math.PI / 180)),
+});
+/** Points every `step` m along straight lines between the corners (x, y in metres) */
+function polyline3(corners: Array<[number, number]>, step = 10): Array<[number, number]> {
+  const out: Array<[number, number]> = [corners[0]!];
+  for (let i = 1; i < corners.length; i++) {
+    const [x0, y0] = corners[i - 1]!;
+    const [x1, y1] = corners[i]!;
+    const n = Math.max(1, Math.round(Math.hypot(x1 - x0, y1 - y0) / step));
+    for (let j = 1; j <= n; j++) out.push([x0 + ((x1 - x0) * j) / n, y0 + ((y1 - y0) * j) / n]);
+  }
+  return out;
+}
+interface StepSpec { at: number; type: string; modifier?: string | null; exit?: number | null; name?: string | null; ref?: string | null; instruction?: string }
+/** A route through metric points with steps starting at the given point indexes */
+function route3(pts: Array<[number, number]>, specs: StepSpec[], id = 't:0'): Nav3Route {
+  const cum = [0];
+  for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1]! + Math.hypot(pts[i]![0] - pts[i - 1]![0], pts[i]![1] - pts[i - 1]![1]));
+  const total = cum[cum.length - 1]!;
+  const steps: Nav3Step[] = specs.map((s, k) => {
+    const end = k + 1 < specs.length ? cum[specs[k + 1]!.at]! : total;
+    const distanceM = s.type === 'arrive' ? 0 : end - cum[s.at]!;
+    return {
+      maneuver: { type: s.type, modifier: s.modifier ?? null, exit: s.exit ?? null, bearingBefore: null, bearingAfter: null, location: at3(...pts[s.at]!), instruction: s.instruction ?? null },
+      startDistanceM: cum[s.at]!, distanceM, durationS: distanceM / 13.4,
+      roadName: s.name ?? null, roadRef: s.ref ?? null, signposts: null, junctionRef: null, drivingSide: 'left',
+      banner: { primary: specs[k + 1]?.name ?? 'Destination', secondary: null },
+      voice: [{ distanceBeforeM: 400, text: `In a quarter of a mile, step ${k + 1}` }, { distanceBeforeM: 60, text: `Now step ${k + 1}` }],
+    };
+  });
+  return {
+    routeId: id, index: 0, geometry: pts.map(([x, y]) => at3(x, y)), distanceM: total, durationS: total / 13.4,
+    typicalDurationS: null, summary: 'A591', legs: [{ distanceM: total, durationS: total / 13.4, summary: 'A591', steps, congestion: null, maxspeedKmh: null }],
+  };
+}
+/** Deterministic noise */
+function rng3(seed: number) {
+  let s = seed >>> 0;
+  return () => ((s = (s * 1664525 + 1013904223) >>> 0) / 2 ** 32);
+}
+const fix3 = (x: number, y: number, t: number, o: Partial<GpsFix> = {}): GpsFix => ({ ...at3(x, y), accuracyM: 8, speedMs: 13, headingDeg: null, time: t, ...o });
+const bearing3 = (dx: number, dy: number) => ((Math.atan2(dx, dy) * 180) / Math.PI + 360) % 360;
+
+// North 1 km, left (west) 600 m, right (north) 400 m, arrive
+const L_PTS = polyline3([[0, 0], [0, 1000], [-600, 1000], [-600, 1400]]);
+const L_TURN1 = 100, L_TURN2 = 160;
+const L_ROUTE = () => route3(L_PTS, [
+  { at: 0, type: 'depart', name: 'Lake Road', ref: 'A591', instruction: 'Head north on Lake Road (A591)' },
+  { at: L_TURN1, type: 'turn', modifier: 'left', name: 'Chestnut Hill', instruction: 'Turn left onto Chestnut Hill' },
+  { at: L_TURN2, type: 'turn', modifier: 'right', name: 'Brow Top', instruction: 'Turn right onto Brow Top' },
+  { at: L_PTS.length - 1, type: 'arrive', instruction: 'You have arrived at your destination' },
+]);
+/** Fixes driving along metric points at `speed` m/s, one a second, with lateral noise */
+function drive3(pts: Array<[number, number]>, opts: { speed?: number; noise?: number; seed?: number; t0?: number; from?: number; to?: number } = {}): GpsFix[] {
+  const speed = opts.speed ?? 13;
+  const rand = rng3(opts.seed ?? 7);
+  const cum = [0];
+  for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1]! + Math.hypot(pts[i]![0] - pts[i - 1]![0], pts[i]![1] - pts[i - 1]![1]));
+  const out: GpsFix[] = [];
+  let i = 0;
+  for (let d = opts.from ?? 0, t = opts.t0 ?? 1_000_000; d <= (opts.to ?? cum[cum.length - 1]!); d += speed, t += 1000) {
+    while (i < pts.length - 2 && cum[i + 1]! < d) i++;
+    const [x0, y0] = pts[i]!, [x1, y1] = pts[i + 1]!;
+    const len = cum[i + 1]! - cum[i]!;
+    const u = len > 0 ? (d - cum[i]!) / len : 0;
+    const nx = -(y1 - y0) / (len || 1), ny = (x1 - x0) / (len || 1);
+    const noise = ((rand() - 0.5) * 2) * (opts.noise ?? 4);
+    out.push(fix3(x0 + (x1 - x0) * u + nx * noise, y0 + (y1 - y0) * u + ny * noise, t, { speedMs: speed, headingDeg: bearing3(x1 - x0, y1 - y0) }));
+  }
+  return out;
+}
+
+test('guidance: a route is prepared once: steps placed on the line, durations summed, no line or steps refused', () => {
+  const p = prepareRoute(L_ROUTE());
+  assert.equal(p.steps.length, 4);
+  assert.ok(Math.abs(p.total - 2000) < 1, `total ${p.total}`);
+  assert.ok(Math.abs(p.stepStart[1]! - 1000) < 1 && Math.abs(p.stepStart[2]! - 1600) < 1);
+  assert.equal(p.stepStart[3], p.total, 'arrive is the end of the line');
+  assert.ok(Math.abs(p.durationAfter[0]! - (600 + 400) / 13.4) < 0.01);
+  assert.equal(segmentAt(p, 1005), 100);
+  const bad = L_ROUTE();
+  bad.legs[0]!.steps = bad.legs[0]!.steps.slice(0, 1);
+  assert.throws(() => prepareRoute(bad), UnusableRouteError);
+  assert.throws(() => prepareRoute({ ...L_ROUTE(), geometry: [at3(0, 0)] }), UnusableRouteError);
+  assert.equal(canNavigate(L_ROUTE()), true);
+  assert.equal(canNavigate(bad), false);
+});
+
+test('guidance: driving the route, steps advance in order and the distance to each turn counts down', () => {
+  const tracker = new RouteTracker(prepareRoute(L_ROUTE()));
+  const seen: Array<{ step: number; next: number; dist: number }> = [];
+  for (const f of drive3(L_PTS, { noise: 5 })) {
+    const m = tracker.match(f)!;
+    const pr = tracker.commit(f, m);
+    seen.push({ step: pr.stepIndex, next: pr.next.stepIndex, dist: pr.distanceToNextM });
+  }
+  // Monotonic steps 0 → 1 → 2, never back
+  for (let i = 1; i < seen.length; i++) assert.ok(seen[i]!.step >= seen[i - 1]!.step, `step went back at ${i}`);
+  assert.deepEqual([...new Set(seen.map((s) => s.step))], [0, 1, 2]);
+  // Within each step the distance to the next manoeuvre only falls (progress never runs backwards)
+  for (let i = 1; i < seen.length; i++) {
+    if (seen[i]!.step === seen[i - 1]!.step) assert.ok(seen[i]!.dist <= seen[i - 1]!.dist + 0.001, `distance rose at ${i}`);
+  }
+  // Approaching the first turn it is the next manoeuvre, at the right distance
+  const t = new RouteTracker(prepareRoute(L_ROUTE()));
+  const pr = t.commit(fix3(0, 700, 1), t.match(fix3(0, 700, 1))!);
+  assert.equal(pr.next.kind, 'turn');
+  assert.equal(pr.next.direction, 'left');
+  assert.equal(pr.next.instruction, 'Turn left onto Chestnut Hill');
+  assert.ok(Math.abs(pr.distanceToNextM - 300) < 2, `${pr.distanceToNextM}`);
+  assert.equal(pr.currentRoad, 'A591 Lake Road');
+  assert.ok(Math.abs(pr.distanceRemainingM - 1300) < 2);
+  assert.ok(Math.abs(pr.durationRemainingS - 1300 / 13.4) < 1);
+  // The scan stays local: a few dozen segments, never the whole line
+  assert.ok(tracker.lastScan < 40, `scanned ${tracker.lastScan}`);
+});
+
+test('guidance: going straight on past a turn never advances to the next instruction', () => {
+  const tracker = new RouteTracker(prepareRoute(L_ROUTE()));
+  // Up to the junction, then carry on north past it
+  const fixes = [...drive3(polyline3([[0, 0], [0, 1300]]), { noise: 3 })];
+  let last = null as ReturnType<RouteTracker['commit']> | null;
+  for (const f of fixes) {
+    const m = tracker.match(f)!;
+    if (m.lateralM <= awayThresholdM(f.accuracyM)) last = tracker.commit(f, m);
+    else tracker.noteFix(f);
+  }
+  assert.equal(last!.stepIndex, 0, 'still on the first step');
+  assert.equal(last!.next.direction, 'left', 'the missed turn is still the instruction');
+  assert.ok(last!.distanceToNextM < 5);
+});
+
+test('guidance: a hairpin with the return leg alongside stays on the leg the car is driving', () => {
+  // North 500 m, a hairpin, then south 25 m to the east
+  const pts = polyline3([[0, 0], [0, 500], [25, 500], [25, 0]]);
+  const r = route3(pts, [{ at: 0, type: 'depart' }, { at: 50, type: 'turn', modifier: 'sharp right' }, { at: 53, type: 'turn', modifier: 'sharp right' }, { at: pts.length - 1, type: 'arrive' }]);
+  const tracker = new RouteTracker(prepareRoute(r));
+  const runs = drive3(pts, { noise: 6, seed: 3 });
+  for (const f of runs) tracker.commit(f, tracker.match(f)!);
+  // A fresh tracker whose first fix is on the southbound leg, heading south: matched there, not northbound
+  const fresh = new RouteTracker(prepareRoute(r));
+  const f = fix3(20, 250, 1, { headingDeg: 180 });
+  const m = fresh.match(f)!;
+  assert.ok(m.along > 500, `matched at ${m.along} (northbound would be ~250)`);
+  // Driving south on it, noise toward the other leg doesn't flip it
+  let along = fresh.commit(f, m).along;
+  for (let i = 1; i < 10; i++) {
+    const g = fix3(i % 2 ? 12 : 22, 250 - i * 13, 1 + i * 1000, { headingDeg: 180 });
+    const pr = fresh.commit(g, fresh.match(g)!);
+    assert.ok(pr.along >= along && pr.along > 500, `step ${i}: ${pr.along}`);
+    along = pr.along;
+  }
+});
+
+test('guidance: one wild fix or a little backwards noise never moves progress back', () => {
+  const tracker = new RouteTracker(prepareRoute(L_ROUTE()));
+  let pr = tracker.commit(fix3(0, 500, 1000), tracker.match(fix3(0, 500, 1000))!);
+  const at = pr.along;
+  // 15 m backwards along the road: held
+  pr = tracker.commit(fix3(0, 485, 2000), tracker.match(fix3(0, 485, 2000))!);
+  assert.equal(pr.along, at);
+  // One fix 80 m to the side: far from the line, not committed by the session (too far), so nothing moves
+  const wild = tracker.match(fix3(80, 510, 3000))!;
+  assert.ok(wild.lateralM > awayThresholdM(8));
+  // A jump far back is believed only after repeated fixes
+  const back = (t: number) => tracker.commit(fix3(0, 300, t), tracker.match(fix3(0, 300, t))!);
+  assert.equal(back(4000).along, at);
+  assert.equal(back(5000).along, at);
+  assert.ok(Math.abs(back(6000).along - 300) < 2, 'three in a row: accepted');
+});
+
+// A roundabout, as UK drivers meet it: north to it, clockwise round from the
+// south point past the west to the north (2nd exit, straight on), then north.
+function roundabout3(exitAt: 'N' | 'E' = 'N') {
+  const r = 15;
+  const approach = polyline3([[0, -300], [0, -r]]);
+  const arc: Array<[number, number]> = [];
+  // Clockwise from the south point: angle (from north, clockwise) 180 → 270 → 360(0) [→ 90 for E]
+  const end = exitAt === 'N' ? 360 : 450;
+  for (let a = 180 + 15; a <= end; a += 15) arc.push([r * Math.sin((a * Math.PI) / 180), r * Math.cos((a * Math.PI) / 180)]);
+  const exitLine = exitAt === 'N' ? polyline3([[0, r], [0, 400]]).slice(1) : polyline3([[r, 0], [400, 0]]).slice(1);
+  const pts = [...approach, ...arc, ...exitLine];
+  const entry = approach.length - 1;
+  return {
+    pts, entry, exitIndex: approach.length + arc.length - 1,
+    route: route3(pts, [
+      { at: 0, type: 'depart', name: 'Station Road' },
+      { at: entry, type: 'roundabout', modifier: exitAt === 'N' ? 'straight' : 'right', exit: exitAt === 'N' ? 2 : 3, name: 'A591', instruction: `At the roundabout, take the ${exitAt === 'N' ? '2nd' : '3rd'} exit onto the A591` },
+      { at: pts.length - 1, type: 'arrive' },
+    ]),
+  };
+}
+
+test('guidance: UK roundabouts: the exit number comes from the data, and is held until the exit', () => {
+  const { route, pts, exitIndex } = roundabout3('N');
+  const p = prepareRoute(route);
+  const m = p.maneuvers[1]!;
+  assert.equal(m.kind, 'roundabout');
+  assert.equal(m.exit, 2, 'structured exit, not parsed from text');
+  assert.equal(m.direction, 'straight');
+  assert.equal(m.drivingSide, 'left');
+  // The exit is found where the clockwise circulation ends (the north point)
+  let cum = 0;
+  for (let i = 1; i <= exitIndex; i++) cum += Math.hypot(pts[i]![0] - pts[i - 1]![0], pts[i]![1] - pts[i - 1]![1]);
+  assert.ok(Math.abs(p.holdUntil[1]! - cum) < 8, `exit at ${p.holdUntil[1]} vs ${cum}`);
+  // On the roundabout, before the exit: still "take the 2nd exit", distance to the exit
+  const mid = progressAt(p, p.stepStart[1]! + 10);
+  assert.equal(mid.onRoundabout, true);
+  assert.equal(mid.next.kind, 'roundabout');
+  assert.equal(mid.next.exit, 2);
+  assert.ok(mid.distanceToNextM > 0 && mid.distanceToNextM < 40);
+  // Past the exit: the next instruction
+  const after = progressAt(p, p.holdUntil[1]! + 5);
+  assert.equal(after.onRoundabout, false);
+  assert.equal(after.next.kind, 'arrive');
+  // A 3rd exit goes further round
+  const third = prepareRoute(roundabout3('E').route);
+  assert.equal(third.maneuvers[1]!.exit, 3);
+  assert.ok(third.holdUntil[1]! - third.stepStart[1]! > p.holdUntil[1]! - p.stepStart[1]!);
+  // Driving round with GPS cutting the corner never flags off-route
+  const session = nav3Session();
+  session.s.start({ route, destination: N3_DEST });
+  for (const f of drive3(pts, { speed: 8, noise: 8, seed: 11 })) session.s.noteFix(f);
+  assert.notEqual(session.phases.includes('offRoute'), true);
+  assert.equal(session.s.phase, 'arrived');
+});
+
+test('guidance: mini roundabouts and closely spaced manoeuvres show "then"', () => {
+  const pts = polyline3([[0, 0], [0, 600], [0, 700], [-300, 700]]);
+  const r = route3(pts, [
+    { at: 0, type: 'depart' },
+    { at: 60, type: 'roundabout turn', modifier: 'straight', name: 'Main Street', instruction: 'At the roundabout, go straight on' },
+    { at: 70, type: 'turn', modifier: 'left', name: 'Mill Lane' },
+    { at: pts.length - 1, type: 'arrive' },
+  ]);
+  const p = prepareRoute(r);
+  assert.equal(p.maneuvers[1]!.kind, 'miniRoundabout');
+  assert.equal(p.maneuvers[1]!.exit, null);
+  // A mini roundabout has no circulation to hold
+  assert.equal(p.holdUntil[1], p.stepStart[1]);
+  const pr = progressAt(p, 400);
+  assert.equal(pr.next.kind, 'miniRoundabout');
+  assert.equal(pr.then?.kind, 'turn', 'the left turn 100 m after it shows as "then"');
+  assert.equal(pr.then?.direction, 'left');
+  assert.equal(progressAt(p, 50).then?.kind, 'turn');
+});
+
+const N3_DEST = { id: 'place:p1', name: 'Brow Top', subtitle: 'Saved place', coordinate: at3(-600, 1400), source: 'saved' as const };
+/** A route as the API sends it */
+function serverRoutes3(...routes: Nav3Route[]): ServerRoutes {
+  return {
+    provider: 'mapbox', providerResponseId: null,
+    routes: routes.map((r, index) => ({
+      index, geometry: encodePolyline(r.geometry.map((p) => ({ lat: p.latitude, lng: p.longitude })), 6),
+      distanceM: r.distanceM, durationS: r.durationS, typicalDurationS: null, summary: r.summary,
+      legs: r.legs.map((l) => ({ ...l, steps: l.steps.map((s) => ({ ...s, maneuver: { ...s.maneuver, location: { lat: s.maneuver.location.latitude, lng: s.maneuver.location.longitude } } })) })),
+    })),
+  };
+}
+/** A NavigationSession on a hand-driven clock, with a fake route server and an in-memory journal */
+function nav3Session(opts: { fetch?: (body: unknown) => Promise<ServerRoutes>; journal?: DiagnosticsJournal } = {}) {
+  const clock = { t: 1_000_000 };
+  const timers: Array<{ fn: () => void; at: number; id: number }> = [];
+  let tid = 0;
+  const bodies: unknown[] = [];
+  const s = new NavigationSession({
+    fetchRoutes: (body) => { bodies.push(body); return opts.fetch ? opts.fetch(body) : Promise.resolve(serverRoutes3(L_ROUTE())); },
+    describe: (e) => ({ code: (e as { code?: string }).code ?? 'network', message: (e as Error).message ?? 'failed' }),
+    now: () => clock.t,
+    setTimer: (fn, ms) => { const id = ++tid; timers.push({ fn, at: clock.t + ms, id }); return id; },
+    clearTimer: (id) => { const i = timers.findIndex((x) => x.id === id); if (i >= 0) timers.splice(i, 1); },
+    journal: opts.journal,
+  });
+  const phases: string[] = [];
+  const states: NavigationState[] = [];
+  s.subscribe(() => { states.push(s.state); if (phases[phases.length - 1] !== s.phase) phases.push(s.phase); });
+  const runTimers = () => {
+    for (;;) {
+      const due = timers.filter((x) => x.at <= clock.t).sort((a, b) => a.at - b.at)[0];
+      if (!due) break;
+      timers.splice(timers.indexOf(due), 1);
+      due.fn();
+    }
+  };
+  const feed = (fixes: GpsFix[]) => { for (const f of fixes) { clock.t = f.time; runTimers(); s.noteFix(f); } };
+  const advance = (ms: number) => { clock.t += ms; runTimers(); };
+  return { s, clock, phases, states, bodies, feed, advance };
+}
+const active3 = (st: NavigationState) => (st.phase === 'starting' || st.phase === 'navigating' || st.phase === 'offRoute' || st.phase === 'rerouting' ? st : null);
+
+test('guidance session: start → navigating on the first fix → arrived → Done; End at any time', () => {
+  const h = nav3Session();
+  void h.s.start({ route: L_ROUTE(), destination: N3_DEST });
+  assert.equal(h.s.phase, 'starting');
+  assert.equal(active3(h.s.state)!.starting, 'locating');
+  assert.equal(active3(h.s.state)!.progress, null);
+  h.feed(drive3(L_PTS, { noise: 4, to: 50 }));
+  assert.equal(h.s.phase, 'navigating');
+  assert.equal(active3(h.s.state)!.progress!.next.instruction, 'Turn left onto Chestnut Hill');
+  h.feed(drive3(L_PTS, { noise: 4, from: 60, t0: 1_100_000 }));
+  assert.equal(h.s.phase, 'arrived');
+  assert.deepEqual(h.phases, ['starting', 'navigating', 'arrived']);
+  assert.equal(h.s.map.route, null, 'nothing left to draw but the destination');
+  h.s.end('arrived');
+  assert.equal(h.s.phase, 'idle');
+  // End part way: idle at once, later fixes do nothing
+  const e = nav3Session();
+  void e.s.start({ route: L_ROUTE(), destination: N3_DEST });
+  e.feed(drive3(L_PTS, { to: 300 }));
+  e.s.end('user');
+  assert.equal(e.s.phase, 'idle');
+  e.feed(drive3(L_PTS, { from: 310, t0: 2_000_000 }));
+  assert.equal(e.s.phase, 'idle');
+  assert.equal(e.s.map.route, null);
+});
+
+test('guidance session: off route needs repeated, accurate, travelling fixes; one bad point never does it', () => {
+  const h = nav3Session();
+  void h.s.start({ route: L_ROUTE(), destination: N3_DEST });
+  h.feed(drive3(L_PTS, { to: 600 }));
+  assert.equal(h.s.phase, 'navigating');
+  const t = h.clock.t;
+  // One wild point 90 m off, then back on the road: still navigating
+  h.feed([fix3(90, 620, t + 1000, { headingDeg: 0 })]);
+  h.feed(drive3(L_PTS, { from: 630, to: 700, t0: t + 2000 }));
+  assert.equal(h.s.phase, 'navigating');
+  // Poor GPS (accuracy 80 m) far off for 20 s: suppressed, not off route
+  const t2 = h.clock.t;
+  h.feed(Array.from({ length: 20 }, (_, i) => fix3(120, 710 + i * 2, t2 + 1000 * (i + 1), { accuracyM: 80, headingDeg: 0 })));
+  assert.notEqual(h.s.phase, 'offRoute');
+  assert.equal(active3(h.s.state)!.gps, 'weak');
+  // Missing the left turn and carrying on north: off route within a few seconds of leaving it
+  const t3 = h.clock.t;
+  h.feed(drive3(polyline3([[0, 720], [0, 1400]]), { t0: t3 + 1000, noise: 3 }));
+  assert.equal(h.s.phase, 'offRoute');
+  // How far past the junction before it was called: not instantly, not late
+  const offAt = h.states.findIndex((st) => st.phase === 'offRoute');
+  assert.ok(offAt > 0);
+  // Back onto the route: navigating again
+  h.feed(drive3(L_PTS, { from: 1100, to: 1300, t0: h.clock.t + 1000 }));
+  assert.equal(h.s.phase, 'navigating');
+});
+
+test('off-route detector: thresholds, confirmation, accuracy suppression, wrong way, back on', () => {
+  const d = new OffRouteDetector();
+  const base = { latitude: 54.6, longitude: -3.13, accuracyM: 8, speedMs: 13, headingDiff: 5, nearManeuver: false };
+  const at = (i: number, o: Partial<typeof base & { lateralM: number }> = {}) => ({ ...base, lateralM: 10, time: i * 1000, ...o, latitude: 54.6 + i * 0.00012 });
+  assert.equal(d.update(at(1, { lateralM: 60 })), 'on', 'one point is never enough');
+  assert.equal(d.update(at(2, { lateralM: 60 })), 'on');
+  assert.equal(d.update(at(3, { lateralM: 10 })), 'on', 'a good point clears suspicion');
+  for (let i = 4; i <= 9; i++) d.update(at(i, { lateralM: 60 }));
+  assert.equal(d.state, 'on', 'five seconds is not yet enough');
+  d.update(at(10, { lateralM: 60 }));
+  assert.equal(d.state, 'off', 'six seconds, travelling, away: off route');
+  assert.equal(d.update(at(11, { lateralM: 10 })), 'off', 'one close point is not back yet');
+  assert.equal(d.update(at(12, { lateralM: 10 })), 'on', 'two are');
+  // Poor accuracy counts for nothing
+  const p = new OffRouteDetector();
+  for (let i = 1; i <= 20; i++) p.update(at(i, { lateralM: 90, accuracyM: 70 }));
+  assert.equal(p.state, 'on');
+  // Threshold grows with inaccuracy: 40 m away at 30 m accuracy is within the noise
+  assert.equal(awayThresholdM(30), 55);
+  assert.equal(awayThresholdM(5), OFF_ROUTE.minThresholdM);
+  // Clearly gone: two fixes 200 m away is enough
+  const f = new OffRouteDetector();
+  f.update(at(1, { lateralM: 200 }));
+  assert.equal(f.update(at(2, { lateralM: 200 })), 'off');
+  // Wrong way along the route, moving, away from junctions
+  const w = new OffRouteDetector();
+  for (let i = 1; i <= 4; i++) w.update(at(i, { headingDiff: 175 }));
+  assert.equal(w.state, 'off');
+  // ...but not near a manoeuvre (roundabouts, junctions)
+  const r = new OffRouteDetector();
+  for (let i = 1; i <= 10; i++) r.update(at(i, { headingDiff: 175, nearManeuver: true }));
+  assert.equal(r.state, 'on');
+  // A gap in fixes (GPS lost) starts judging over
+  const g = new OffRouteDetector();
+  g.update(at(1, { lateralM: 60 }));
+  g.update(at(2, { lateralM: 60 }));
+  g.update({ ...at(30, { lateralM: 60 }) });
+  assert.equal(g.state, 'on');
+});
+
+test('guidance session: Update Route makes exactly one request, keeps the old route until the new one is in', async () => {
+  let resolve!: (v: ServerRoutes) => void;
+  let reject!: (e: unknown) => void;
+  const h = nav3Session({ fetch: () => new Promise((res, rej) => { resolve = res; reject = rej; }) });
+  void h.s.start({ route: L_ROUTE(), destination: N3_DEST });
+  h.feed(drive3(L_PTS, { to: 700 }));
+  h.feed(drive3(polyline3([[0, 720], [0, 1400]]), { t0: h.clock.t + 1000 }));
+  assert.equal(h.s.phase, 'offRoute');
+  const oldRoute = active3(h.s.state)!.route;
+  const origin = { coordinate: at3(0, 1400), headingDeg: 0 };
+  const a = h.s.reroute(origin);
+  void h.s.reroute(origin);
+  void h.s.reroute(origin);
+  assert.equal(h.bodies.length, 1, 'three taps, one request');
+  assert.equal(h.s.phase, 'rerouting');
+  assert.equal(active3(h.s.state)!.route, oldRoute, 'the old route stays meanwhile');
+  assert.deepEqual((h.bodies[0] as { destination: unknown }).destination, { lat: N3_DEST.coordinate.latitude, lng: N3_DEST.coordinate.longitude });
+  // A new route from where the car is
+  const fresh = route3(polyline3([[0, 1400], [0, 1500], [-600, 1500], [-600, 1400]]), [{ at: 0, type: 'depart' }, { at: 10, type: 'turn', modifier: 'left' }, { at: 70, type: 'turn', modifier: 'left' }, { at: 80, type: 'arrive' }], 'r:0');
+  resolve(serverRoutes3(fresh));
+  await a;
+  assert.equal(h.s.phase, 'navigating');
+  assert.notEqual(active3(h.s.state)!.route, oldRoute);
+  assert.equal(active3(h.s.state)!.route.geometry.length, fresh.geometry.length);
+  // A failed update keeps guiding on the route there is, and says so
+  h.feed(drive3(polyline3([[0, 1400], [200, 1400]]), { t0: h.clock.t + 1000 }));
+  assert.equal(h.s.phase, 'offRoute');
+  const kept = active3(h.s.state)!.route;
+  const b = h.s.reroute(origin);
+  reject(Object.assign(new Error('offline'), { code: 'offline' }));
+  await b;
+  assert.equal(h.s.phase, 'offRoute');
+  assert.equal(active3(h.s.state)!.route, kept);
+  assert.equal(active3(h.s.state)!.notice, 'offline');
+  assert.equal(h.bodies.length, 2);
+  // Ended while a request is in flight: its answer is ignored
+  const c = h.s.reroute(origin);
+  h.s.end('user');
+  resolve(serverRoutes3(fresh));
+  await c;
+  assert.equal(h.s.phase, 'idle');
+});
+
+test('guidance session: arrival is conservative: close, accurate, and confirmed', () => {
+  const h = nav3Session();
+  void h.s.start({ route: L_ROUTE(), destination: N3_DEST });
+  h.feed(drive3(L_PTS, { to: 1900 }));
+  assert.equal(h.s.phase, 'navigating', '100 m short: not arrived');
+  const along = active3(h.s.state)!.progress!.along;
+  // A poor fix (60 m accuracy) right at the end: GPS is weak, nothing moves, no arrival
+  h.feed([fix3(-600, 1400, h.clock.t + 1000, { accuracyM: 60, headingDeg: 0 })]);
+  assert.equal(h.s.phase, 'navigating');
+  assert.equal(active3(h.s.state)!.gps, 'weak');
+  assert.equal(active3(h.s.state)!.progress!.along, along);
+  // Slowing down to the end: arrives only once close, slow, and confirmed
+  const slowDown: Array<[number, number]> = [[1310, 8], [1330, 6], [1345, 4], [1360, 2.5]];
+  for (const [y, v] of slowDown) h.feed([fix3(-600, y, h.clock.t + 1000, { speedMs: v, headingDeg: 0 })]);
+  assert.equal(h.s.phase, 'navigating', 'one slow fix 40 m short is not enough');
+  h.feed([fix3(-600, 1361, h.clock.t + 1000, { speedMs: 0.5, headingDeg: 0 })]);
+  assert.equal(h.s.phase, 'arrived');
+  const st = h.s.state as Extract<NavigationState, { phase: 'arrived' }>;
+  assert.equal(st.destination, N3_DEST);
+});
+
+test('guidance session: GPS lost shows, nothing advances blind, and it recovers by itself', () => {
+  const h = nav3Session();
+  void h.s.start({ route: L_ROUTE(), destination: N3_DEST });
+  h.feed(drive3(L_PTS, { to: 400 }));
+  const before = active3(h.s.state)!.progress!.along;
+  h.advance(NAVIGATION.gpsLostMs + 1);
+  assert.equal(active3(h.s.state)!.gps, 'lost');
+  assert.equal(h.s.phase, 'navigating', 'losing GPS is not leaving the route');
+  assert.equal(active3(h.s.state)!.progress!.along, before, 'no step advanced without fixes');
+  h.advance(60_000);
+  assert.equal(h.s.phase, 'navigating');
+  // Back after a minute, 800 m further on: found again (wider search after a gap)
+  h.feed([fix3(0, 1200 - 400, h.clock.t + 1000, { headingDeg: 0 })]);
+  assert.equal(active3(h.s.state)!.gps, 'ok');
+  assert.ok(active3(h.s.state)!.progress!.along > 750);
+});
+
+test('guidance session: a new start replaces the old session; an unusable route is an error, not a crash', () => {
+  const h = nav3Session();
+  void h.s.start({ route: L_ROUTE(), destination: N3_DEST });
+  h.feed(drive3(L_PTS, { to: 300 }));
+  const first = (h.s.state as { sessionId: number }).sessionId;
+  // A route 5 km away: the last fix isn't on it, so it waits to find the car
+  const elsewhere = route3(polyline3([[5000, 5000], [5000, 6000], [5600, 6000]]), [{ at: 0, type: 'depart' }, { at: 100, type: 'turn', modifier: 'right' }, { at: 160, type: 'arrive' }]);
+  void h.s.start({ route: elsewhere, destination: { ...N3_DEST, id: 'coord:1', source: 'coordinates' } });
+  assert.equal(h.s.phase, 'starting');
+  assert.ok((h.s.state as { sessionId: number }).sessionId > first);
+  const bad = L_ROUTE();
+  bad.legs[0]!.steps = bad.legs[0]!.steps.slice(0, 1);
+  void h.s.start({ route: bad, destination: N3_DEST });
+  assert.equal(h.s.phase, 'error');
+  assert.match((h.s.state as { message: string }).message, /turn-by-turn/);
+  h.s.end('user');
+  assert.equal(h.s.phase, 'idle');
+});
+
+test('manoeuvres: Mapbox steps become a small model: banner and voice from the step before, exit from the data', () => {
+  const base = L_ROUTE().legs[0]!.steps;
+  const steps: Nav3Step[] = [
+    { ...base[0]!, banner: { primary: 'Chestnut Hill', secondary: 'Keswick' }, voice: [{ distanceBeforeM: 50, text: 'Bear left' }, { distanceBeforeM: 800, text: 'In half a mile, bear left' }] },
+    { ...base[1]!, maneuver: { ...base[1]!.maneuver, type: 'turn', modifier: 'slight left', instruction: 'Bear left onto Chestnut Hill' }, roadName: 'Chestnut Hill', roadRef: 'B5289', junctionRef: '36', signposts: 'Keswick' },
+    // The text says 5th, the data says 2nd: the data wins (never parsed from words)
+    { ...base[2]!, maneuver: { ...base[2]!.maneuver, type: 'roundabout', modifier: 'straight', exit: 2, instruction: 'At the roundabout, take the 5th exit' } },
+    { ...base[3]!, maneuver: { ...base[3]!.maneuver, type: 'exit roundabout', modifier: 'right', exit: 2, instruction: null }, roadName: 'A591', roadRef: null },
+    { ...base[3]!, maneuver: { ...base[3]!.maneuver, type: 'on ramp', modifier: 'slight right', instruction: null }, roadName: null, roadRef: 'M6' },
+    { ...base[3]!, maneuver: { ...base[3]!.maneuver, type: 'continue', modifier: 'uturn', instruction: null }, drivingSide: 'right' },
+    { ...base[3]!, maneuver: { ...base[3]!.maneuver, type: 'roundabout turn', modifier: 'left', exit: 1, instruction: null }, roadName: 'Mill Lane' },
+    base[3]!,
+  ];
+  const m = maneuversFor(steps);
+  assert.equal(m[0]!.kind, 'depart');
+  assert.equal(m[1]!.kind, 'turn');
+  assert.equal(m[1]!.direction, 'slightLeft');
+  assert.equal(m[1]!.instruction, 'Bear left onto Chestnut Hill', "Mapbox's own en-GB words");
+  assert.equal(m[1]!.primaryText, 'Chestnut Hill', 'the banner comes from the step before');
+  assert.equal(m[1]!.secondaryText, 'Keswick');
+  assert.deepEqual(m[1]!.voice.map((v) => v.distanceBeforeM), [800, 50], 'voice prompts kept for Phase 5, farthest first');
+  assert.equal(m[1]!.junctionRef, '36');
+  assert.equal(m[1]!.lanes, null, 'no lane data from the API yet: kept as null, never invented');
+  assert.equal(roadLabel(steps[1]!), 'B5289 Chestnut Hill');
+  assert.equal(m[2]!.kind, 'roundabout');
+  assert.equal(m[2]!.exit, 2);
+  assert.equal(m[3]!.kind, 'roundaboutExit');
+  assert.equal(m[3]!.instruction, 'Exit the roundabout onto A591', 'composed only when Mapbox gave none');
+  assert.equal(m[4]!.kind, 'onRamp');
+  assert.equal(m[4]!.instruction, 'Take the slip road onto M6');
+  assert.equal(m[5]!.kind, 'uturn');
+  assert.equal(m[5]!.drivingSide, 'right');
+  assert.equal(m[6]!.kind, 'miniRoundabout');
+  assert.equal(m[6]!.instruction, 'At the roundabout, take the 1st exit onto Mill Lane');
+  assert.equal(m[7]!.kind, 'arrive');
+  assert.deepEqual([1, 2, 3, 4, 11, 12, 13, 21, 22, 23, 101, 111].map(ordinal), ['1st', '2nd', '3rd', '4th', '11th', '12th', '13th', '21st', '22nd', '23rd', '101st', '111th']);
+  assert.equal(maneuverFor(steps, 1).stepIndex, 1);
+});
+
+test('guidance distances read the UK way: yards under a tenth of a mile, then miles; never feet', () => {
+  assert.equal(formatGuidanceDistance(5, 'imperial'), '10 yd');
+  assert.equal(formatGuidanceDistance(100, 'imperial'), '110 yd');
+  assert.equal(formatGuidanceDistance(274, 'imperial'), '0.2 mi');
+  assert.equal(formatGuidanceDistance(150, 'imperial'), '160 yd');
+  assert.equal(formatGuidanceDistance(161, 'imperial'), '0.1 mi');
+  assert.equal(formatGuidanceDistance(483, 'imperial'), '0.3 mi');
+  assert.equal(formatGuidanceDistance(26_400, 'imperial'), '16 mi');
+  assert.equal(formatGuidanceDistance(14_000, 'imperial'), '8.7 mi');
+  assert.equal(formatGuidanceDistance(450, 'metric'), '450 m');
+  assert.equal(formatGuidanceDistance(1234, 'metric'), '1.2 km');
+  for (const m of [3, 30, 120, 160, 900, 5000]) assert.ok(!/ft|feet/.test(formatGuidanceDistance(m, 'imperial')));
+  // Arrival time: the clock time, 24-hour
+  assert.equal(formatClock(arrivalTime(new Date(2026, 9, 9, 23, 50).getTime(), 1500)), '00:15');
+  assert.equal(formatDuration(1980), '33 min');
+});
+
+test('guidance camera: zoom by speed band with hysteresis, closer for a turn in town, never pumping', () => {
+  const t0 = 1_000_000;
+  let z = guidanceZoom(null, { speedKmh: 30, distanceToNextM: 900, nextKind: 'turn', now: t0 });
+  assert.equal(z.zoom, GUIDANCE_CAMERA.bands[0]!.zoom);
+  // Hovering around the band edge never flips it
+  for (let i = 1; i <= 10; i++) z = guidanceZoom(z, { speedKmh: i % 2 ? 58 : 52, distanceToNextM: 900, nextKind: 'turn', now: t0 + i * 10_000 });
+  assert.equal(z.band, 0);
+  // Clearly faster: the next band, but not before minIntervalMs since the last change
+  z = guidanceZoom(z, { speedKmh: 75, distanceToNextM: 2000, nextKind: 'turn', now: t0 + 120_000 });
+  assert.equal(z.band, 1);
+  const changed = z.changedAt;
+  const motorway = guidanceZoom(z, { speedKmh: 110, distanceToNextM: 5000, nextKind: 'offRamp', now: changed + 1000 });
+  assert.equal(motorway.zoom, z.zoom, 'held: changed less than 4 s ago');
+  const later = guidanceZoom(z, { speedKmh: 110, distanceToNextM: 5000, nextKind: 'offRamp', now: changed + GUIDANCE_CAMERA.minIntervalMs + 1 });
+  assert.equal(later.zoom, GUIDANCE_CAMERA.bands[2]!.zoom);
+  // A turn ahead in town zooms in at once (never held back)
+  const town = guidanceZoom(null, { speedKmh: 40, distanceToNextM: 1000, nextKind: 'turn', now: t0 });
+  const approach = guidanceZoom(town, { speedKmh: 40, distanceToNextM: 150, nextKind: 'turn', now: t0 + 500 });
+  assert.equal(approach.approaching, true);
+  assert.ok(approach.zoom > town.zoom);
+  // Not for arriving, not at motorway speed
+  assert.equal(guidanceZoom(null, { speedKmh: 40, distanceToNextM: 100, nextKind: 'arrive', now: t0 }).approaching, false);
+  assert.equal(guidanceZoom(null, { speedKmh: 110, distanceToNextM: 100, nextKind: 'offRamp', now: t0 }).approaching, false);
+});
+
+test('Start Navigation: every kind of destination becomes the same session, from the same preview', async () => {
+  const sources = [
+    { id: 'place:1', name: 'Home', subtitle: 'Saved place', source: 'saved' as const },
+    { id: 'spot:2', name: 'Ashness Bridge', subtitle: 'Beauty Spot', source: 'spot' as const },
+    { id: 'search:poi.9', name: 'Booths', subtitle: 'Lake Road, Keswick', source: 'search' as const },
+    { id: 'coord:54.70000,-3.00000', name: 'Dropped Pin', subtitle: '54.70000, -3.00000', source: 'pin' as const },
+    { id: 'coord:54.71000,-3.01000', name: 'Dropped Pin', subtitle: '54.71000, -3.01000', source: 'coordinates' as const },
+  ];
+  for (const src of sources) {
+    const dest = { ...src, coordinate: at3(-600, 1400) };
+    const preview = new RoutePreviewStore({
+      fetchRoutes: async () => serverRoutes3(L_ROUTE()),
+      describe: (e) => ({ code: 'x', message: String(e) }),
+      now: () => 1_000_000, setTimer: () => 1, clearTimer: () => {},
+    });
+    await preview.open(dest, { coordinate: at3(0, 0), headingDeg: null });
+    assert.equal(preview.phase, 'preview', src.source);
+    const h = nav3Session();
+    const started = await startFromPreview(preview, h.s, async () => ({ coordinate: at3(0, 0), headingDeg: null }));
+    assert.equal(started, true, src.source);
+    assert.equal(preview.phase, 'idle', 'the preview closes');
+    assert.equal(h.s.phase, 'starting');
+    assert.equal(h.bodies.length, 0, 'a current preview starts without another request');
+    assert.equal((h.s.state as { destination: { id: string } }).destination.id, dest.id);
+    h.feed(drive3(L_PTS, { to: 100 }));
+    assert.equal(h.s.phase, 'navigating', src.source);
+  }
+});
+
+test('Start Navigation with an out-of-date preview asks for one fresh route, and falls back to the old one', async () => {
+  const preview = new RoutePreviewStore({
+    fetchRoutes: async () => serverRoutes3(L_ROUTE()),
+    describe: (e) => ({ code: 'x', message: String(e) }),
+    now: () => 1_000_000, setTimer: () => 1, clearTimer: () => {},
+  });
+  await preview.open(N3_DEST, { coordinate: at3(0, 0), headingDeg: null });
+  preview.noteFix(at3(0, 500), 1_000_500);
+  assert.ok((preview.state as { stale: string | null }).stale);
+  const h = nav3Session();
+  await startFromPreview(preview, h.s, async () => ({ coordinate: at3(0, 500), headingDeg: 0 }));
+  assert.equal(h.bodies.length, 1, 'one request, from where the car is now');
+  assert.deepEqual((h.bodies[0] as { origin: { lat: number } }).origin.lat, at3(0, 500).latitude);
+  assert.equal(h.s.phase, 'starting');
+  // Failing: the earlier route, with a notice
+  const p2 = new RoutePreviewStore({
+    fetchRoutes: async () => serverRoutes3(L_ROUTE()),
+    describe: (e) => ({ code: 'x', message: String(e) }),
+    now: () => 1_000_000, setTimer: () => 1, clearTimer: () => {},
+  });
+  await p2.open(N3_DEST, { coordinate: at3(0, 0), headingDeg: null });
+  p2.noteFix(at3(0, 500), 1_000_500);
+  const failing = nav3Session({ fetch: async () => { throw new Error('offline'); } });
+  await startFromPreview(p2, failing.s, async () => ({ coordinate: at3(0, 500), headingDeg: 0 }));
+  assert.equal(failing.s.phase, 'starting');
+  assert.match((failing.s.state as { notice: string }).notice, /earlier one/);
+  assert.equal(failing.bodies.length, 1);
+});
+
+test('guidance privacy: nothing is stored; the diagnostics journal has events, never places, roads or positions', async () => {
+  const store = new MemoryStore();
+  const journal = new DiagnosticsJournal({ store, now: () => 0 });
+  let fail = true;
+  const h = nav3Session({
+    journal,
+    fetch: async () => { if (fail) { fail = false; throw Object.assign(new Error('offline'), { code: 'offline' }); } return serverRoutes3(L_ROUTE()); },
+  });
+  const searched = { id: 'search:poi.77', name: 'Secret Café', subtitle: '12 Hidden Lane, Keswick', coordinate: at3(-600, 1400), source: 'search' as const };
+  void h.s.start({ route: L_ROUTE(), destination: searched });
+  // Round the first turn (a step change), then off the route heading north
+  h.feed(drive3(L_PTS, { to: 1300 }));
+  h.feed(drive3(polyline3([[-300, 1000], [-300, 1400]]), { t0: h.clock.t + 1000 }));
+  assert.equal(h.s.phase, 'offRoute');
+  await h.s.reroute({ coordinate: at3(0, 1400), headingDeg: 0 });
+  await h.s.reroute({ coordinate: at3(0, 1400), headingDeg: 0 });
+  h.advance(NAVIGATION.gpsLostMs + 1);
+  h.s.end('user');
+  await journal.flush();
+  const entries = await journal.read();
+  const events = entries.map((e) => e.event);
+  for (const e of ['nav_started', 'nav_step', 'nav_off_route', 'nav_reroute', 'nav_gps', 'nav_ended']) assert.ok(events.includes(e), `${e} logged`);
+  const text = JSON.stringify(entries) + [...store.data.values()].join('');
+  for (const secret of ['Secret Café', 'Hidden Lane', 'Keswick', 'Chestnut Hill', 'Lake Road', 'A591', String(searched.coordinate.latitude).slice(0, 7), '54.6', '-3.1']) {
+    assert.ok(!text.includes(secret), `the journal holds "${secret}"`);
+  }
+  // The only thing written to the device is the journal
+  assert.deepEqual([...store.data.keys()], ['@driveos/diagnostics/journal']);
+  // And the navigation modules have no storage of their own
+  const read = (rel: string) => readFileSync(toPath(new URL(rel, import.meta.url)), 'utf8').replace(/\/\/.*$/gm, '');
+  for (const f of ['session.ts', 'routeProgress.ts', 'offRoute.ts', 'maneuver.ts', 'guidanceCamera.ts', 'startNavigation.ts']) {
+    assert.ok(!/AsyncStorage|SecureStore|writeJson|setItem|deviceStorage|console\./.test(read(`../lib/navigation/${f}`)), f);
+  }
+});
+
+test('guidance and recording stay separate: neither starts, stops or changes the other', () => {
+  const read = (rel: string) => readFileSync(toPath(new URL(rel, import.meta.url)), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+  for (const f of ['lib/navigation/session.ts', 'lib/navigation/routeProgress.ts', 'lib/navigation/offRoute.ts', 'components/navigation/GuidanceBar.tsx', 'components/navigation/GuidanceBanner.tsx']) {
+    const src = read(`../${f}`);
+    assert.ok(!/journeyRecorder|cloudSync|updateDriveCoordinate|endDrive|discardDrive|liveLocation|presence/.test(src), `${f} reaches into recording or sharing`);
+  }
+  const bar = read('../components/navigation/GuidanceBar.tsx');
+  assert.ok(!/startDrive|endDrive/.test(bar), 'the bar only asks the screen to record (onRecord)');
+  const drive = read('../app/(tabs)/(drive)/index.tsx');
+  // Recording still gets the raw fix, exactly as before
+  assert.ok(/updateDriveCoordinate\(\{\s*latitude: lat,\s*longitude: lon,/.test(drive));
+  // Nothing on the screen ends navigation because of a drive (or a drive because of navigation)
+  assert.ok(!/navSession\.end\(|useEndNavigation/.test(drive));
+  const drivingEffect = drive.slice(drive.indexOf('if (isDriving && routePreviewStore.phase !== "idle")'), drive.indexOf('if (isDriving && routePreviewStore.phase !== "idle")') + 200);
+  assert.ok(!/navSession/.test(drivingEffect));
+  // Recording is started only by the user's Record tap
+  assert.ok(/onRecord=\{handleStartDrive\}/.test(drive));
+  // The session copies each fix and never changes it
+  const h = nav3Session();
+  void h.s.start({ route: L_ROUTE(), destination: N3_DEST });
+  const fixes = drive3(L_PTS, { to: 200 }).map((f) => Object.freeze(f));
+  const before = JSON.stringify(fixes);
+  h.feed(fixes);
+  assert.equal(JSON.stringify(fixes), before);
+  assert.equal(h.s.phase, 'navigating');
+});
+
+test('guidance camera wiring: the follow camera writes, guidance only sets its zoom; off screen, panning and recenter behave', () => {
+  const read = (rel: string) => readFileSync(toPath(new URL(rel, import.meta.url)), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+  const drive = read('../app/(tabs)/(drive)/index.tsx');
+  const effect = drive.slice(drive.indexOf('let wasGuiding = navSession.guiding;'), drive.indexOf('const showNavigationOverview'));
+  assert.ok(effect.length > 0);
+  // No camera writes of its own: the follow camera's zoom target, retarget, and the frame loop
+  assert.ok(!/setFollowCamera|setCamera|easeToZoom|animateCamera/.test(effect));
+  assert.ok(/zoomTarget\.set\(\{ zoom: next\.zoom \}\)/.test(effect) && /wakeFrameLoop\(\)/.test(effect));
+  // The user has moved the map: guidance carries on, the camera is left alone
+  assert.ok(/if \(followModeRef\.current !== "following"\) return;/.test(effect));
+  // Heading-up while guiding, and the guidance zoom on Recenter
+  assert.ok(/guidingRef\.current \|\| headingModeRef\.current === "heading-up"/.test(drive));
+  assert.ok(/guidingRef\.current && guidanceZoomRef\.current\s*\?\s*guidanceZoomRef\.current\.zoom\s*:\s*FOLLOW_ZOOM/.test(drive));
+  assert.ok(/onRecenter=\{handleResumeFollowing\}/.test(drive));
+  const resume = drive.slice(drive.indexOf('const handleResumeFollowing'), drive.indexOf('const handleResumeFollowing') + 300);
+  assert.ok(/startFollowing\(true\)/.test(resume));
+  // Off screen the frame loop never starts (and with it every follow write)
+  assert.ok(/if \(frameIdRef\.current != null \|\| !visualsLiveRef\.current\) return;/.test(drive));
+  assert.ok(/navSession\.setForeground\(next\.live\)/.test(drive));
+  // The Drive screen reads navigation's phase only
+  assert.ok(/useNavigationPhase\(\)/.test(drive) && !/useNavigationState\(\)/.test(drive));
+  // The screen stays on while guiding (foreground only: an auto-lock would pause it), not after
+  assert.ok(/\{navigating && navPhase !== "arrived" && navPhase !== "error" && \(\s*<GuidanceKeepAwake \/>/.test(drive));
+  // Long-press can't start something new mid-navigation
+  assert.ok(/navSession\.phase !== "idle"\) return;/.test(drive));
+  // The map's route layer reads the session's map view (route changes only), never each fix
+  const map = read('../components/MapboxDriveMap.tsx');
+  const layer = map.slice(map.indexOf('const NavigationRouteLayers = memo('), map.indexOf('const MapboxDriveMap = forwardRef'));
+  assert.ok(/\(\) => session\.map,/.test(layer) && !/session\.state/.test(layer));
+  assert.ok(!/Camera|setFollowCamera|LocationPuck|followUserLocation/.test(layer));
+  assert.ok(map.indexOf('<NavigationRouteLayers session={navigation} />') < map.lastIndexOf('<MarkerFeeder'));
+});
+
+test('guidance performance: a long route, thousands of fixes, local scans only', () => {
+  // ~60 km of road with a bend every 2 km: 6000 points
+  const corners: Array<[number, number]> = [];
+  for (let i = 0; i <= 30; i++) corners.push([(i % 2) * 300, i * 2000]);
+  const pts = polyline3(corners, 10);
+  assert.ok(pts.length > 5000);
+  const specs: StepSpec[] = [{ at: 0, type: 'depart' }];
+  for (let i = 1; i < 30; i++) specs.push({ at: Math.round((i * pts.length) / 30), type: 'turn', modifier: i % 2 ? 'slight right' : 'slight left' });
+  specs.push({ at: pts.length - 1, type: 'arrive' });
+  const route = route3(pts, specs);
+  const t0 = performance.now();
+  const p = prepareRoute(route);
+  const prepMs = performance.now() - t0;
+  const tracker = new RouteTracker(p);
+  const fixes = drive3(pts, { speed: 25, noise: 6 });
+  let maxScan = 0;
+  const t1 = performance.now();
+  for (const f of fixes) {
+    const m = tracker.match(f)!;
+    tracker.commit(f, m);
+    maxScan = Math.max(maxScan, tracker.lastScan);
+  }
+  const perFixMs = (performance.now() - t1) / fixes.length;
+  assert.ok(prepMs < 300, `prepare took ${prepMs.toFixed(1)} ms`);
+  assert.ok(perFixMs < 1, `${perFixMs.toFixed(3)} ms per fix`);
+  // Only the first fix looks along the whole route; every other one stays local
+  assert.ok(maxScan <= p.n, 'first fix');
+  const scans: number[] = [];
+  const t2 = new RouteTracker(p);
+  for (const f of fixes.slice(0, 500)) { t2.commit(f, t2.match(f)!); scans.push(t2.lastScan); }
+  assert.ok(Math.max(...scans.slice(1)) < 120, `local scan ${Math.max(...scans.slice(1))} segments`);
+  assert.equal(tracker.progress!.stepIndex, specs.length - 2);
+});
+
+// ─── iOS build number: one source of truth (app.json ios.buildNumber) ───────
+// `expo prebuild` writes ios.buildNumber into Info.plist (CFBundleVersion);
+// without it, "1". app.config.js also writes it into the Xcode project's
+// CURRENT_PROJECT_VERSION, so a local Archive needs no hand edits.
+
+test('the iOS build number comes from app.json, is a whole number, and reaches Xcode too', () => {
+  const req = createRequire(import.meta.url);
+  const app = JSON.parse(readFileSync(toPath(new URL('../app.json', import.meta.url)), 'utf8')) as { expo: { version: string; ios: { buildNumber?: string } } };
+  assert.match(String(app.expo.ios.buildNumber), /^[1-9]\d*$/, 'app.json ios.buildNumber');
+  const appConfig = req('../app.config.js') as (a: { config: object }) => { ios: { buildNumber: string }; version: string; mods?: { ios?: { xcodeproj?: unknown } } };
+  const cfg = appConfig({ config: app.expo });
+  assert.equal(cfg.ios.buildNumber, app.expo.ios.buildNumber);
+  assert.equal(typeof cfg.mods?.ios?.xcodeproj, 'function', 'the Xcode version plugin is applied');
+  for (const bad of ['', '0', '24.1', 'abc', '-3']) {
+    assert.throws(() => appConfig({ config: { ...app.expo, ios: { ...app.expo.ios, buildNumber: bad } } }), /ios\.buildNumber must be a whole number/, String(bad));
+  }
+  const src = readFileSync(toPath(new URL('../app.config.js', import.meta.url)), 'utf8');
+  assert.ok(/settings\.CURRENT_PROJECT_VERSION = cfg\.ios\?\.buildNumber \?\? '1';/.test(src));
+  assert.ok(/settings\.MARKETING_VERSION = cfg\.version;/.test(src));
 });

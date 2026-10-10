@@ -158,3 +158,11 @@ overrides:
   # drizzle-kit uses esbuild internally on an older version that's vulnerable, this overrides it
   "@esbuild-kit/esm-loader": "npm:tsx@^4.21.0"
   esbuild: "0.27.3"
+
+# expo-modules-jsi 57.1.1 does not compile with Xcode 26 / Swift 6.2 (RuntimeScheduler
+# constructors annotated SWIFT_RETURNS_RETAINED, and "sending ... risks causing data
+# races" in host function / host object getter callbacks).  Backport of the upstream
+# fix (expo/expo#51040), which shipped only in expo-modules-jsi 58.x.  Remove when
+# the app moves to an expo-modules-jsi release that contains it.
+patchedDependencies:
+  expo-modules-jsi@57.1.1: patches/expo-modules-jsi@57.1.1.patch

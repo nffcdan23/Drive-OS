@@ -14,17 +14,11 @@ import { openDirections } from "@/lib/directions";
 import { describeError } from "@/lib/backend/http";
 import type { NearbySpot, SavedPlace } from "@/lib/backend/model";
 import type { Destination } from "@/lib/navigation/model";
+import { placeToDestination } from "@/lib/navigation/localResults";
 
 /** A saved place (the user's own, Beauty Spots included) as a destination */
 export function placeDestination(p: SavedPlace): Destination {
-  const spot = p.kind === "beauty_spot";
-  return {
-    id: `place:${p.id}`,
-    name: p.name,
-    subtitle: spot ? "Beauty Spot" : "Saved place",
-    coordinate: { latitude: p.coordinate.latitude, longitude: p.coordinate.longitude },
-    source: spot ? "spot" : "saved",
-  };
+  return placeToDestination(p);
 }
 
 /** A Beauty Spot someone shared nearby as a destination */
@@ -45,6 +39,13 @@ export function useRouteToPlace() {
   return useCallback(
     async (destination: Destination) => {
       if (!canPreviewRoutes(isDriving)) {
+        // A Search Box result is only ever shown on the Mapbox map (Mapbox's
+        // terms); search is offered only where it can be, so this is a drive
+        // that started meanwhile
+        if (destination.source === "search") {
+          Alert.alert("Finish your drive first", "Places from search open as a route preview once you've stopped recording.");
+          return;
+        }
         await openDirections(destination.coordinate);
         return;
       }

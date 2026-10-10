@@ -102,7 +102,7 @@ interface AppContextValue {
 
   // Saved places & Beauty Spots
   places: SavedPlace[];
-  addPlace: (p: { kind: LocationKind; name: string; coordinate: Coordinate; description?: string; category?: SpotCategory | null; visibility?: Visibility }) => Promise<string>;
+  addPlace: (p: { kind: LocationKind; name: string; coordinate: Coordinate; description?: string; category?: SpotCategory | null; visibility?: Visibility; address?: string }) => Promise<string>;
   updatePlace: (id: string, updates: Partial<Pick<SavedPlace, 'name' | 'description' | 'visibility' | 'category'>>) => void;
   deletePlace: (id: string) => void;
   findNearbySpots: (lat: number, lng: number, radiusM?: number) => Promise<NearbySpot[]>;
