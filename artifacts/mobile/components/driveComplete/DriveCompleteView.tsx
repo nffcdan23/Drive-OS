@@ -126,7 +126,7 @@ export default function DriveCompleteView({
                 accessibilityLabel={`${s.label}: ${s.value}`}
                 style={[styles.stat, i > 0 && styles.statDivider]}
               >
-                <Glyph sf={s.sf} ion={s.ion} size={21} color="#FFFFFF" />
+                <Glyph sf={s.sf} ion={s.ion} size={19} color="#FFFFFF" />
                 <Text style={styles.statLabel} numberOfLines={1}>{s.label}</Text>
                 <Text style={styles.statValue} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.75}>
                   {s.value}
@@ -201,19 +201,19 @@ const styles = StyleSheet.create({
   heroContent: { flex: 1, alignItems: 'center', justifyContent: 'flex-end', paddingBottom: 16, paddingHorizontal: 24 },
   flag: { width: 56, height: 56, borderRadius: 18, alignItems: 'center', justifyContent: 'center', marginBottom: 10 },
   title: {
-    color: '#FFFFFF', fontSize: 34, fontWeight: '700', letterSpacing: -0.5, textAlign: 'center',
+    color: '#FFFFFF', fontSize: 31, fontWeight: '700', letterSpacing: -0.5, textAlign: 'center',
     textShadowColor: 'rgba(0,0,0,0.5)', textShadowRadius: 12,
   },
   subtitle: {
-    color: 'rgba(236,240,244,0.88)', fontSize: 17, marginTop: 4, textAlign: 'center',
+    color: 'rgba(236,240,244,0.88)', fontSize: 15.5, marginTop: 4, textAlign: 'center',
     textShadowColor: 'rgba(0,0,0,0.5)', textShadowRadius: 8,
   },
   body: { paddingHorizontal: 16, gap: 10 },
-  stats: { flexDirection: 'row', borderRadius: 22, paddingVertical: 13 },
-  stat: { flex: 1, alignItems: 'center', gap: 5, paddingHorizontal: 4 },
+  stats: { flexDirection: 'row', borderRadius: 22, paddingVertical: 12 },
+  stat: { flex: 1, alignItems: 'center', gap: 4, paddingHorizontal: 4 },
   statDivider: { borderLeftWidth: StyleSheet.hairlineWidth, borderLeftColor: 'rgba(220,232,244,0.18)' },
-  statLabel: { color: 'rgba(214,224,234,0.72)', fontSize: 12.5, marginTop: 3 },
-  statValue: { color: '#FFFFFF', fontSize: 20, fontWeight: '600', fontVariant: ['tabular-nums'] },
+  statLabel: { color: 'rgba(214,224,234,0.72)', fontSize: 11.5, marginTop: 3 },
+  statValue: { color: '#FFFFFF', fontSize: 18, fontWeight: '600', fontVariant: ['tabular-nums'] },
   notice: { borderRadius: 22, padding: 18 },
   noticeText: { color: 'rgba(214,224,234,0.8)', fontSize: 15, lineHeight: 21 },
   close: {
