@@ -7006,11 +7006,13 @@ test('route previews: fetched only when the user asks, kept in memory only, with
     const src = strip(read(f));
     assert.ok(!/AsyncStorage|SecureStore|MemoryStore|storage|FileSystem|console\./.test(src), `${f} stores or logs routes`);
   }
-  // The context stores one thing on the device: recent destinations (Phase 2B), never routes
+  // The context stores two things on the device, never routes: recent
+  // destinations (Phase 2B) and the voice preference (Phase 4)
   const ctx = strip(read('../context/NavigationContext.tsx'));
   assert.ok(!/AsyncStorage|SecureStore|FileSystem|console\./.test(ctx));
-  assert.deepEqual(ctx.match(/deviceStorage/g)?.length, 2, 'deviceStorage: one import, one use (recents)');
+  assert.deepEqual(ctx.match(/deviceStorage/g)?.length, 3, 'deviceStorage: one import, two uses (recents, voice preference)');
   assert.ok(/new RecentDestinations\(deviceStorage, userId\)/.test(ctx));
+  assert.ok(/new VoicePreferences\(deviceStorage, userId\)/.test(ctx));
   // The disclosure Mapbox asks directions apps to show, on the preview itself
   const panel = read('../components/navigation/RoutePreviewPanel.tsx');
   assert.ok(panel.includes('"Directions are a guide. Always follow road signs, signals and local traffic laws."'));
@@ -8621,6 +8623,330 @@ test('navigation UI: passive off-route states, End asks before finishing a drive
   const map = read('../components/MapboxDriveMap.tsx');
   const layer = map.slice(map.indexOf('const NavigationRouteLayers = memo('), map.indexOf('const MapboxDriveMap = forwardRef'));
   assert.ok(/view\.remaining \?\?/.test(layer) && /\[view\.route, view\.remaining\]/.test(layer));
+});
+
+// ─── Navigation Phase 4: foreground voice guidance ──────────────────────────
+// Mapbox's own prompts, spoken from route progress at Mapbox's distances,
+// once each; rerouting, off route, arrival, foreground only, settings.
+
+import { VoiceGuidance, VOICE, promptKind, type Speaker } from '@/lib/navigation/voice';
+import { VoicePreferences, voicePrefsKey } from '@/lib/navigation/voicePrefs';
+
+/** The L route with Mapbox-like prompts: depart, advance, preparation, immediate; arrival */
+function voiceRoute3(id = 'v:0'): Nav3Route {
+  const r = L_ROUTE();
+  r.routeId = id;
+  const steps = r.legs[0]!.steps;
+  steps[0]!.voice = [
+    { distanceBeforeM: 1000, text: 'Head north on Lake Road, then in 1000 yards, turn left onto Chestnut Hill' },
+    { distanceBeforeM: 800, text: 'In half a mile, turn left onto Chestnut Hill' },
+    { distanceBeforeM: 400, text: 'In a quarter of a mile, turn left onto Chestnut Hill' },
+    { distanceBeforeM: 60, text: 'Turn left onto Chestnut Hill' },
+  ];
+  steps[1]!.voice = [
+    { distanceBeforeM: 600, text: 'Continue for 600 yards, then turn right onto Brow Top' },
+    { distanceBeforeM: 300, text: 'In 300 yards, turn right onto Brow Top' },
+    { distanceBeforeM: 50, text: 'Turn right onto Brow Top' },
+  ];
+  steps[2]!.voice = [
+    { distanceBeforeM: 400, text: 'In a quarter of a mile, you will arrive at your destination' },
+    { distanceBeforeM: 30, text: 'You have arrived at your destination' },
+  ];
+  return r;
+}
+const OLD_TEXTS3 = voiceRoute3().legs[0]!.steps.flatMap((st) => st.voice.map((v) => v.text));
+/** A new route from just past the missed turn, with its own prompts */
+function freshVoice3(): Nav3Route {
+  const r = FRESH3();
+  r.legs[0]!.steps.forEach((st, k) => { st.voice = [{ distanceBeforeM: 2000, text: `NEW depart ${k}` }, { distanceBeforeM: 300, text: `NEW prepare ${k}` }, { distanceBeforeM: 40, text: `NEW now ${k}` }]; });
+  return r;
+}
+/** A navigation session with voice guidance on a fake speaker */
+function voice3(opts: { fetch?: (body: unknown) => Promise<ServerRoutes> } = {}) {
+  const h = nav3Session(opts);
+  const said: Array<{ text: string; along: number | null; t: number }> = [];
+  const logs: Array<Record<string, unknown>> = [];
+  let stops = 0;
+  const speaker: Speaker = {
+    speak: (text) => {
+      const st = h.s.state;
+      said.push({ text, along: active3(st)?.progress?.along ?? null, t: h.clock.t });
+    },
+    stop: () => { stops++; },
+  };
+  const v = new VoiceGuidance({ session: h.s, speaker, now: () => h.clock.t, journal: { log: (event, data) => logs.push({ event, ...data }) } });
+  v.attach();
+  return { ...h, v, said, logs, texts: () => said.map((x) => x.text), stops: () => stops };
+}
+/** One fix every `step` m along the L route, noise-free */
+const walk3 = (from: number, to: number, t0: number, step = 10) => drive3(L_PTS, { from, to, t0, speed: step, noise: 0 });
+
+test('voice: Mapbox prompts fire from route progress at their distances: depart, advance, preparation, immediate, arrival', () => {
+  const h = voice3();
+  void h.s.start({ route: voiceRoute3(), destination: N3_DEST });
+  assert.equal(h.said.length, 0, 'nothing before the car is on the route');
+  h.feed(walk3(0, 1995, 1_000_000));
+  h.feed(walk3(1996, 2000, h.clock.t + 1000, 2));
+  assert.equal(h.s.phase, 'arrived');
+  assert.deepEqual(h.texts(), [
+    'Head north on Lake Road, then in 1000 yards, turn left onto Chestnut Hill',
+    'In half a mile, turn left onto Chestnut Hill',
+    'In a quarter of a mile, turn left onto Chestnut Hill',
+    'Turn left onto Chestnut Hill',
+    'Continue for 600 yards, then turn right onto Brow Top',
+    'In 300 yards, turn right onto Brow Top',
+    'Turn right onto Brow Top',
+    'In a quarter of a mile, you will arrive at your destination',
+    'You have arrived at your destination',
+  ]);
+  // Each at its threshold (within one fix of it), never early
+  const turnAt = [1000, 1000, 1000, 1000, 1600, 1600, 1600, 2000];
+  const before = [1000, 800, 400, 60, 600, 300, 50, 400];
+  for (let k = 1; k < 8; k++) {
+    const due = turnAt[k]! - before[k]!;
+    const along = h.said[k]!.along!;
+    assert.ok(along >= due - 0.5 && along < due + 12, `${h.said[k]!.text}: said at ${along.toFixed(0)} m, due at ${due} m`);
+  }
+  // The kinds the diagnostics use
+  assert.equal(promptKind(0, 4), 'advance');
+  assert.equal(promptKind(2, 4), 'preparation');
+  assert.equal(promptKind(3, 4), 'immediate');
+  assert.equal(promptKind(0, 2), 'preparation');
+  assert.equal(promptKind(0, 1), 'immediate');
+  // Arrival is spoken once, even with more updates and Done; Done doesn't cut it off
+  const stops = h.stops();
+  h.advance(30_000);
+  h.s.end('arrived');
+  assert.equal(h.texts().filter((t) => /arrived/.test(t)).length, 1);
+  assert.equal(h.stops(), stops, 'navigation handing over to Drive Complete leaves the arrival to finish');
+});
+
+test('voice: GPS jitter and going slightly backwards never replay a prompt', () => {
+  const h = voice3();
+  void h.s.start({ route: voiceRoute3(), destination: N3_DEST });
+  h.feed(walk3(0, 590, 1_000_000));
+  const t = h.clock.t;
+  // Wobbling across the 400 m prompt's threshold (600 m along), forwards and back
+  const wobble = [595, 603, 598, 606, 597, 611, 602, 615, 605, 620];
+  h.feed(wobble.map((d, i) => fix3(0 + (i % 2 ? 4 : -4), d, t + 1000 * (i + 1), { headingDeg: 0, speedMs: 5 })));
+  // Noisy driving on to the turn
+  h.feed(drive3(L_PTS, { from: 625, to: 990, t0: h.clock.t + 1000, noise: 8, seed: 3 }));
+  const texts = h.texts();
+  assert.equal(new Set(texts).size, texts.length, `repeated: ${texts.join(' | ')}`);
+  assert.equal(texts.filter((x) => x === 'In a quarter of a mile, turn left onto Chestnut Hill').length, 1);
+  // Even a bigger step back (confirmed by the tracker) says nothing again
+  const n = h.said.length;
+  h.feed(drive3(L_PTS, { from: 900, to: 960, t0: h.clock.t + 1000, noise: 0 }));
+  h.feed(drive3(L_PTS, { from: 850, to: 900, t0: h.clock.t + 1000, noise: 0 }));
+  const again = h.texts().slice(n);
+  assert.ok(again.every((x) => !texts.includes(x)), `replayed: ${again.join(' | ')}`);
+});
+
+test('voice: rerouting cancels the old route, says "Updating route" once, and speaks only the new route', async () => {
+  const srv = routeServer3();
+  const h = voice3({ fetch: srv.fetch });
+  void h.s.start({ route: voiceRoute3(), destination: N3_DEST });
+  h.feed(walk3(0, 700, 1_000_000));
+  const stopsBefore = h.stops();
+  feedWatching3(h, offNorth3(h.clock.t + 1000), () => h.bodies.length === 1);
+  assert.ok(h.stops() > stopsBefore, 'queued speech for the old route is cancelled');
+  assert.equal(h.texts().filter((x) => x === VOICE.updating).length, 1);
+  // More off-route fixes while the request is out: not said again
+  feedWatching3(h, offNorth3(h.clock.t + 1000).slice(30, 40));
+  assert.equal(h.texts().filter((x) => x === VOICE.updating).length, 1);
+  const cut = h.said.length;
+  srv.answer(serverRoutes3(freshVoice3()));
+  await settle3();
+  assert.equal(h.s.phase, 'navigating');
+  const after = h.texts().slice(cut);
+  assert.ok(after.length >= 1, 'the new route speaks straight away');
+  assert.ok(after.every((x) => x.startsWith('NEW')), `after the reroute: ${after.join(' | ')}`);
+  // Driving the new route: its prompts, never the old ones
+  h.feed(drive3(polyline3([[0, 1250], [0, 1500], [-600, 1500]]), { t0: h.clock.t + 1000, noise: 0 }));
+  const later = h.texts().slice(cut);
+  assert.ok(later.every((x) => !OLD_TEXTS3.includes(x)), `old route spoken: ${later.join(' | ')}`);
+  assert.ok(later.includes('NEW now 1'), 'the new route\'s turn');
+  assert.ok(h.logs.some((l) => l.event === 'nav_voice' && l.reason === 'off_route'));
+});
+
+test('voice: off route again within a minute is not announced again', async () => {
+  const srv = routeServer3();
+  const h = voice3({ fetch: srv.fetch });
+  void h.s.start({ route: voiceRoute3(), destination: N3_DEST });
+  h.feed(walk3(0, 700, 1_000_000));
+  const off = offNorth3(h.clock.t + 1000);
+  feedWatching3(h, off, () => h.bodies.length === 1);
+  srv.answer(serverRoutes3(freshVoice3()));
+  await settle3();
+  const firstAt = h.said.find((x) => x.text === VOICE.updating)!.t;
+  // Straight off the new route too (east, into a side road)
+  const y = (off.find((f) => f.time === h.clock.t)!.latitude - N3_BASE.latitude) * N3_M;
+  h.feed(drive3(polyline3([[0, y], [500, y]]), { t0: h.clock.t + 1000, noise: 0 }).slice(0, 20));
+  assert.ok(h.phases.lastIndexOf('offRoute') > h.phases.indexOf('navigating'));
+  assert.ok(h.clock.t - firstAt < VOICE.offRouteGapMs);
+  assert.equal(h.texts().filter((x) => x === VOICE.updating).length, 1, 'once a minute at most');
+});
+
+test('voice: foreground only: leaving stops speech, nothing is said away, coming back replays nothing', () => {
+  const h = voice3();
+  void h.s.start({ route: voiceRoute3(), destination: N3_DEST });
+  h.feed(walk3(0, 150, 1_000_000));
+  const stops = h.stops();
+  h.v.setForeground(false);
+  assert.equal(h.stops(), stops + 1, 'leaving the foreground stops speech');
+  assert.ok(h.logs.some((l) => l.event === 'nav_voice' && l.action === 'cancelled' && l.reason === 'background'));
+  const n = h.said.length;
+  // Away: past the 800 m and 400 m prompts
+  h.feed(walk3(160, 700, h.clock.t + 1000));
+  assert.equal(h.said.length, n, 'nothing spoken in the background');
+  h.v.setForeground(true);
+  assert.equal(h.said.length, n, 'coming back replays nothing');
+  h.feed(walk3(710, 950, h.clock.t + 1000));
+  assert.deepEqual(h.texts().slice(n), ['Turn left onto Chestnut Hill'], 'only what is still ahead');
+});
+
+test('voice: mute stops at once and says nothing; unmute speaks what is still ahead; Alerts only', () => {
+  const h = voice3();
+  void h.s.start({ route: voiceRoute3(), destination: N3_DEST });
+  h.feed(walk3(0, 150, 1_000_000));
+  const stops = h.stops();
+  h.v.setMode('off');
+  assert.equal(h.stops(), stops + 1, 'muting cancels what is queued');
+  const n = h.said.length;
+  h.feed(walk3(160, 700, h.clock.t + 1000));
+  assert.equal(h.said.length, n, 'muted: nothing');
+  h.v.setMode('normal');
+  assert.equal(h.said.length, n, 'unmuting replays nothing');
+  h.feed(walk3(710, 1300, h.clock.t + 1000));
+  assert.deepEqual(h.texts().slice(n), ['Turn left onto Chestnut Hill', 'Continue for 600 yards, then turn right onto Brow Top', 'In 300 yards, turn right onto Brow Top']);
+  assert.ok(h.logs.some((l) => l.state === 'disabled') && h.logs.some((l) => l.state === 'enabled'));
+  // Alerts only: just the prompt at each manoeuvre
+  const a = voice3();
+  a.v.setMode('alerts');
+  void a.s.start({ route: voiceRoute3(), destination: N3_DEST });
+  a.feed(walk3(0, 1995, 1_000_000));
+  a.feed(walk3(1996, 2000, a.clock.t + 1000, 2));
+  assert.deepEqual(a.texts(), ['Turn left onto Chestnut Hill', 'Turn right onto Brow Top', 'You have arrived at your destination']);
+});
+
+test('voice: arrival without a Mapbox arrival prompt says "You have arrived", once; End stops speech', () => {
+  const h = voice3();
+  const r = voiceRoute3();
+  r.legs[0]!.steps[2]!.voice = [];
+  void h.s.start({ route: r, destination: N3_DEST });
+  h.feed(walk3(0, 1995, 1_000_000));
+  h.feed(walk3(1996, 2000, h.clock.t + 1000, 2));
+  assert.equal(h.texts().filter((x) => x === VOICE.arrived).length, 1);
+  assert.equal(h.texts()[h.said.length - 1], VOICE.arrived);
+  // Ending part way stops speech
+  const e = voice3();
+  void e.s.start({ route: voiceRoute3(), destination: N3_DEST });
+  e.feed(walk3(0, 300, 1_000_000));
+  const stops = e.stops();
+  e.s.end('user');
+  assert.equal(e.stops(), stops + 1);
+  e.feed(walk3(310, 900, e.clock.t + 1000));
+  assert.equal(e.texts().length, 2, 'nothing after End');
+});
+
+test('voice preference: Normal by default, kept per user on this device, mute remembers the last choice', async () => {
+  const store = new MemoryStore();
+  const a = new VoicePreferences(store, 'u1');
+  await a.load();
+  assert.equal(a.mode, 'normal');
+  await a.setMode('alerts');
+  const b = new VoicePreferences(store, 'u1');
+  await b.load();
+  assert.equal(b.mode, 'alerts', 'persisted');
+  await b.toggleMute();
+  assert.equal(b.mode, 'off');
+  const c = new VoicePreferences(store, 'u1');
+  await c.load();
+  assert.equal(c.mode, 'off');
+  await c.toggleMute();
+  assert.equal(c.mode, 'alerts', 'unmute: back to the last spoken choice');
+  // Another user on the same phone has their own
+  const other = new VoicePreferences(store, 'u2');
+  await other.load();
+  assert.equal(other.mode, 'normal');
+  // Nonsense stored: the default
+  await store.setItem(voicePrefsKey('u3'), '{"mode":"loud"}');
+  const d = new VoicePreferences(store, 'u3');
+  await d.load();
+  assert.equal(d.mode, 'normal');
+  // Cleared with the user's other device data at sign-out
+  const sync = readFileSync(toPath(new URL('../lib/backend/cloudSync.ts', import.meta.url)), 'utf8');
+  assert.ok(sync.includes("userKey(this.deps.userId, 'nav/voice/v1')"));
+  assert.equal(voicePrefsKey('u1'), userKey('u1', 'nav/voice/v1'));
+});
+
+test('voice: diagnostics have steps, kinds and reasons, never the words, roads, destination or position', async () => {
+  const srv = routeServer3();
+  const h = voice3({ fetch: srv.fetch });
+  void h.s.start({ route: voiceRoute3(), destination: { ...N3_DEST, name: 'Secret Café' } });
+  h.feed(walk3(0, 700, 1_000_000));
+  feedWatching3(h, offNorth3(h.clock.t + 1000), () => h.bodies.length === 1);
+  srv.answer(serverRoutes3(freshVoice3()));
+  await settle3();
+  h.v.setForeground(false);
+  h.v.noteSpeechError('speech_error');
+  const spoken = h.logs.filter((l) => l.event === 'nav_voice' && l.action === 'spoken');
+  assert.ok(h.logs.some((l) => (l as Record<string, unknown>).step === 1 && (l as Record<string, unknown>).kind === 'advance'));
+  assert.ok(h.logs.some((l) => l.reason === 'off_route'));
+  assert.ok(h.logs.some((l) => l.reason === 'background'));
+  assert.ok(h.logs.some((l) => l.code === 'speech_error'));
+  assert.ok(spoken.length > 3);
+  const text = JSON.stringify(h.logs);
+  for (const secret of ['Chestnut', 'Lake Road', 'Brow Top', 'Secret Café', 'NEW', 'yards', 'Updating route', '54.6', '-3.1']) {
+    assert.ok(!text.includes(secret), `the voice log holds "${secret}"`);
+  }
+});
+
+test('voice is a reader only: navigation, rerouting, progress and recording behave the same with it', async () => {
+  const run = async (withVoice: boolean) => {
+    const srv = routeServer3();
+    const h = withVoice ? voice3({ fetch: srv.fetch }) : nav3Session({ fetch: srv.fetch });
+    void h.s.start({ route: voiceRoute3(), destination: N3_DEST, recording: 'navigation' });
+    h.feed(walk3(0, 700, 1_000_000));
+    feedWatching3(h, offNorth3(h.clock.t + 1000), () => h.bodies.length === 1);
+    srv.answer(serverRoutes3(freshVoice3()));
+    await settle3();
+    h.feed(drive3(polyline3([[0, 1250], [0, 1500], [-600, 1500], [-600, 1400]]), { t0: h.clock.t + 1000, noise: 0 }));
+    return { phases: h.phases, bodies: JSON.stringify(h.bodies), states: h.states.map((st) => `${st.phase}:${active3(st)?.progress?.along.toFixed(2) ?? '-'}:${st.phase === 'idle' ? '' : st.recording}`) };
+  };
+  const a = await run(false);
+  const b = await run(true);
+  assert.deepEqual(b.phases, a.phases);
+  assert.equal(b.bodies, a.bodies);
+  assert.deepEqual(b.states, a.states);
+  // Nothing in voice reaches recording, sharing, presence or the camera; navigation doesn't know about voice
+  const read = (rel: string) => readFileSync(toPath(new URL(rel, import.meta.url)), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+  for (const f of ['lib/navigation/voice.ts', 'lib/navigation/voicePrefs.ts', 'lib/navigation/speech.ts']) {
+    const src = read(`../${f}`);
+    assert.ok(!/startDrive|endDrive|cloudSync|journeyRecorder|liveLocation|presence|setCamera|Camera|reroute\(|noteFix\(|\.end\(/.test(src), f);
+  }
+  assert.ok(!/voice/i.test(read('../lib/navigation/session.ts').replace(/voice[A-Za-z]*:/g, '')), 'the session has no voice in it');
+  const drive = read('../app/(tabs)/(drive)/index.tsx');
+  assert.ok(!/Voice|Speech|speech/.test(drive), 'the Drive screen is untouched by voice');
+});
+
+test('voice native impact: expo-speech only, own iOS speech session, British English, no background audio', () => {
+  const read = (rel: string) => readFileSync(toPath(new URL(rel, import.meta.url)), 'utf8');
+  const speech = read('../lib/navigation/speech.ts');
+  assert.ok(/useApplicationAudioSession: false/.test(speech), "iOS's own ducking speech session, not the app's");
+  assert.ok(/language: 'en-GB'/.test(speech));
+  assert.ok(/requireOptionalNativeModule\('ExpoSpeech'\) \?/.test(speech), 'a binary without the module stays quiet, never crashes');
+  const pkg = JSON.parse(read('../package.json')) as { dependencies: Record<string, string> };
+  assert.equal(pkg.dependencies['expo-speech'], '~57.0.3');
+  assert.ok(!pkg.dependencies['expo-av'] && !pkg.dependencies['expo-audio'], 'no app audio session library');
+  for (const f of ['../app.json', '../app.config.js']) {
+    const src = read(f);
+    assert.ok(!/["']audio["']/.test(src), `${f}: no background audio mode`);
+    assert.ok(!/expo-speech|AVAudioSession|NSMicrophone/.test(src), `${f}: no speech plugin or audio config`);
+  }
+  // Foreground only, in the context: anything but "active" is quiet
+  const ctx = read('../context/NavigationContext.tsx');
+  assert.ok(/AppState\.addEventListener\('change', \(state\) => voice\.setForeground\(state === 'active'\)\)/.test(ctx));
 });
 
 // ─── iOS build number: one source of truth (app.json ios.buildNumber) ───────

@@ -1546,6 +1546,8 @@ export class CloudSync {
     await this.deps.store.removeItem(this.cacheKey);
     // Recent destinations (lib/navigation/recents.ts) are this user's too
     await this.deps.store.removeItem(userKey(this.deps.userId, 'nav/recents/v1'));
+    // And the navigation voice choice (lib/navigation/voicePrefs.ts)
+    await this.deps.store.removeItem(userKey(this.deps.userId, 'nav/voice/v1'));
   }
 
   /**

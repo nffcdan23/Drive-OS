@@ -19,6 +19,10 @@
  * may be saved (not a search result: Mapbox's terms) and isn't already. (A
  * drive navigation started is finished by the Drive screen on arriving.)
  *
+ * Both have a small voice button (Phase 4): mute stops guidance speaking at
+ * once (and drops anything queued); unmute brings back the last choice, for
+ * the prompts still ahead. It's the same preference as Settings.
+ *
  * Both read the navigation state themselves; the Drive screen doesn't
  * re-render as it changes. They never start or stop a recording themselves.
  */
@@ -29,7 +33,7 @@ import * as Haptics from "expo-haptics";
 import { GlassButton, GlassSurface } from "@/components/Glass";
 import { SavePlaceSheet } from "@/components/places/SavePlaceSheet";
 import { useApp } from "@/context/AppContext";
-import { useEndNavigation, useNavigationState } from "@/context/NavigationContext";
+import { useEndNavigation, useNavigationState, useNavigationVoice } from "@/context/NavigationContext";
 import { arrivalTime, formatClock, formatDuration, formatGuidanceDistance } from "@/lib/navigation/format";
 import { saveability } from "@/lib/navigation/places";
 import type { NavigationState } from "@/lib/navigation/session";
@@ -141,6 +145,27 @@ function EndButton({ compact, ownsDrive, onFinishDrive }: { compact?: boolean; o
   );
 }
 
+/** Mute / unmute voice guidance: an icon, quiet by design */
+function VoiceButton({ compact }: { compact?: boolean }) {
+  const { mode, toggleMute } = useNavigationVoice();
+  const muted = mode === "off";
+  return (
+    <TouchableOpacity
+      accessibilityRole="button"
+      accessibilityLabel={muted ? "Unmute voice guidance" : "Mute voice guidance"}
+      accessibilityState={{ selected: muted }}
+      onPress={() => {
+        Haptics.selectionAsync();
+        toggleMute();
+      }}
+      style={[styles.voice, compact && styles.voiceCompact]}
+      hitSlop={8}
+    >
+      <Ionicons name={muted ? "volume-mute" : "volume-high"} size={compact ? 18 : 20} color={muted ? MUTED : FG} />
+    </TouchableOpacity>
+  );
+}
+
 function Summary({ state, unitSystem, compact }: { state: NavigationState; unitSystem: ResolvedUnitSystem; compact: boolean }) {
   const now = useClock();
   const progress = remainingOf(state);
@@ -198,6 +223,7 @@ export function GuidanceBar({
         <>
           <View style={styles.row}>
             <Summary state={state} unitSystem={unitSystem} compact={false} />
+            <VoiceButton />
             <EndButton ownsDrive={false} />
           </View>
           {state.phase !== "error" ? (
@@ -251,6 +277,7 @@ export function GuidanceStrip({
       ) : (
         <View style={[styles.row, styles.compactRow]}>
           <Summary state={state} unitSystem={unitSystem} compact />
+          <VoiceButton compact />
           <EndButton compact ownsDrive={state.recording === "navigation"} onFinishDrive={onFinishDrive} />
         </View>
       )}
@@ -289,6 +316,15 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   endCompact: { height: 36, paddingHorizontal: 16, borderRadius: 18 },
+  voice: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(255,255,255,0.10)",
+  },
+  voiceCompact: { width: 36, height: 36, borderRadius: 18 },
   endText: { color: "#0A0D10", fontSize: 16, fontWeight: "700" },
   actions: { flexDirection: "row", gap: 10 },
   pill: {

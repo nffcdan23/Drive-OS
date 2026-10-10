@@ -20,11 +20,18 @@ import { ScreenTitle } from "@/components/Cockpit";
 import { AccountPreferences } from "@/components/AccountPreferences";
 import { useSignOut } from "@/hooks/useSignOut";
 import { useApp } from "@/context/AppContext";
+import { useNavigationVoice } from "@/context/NavigationContext";
 import { useAuth } from "@/context/AuthContext";
 import { describeError } from "@/lib/backend/http";
 import { UNIT_SYSTEM_OPTIONS } from "@/lib/units";
 import colors, { sectionAccent } from "@/constants/colors";
 const c = colors.dark;
+/** Voice guidance while navigating (lib/navigation/voice.ts) */
+const VOICE_OPTIONS = [
+  { value: "normal", label: "Voice Guidance", sub: "Spoken directions while navigating." },
+  { value: "alerts", label: "Alerts Only", sub: "Just at each turn, rerouting and arrival." },
+  { value: "off", label: "Off", sub: "No spoken directions. The banner still shows them." },
+] as const;
 const sectionTitles: Record<string, string> = {
   account: "Account",
   privacy: "Privacy",
@@ -58,6 +65,7 @@ export default function SettingsScreen() {
     userProfile,
   } = useApp();
   const { email, signOut } = useAuth();
+  const voice = useNavigationVoice();
   const handleSignOut = useSignOut();
   const [showDelete, setShowDelete] = useState(false);
   const [deleteText, setDeleteText] = useState("");
@@ -188,6 +196,29 @@ export default function SettingsScreen() {
                     <Text style={s.note}>{option.sub}</Text>
                   </View>
                   {unitSystem === option.value && (
+                    <Ionicons
+                      name="checkmark"
+                      size={21}
+                      color={sectionAccent.profile}
+                    />
+                  )}
+                </GlassButton>
+              ))}
+            </GlassSurface>
+            <GlassSurface style={s.card}>
+              <Text style={s.title}>Navigation Voice</Text>
+              {VOICE_OPTIONS.map((option) => (
+                <GlassButton
+                  key={option.value}
+                  style={s.action}
+                  onPress={() => voice.setMode(option.value)}
+                  accessibilityState={{ selected: voice.mode === option.value }}
+                >
+                  <View style={{ flex: 1 }}>
+                    <Text style={s.label}>{option.label}</Text>
+                    <Text style={s.note}>{option.sub}</Text>
+                  </View>
+                  {voice.mode === option.value && (
                     <Ionicons
                       name="checkmark"
                       size={21}

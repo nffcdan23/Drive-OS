@@ -21,10 +21,17 @@
  * Start Navigation turns the preview into turn-by-turn guidance, fed the
  * same accepted fixes, read only. In memory only: the app closing (or the
  * user signing out) ends it. Starting it records the drive with the app's
- * existing Start Drive when nothing is recording (Phase 3.1). The Drive screen reads only its phase; the
- * guidance banner and bar read the rest.
+ * existing Start Drive when nothing is recording (Phase 3.1). The Drive
+ * screen reads only its phase; the guidance banner and bar read the rest.
+ *
+ * Voice guidance (Phase 4, lib/navigation/voice.ts) follows the session from
+ * here, so it lives as long as the session does (other tabs don't reset
+ * it): it speaks Mapbox's prompts while the app is in the foreground and
+ * stops the moment it isn't. Its preference (Normal / Alerts only / Off) is
+ * kept on this device for this user (lib/navigation/voicePrefs.ts).
  */
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { AppState } from 'react-native';
 import * as Location from 'expo-location';
 import { ep, newId } from '@/lib/backendClient';
 import { ApiError, AuthRequiredError, NetworkError, describeError } from '@/lib/backend/http';
@@ -35,6 +42,9 @@ import { RecentDestinations, type RecentDestination } from '@/lib/navigation/rec
 import { DestinationSearch, type SearchState } from '@/lib/navigation/search';
 import { NavigationSession, type EndReason, type NavigationState, type NavPhase } from '@/lib/navigation/session';
 import { startFromPreview, type NavigationRecorder } from '@/lib/navigation/startNavigation';
+import { createSpeaker } from '@/lib/navigation/speech';
+import { VoiceGuidance, type VoiceMode } from '@/lib/navigation/voice';
+import { VoicePreferences } from '@/lib/navigation/voicePrefs';
 import { useApp } from '@/context/AppContext';
 import { journal } from '@/lib/diagnostics';
 import { RoutePreviewStore, type PreviewError, type PreviewPhase, type PreviewState } from '@/lib/navigation/previewStore';
@@ -58,6 +68,7 @@ interface NavigationContextValue {
   /** The latest position the Drive screen accepted, if recent (search ranks near it) */
   recentPosition(): LatLng | null;
   recents: RecentDestinations;
+  voicePrefs: VoicePreferences;
 }
 
 const NavigationContext = createContext<NavigationContextValue | null>(null);
@@ -96,6 +107,30 @@ export function NavigationProvider({ userId, children }: { userId: string; child
   }), []);
   // Signing out (or anything else unmounting this) ends navigation
   useEffect(() => () => session.end('closed'), [session]);
+
+  // Voice guidance: reads the session only; foreground only
+  const voicePrefs = useMemo(() => new VoicePreferences(deviceStorage, userId), [userId]);
+  useEffect(() => {
+    const voice: VoiceGuidance = new VoiceGuidance({
+      session,
+      speaker: createSpeaker((code) => voice.noteSpeechError(code)),
+      now: Date.now,
+      journal,
+    });
+    voice.setForeground(AppState.currentState === 'active');
+    const apply = () => voice.setMode(voicePrefs.mode);
+    apply();
+    const offPrefs = voicePrefs.subscribe(apply);
+    void voicePrefs.load();
+    // Anything but on screen and active (background, a call, Control Centre): quiet
+    const app = AppState.addEventListener('change', (state) => voice.setForeground(state === 'active'));
+    const detach = voice.attach();
+    return () => {
+      app.remove();
+      offPrefs();
+      detach();
+    };
+  }, [session, voicePrefs]);
   const lastFix = useRef<{ origin: RouteOrigin; time: number } | null>(null);
 
   const noteFix = useCallback<NavigationContextValue['noteFix']>((fix) => {
@@ -128,8 +163,8 @@ export function NavigationProvider({ userId, children }: { userId: string; child
   useEffect(() => { void recents.load(); }, [recents]);
 
   const value = useMemo(
-    () => ({ store, session, noteFix, currentOrigin, recentPosition, recents }),
-    [store, session, noteFix, currentOrigin, recentPosition, recents],
+    () => ({ store, session, noteFix, currentOrigin, recentPosition, recents, voicePrefs }),
+    [store, session, noteFix, currentOrigin, recentPosition, recents, voicePrefs],
   );
   return <NavigationContext.Provider value={value}>{children}</NavigationContext.Provider>;
 }
@@ -285,3 +320,13 @@ export function useEndNavigation() {
   return useCallback((reason: EndReason = 'user') => session.end(reason), [session]);
 }
 
+/** The navigation voice preference: Normal, Alerts only or Off (this device, this user) */
+export function useNavigationVoice(): { mode: VoiceMode; setMode(mode: VoiceMode): void; toggleMute(): void } {
+  const { voicePrefs } = useNavigation();
+  const mode = useSyncExternalStore(useCallback((fn: () => void) => voicePrefs.subscribe(fn), [voicePrefs]), () => voicePrefs.mode);
+  return useMemo(() => ({
+    mode,
+    setMode: (m: VoiceMode) => void voicePrefs.setMode(m),
+    toggleMute: () => void voicePrefs.toggleMute(),
+  }), [mode, voicePrefs]);
+}

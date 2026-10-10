@@ -13,8 +13,9 @@
 // gave none. The roundabout exit is Mapbox's structured exit number, never
 // read out of the text.
 //
-// Kept for later phases: the voice prompts and their distances (Phase 5
-// voice) and lane data (Phase 6, null until the API forwards it).
+// The voice prompts and their distances are what voice guidance speaks
+// (Phase 4, voice.ts). Lane data is kept for later (null until the API
+// forwards it).
 //
 // No React Native imports, so it is unit-tested under node.
 
