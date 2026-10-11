@@ -84,6 +84,7 @@ import {
 } from "@/context/NavigationContext";
 import { GuidanceBanner } from "@/components/navigation/GuidanceBanner";
 import { GuidanceBar } from "@/components/navigation/GuidanceBar";
+import { NavigationControls } from "@/components/navigation/NavigationControls";
 import { GuidanceKeepAwake } from "@/components/navigation/GuidanceKeepAwake";
 import { guidanceZoom, type GuidanceZoom } from "@/lib/navigation/guidanceCamera";
 import { drivePresentation } from "@/lib/drivePresentation";
@@ -594,6 +595,11 @@ export default function MapScreen() {
     if (Math.abs(h - guidanceBannerHeightRef.current) < 1) return;
     guidanceBannerHeightRef.current = h;
     setGuidanceBannerHeight(h);
+  }, []);
+  // The main guidance card alone (the controls sit beside the Then card)
+  const [guidanceCardHeight, setGuidanceCardHeight] = useState(0);
+  const onGuidanceCardHeight = useCallback((h: number) => {
+    setGuidanceCardHeight((prev) => (Math.abs(h - prev) < 1 ? prev : h));
   }, []);
 
   // ── Map state ──
@@ -2209,6 +2215,11 @@ export default function MapScreen() {
       right: 0,
       zIndex: 20,
     },
+    navControls: {
+      position: "absolute",
+      right: 12,
+      zIndex: 19,
+    },
     bottomArea: {
       position: "absolute",
       left: 0,
@@ -2817,6 +2828,23 @@ export default function MapScreen() {
           <GuidanceBanner
             unitSystem={resolvedUnitSystem}
             onHeight={onGuidanceBannerHeight}
+            onCardHeight={onGuidanceCardHeight}
+          />
+        </View>
+      )}
+
+      {/* ── Navigation controls down the right: voice, Record ── */}
+      {presentation === "navigation" && !previewing && (
+        <View
+          pointerEvents="box-none"
+          style={[
+            styles.navControls,
+            { top: SEARCH_TOP + passengerOffset + guidanceCardHeight + 10 },
+          ]}
+        >
+          <NavigationControls
+            recordingActive={isDriving}
+            onRecord={handleStartDrive}
           />
         </View>
       )}
@@ -2858,7 +2886,6 @@ export default function MapScreen() {
             following={followMode === "following"}
             onRecenter={handleResumeFollowing}
             onOverview={showNavigationOverview}
-            onRecord={handleStartDrive}
             recordingActive={isDriving}
             onFinishDrive={handleFinishNavigationDrive}
           />

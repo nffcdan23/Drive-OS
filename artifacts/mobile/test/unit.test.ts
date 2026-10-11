@@ -8298,7 +8298,7 @@ test('guidance privacy: nothing is stored; the diagnostics journal has events, n
 test('guidance and recording: navigation uses the one existing recorder, only through Start Drive and End Drive', () => {
   const read = (rel: string) => readFileSync(toPath(new URL(rel, import.meta.url)), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
   // No navigation module reaches into recording internals or sharing
-  for (const f of ['lib/navigation/session.ts', 'lib/navigation/routeProgress.ts', 'lib/navigation/offRoute.ts', 'lib/navigation/startNavigation.ts', 'components/navigation/GuidanceBar.tsx', 'components/navigation/GuidanceBanner.tsx']) {
+  for (const f of ['lib/navigation/session.ts', 'lib/navigation/routeProgress.ts', 'lib/navigation/offRoute.ts', 'lib/navigation/startNavigation.ts', 'components/navigation/GuidanceBar.tsx', 'components/navigation/GuidanceBanner.tsx', 'components/navigation/NavigationControls.tsx', 'lib/navigation/guidanceText.ts']) {
     const src = read(`../${f}`);
     assert.ok(!/journeyRecorder|cloudSync|updateDriveCoordinate|endDrive|discardDrive|liveLocation|presence|startDrive/.test(src), `${f} reaches into recording or sharing`);
   }
@@ -8309,7 +8309,8 @@ test('guidance and recording: navigation uses the one existing recorder, only th
   assert.ok(/canRecord: \(\) => !app\.current\.isPassengerMode/.test(recorder));
   assert.ok(!/cloud|endDrive|discardDrive|liveLocation|presence/.test(recorder));
   const bar = read('../components/navigation/GuidanceBar.tsx');
-  assert.ok(/onRecord/.test(bar) && /onFinishDrive/.test(bar), 'the bar asks the screen to record or finish');
+  assert.ok(/onFinishDrive/.test(bar), 'the bar asks the screen to finish');
+  assert.ok(/onRecord/.test(read('../components/navigation/NavigationControls.tsx')), 'the controls ask the screen to record');
   const drive = read('../app/(tabs)/(drive)/index.tsx');
   // Recording still gets the raw fix, exactly as before
   assert.ok(/updateDriveCoordinate\(\{\s*latitude: lat,\s*longitude: lon,/.test(drive));
@@ -8617,10 +8618,13 @@ test('navigation UI: passive off-route states, End asks before finishing a drive
   const bar = read('../components/navigation/GuidanceBar.tsx');
   assert.ok(bar.includes('"End navigation and finish drive", onPress: onFinishDrive'));
   assert.ok(bar.includes('{ text: "Continue navigation", style: "cancel" }'));
-  assert.ok(/if \(ownsDrive && onFinishDrive\) \{[\s\S]*?return;\s*\}\s*end\("user"\);/.test(bar), 'otherwise End ends navigation only');
+  assert.ok(/if \(ownsDrive\) \{[\s\S]*?return;\s*\}\s*end\("user"\);/.test(bar), 'otherwise End ends navigation only');
   assert.ok(/const ownsDrive = recordingActive && state\.recording === "navigation";/.test(bar));
   assert.ok(/<EndButton ownsDrive=\{ownsDrive\} onFinishDrive=\{onFinishDrive\} \/>/.test(bar), 'one End: it asks only for a drive navigation started');
-  assert.ok(/\) : state\.recording === "none" \? \(\s*<GlassButton\s*accessibilityLabel="Record this drive"/.test(bar), 'Record only with nothing recording');
+  const controls = read('../components/navigation/NavigationControls.tsx');
+  assert.ok(/const canRecord = state\.phase !== "error" && !recordingActive && state\.recording === "none";/.test(controls), 'Record only with nothing recording');
+  assert.ok(/\{canRecord \? \(\s*<GlassButton[\s\S]*?accessibilityLabel="Record this drive"/.test(controls));
+  assert.ok(!/onRecord/.test(bar), 'Record is in the controls, not the bottom panel');
   // The map draws the remaining line, not the whole route
   const map = read('../components/MapboxDriveMap.tsx');
   const layer = map.slice(map.indexOf('const NavigationRouteLayers = memo('), map.indexOf('const MapboxDriveMap = forwardRef'));
@@ -9972,7 +9976,8 @@ test('presentation: free drive shows the recording dashboard; navigation (with o
   assert.ok(/recordingActive=\{isDriving\}/.test(barJsx) && /onFinishDrive=\{handleFinishNavigationDrive\}/.test(barJsx));
   // The bar: navigation's controls only, plus one quiet recording mark; no recording dashboard controls
   const bar = read('../components/navigation/GuidanceBar.tsx');
-  for (const part of ['<Summary state={state}', '<VoiceButton />', '<EndButton ownsDrive={ownsDrive} onFinishDrive={onFinishDrive} />', '"Overview"', '"Recenter"']) assert.ok(bar.includes(part), part);
+  for (const part of ['<Summary state={state}', '<EndButton ownsDrive={ownsDrive} onFinishDrive={onFinishDrive} />', '"Overview"', '"Recenter"']) assert.ok(bar.includes(part), part);
+  assert.ok(read('../components/navigation/NavigationControls.tsx').includes('<VoiceToggle />'), 'voice in the controls down the right');
   assert.ok(/recordingActive \? \([\s\S]*?accessibilityLabel="This drive is being recorded"[\s\S]*?>Recording<\/Text>/.test(bar), 'a single "Recording" mark');
   assert.ok(!/Speedometer|onPause|Save Point|End Drive"|driveSeconds|distanceKm/.test(bar), 'no speedometer, Pause, Save Point, End Drive or drive statistics');
   assert.ok(!/export function GuidanceStrip/.test(bar), 'the strip that sat inside the dashboard is gone');
@@ -10006,6 +10011,152 @@ test('presentation: ending navigation finishes only a drive navigation started; 
   assert.equal(drivePresentation({ isDriving: true, navigating: false }), 'freeDrive');
   // Arrived (a drive the user started): still the navigation bar (arrival, Done) until Done
   assert.equal(drivePresentation({ isDriving: true, navigating: true }), 'navigation');
+});
+
+// ─── Drive screen: the reference-led navigation layout ─────────────────────
+// Map first: a compact manoeuvre card (lanes along its bottom edge), a small
+// Then card, a speed HUD, voice and Record on the right, and a bottom panel
+// with Overview / Recenter, the time left and End.
+
+import { guidanceLines, guidanceShield } from '@/lib/navigation/guidanceText';
+
+const readNav = (rel: string) => readFileSync(toPath(new URL(rel, import.meta.url)), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+
+test('navigation layout: search, map controls and the free-drive dashboard are hidden; the native tab bar stays', () => {
+  const drive = readNav('../app/(tabs)/(drive)/index.tsx');
+  // The search bar ("Where are we going?") never while navigating
+  const search = drive.slice(drive.lastIndexOf('{', drive.indexOf('accessibilityLabel="Where are we going? Search destinations"')) - 200, drive.indexOf('accessibilityLabel="Where are we going? Search destinations"'));
+  assert.ok(/\{!isDriving && !navigating && \(\s*<View\s*style=\{\[styles\.searchBarWrap/.test(search), 'search bar gated on navigating');
+  // Layers, More and the other map controls: none while navigating
+  assert.ok((drive.match(/\{!isDriving && !previewing && !navigating && /g) ?? []).length >= 4);
+  // The recording dashboard: free drives only
+  assert.equal(drivePresentation({ isDriving: true, navigating: true }), 'navigation');
+  assert.ok(/\{freeDrive && \(\s*<ActiveDriveOverlay/.test(drive));
+  // The tab bar: expo-router's native tabs, not ours to hide from this screen; navigation sits above it
+  const tabs = readFileSync(toPath(new URL('../app/(tabs)/_layout.tsx', import.meta.url)), 'utf8');
+  assert.ok(/NativeTabs/.test(tabs) && !/navigat|presentation|guidance/i.test(tabs.replace(/navigate-outline/g, '')), 'the tab layout knows nothing of navigation');
+  assert.ok(/\{presentation === "navigation" && !previewing && \(\s*<AboveTabBar[\s\S]*?<GuidanceBar/.test(drive), 'the bottom panel sits above the tab bar');
+});
+
+test('navigation layout: the top card shows the arrow, distance, road, instruction and a shield, one line each', () => {
+  // The words, from the manoeuvre's own data
+  const p = prepareRoute(L_ROUTE());
+  const turn = p.maneuvers[1]!;
+  assert.deepEqual(guidanceLines(turn), { primary: 'Chestnut Hill', secondary: 'Turn left onto Chestnut Hill' }, 'the road it leads onto, then what to do');
+  const bare = { ...turn, primaryText: null, roadRef: null, roadName: null, secondaryText: null, signposts: 'Keswick' };
+  assert.deepEqual(guidanceLines(bare), { primary: 'Turn left onto Chestnut Hill', secondary: 'Keswick' }, 'no road: the instruction leads');
+  assert.deepEqual(guidanceLines({ ...bare, signposts: null }), { primary: 'Turn left onto Chestnut Hill', secondary: null });
+  assert.deepEqual(guidanceLines({ ...turn, primaryText: turn.instruction }), { primary: turn.instruction, secondary: null }, 'never the same line twice');
+  // The shield: junction first, else the road number; motorways blue
+  assert.deepEqual(guidanceShield({ ...turn, junctionRef: '36', roadRef: 'M6' }), { text: 'J36', motorway: true });
+  assert.deepEqual(guidanceShield({ ...turn, junctionRef: null, roadRef: 'M6' }), { text: 'M6', motorway: true });
+  assert.deepEqual(guidanceShield({ ...turn, junctionRef: null, roadRef: 'A1(M)' }), { text: 'A1(M)', motorway: true });
+  assert.deepEqual(guidanceShield({ ...turn, junctionRef: null, roadRef: 'A6013' }), { text: 'A6013', motorway: false });
+  assert.equal(guidanceShield({ ...turn, junctionRef: null, roadRef: null }), null, 'no number, no shield');
+  // The card: arrow and distance strongest, every line one line (never tall)
+  const banner = readNav('../components/navigation/GuidanceBanner.tsx');
+  const main = banner.slice(banner.indexOf('const next = progress.next;'), banner.indexOf('const styles = StyleSheet.create'));
+  assert.ok(/<ManeuverIcon maneuver=\{next\} size=\{50\}/.test(main));
+  assert.ok(/<Text style=\{styles\.distance\} numberOfLines=\{1\}>\s*\{distance\}/.test(main));
+  assert.ok(/<Text style=\{styles\.primary\} numberOfLines=\{1\}>\s*\{primary\}/.test(main));
+  assert.ok(/<Text style=\{styles\.secondary\} numberOfLines=\{1\}>\s*\{secondary\}/.test(main));
+  assert.ok(/\{shield \? <Shield text=\{shield\.text\} motorway=\{shield\.motorway\} \/> : null\}/.test(main));
+  assert.ok(!/numberOfLines=\{[3-9]\}/.test(banner), 'nothing wraps past two lines');
+  const size = (k: string) => Number(new RegExp(`${k}: \\{[^}]*fontSize: (\\d+)`).exec(banner)?.[1]);
+  assert.ok(size('distance') > size('primary') && size('primary') > size('secondary'), 'distance, then road, then instruction');
+  // Roundabouts keep their icon (and its exit number): the same ManeuverIcon
+  assert.ok(!/onRoundabout/.test(main));
+});
+
+test('navigation layout: lanes along the card\'s bottom edge; a small Then card under it', () => {
+  const banner = readNav('../components/navigation/GuidanceBanner.tsx');
+  const main = banner.slice(banner.indexOf('const next = progress.next;'), banner.indexOf('const styles = StyleSheet.create'));
+  // Lanes are inside the main card (before the Then card, which is outside it)
+  const lanesAt = main.indexOf('<LaneStrip view={state.lanes} />');
+  const thenAt = main.indexOf('then ? (');
+  assert.ok(lanesAt > 0 && thenAt > lanesAt);
+  assert.ok(/lanes: \{[^}]*borderTopWidth: StyleSheet\.hairlineWidth[^}]*\}/.test(banner), 'a hairline above the lanes, along the edge');
+  // Then: the session's own "then", with how far after the next manoeuvre it comes
+  const pts = polyline3([[0, 0], [0, 600], [0, 700], [-300, 700]]);
+  const p = prepareRoute(route3(pts, [
+    { at: 0, type: 'depart' },
+    { at: 60, type: 'roundabout turn', modifier: 'straight', name: 'Main Street', instruction: 'At the roundabout, go straight on' },
+    { at: 70, type: 'turn', modifier: 'left', name: 'Mill Lane' },
+    { at: pts.length - 1, type: 'arrive' },
+  ]));
+  const pr = progressAt(p, 400);
+  assert.equal(pr.then?.direction, 'left');
+  assert.ok(Math.abs(pr.thenAfterM! - 100) < 1, 'the turn 100 m after');
+  const far = progressAt(prepareRoute(L_ROUTE()), 200);
+  assert.equal(far.then, null);
+  assert.equal(far.thenAfterM, null, 'no then, no distance');
+  assert.ok(/<GlassSurface material="dense" style=\{styles\.then\}[\s\S]*?>Then<\/Text>\s*<ManeuverIcon maneuver=\{then\} size=\{22\}/.test(main));
+  assert.ok(/progress\.thenAfterM != null \?[\s\S]*?formatGuidanceDistance\(progress\.thenAfterM, unitSystem\)/.test(main));
+  assert.ok(/then: \{[^}]*alignSelf: "flex-start"[^}]*\}/.test(banner), 'small, on the left');
+  // The controls on the right start under the main card, beside the Then card
+  const drive = readNav('../app/(tabs)/(drive)/index.tsx');
+  assert.ok(/onCardHeight=\{onGuidanceCardHeight\}/.test(drive));
+  assert.ok(/top: SEARCH_TOP \+ passengerOffset \+ guidanceCardHeight \+ 10/.test(drive));
+});
+
+test('navigation layout: the bottom panel has time left, distance and arrival; Overview / Recenter; End', () => {
+  const p = prepareRoute(L_ROUTE());
+  const pr = progressAt(p, 300);
+  assert.ok(pr.durationRemainingS > 0 && pr.distanceRemainingM > 0, 'time and distance left come from progress');
+  const bar = readNav('../components/navigation/GuidanceBar.tsx');
+  const summary = bar.slice(bar.indexOf('function Summary('), bar.indexOf('function SpeedHud('));
+  assert.ok(/const eta = formatClock\(arrivalTime\(/.test(summary) && /const time = formatDuration\(progress\.durationRemainingS\);/.test(summary) && /formatGuidanceDistance\(progress\.distanceRemainingM, unitSystem\)/.test(summary));
+  assert.ok(/<Text style=\{styles\.time\}[^>]*>\s*\{time\}/.test(summary), 'time left is the main figure');
+  assert.ok(/\{distance\} • \{eta\}/.test(summary), 'distance • arrival beneath');
+  // Overview while following, Recenter otherwise: the screen's own camera actions
+  assert.ok(/if \(following\) onOverview\(\);\s*else onRecenter\(\);/.test(bar));
+  const drive = readNav('../app/(tabs)/(drive)/index.tsx');
+  const barJsx = drive.slice(drive.indexOf('<GuidanceBar'), drive.indexOf('/>', drive.indexOf('<GuidanceBar')));
+  assert.ok(/following=\{followMode === "following"\}/.test(barJsx) && /onRecenter=\{handleResumeFollowing\}/.test(barJsx) && /onOverview=\{showNavigationOverview\}/.test(barJsx));
+  // Left Overview / Recenter, centre summary, right End
+  const row = bar.slice(bar.indexOf('<View style={styles.row}>'), bar.indexOf('</GlassSurface>', bar.indexOf('<View style={styles.row}>')));
+  const order = ['label={following ? "Overview" : "Recenter"}', '<Summary state={state}', '<EndButton'].map((x) => row.indexOf(x));
+  assert.ok(order.every((i) => i >= 0) && order[0]! < order[1]! && order[1]! < order[2]!, 'Overview, summary, End');
+});
+
+test('navigation layout: the speed HUD is the real GPS speed only; no speed limit is ever shown', () => {
+  const bar = readNav('../components/navigation/GuidanceBar.tsx');
+  const hud = bar.slice(bar.indexOf('function SpeedHud('), bar.indexOf('export function GuidanceBar('));
+  assert.ok(/const fix = useLatestNavigationFix\(\)\(\);|const latestFix = useLatestNavigationFix\(\);\s*const fix = latestFix\(\);/.test(hud), 'the newest real fix');
+  assert.ok(/fix\.speedMs >= 0 && Date\.now\(\) - fix\.timestamp <= SPEED_FRESH_MS/.test(hud), 'a missing, negative or old speed shows as --');
+  assert.ok(/convertSpeed\(msToKmh\(fix!\.speedMs\), unitSystem\)/.test(hud) && /speedUnit\(unitSystem\)/.test(hud), 'in the user\'s units');
+  assert.ok(/\{value \?\? "--"\}/.test(hud));
+  // The context hands over the last fix navigation was given, untouched
+  const ctx = readNav('../context/NavigationContext.tsx');
+  assert.ok(/const latestFix = useCallback\(\(\) => lastFix\.current\?\.fix \?\? null, \[\]\);/.test(ctx));
+  // The units: m/s → km/h → mph
+  assert.equal(Math.round(convertSpeed(msToKmh(27.78), 'imperial')), 62);
+  assert.equal(speedUnit('imperial'), 'mph');
+  // No speed limit anywhere in the navigation UI
+  for (const f of ['GuidanceBar.tsx', 'GuidanceBanner.tsx', 'NavigationControls.tsx']) {
+    assert.ok(!/maxspeed|speedLimit|speed limit|limitKmh/i.test(readNav(`../components/navigation/${f}`)), `${f}: no speed limit`);
+  }
+});
+
+test('navigation layout: right controls are real ones only; recording is one quiet mark; Free Drive is unchanged', () => {
+  const controls = readNav('../components/navigation/NavigationControls.tsx');
+  assert.ok(/<VoiceToggle \/>/.test(controls) && /toggleMute\(\)/.test(controls), 'mute is the voice preference');
+  assert.ok(!/Report|Options|compass|north/i.test(controls), 'no report, options or a compass that would do nothing (guidance always turns with the car)');
+  const drive = readNav('../app/(tabs)/(drive)/index.tsx');
+  assert.ok(/guidingRef\.current \|\| headingModeRef\.current === "heading-up"/.test(drive), 'guidance turns with the car regardless');
+  assert.ok(/\{presentation === "navigation" && !previewing && \(\s*<View[\s\S]*?<NavigationControls\s*recordingActive=\{isDriving\}\s*onRecord=\{handleStartDrive\}/.test(drive));
+  assert.equal((drive.match(/<NavigationControls/g) ?? []).length, 1);
+  // Recording: a small dot and the word, nothing else
+  const bar = readNav('../components/navigation/GuidanceBar.tsx');
+  assert.ok(/recordingText: \{ color: MUTED, fontSize: 12/.test(bar) && /recDotLive: \{ width: 7, height: 7/.test(bar));
+  const mark = bar.slice(bar.indexOf('{recordingActive ? ('), bar.indexOf(') : null}', bar.indexOf('{recordingActive ? (')));
+  assert.equal((mark.match(/<Text/g) ?? []).length, 1, 'one line of text');
+  assert.ok(!/driveSeconds|distanceKm|Speedometer|formatDuration/.test(mark));
+  // Free Drive: the same dashboard with the same controls, and its file untouched by navigation
+  assert.equal(drivePresentation({ isDriving: true, navigating: false }), 'freeDrive');
+  const overlay = readFileSync(toPath(new URL('../components/ActiveDriveOverlay.tsx', import.meta.url)), 'utf8');
+  assert.ok(!/navigation\//.test(overlay), 'the dashboard imports nothing from navigation');
+  for (const part of ['<Speedometer speedKmh={currentSpeedKmh}', 'onPause();', 'text: "End Drive"', '{/* Save Point */}']) assert.ok(overlay.includes(part), part);
 });
 
 // ─── iOS build number: one source of truth (app.json ios.buildNumber) ───────

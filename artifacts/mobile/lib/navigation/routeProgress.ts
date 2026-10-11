@@ -333,6 +333,8 @@ export interface RouteProgress {
   onRoundabout: boolean;
   /** A manoeuvre straight after the next one */
   then: Maneuver | null;
+  /** How far after the next manoeuvre `then` comes (m); null without one */
+  thenAfterM: number | null;
   distanceRemainingM: number;
   durationRemainingS: number;
   /** The road the car is on, e.g. "A591 Lake Road" */
@@ -367,6 +369,7 @@ export function progressAt(p: PreparedRoute, along: number): RouteProgress {
     distanceToNextM: Math.max(0, nextAt - a),
     onRoundabout: holding,
     then: m < last && after <= PROGRESS.thenWithinM ? p.maneuvers[m + 1]! : null,
+    thenAfterM: m < last && after <= PROGRESS.thenWithinM ? Math.max(0, after) : null,
     distanceRemainingM: Math.max(0, p.total - a),
     durationRemainingS: p.stepDuration[k]! * frac + p.durationAfter[k]!,
     currentRoad: roadLabel(p.steps[k]!),
