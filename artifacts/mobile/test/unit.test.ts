@@ -10179,3 +10179,419 @@ test('the iOS build number comes from app.json, is a whole number, and reaches X
   assert.ok(/settings\.CURRENT_PROJECT_VERSION = cfg\.ios\?\.buildNumber \?\? '1';/.test(src));
   assert.ok(/settings\.MARKETING_VERSION = cfg\.version;/.test(src));
 });
+
+// ─── Live road hazards (migration 0020) ────────────────────────────────────
+// Report → a type, at the accepted GPS fix; nearby hazards on the map, live,
+// anonymous, gone at expiry; Still there / Not there. The server owns every
+// rule; the app parses, filters and draws.
+
+import { HAZARD_KINDS, areaAround, hazardFeatures, hazardTopic, hazardTopicsFor, inArea, kindInfo, parseHazard, parseHazardEvent, reportedAgo, type RoadHazard } from '@/lib/hazards/model';
+import { HazardStore } from '@/lib/hazards/store';
+import { HazardFeed, HAZARD_FEED, type HazardChannelStatus } from '@/lib/hazards/feed';
+import { FIX_PROBLEM_MESSAGE, REPORT_FIX, reportBody, reportedMessage, reportFixProblem } from '@/lib/hazards/report';
+
+const HZ_T0 = Date.parse('2026-10-11T12:00:00Z');
+/** A hazard as the server sends it */
+function hzRaw(o: Record<string, unknown> = {}) {
+  return {
+    id: 'h1', kind: 'accident', latitude: 54.5, longitude: -3.0, reportedAt: '2026-10-11T11:50:00.000Z',
+    lastConfirmedAt: '2026-10-11T11:55:00.000Z', expiresAt: '2026-10-11T12:50:00.000Z', expiresInMs: 50 * 60_000,
+    confirmations: 1, myVote: null, ...o,
+  };
+}
+const hz = (o: Record<string, unknown> = {}, at = HZ_T0) => parseHazard(hzRaw(o), at)!;
+
+test('hazards: six kinds, each with a label, a colour and a marker the map registers (1x, 2x, 3x)', () => {
+  assert.deepEqual(HAZARD_KINDS.map((k) => k.kind), ['accident', 'hazard', 'broken_down', 'roadworks', 'flooding', 'police']);
+  assert.deepEqual(HAZARD_KINDS.map((k) => k.label), ['Accident', 'Hazard', 'Broken-down vehicle', 'Roadworks', 'Flooding', 'Police']);
+  assert.equal(new Set(HAZARD_KINDS.map((k) => k.markerImage)).size, 6);
+  const map = readFileSync(toPath(new URL('../components/MapboxDriveMap.tsx', import.meta.url)), 'utf8');
+  for (const k of HAZARD_KINDS) {
+    const file = k.markerImage.replace('derwent-', '');
+    assert.ok(map.includes(`"${k.markerImage}": require("@/assets/images/map/${file}.png")`), `${k.kind} registered with the map`);
+    for (const scale of ['', '@2x', '@3x']) assert.ok(existsSync(toPath(new URL(`../assets/images/map/${file}${scale}.png`, import.meta.url))), `${file}${scale}.png`);
+  }
+  // The same kinds as the server (the database's check is the authority)
+  const sql = readFileSync(toPath(new URL('../../../supabase/migrations/20261011000100_road_hazards.sql', import.meta.url)), 'utf8');
+  const check = /constraint road_hazards_kind\s+check \(kind in \(([^)]*)\)\)/.exec(sql)![1]!;
+  assert.deepEqual(check.split(',').map((x) => x.trim().replace(/'/g, '')), HAZARD_KINDS.map((k) => k.kind));
+  // A kind a newer server adds still draws, as a generic hazard
+  assert.equal(kindInfo('black_ice').kind, 'hazard');
+});
+
+test('hazards: the server owns the lifetimes, centrally (accident 1 h, hazard and breakdown 45 min, police 30 min, roadworks 6 h, flooding 4 h)', () => {
+  const sql = readFileSync(toPath(new URL('../../../supabase/migrations/20261011000100_road_hazards.sql', import.meta.url)), 'utf8');
+  const lifetimes = sql.slice(sql.indexOf('create function private.hazard_lifetime'), sql.indexOf('create function private.hazard_max_lifetime'));
+  for (const [kind, interval] of [['accident', '60 minutes'], ['hazard', '45 minutes'], ['broken_down', '45 minutes'], ['police', '30 minutes'], ['roadworks', '6 hours'], ['flooding', '4 hours']]) {
+    assert.ok(new RegExp(`when '${kind}'\\s+then interval '${interval}'`).test(lifetimes), `${kind}: ${interval}`);
+  }
+  assert.ok(/select private\.hazard_lifetime\(p_kind\) \* 3/.test(sql), 'capped at three lifetimes');
+  // The app keeps no lifetimes of its own: only the server's remaining time
+  const model = readFileSync(toPath(new URL('../lib/hazards/model.ts', import.meta.url)), 'utf8');
+  assert.ok(!/minutes|60_000 \*|45|hours/.test(model.replace(/\/\/.*$/gm, '').replace(/reportedAgo[\s\S]*$/, '')), 'no client-side lifetimes');
+});
+
+test('hazards: what arrives is parsed strictly; expiry comes from the server\'s clock; nobody\'s identity is ever kept', () => {
+  const h = hz();
+  assert.deepEqual(Object.keys(h).sort(), ['confirmations', 'expiresAt', 'id', 'kind', 'lastConfirmedAt', 'latitude', 'longitude', 'myVote', 'reportedAt']);
+  assert.equal(h.expiresAt, HZ_T0 + 50 * 60_000, 'remaining lifetime counted from receipt, whatever the phone\'s clock says');
+  assert.equal(h.reportedAt, Date.parse('2026-10-11T11:50:00Z'));
+  // Extra fields (a reporter, say) are never carried
+  const sneaky = parseHazard(hzRaw({ reporterId: 'u1', userId: 'u1', name: 'Alice' }), HZ_T0)!;
+  assert.ok(!JSON.stringify(sneaky).includes('u1') && !JSON.stringify(sneaky).includes('Alice'));
+  for (const bad of [null, 'x', {}, hzRaw({ id: '' }), hzRaw({ latitude: 95 }), hzRaw({ longitude: 'x' }), hzRaw({ reportedAt: 'never' }), hzRaw({ expiresInMs: undefined, expiresAt: undefined })]) {
+    assert.equal(parseHazard(bad, HZ_T0), null);
+  }
+  assert.equal(hz({ myVote: 'reported' }).myVote, 'reported');
+  assert.equal(hz({ myVote: 'something' }).myVote, null);
+  assert.equal(hz({ confirmations: -3 }).confirmations, 0);
+  // Broadcasts: a hazard or a removal; they never say how this driver voted
+  const e = parseHazardEvent({ ...hzRaw({ myVote: 'reported' }), type: 'hazard' }, HZ_T0);
+  assert.equal(e?.type, 'hazard');
+  assert.equal(e?.type === 'hazard' && e.hazard.myVote, null);
+  assert.deepEqual(parseHazardEvent({ type: 'hazard_removed', id: 'h1' }, HZ_T0), { type: 'hazard_removed', id: 'h1' });
+  assert.equal(parseHazardEvent({ type: 'presence', id: 'h1' }, HZ_T0), null);
+  assert.equal(parseHazardEvent({ type: 'hazard_removed' }, HZ_T0), null);
+  assert.equal(reportedAgo(HZ_T0 - 20_000, HZ_T0), 'Reported just now');
+  assert.equal(reportedAgo(HZ_T0 - 12 * 60_000, HZ_T0), 'Reported 12 min ago');
+  assert.equal(reportedAgo(HZ_T0 - 130 * 60_000, HZ_T0), 'Reported 2 h ago');
+});
+
+test('hazards: map markers — one per active hazard, expired ones gone, only a position and an image', () => {
+  const list = [hz({ id: 'a' }), hz({ id: 'b', kind: 'roadworks', latitude: 54.6, longitude: -3.1 }), hz({ id: 'c', expiresInMs: 0 }), hz({ id: 'd', kind: 'mystery' })];
+  const fc = hazardFeatures(list, HZ_T0 + 1);
+  assert.deepEqual(fc.features.map((f) => f.id), ['a', 'b', 'd'], 'the expired one is not drawn');
+  assert.deepEqual(fc.features[1]!.geometry.coordinates, [-3.1, 54.6], 'GeoJSON order: longitude, latitude');
+  assert.deepEqual(fc.features[1]!.properties, { id: 'b', image: 'derwent-hazard-roadworks' });
+  assert.equal(fc.features[2]!.properties.image, 'derwent-hazard-hazard', 'unknown kinds draw as a generic hazard');
+  assert.deepEqual(hazardFeatures(list, HZ_T0 + 60 * 60_000).features, [], 'all gone once expired');
+});
+
+test('hazards: nearby loading is bounded — about 15 km around the driver, within the server\'s limits, a few Realtime areas', () => {
+  for (const lat of [50.1, 52.5, 54.5, 57.5, 60.8]) {
+    const a = areaAround(lat, -3.0, HAZARD_FEED.radiusKm);
+    assert.ok(a.maxLat - a.minLat <= 1.0 && a.maxLng - a.minLng <= 1.6, `within the server's area limit at ${lat}°`);
+    assert.ok(inArea(a, lat, -3.0));
+    assert.ok(!inArea(a, lat + 0.3, -3.0), 'about 33 km north is outside');
+    assert.ok(hazardTopicsFor(a).length <= 6, `${hazardTopicsFor(a).length} areas at ${lat}°`);
+  }
+  assert.ok(hazardTopicsFor(areaAround(54.5, -3.0, HAZARD_FEED.radiusKm)).length <= 4, 'at most four in England');
+  // The same cells as the server's private.hazard_topic (and its tests)
+  assert.equal(hazardTopic(54.5, -3.0), 'hazards:109:-6');
+  assert.equal(hazardTopic(52.0, -1.0), 'hazards:104:-2');
+  assert.equal(hazardTopic(55.2, -3.2), 'hazards:110:-7');
+  assert.equal(hazardTopic(-60.0, -150.0), 'hazards:-120:-300');
+  const a = areaAround(54.5, -3.0, HAZARD_FEED.radiusKm);
+  assert.ok(hazardTopicsFor(a).includes(hazardTopic(54.5, -3.0)));
+  assert.ok(hazardTopicsFor(a).every((t) => /^hazards:-?[0-9]{1,3}:-?[0-9]{1,3}$/.test(t)), 'only topics the database lets clients join');
+});
+
+test('hazards: the store — a snapshot replaces, live updates merge, own votes are kept, expired ones drop out', () => {
+  const s = new HazardStore();
+  let changes = 0;
+  s.subscribe(() => changes++);
+  const area = areaAround(54.5, -3.0, 15);
+  s.replace(area, [hz({ id: 'a' }), hz({ id: 'b', myVote: 'reported' }), hz({ id: 'old', expiresInMs: 0 })], HZ_T0 + 1);
+  assert.deepEqual(s.list.map((h) => h.id), ['a', 'b'], 'expired ones never enter');
+  // A live update keeps the driver's own vote (broadcasts never carry it)
+  s.apply({ type: 'hazard', hazard: hz({ id: 'b', confirmations: 4 }) }, HZ_T0 + 2);
+  assert.equal(s.list.find((h) => h.id === 'b')!.confirmations, 4);
+  assert.equal(s.list.find((h) => h.id === 'b')!.myVote, 'reported');
+  // New ones nearby appear; ones outside the loaded area are ignored
+  s.apply({ type: 'hazard', hazard: hz({ id: 'c', latitude: 54.55 }) }, HZ_T0 + 2);
+  s.apply({ type: 'hazard', hazard: hz({ id: 'far', latitude: 56.0 }) }, HZ_T0 + 2);
+  assert.deepEqual(s.list.map((h) => h.id).sort(), ['a', 'b', 'c']);
+  // Removed, and the open card closes with it
+  s.select('a');
+  assert.equal(s.selected?.id, 'a');
+  s.apply({ type: 'hazard_removed', id: 'a' }, HZ_T0 + 3);
+  assert.equal(s.selected, null);
+  assert.ok(!s.list.some((h) => h.id === 'a'));
+  // Expiry: gone at its time with no message from anyone
+  s.prune(HZ_T0 + 51 * 60_000);
+  assert.deepEqual(s.list, []);
+  // The driver's own report or vote answer
+  s.upsertOwn('x', hz({ id: 'x', myVote: 'still_there' }));
+  assert.equal(s.list[0]!.myVote, 'still_there');
+  s.upsertOwn('x', null);
+  assert.deepEqual(s.list, [], 'their vote cleared it');
+  assert.ok(changes > 0);
+  s.select('nope');
+  assert.equal(s.selected, null, 'only an existing hazard can be selected');
+  s.replace(area, [hz({ id: 'z' })], HZ_T0);
+  s.clear();
+  assert.deepEqual(s.list, []);
+  assert.equal(s.loadedArea, null);
+});
+
+/** A HazardFeed with a fake clock, server and Realtime */
+function hazardFeed3() {
+  let now = HZ_T0;
+  const timers: Array<{ at: number; fn: () => void; id: number; every?: number }> = [];
+  let nextId = 1;
+  const loads: Array<{ area: ReturnType<typeof areaAround>; resolve: (h: RoadHazard[]) => void; reject: (e: Error) => void }> = [];
+  const joins: Array<{ topics: string[]; onEvent: (p: unknown) => void; onStatus: (s: HazardChannelStatus) => void; closed: boolean }> = [];
+  const store = new HazardStore();
+  const feed = new HazardFeed({
+    store,
+    now: () => now,
+    load: (area) => new Promise((resolve, reject) => loads.push({ area, resolve, reject })),
+    openTopics: async (topics, h) => {
+      const j = { topics, ...h, closed: false };
+      joins.push(j);
+      return { close: () => { j.closed = true; } };
+    },
+    setTimeout: (fn, ms) => { const id = nextId++; timers.push({ at: now + ms, fn, id }); return id; },
+    clearTimeout: (id) => { const i = timers.findIndex((t) => t.id === id); if (i >= 0) timers.splice(i, 1); },
+    setInterval: (fn, ms) => { const id = nextId++; timers.push({ at: now + ms, fn, id, every: ms }); return id; },
+    clearInterval: (id) => { const i = timers.findIndex((t) => t.id === id); if (i >= 0) timers.splice(i, 1); },
+  });
+  const advance = async (ms: number) => {
+    const end = now + ms;
+    for (;;) {
+      timers.sort((a, b) => a.at - b.at);
+      const t = timers[0];
+      if (!t || t.at > end) break;
+      now = t.at;
+      if (t.every) t.at += t.every; else timers.shift();
+      t.fn();
+      await Promise.resolve();
+    }
+    now = end;
+    await Promise.resolve();
+  };
+  const flush = async () => { for (let i = 0; i < 5; i++) await Promise.resolve(); };
+  return { feed, store, loads, joins, advance, flush, get now() { return now; }, set now(v: number) { now = v; } };
+}
+/** Metres north as degrees */
+const north3 = (m: number) => m / 111_320;
+
+test('hazards: nearby loading — once, then only after moving 4 km or 5 minutes; never per GPS fix', async () => {
+  const f = hazardFeed3();
+  f.feed.notePosition(54.5, -3.0);
+  assert.equal(f.loads.length, 0, 'nothing until the app is on screen');
+  f.feed.setActive(true);
+  f.feed.notePosition(54.5, -3.0);
+  assert.equal(f.loads.length, 1, 'the first fix on screen loads');
+  await f.flush();
+  assert.ok(f.joins.length === 1 && f.joins[0]!.topics.includes('hazards:109:-6'), 'the area topics are joined with it');
+  f.loads[0]!.resolve([hz({ id: 'a' })]);
+  await f.flush();
+  assert.deepEqual(f.store.list.map((h) => h.id), ['a']);
+  // A drive's worth of fixes within a few km: no more loads
+  for (let i = 1; i <= 120; i++) {
+    f.now = HZ_T0 + i * 1000;
+    f.feed.notePosition(54.5 + north3(i * 25), -3.0);
+  }
+  assert.equal(f.loads.length, 1, '120 fixes over 3 km: still one request');
+  f.now = HZ_T0 + 130_000;
+  f.feed.notePosition(54.5 + north3(4100), -3.0);
+  assert.equal(f.loads.length, 2, 'past 4 km: the area moves with the driver');
+  f.loads[1]!.resolve([]);
+  await f.flush();
+  // Standing still: again after 5 minutes, not before
+  f.now += HAZARD_FEED.refreshEveryMs - 1000;
+  f.feed.notePosition(54.5 + north3(4100), -3.0);
+  assert.equal(f.loads.length, 2);
+  f.now += 2000;
+  f.feed.notePosition(54.5 + north3(4100), -3.0);
+  assert.equal(f.loads.length, 3, 'every 5 minutes on screen');
+  // Never more often than every 20 s, however far it jumps
+  f.loads[2]!.resolve([]);
+  await f.flush();
+  f.now += 5000;
+  f.feed.notePosition(55.5, -3.0);
+  assert.equal(f.loads.length, 3, 'within 20 s of the last load');
+  f.now += HAZARD_FEED.minGapMs;
+  f.feed.notePosition(55.5, -3.0);
+  assert.equal(f.loads.length, 4);
+});
+
+test('hazards: realtime — new and removed hazards arrive without a refresh; updates during a load are not lost', async () => {
+  const f = hazardFeed3();
+  f.feed.setActive(true);
+  f.feed.notePosition(54.5, -3.0);
+  await f.flush();
+  const j = f.joins[0]!;
+  j.onStatus('subscribed');
+  // Arrives while the snapshot loads: applied after it, not overwritten by it
+  j.onEvent({ ...hzRaw({ id: 'live' }), type: 'hazard' });
+  f.loads[0]!.resolve([hz({ id: 'a' })]);
+  await f.flush();
+  assert.deepEqual(f.store.list.map((h) => h.id).sort(), ['a', 'live']);
+  j.onEvent({ ...hzRaw({ id: 'new', latitude: 54.52 }), type: 'hazard' });
+  assert.ok(f.store.list.some((h) => h.id === 'new'), 'a new report nearby appears at once');
+  j.onEvent({ type: 'hazard_removed', id: 'a' });
+  assert.ok(!f.store.list.some((h) => h.id === 'a'), 'a cleared one disappears at once');
+  j.onEvent({ type: 'presence', userId: 'x' });
+  j.onEvent('garbage');
+  assert.equal(f.store.list.length, 2, 'anything else is ignored');
+  assert.equal(f.loads.length, 1, 'no extra requests');
+  // Dropped connection: rejoin with backoff; once back, one load to catch up
+  j.onStatus('error');
+  await f.advance(HAZARD_FEED.retryMs[0]!);
+  await f.flush();
+  assert.equal(f.joins.length, 2, 'rejoined');
+  assert.ok(j.closed);
+  f.now += HAZARD_FEED.minGapMs;
+  f.joins[1]!.onStatus('subscribed');
+  assert.equal(f.loads.length, 2, 'caught up after the reconnect');
+  // Events from the old connection are ignored
+  j.onEvent({ ...hzRaw({ id: 'ghost' }), type: 'hazard' });
+  f.loads[1]!.resolve(f.store.list.slice());
+  await f.flush();
+  assert.ok(!f.store.list.some((h) => h.id === 'ghost'));
+});
+
+test('hazards: off screen nothing loads or listens; back on screen it loads again; failures back off', async () => {
+  const f = hazardFeed3();
+  f.feed.setActive(true);
+  f.feed.notePosition(54.5, -3.0);
+  await f.flush();
+  f.feed.setActive(false);
+  assert.ok(f.joins[0]!.closed, 'the area topics are left');
+  f.loads[0]!.resolve([hz({ id: 'late' })]);
+  await f.flush();
+  assert.deepEqual(f.store.list, [], 'a load that finishes off screen is ignored');
+  f.now += 60_000;
+  f.feed.notePosition(54.6, -3.0);
+  assert.equal(f.loads.length, 1, 'nothing loads off screen');
+  f.feed.setActive(true);
+  assert.equal(f.loads.length, 2, 'back on screen: at once');
+  f.loads[1]!.reject(new Error('offline'));
+  await f.flush();
+  f.feed.notePosition(54.6, -3.0);
+  assert.equal(f.loads.length, 2, 'after a failure it waits');
+  f.now += HAZARD_FEED.retryMs[0]!;
+  f.feed.notePosition(54.6, -3.0);
+  assert.equal(f.loads.length, 3, 'then tries again (5 s)');
+  f.loads[2]!.reject(new Error('offline'));
+  await f.flush();
+  f.now += HAZARD_FEED.retryMs[0]!;
+  f.feed.notePosition(54.6, -3.0);
+  assert.equal(f.loads.length, 3, 'a second failure waits longer');
+  f.now += HAZARD_FEED.retryMs[1]! - HAZARD_FEED.retryMs[0]!;
+  f.feed.notePosition(54.6, -3.0);
+  assert.equal(f.loads.length, 4, '(15 s)');
+  // Expired hazards drop out on screen without any message
+  f.loads[3]!.resolve([hz({ id: 'soon', expiresInMs: 40_000 }, f.now)]);
+  await f.flush();
+  assert.equal(f.store.list.length, 1);
+  await f.advance(HAZARD_FEED.pruneEveryMs * 3);
+  assert.deepEqual(f.store.list, [], 'expired reports disappear');
+  f.feed.stop();
+  assert.equal(f.store.loadedArea, null);
+});
+
+test('hazards: a report uses the current accepted fix only — no stale, vague or missing positions, nothing queued', () => {
+  const fix = { latitude: 54.51234, longitude: -3.01234, accuracyM: 8, timestamp: HZ_T0 - 3000 };
+  assert.equal(reportFixProblem(fix, HZ_T0), null);
+  assert.equal(reportFixProblem(null, HZ_T0), 'no_fix');
+  assert.equal(reportFixProblem({ ...fix, timestamp: HZ_T0 - REPORT_FIX.maxAgeMs - 1 }, HZ_T0), 'stale_fix');
+  assert.equal(reportFixProblem({ ...fix, accuracyM: 120 }, HZ_T0), 'inaccurate_fix');
+  assert.equal(reportFixProblem({ ...fix, accuracyM: null }, HZ_T0), null);
+  for (const m of Object.values(FIX_PROBLEM_MESSAGE)) assert.ok(/wasn't sent/.test(m), 'never pretends it went');
+  assert.deepEqual(reportBody('flooding', fix), {
+    kind: 'flooding', latitude: 54.51234, longitude: -3.01234, accuracyM: 8, capturedAt: new Date(HZ_T0 - 3000).toISOString(),
+  });
+  assert.equal(reportedMessage('created'), 'Reported. Thanks.');
+  assert.match(reportedMessage('merged'), /Already reported here/);
+  assert.match(reportedMessage('already_reported'), /already reported/);
+  // The client: failures say so; nothing is stored or retried later
+  const ctx = readNav('../context/HazardsContext.tsx');
+  assert.ok(/if \(problem\) \{[\s\S]*?throw new HazardActionError\(FIX_PROBLEM_MESSAGE\[problem\]\);/.test(ctx));
+  assert.ok(/The report wasn't sent\./.test(ctx));
+  assert.ok(!/outbox|AsyncStorage|writeJson|deviceStorage|setTimeout/.test(ctx), 'no queue, no storage, no delayed resend');
+  // The journal records outcomes only: never a position or an id
+  for (const m of ctx.matchAll(/journal\.log\("hazard_(?:report|vote)", \{([^}]*)\}\)/g)) assert.ok(!/latitude|longitude|fix|id\b|hazard\.id/.test(m[1]!), m[1]);
+});
+
+test('hazards: the report sheet is two taps — Report, then a type; nothing to type, no extra confirmation', () => {
+  const sheet = readNav('../components/hazards/ReportHazardSheet.tsx');
+  assert.ok(/\{HAZARD_KINDS\.map\(\(k\) => \{/.test(sheet), 'every type on one screen');
+  assert.ok(/onPress=\{\(\) => void send\(k\.kind\)\}/.test(sheet), 'tapping a type sends it');
+  assert.ok(/const message = await report\(kind, getFix\(\)\);/.test(sheet), 'at the fix as it is when tapped');
+  assert.ok(!/TextInput|Alert\.alert|Switch/.test(sheet), 'no typing, no confirmation dialog');
+  assert.ok(/minHeight: 104/.test(sheet), 'large targets');
+  assert.ok(/step: "failed"/.test(sheet) && /setPhase\(\{ step: "failed", message:/.test(sheet), 'a failure is shown as one');
+  assert.ok(/closeTimer\.current = setTimeout\(onClose, DONE_MS\)/.test(sheet), 'it closes itself once sent');
+  const button = readNav('../components/hazards/ReportButton.tsx');
+  assert.ok(/accessibilityLabel="Report a hazard"/.test(button) && />Report<\/Text>/.test(button));
+});
+
+test('hazards: Report in navigation (lower right, by the speed HUD) and in Free Drive (dashboard map area, lower right)', () => {
+  const drive = readNav('../app/(tabs)/(drive)/index.tsx');
+  const bar = readNav('../components/navigation/GuidanceBar.tsx');
+  // Navigation: in the HUD row, opposite the speed, as in the reference design
+  const hud = bar.slice(bar.indexOf('<View style={styles.hud}'), bar.indexOf('<GlassSurface material="dense" style={styles.panel}>'));
+  assert.ok(/<SpeedHud unitSystem=\{unitSystem\} \/>[\s\S]*\{onReport && state\.phase !== "error" \? \([\s\S]*<ReportButton onPress=\{onReport\} \/>/.test(hud));
+  const barJsx = drive.slice(drive.indexOf('<GuidanceBar'), drive.indexOf('/>', drive.indexOf('<GuidanceBar')));
+  assert.ok(/onReport=\{openReport\}/.test(barJsx));
+  assert.ok(!/Report/.test(readNav('../components/navigation/NavigationControls.tsx')), 'the right-hand controls are unchanged');
+  // Free Drive: one optional button on the dashboard, its own controls untouched
+  const overlay = readNav('../components/ActiveDriveOverlay.tsx');
+  assert.ok(/\{onReport \? \([\s\S]*?<ReportButton onPress=\{onReport\} \/>/.test(overlay));
+  assert.ok(/reportWrap: \{\s*position: "absolute",\s*right: 12,/.test(overlay));
+  const overlayJsx = drive.slice(drive.indexOf('<ActiveDriveOverlay'), drive.indexOf('/>', drive.indexOf('<ActiveDriveOverlay')));
+  assert.ok(/onReport=\{openReport\}/.test(overlayJsx));
+  for (const control of ['onPause={handlePause}', 'onEndDrive={handlePanelEndDrive}', 'onSavePoint={handleSavePoint}', 'onLocateButton={handleLocateButton}']) {
+    assert.ok(overlayJsx.includes(control), `free drive keeps ${control}`);
+  }
+  // One sheet for both, at the screen's accepted fix
+  assert.equal((drive.match(/<ReportHazardSheet /g) ?? []).length, 1);
+  assert.ok(/<ReportHazardSheet visible=\{reportOpen\} onClose=\{closeReport\} getFix=\{getReportFix\} \/>/.test(drive));
+});
+
+test('hazards: the report position is the raw accepted fix, never a route-snapped one; the feed hears each fix cheaply', () => {
+  const drive = readNav('../app/(tabs)/(drive)/index.tsx');
+  const process = drive.slice(drive.indexOf('const processPosition = useCallback('), drive.indexOf('// ── Visual smoothing'));
+  const filters = process.indexOf('if (impliedKmh > MAX_PLAUSIBLE_KMH) return;');
+  const stored = process.indexOf('lastAcceptedFixRef.current = { latitude: lat, longitude: lon, accuracyM: accuracy, timestamp: fixTime ?? now };');
+  assert.ok(filters > 0 && stored > filters, 'after the accuracy and plausibility filters');
+  assert.ok(process.indexOf('noteHazardPosition(lat, lon);') > stored);
+  assert.ok(/const getReportFix = useCallback\(\(\) => lastAcceptedFixRef\.current, \[\]\);/.test(drive));
+  assert.equal((drive.match(/lastAcceptedFixRef\.current =/g) ?? []).length, 1, 'set in one place only');
+  assert.ok(!/snapped|progress/.test(drive.slice(drive.indexOf('const getReportFix'), drive.indexOf('const getReportFix') + 120)));
+  // Recording still gets every fix, unchanged
+  assert.ok(/updateDriveCoordinate\(\{\s*latitude: lat,\s*longitude: lon,/.test(drive));
+});
+
+test('hazards: map markers sit above the route, beneath the arrow, never move the camera; a tap opens an anonymous card', () => {
+  const map = readNav('../components/MapboxDriveMap.tsx');
+  const tree = map.slice(map.indexOf('<MapView'), map.indexOf('</MapView>'));
+  const at = (s: string) => tree.indexOf(s);
+  assert.ok(at('<NavigationRouteLayers') < at('<HazardLayers') && at('id="derwent-drive-trail"') < at('<HazardLayers'), 'above the route and trail');
+  assert.ok(at('<HazardLayers') < at('{friendLayer}') && at('{friendLayer}') < tree.lastIndexOf('<MarkerFeeder'), 'beneath friends and the location arrow');
+  const layer = map.slice(map.indexOf('const HazardLayers = memo('), map.indexOf('let tokenSet'));
+  assert.ok(layer.length > 200 && layer.length < 3000);
+  assert.ok(/minZoomLevel=\{9\}/.test(layer), 'hidden when zoomed far out (no clutter)');
+  assert.ok(/iconSize: \["interpolate"/.test(layer) && /iconPitchAlignment: "viewport"/.test(layer));
+  assert.ok(!/Camera|setCamera|followCamera|easeTo|flyTo/.test(layer), 'no camera writes');
+  assert.ok(/store\.select\(id\)/.test(layer));
+  const card = readNav('../components/hazards/HazardCard.tsx');
+  assert.ok(/>Still there<\/Text>/.test(card) && />Not there<\/Text>/.test(card));
+  assert.ok(/\{mine \? null : \(/.test(card), 'one vote: the buttons go once they have voted or reported');
+  assert.ok(/reportedAgo\(hazard\.reportedAt, now\)/.test(card));
+  assert.ok(!/userId|reporter|avatar|displayName|initials|\.name\b|profile/i.test(card), 'no identity anywhere on the card');
+  assert.ok(/friendMapSelection\.select\(null\)/.test(card), 'one card at a time with a friend\'s');
+});
+
+test('hazards: realtime reuses Supabase broadcast on area topics, receive only; the private inbox and presence are untouched', () => {
+  const ctx = readNav('../context/HazardsContext.tsx');
+  assert.ok(/client\.channel\(topic, \{ config: \{ private: true \} \}\)/.test(ctx), 'private channels (the database authorises them)');
+  assert.ok(/channel\.on\("broadcast", \{ event: "hazard" \}/.test(ctx));
+  assert.ok(!/\.send\(|httpSend|track\(|inbox:/.test(ctx), 'never publishes; never the inbox');
+  const presence = readNav('../lib/realtimePresence.ts');
+  assert.ok(!/hazard/i.test(presence), 'the inbox feed knows nothing of hazards');
+  assert.ok(/const channel = supabase\.channel\(topic, \{ config: \{ private: true \} \}\);/.test(presence));
+  // Friends' markers are drawn exactly as before
+  const drive = readNav('../app/(tabs)/(drive)/index.tsx');
+  assert.ok(/showFriends && visuals\.live && FriendMarkersMapbox \? <FriendMarkersMapbox \/> : null/.test(drive));
+  // The database: anyone signed in may receive on a well-formed area topic, nobody may publish
+  const sql = readFileSync(toPath(new URL('../../../supabase/migrations/20261011000100_road_hazards.sql', import.meta.url)), 'utf8');
+  assert.ok(/create policy driveos_hazard_area_receive on realtime\.messages\s+for select to authenticated/.test(sql));
+  assert.ok(!/on realtime\.messages\s+for insert/.test(sql));
+  // One provider per signed-in account, next to navigation's
+  const layout = readNav('../app/_layout.tsx');
+  assert.ok(/<NavigationProvider userId=\{userId\}>\s*<HazardsProvider userId=\{userId\}>/.test(layout));
+});

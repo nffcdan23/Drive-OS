@@ -21,7 +21,9 @@
  *  - the speed HUD: the car's current GPS speed in the user's units, nothing
  *    else (no speed limit: the route's limits aren't reliable enough to show);
  *  - one quiet "Recording" mark while a drive records underneath. Never the
- *    recording dashboard (speedometer panel, Pause, End Drive, Save Point).
+ *    recording dashboard (speedometer panel, Pause, End Drive, Save Point);
+ *  - Report, on the right of that row (lower right, as in the reference
+ *    design): opens the hazard report sheet.
  *
  * On arriving it says so, with Done, and Save Place where the destination
  * may be saved (not a search result: Mapbox's terms) and isn't already. (A
@@ -39,6 +41,7 @@ import * as Haptics from "expo-haptics";
 import { GlassButton, GlassSurface } from "@/components/Glass";
 import { Glyph } from "@/components/Glyph";
 import { SavePlaceSheet } from "@/components/places/SavePlaceSheet";
+import { ReportButton } from "@/components/hazards/ReportButton";
 import { useApp } from "@/context/AppContext";
 import { useEndNavigation, useLatestNavigationFix, useNavigationState } from "@/context/NavigationContext";
 import { arrivalTime, formatClock, formatDuration, formatGuidanceDistance } from "@/lib/navigation/format";
@@ -248,6 +251,7 @@ export function GuidanceBar({
   onOverview,
   recordingActive,
   onFinishDrive,
+  onReport,
 }: {
   unitSystem: ResolvedUnitSystem;
   /** Whether the camera is following the route (else the user moved the map) */
@@ -258,6 +262,8 @@ export function GuidanceBar({
   recordingActive: boolean;
   /** End navigation and finish the drive navigation started (the Drive screen's End Drive) */
   onFinishDrive: () => void;
+  /** Opens the hazard report sheet */
+  onReport?: () => void;
 }) {
   const state = useNavigationState();
   if (state.phase === "idle") return null;
@@ -273,6 +279,12 @@ export function GuidanceBar({
               <View style={styles.recDotLive} />
               <Text style={styles.recordingText}>Recording</Text>
             </View>
+          ) : null}
+          {onReport && state.phase !== "error" ? (
+            <>
+              <View style={styles.grow} pointerEvents="none" />
+              <ReportButton onPress={onReport} />
+            </>
           ) : null}
         </View>
       ) : null}

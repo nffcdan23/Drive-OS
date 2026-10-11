@@ -1169,4 +1169,206 @@ select pg_temp.ok_bool(exists (select 1 from live_locations where user_id = pg_t
 select pg_temp.expect_live_inbox('F', array['live_location_hidden'], 'and viewers are told to remove it');
 select pg_temp.expect_live_inbox('G', array['live_location_hidden'], 'every one of them');
 
+\echo '--- road hazards (0020)'
+-- Own cast: R reports; S, T, U, V other drivers; W a heavy user (limits).
+create function pg_temp.hu(p text) returns uuid language sql immutable as $$
+  select ('20000000-0000-4000-8000-0000000000' || case p
+    when 'R' then '01' when 'S' then '02' when 'T' then '03' when 'U' then '04'
+    when 'V' then '05' when 'W' then '06' end)::uuid
+$$;
+insert into auth.users (id, email, raw_user_meta_data)
+select pg_temp.hu(x), 'hazard-' || lower(x) || '@example.test', json_build_object('display_name', 'Hazard ' || x)
+  from unnest(array['R','S','T','U','V','W']) x;
+-- The API's calls (it connects as the table owner)
+create function pg_temp.report(p_who text, p_kind text, p_lat double precision, p_lng double precision)
+returns text language sql as $$
+  select outcome || ':' || coalesce(hazard_id::text, '-') from private.report_hazard(pg_temp.hu(p_who), p_kind, p_lat, p_lng)
+$$;
+create function pg_temp.outcome(p text) returns text language sql immutable as $$ select split_part(p, ':', 1) $$;
+create function pg_temp.hid(p text) returns uuid language sql immutable as $$ select nullif(split_part(p, ':', 2), '-')::uuid $$;
+create function pg_temp.vote(p_who text, p_hazard uuid, p_vote text) returns text language sql as $$
+  select private.vote_hazard(pg_temp.hu(p_who), p_hazard, p_vote)
+$$;
+create function pg_temp.hazard(p_id uuid) returns public.road_hazards language sql as $$
+  select * from public.road_hazards where id = p_id
+$$;
+create function pg_temp.visible_ids(p_min_lat double precision, p_min_lng double precision, p_max_lat double precision, p_max_lng double precision)
+returns uuid[] language sql as $$
+  select coalesce(array_agg((hazard->>'id')::uuid), '{}') from private.hazards_in_view(pg_temp.hu('V'), p_min_lat, p_min_lng, p_max_lat, p_max_lng)
+$$;
+create temp table hz (label text primary key, id uuid not null);
+create temp table hz_seen (id uuid primary key);
+insert into hz_seen select id from realtime.messages;
+create function pg_temp.hz_new() returns text[] language plpgsql as $$
+declare v text[];
+begin
+  select coalesce(array_agg((m.payload->>'type') || '@' || m.topic order by m.inserted_at, m.id), '{}') into v
+    from realtime.messages m where m.event = 'hazard' and not exists (select 1 from hz_seen s where s.id = m.id);
+  insert into hz_seen select id from realtime.messages on conflict do nothing;
+  return v;
+end;
+$$;
+
+-- Clients: no direct writes, no functions (part 2: worst-case table grants)
+select pg_temp.check_denied('alice', $q$insert into public.road_hazards (kind, latitude, longitude, expires_at) values ('accident', 54.5, -3.0, now() + interval '1 hour')$q$,
+  '42501', '%row-level security%', 'a client cannot create a hazard directly');
+select pg_temp.check_denied('alice', $q$select * from private.report_hazard('a0000000-0000-0000-0000-000000000000', 'accident', 54.5, -3.0)$q$,
+  '42501', 'permission denied%', 'nor call the report function (the API only)');
+select pg_temp.check_denied('alice', $q$select private.vote_hazard('a0000000-0000-0000-0000-000000000000', gen_random_uuid(), 'still_there')$q$,
+  '42501', 'permission denied%', 'nor the vote function');
+select pg_temp.check_denied('alice', $q$select * from private.hazards_in_view('b0000000-0000-0000-0000-000000000000', 54, -3, 55, -2)$q$,
+  '42501', 'permission denied%', 'nor read hazards as someone else');
+select pg_temp.ok_bool(exists (select 1 from information_schema.columns where table_schema = 'public' and table_name = 'road_hazards'
+                               and column_name ~ '(user|reporter|owner|profile|created_by)'), false,
+  'a hazard row holds no user at all');
+
+-- Reporting: one marker per incident
+insert into hz values ('acc', pg_temp.hid(pg_temp.report('R', 'accident', 54.50000, -3.00000)));
+select pg_temp.ok_bool((select kind = 'accident' and support = 1 and expires_at - created_at = interval '60 minutes'
+                          and latitude = 54.5 and longitude = -3.0 from public.road_hazards where id = (select id from hz where label = 'acc')), true,
+  'a report creates an accident at the reporter''s position, up for 60 minutes');
+select pg_temp.ok_bool((select vote = 'reported' from public.road_hazard_votes where user_id = pg_temp.hu('R')), true,
+  'the reporter is kept privately (for duplicates and limits)');
+select pg_temp.ok_bool(pg_temp.hz_new() = array['hazard@hazards:109:-6'], true, 'a new hazard is broadcast to its area only');
+select pg_temp.ok_bool(pg_temp.report('S', 'accident', 54.50070, -3.00000) = 'merged:' || (select id from hz where label = 'acc'), true,
+  'the same kind 80 m away confirms the existing hazard instead of adding one');
+select pg_temp.ok_bool((pg_temp.hazard((select id from hz where label = 'acc'))).support = 2, true, 'its support counts both reports');
+select pg_temp.ok_bool(pg_temp.report('S', 'accident', 54.50010, -3.00010) = 'already_reported:' || (select id from hz where label = 'acc'), true,
+  'reporting it again changes nothing (no repeated boosting)');
+select pg_temp.ok_bool((pg_temp.hazard((select id from hz where label = 'acc'))).support = 2, true, 'support unchanged');
+insert into hz values ('pol', pg_temp.hid(pg_temp.report('S', 'police', 54.50000, -3.00000)));
+select pg_temp.ok_bool((select id from hz where label = 'pol') <> (select id from hz where label = 'acc'), true, 'a different kind at the same spot is its own hazard');
+insert into hz values ('acc2', pg_temp.hid(pg_temp.report('T', 'accident', 54.50400, -3.00000)));
+select pg_temp.ok_bool((select id from hz where label = 'acc2') <> (select id from hz where label = 'acc'), true, 'the same kind 450 m away is a separate incident');
+insert into hz values ('rw', pg_temp.hid(pg_temp.report('T', 'roadworks', 54.60000, -3.00000)));
+select pg_temp.ok_bool(pg_temp.report('U', 'roadworks', 54.60250, -3.00000) = 'merged:' || (select id from hz where label = 'rw'), true,
+  'roadworks merge over a wider stretch (280 m)');
+select pg_temp.ok_bool((select expires_at - created_at = interval '6 hours' from public.road_hazards where id = (select id from hz where label = 'rw')), true,
+  'roadworks stay up for hours, not minutes');
+select pg_temp.expect_error_sql($$select pg_temp.report('R', 'alien_invasion', 54.5, -3.0)$$, '22023', 'an unknown kind is refused');
+select pg_temp.expect_error_sql($$select pg_temp.report('R', 'accident', 95, -3.0)$$, '22023', 'an impossible position is refused');
+select pg_temp.hz_new();
+
+-- Still there / Not there
+select pg_temp.ok_bool(pg_temp.vote('R', (select id from hz where label = 'acc'), 'still_there') = 'own_report', true, 'a reporter cannot confirm their own report');
+select pg_temp.ok_bool(pg_temp.vote('S', (select id from hz where label = 'acc'), 'not_there') = 'own_report', true, 'nor can a merged reporter vote on it');
+select pg_temp.ok_bool(pg_temp.vote('T', (select id from hz where label = 'acc'), 'still_there') = 'counted', true, 'another driver confirms it');
+select pg_temp.ok_bool(pg_temp.vote('T', (select id from hz where label = 'acc'), 'still_there') = 'already_voted', true, 'once only');
+select pg_temp.ok_bool(pg_temp.vote('T', (select id from hz where label = 'acc'), 'not_there') = 'already_voted', true, 'and a vote is final');
+select pg_temp.ok_bool((pg_temp.hazard((select id from hz where label = 'acc'))).support = 3, true, 'support 3');
+-- Lifetime: a confirmation extends modestly, never past the cap
+with x as (insert into public.road_hazards (kind, latitude, longitude, created_at, last_confirmed_at, expires_at)
+  values ('accident', 53.0, -2.0, now() - interval '50 minutes', now() - interval '50 minutes', now() + interval '10 minutes') returning id) insert into hz select 'old', id from x;
+insert into public.road_hazard_votes (hazard_id, user_id, vote) values ((select id from hz where label = 'old'), pg_temp.hu('R'), 'reported');
+select pg_temp.ok_bool(pg_temp.vote('U', (select id from hz where label = 'old'), 'still_there') = 'counted', true, 'confirming a fading accident');
+select pg_temp.ok_bool((pg_temp.hazard((select id from hz where label = 'old'))).expires_at between now() + interval '29 minutes' and now() + interval '31 minutes', true,
+  'keeps it up for half its lifetime from now (30 minutes)');
+with x as (insert into public.road_hazards (kind, latitude, longitude, created_at, last_confirmed_at, expires_at)
+  values ('accident', 53.1, -2.0, now() - interval '170 minutes', now() - interval '20 minutes', now() + interval '10 minutes') returning id) insert into hz select 'capped', id from x;
+select pg_temp.ok_bool(pg_temp.vote('U', (select id from hz where label = 'capped'), 'still_there') = 'counted', true, 'confirming one near its cap');
+select pg_temp.ok_bool((select expires_at = created_at + interval '180 minutes' from public.road_hazards where id = (select id from hz where label = 'capped')), true,
+  'never past three lifetimes (3 hours for an accident)');
+-- Not there: one person can't clear it; enough people who outnumber its support do
+select pg_temp.hz_new();
+insert into hz values ('stall', pg_temp.hid(pg_temp.report('R', 'broken_down', 52.0, -1.0)));
+select pg_temp.hz_new();
+select pg_temp.ok_bool(pg_temp.vote('S', (select id from hz where label = 'stall'), 'not_there') = 'counted', true, 'one driver says it''s gone');
+select pg_temp.ok_bool((pg_temp.hazard((select id from hz where label = 'stall'))).removed_at is null, true, 'it stays (one disagreement is not enough)');
+select pg_temp.ok_bool(pg_temp.hz_new() = '{}', true, 'and nothing changes on anyone''s map');
+select pg_temp.ok_bool(pg_temp.vote('T', (select id from hz where label = 'stall'), 'not_there') = 'counted', true, 'a second driver agrees');
+select pg_temp.ok_bool((pg_temp.hazard((select id from hz where label = 'stall'))).removed_at is not null, true, 'two who outnumber its one report remove it');
+select pg_temp.ok_bool(pg_temp.hz_new() = array['hazard_removed@hazards:104:-2'], true, 'its area is told to remove it');
+select pg_temp.ok_bool(pg_temp.vote('U', (select id from hz where label = 'stall'), 'still_there') = 'not_found', true, 'a removed hazard cannot be voted back');
+select pg_temp.ok_bool(pg_temp.vote('U', (select id from hz where label = 'acc'), 'not_there') = 'counted'
+                   and pg_temp.vote('V', (select id from hz where label = 'acc'), 'not_there') = 'counted', true, 'two say the confirmed accident is gone');
+select pg_temp.ok_bool((pg_temp.hazard((select id from hz where label = 'acc'))).removed_at is null, true,
+  'it stays: two don''t outnumber three who saw it');
+select pg_temp.ok_bool(pg_temp.vote('W', (select id from hz where label = 'acc'), 'not_there') = 'counted', true, 'a third says it''s gone');
+select pg_temp.ok_bool((pg_temp.hazard((select id from hz where label = 'acc'))).removed_at is null, true, 'still a tie: it stays');
+select pg_temp.ok_bool(pg_temp.vote('R', (select id from hz where label = 'pol'), 'not_there') = 'counted', true, 'someone says the police have gone');
+select pg_temp.ok_bool(pg_temp.report('R', 'police', 54.50005, -3.00000) = 'merged:' || (select id from hz where label = 'pol'), true,
+  'then reports them there');
+select pg_temp.ok_bool((select support = 2 and dismissals = 0 from public.road_hazards where id = (select id from hz where label = 'pol')), true,
+  'their "Not there" became a report, counted once');
+select pg_temp.ok_bool(pg_temp.report('R', 'police', 54.50005, -3.00000) = 'already_reported:' || (select id from hz where label = 'pol'), true,
+  'and reporting again changes nothing');
+
+-- Expiry: expired hazards are absent everywhere, without any clean-up
+with x as (insert into public.road_hazards (kind, latitude, longitude, created_at, last_confirmed_at, expires_at)
+  values ('flooding', 51.0, 0.5, now() - interval '5 hours', now() - interval '5 hours', now() - interval '1 hour') returning id) insert into hz select 'expired', id from x;
+select pg_temp.ok_bool((select id from hz where label = 'expired') = any(pg_temp.visible_ids(50.9, 0.4, 51.1, 0.6)), false, 'an expired hazard is not listed');
+select pg_temp.ok_bool(pg_temp.vote('U', (select id from hz where label = 'expired'), 'still_there') = 'not_found', true, 'nor can it be confirmed back to life');
+select pg_temp.ok_bool(pg_temp.outcome(pg_temp.report('U', 'flooding', 51.0, 0.5)) = 'created', true, 'a new report there is a new hazard, not a revival');
+
+-- Nearby: a bounded area only, nearest first, with the caller's own vote
+select pg_temp.ok_bool(pg_temp.visible_ids(54.45, -3.05, 54.55, -2.95) @> array[(select id from hz where label = 'acc'), (select id from hz where label = 'pol')], true,
+  'hazards in the area are listed');
+select pg_temp.ok_bool((select id from hz where label = 'rw') = any(pg_temp.visible_ids(54.45, -3.05, 54.55, -2.95)), false, 'one 11 km north of it is not');
+select pg_temp.ok_bool(pg_temp.visible_ids(50.0, -4.0, 56.0, 1.0) = '{}', true, 'an area larger than about 110 km is refused (empty)');
+select pg_temp.ok_bool(pg_temp.visible_ids(54.55, -3.05, 54.45, -2.95) = '{}', true, 'an inverted area is refused');
+select pg_temp.ok_bool((select array_agg(k order by k) from private.hazards_in_view(pg_temp.hu('V'), 54.45, -3.05, 54.55, -2.95) h, jsonb_object_keys(h.hazard) k
+                         where h.hazard->>'id' = (select id from hz where label = 'acc')::text)
+  = array['confirmations','expiresAt','expiresInMs','id','kind','lastConfirmedAt','latitude','longitude','reportedAt'], true,
+  'what a viewer gets: kind, position, times and a count — nobody''s identity');
+select pg_temp.ok_bool((select my_vote from private.hazards_in_view(pg_temp.hu('V'), 54.45, -3.05, 54.55, -2.95) where hazard->>'id' = (select id from hz where label = 'acc')::text) = 'not_there', true,
+  'the caller sees their own vote (only theirs)');
+
+-- Limits
+select pg_temp.ok_bool((select array_agg(pg_temp.outcome(pg_temp.report('W', 'hazard', 40.0 + g * 0.1, 10.0)) order by g) from generate_series(1, 6) g)
+  = array['created','created','created','created','created','rate_limited'], true, 'at most 5 reports in 10 minutes');
+update public.road_hazard_votes set created_at = now() - interval '11 minutes' where user_id = pg_temp.hu('W') and vote = 'reported';
+select pg_temp.ok_bool(pg_temp.outcome(pg_temp.report('W', 'hazard', 41.0, 10.0)) = 'created', true, 'then more once the window has passed');
+insert into public.road_hazards (kind, latitude, longitude, expires_at) select 'hazard', 30.0 + g * 0.1, 20.0, now() + interval '30 minutes' from generate_series(1, 21) g;
+select pg_temp.ok_bool((select array_agg(pg_temp.vote('W', id, 'still_there') order by latitude) from public.road_hazards where longitude = 20.0)
+  = array_fill('counted'::text, array[19]) || array['rate_limited','rate_limited'], true, 'at most 20 votes in 10 minutes (one already cast)');
+
+-- Clients reading directly (worst-case grants): active hazards only, own votes only, no edits
+select pg_temp.check_rows('alice', $q$select 1 from public.road_hazards$q$,
+  (select count(*) from public.road_hazards where expires_at > now() and removed_at is null),
+  'a signed-in user reads active hazards only');
+select pg_temp.check_rows('alice', $q$select 1 from public.road_hazards where expires_at <= now() or removed_at is not null$q$, 0,
+  'never an expired or removed one');
+select pg_temp.check_rows('anon', $q$select 1 from public.road_hazards$q$, 0, 'anonymous callers read none');
+create function pg_temp.hz_votes_seen_by(p_who text) returns bigint language plpgsql as $$
+declare n bigint; me uuid := pg_temp.hu(p_who);
+begin
+  perform set_config('request.jwt.claims', json_build_object('sub', me, 'role', 'authenticated')::text, true);
+  perform set_config('role', 'authenticated', true);
+  select count(*) into n from public.road_hazard_votes where user_id <> me;
+  reset role; perform set_config('request.jwt.claims', '', true);
+  return n;
+end;
+$$;
+select pg_temp.ok_bool(pg_temp.hz_votes_seen_by('V') = 0, true, 'nobody can see who reported or voted on anything');
+select pg_temp.check_affects('alice', $q$update public.road_hazards set expires_at = now() + interval '20 hours', removed_at = null$q$, 0,
+  'a client cannot extend, revive or edit a hazard');
+select pg_temp.check_affects('alice', $q$update public.road_hazards set latitude = 0, longitude = 0$q$, 0, 'nor move one');
+select pg_temp.check_affects('alice', $q$delete from public.road_hazards$q$, 0, 'nor delete one');
+select pg_temp.check_affects('alice', $q$update public.road_hazard_votes set vote = 'still_there'$q$, 0, 'nor change any vote');
+select pg_temp.check_denied('alice', $q$insert into public.road_hazard_votes (hazard_id, user_id, vote) select id, 'b0000000-0000-0000-0000-000000000000', 'not_there' from public.road_hazards limit 1$q$,
+  '42501', '%row-level security%', 'nor vote as someone else');
+select pg_temp.check_denied('alice', $q$insert into public.road_hazard_votes (hazard_id, user_id, vote) select id, 'a0000000-0000-0000-0000-000000000000', 'still_there' from public.road_hazards limit 1$q$,
+  '42501', '%row-level security%', 'nor vote as themselves except through the API');
+select pg_temp.expect_error_sql($$update public.road_hazards set latitude = 1 where id = (select id from pg_temp.hz where label = 'acc')$$, '42501',
+  'even the API cannot move a hazard');
+select pg_temp.expect_error_sql($$insert into public.road_hazards (kind, latitude, longitude, expires_at) values ('accident', 1, 1, now() + interval '2 days')$$, '23514',
+  'no hazard can be set to last more than a day');
+
+-- Realtime areas: any signed-in user may receive, nobody may publish
+select pg_temp.ok_bool(pg_temp.can_join('alice', 'hazards:109:-6'), true, 'a signed-in user can join a hazard area');
+select pg_temp.ok_bool(pg_temp.can_join('anon', 'hazards:109:-6'), false, 'anonymous callers cannot');
+select pg_temp.ok_bool(pg_temp.can_join('alice', 'hazards:109:-6:inbox'), false, 'malformed area topics are not readable');
+select pg_temp.ok_bool(pg_temp.can_join('alice', 'inbox:b0000000-0000-0000-0000-000000000000'), false, 'and nobody else''s inbox becomes readable');
+select pg_temp.check_denied('alice', $q$insert into realtime.messages (topic, extension, payload, event, private) values ('hazards:109:-6', 'broadcast', '{"type":"hazard"}', 'hazard', true)$q$,
+  '42501', '%row-level security%', 'a client cannot publish a hazard');
+select pg_temp.ok_bool(not exists (select 1 from realtime.messages where event = 'hazard'
+                                   and payload::text ~ '(20000000-0000-4000-8000|userId|reporter|user_id)'), true,
+  'no broadcast ever carries a user');
+
+-- Account deletion: the person's reports and votes go; the hazards stay, anonymous
+delete from auth.users where id = pg_temp.hu('R');
+select pg_temp.ok_bool(not exists (select 1 from public.road_hazard_votes where user_id = pg_temp.hu('R'))
+                   and exists (select 1 from public.road_hazards where id = (select id from hz where label = 'acc')), true,
+  'deleting an account removes its reports and votes, not the hazards');
+
 \echo '=== ALL RLS AND SECURITY TESTS PASSED ==='

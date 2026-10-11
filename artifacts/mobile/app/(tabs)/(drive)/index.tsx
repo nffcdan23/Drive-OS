@@ -85,6 +85,10 @@ import {
 import { GuidanceBanner } from "@/components/navigation/GuidanceBanner";
 import { GuidanceBar } from "@/components/navigation/GuidanceBar";
 import { NavigationControls } from "@/components/navigation/NavigationControls";
+import { HazardCard } from "@/components/hazards/HazardCard";
+import { ReportHazardSheet } from "@/components/hazards/ReportHazardSheet";
+import { useHazardActions, useHazardStore } from "@/context/HazardsContext";
+import type { ReportFix } from "@/lib/hazards/report";
 import { GuidanceKeepAwake } from "@/components/navigation/GuidanceKeepAwake";
 import { guidanceZoom, type GuidanceZoom } from "@/lib/navigation/guidanceCamera";
 import { drivePresentation } from "@/lib/drivePresentation";
@@ -589,6 +593,15 @@ export default function MapScreen() {
   // from speed and the next turn (lib/navigation/guidanceCamera)
   const guidingRef = useRef(false);
   const guidanceZoomRef = useRef<GuidanceZoom | null>(null);
+  // ── Road hazards (0020): nearby markers, Report, the tapped hazard's card ──
+  const hazardStore = useHazardStore();
+  const { notePosition: noteHazardPosition } = useHazardActions();
+  const [reportOpen, setReportOpen] = useState(false);
+  const openReport = useCallback(() => setReportOpen(true), []);
+  const closeReport = useCallback(() => setReportOpen(false), []);
+  // The latest accepted fix as the phone took it (never route-snapped): a report's position
+  const lastAcceptedFixRef = useRef<ReportFix | null>(null);
+  const getReportFix = useCallback(() => lastAcceptedFixRef.current, []);
   const [guidanceBannerHeight, setGuidanceBannerHeight] = useState(0);
   const guidanceBannerHeightRef = useRef(0);
   const onGuidanceBannerHeight = useCallback((h: number) => {
@@ -1169,6 +1182,9 @@ export default function MapScreen() {
         }
       }
       lastPositionRef.current = { lat, lon, time: now };
+      lastAcceptedFixRef.current = { latitude: lat, longitude: lon, accuracyM: accuracy, timestamp: fixTime ?? now };
+      // Nearby hazards load only once the driver has moved far enough (never per fix)
+      noteHazardPosition(lat, lon);
 
       // ── Update stored location ──
       const coord = { latitude: lat, longitude: lon };
@@ -1262,7 +1278,7 @@ export default function MapScreen() {
       // ── Draw: marker, heading and follow camera glide from here ──
       wakeFrameLoop();
     },
-    [locationSmoother, headingFilter, updateDriveCoordinate, noteForegroundFix, noteRouteFix, wakeFrameLoop],
+    [locationSmoother, headingFilter, updateDriveCoordinate, noteForegroundFix, noteRouteFix, noteHazardPosition, wakeFrameLoop],
   );
 
   // The live head starts from the recorded trail's newest point, as drawn: a
@@ -2341,6 +2357,7 @@ export default function MapScreen() {
           trailHead={freeDrive ? subscribeLiveTrail : undefined}
           routePreview={routePreviewStore}
           navigation={navSession}
+          hazards={hazardStore}
           friendLayer={
             // Like every map write, only while the app is on screen
             showFriends && visuals.live && FriendMarkersMapbox ? <FriendMarkersMapbox /> : null
@@ -2721,6 +2738,23 @@ export default function MapScreen() {
         />
       )}
 
+      {/* ── A tapped hazard's card (closes itself when it expires or is cleared) ── */}
+      {USING_MAPBOX && visuals.live && (
+        <HazardCard
+          style={{
+            position: "absolute",
+            top: navigating
+              ? SEARCH_TOP + passengerOffset + guidanceBannerHeight + 8
+              : CONTROLS_TOP + passengerOffset,
+            left: 16,
+            right: 72,
+          }}
+        />
+      )}
+
+      {/* ── Report a hazard: Report → a type, sent at the current fix ── */}
+      <ReportHazardSheet visible={reportOpen} onClose={closeReport} getFix={getReportFix} />
+
       {/* ── More: orientation, saved places, passenger mode ── */}
       {!isDriving && !previewing && !navigating && showMore && (
         <GlassSurface
@@ -2811,6 +2845,7 @@ export default function MapScreen() {
           onZoomIn={handleZoomIn}
           onZoomOut={handleZoomOut}
           onMapAreaLayout={USING_MAPBOX ? setDriveMapAreaHeight : undefined}
+          onReport={openReport}
         />
       )}
 
@@ -2888,6 +2923,7 @@ export default function MapScreen() {
             onOverview={showNavigationOverview}
             recordingActive={isDriving}
             onFinishDrive={handleFinishNavigationDrive}
+            onReport={openReport}
           />
         </AboveTabBar>
       )}
