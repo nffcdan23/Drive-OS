@@ -213,6 +213,14 @@ export class NavigationSession {
     return this.mapView;
   }
 
+  /**
+   * The prepared form of the route being followed (read only: hazard
+   * warnings match hazards against it); a new object on a new route
+   */
+  get preparedRoute(): PreparedRoute | null {
+    return this.prepared;
+  }
+
   /** Whether guidance is running (the camera follows the route) */
   get guiding(): boolean {
     return isActive(this.current);

@@ -10595,3 +10595,258 @@ test('hazards: realtime reuses Supabase broadcast on area topics, receive only; 
   const layout = readNav('../app/_layout.tsx');
   assert.ok(/<NavigationProvider userId=\{userId\}>\s*<HazardsProvider userId=\{userId\}>/.test(layout));
 });
+
+// ─── Upcoming hazard warnings (navigation only) ─────────────────────────────
+// A hazard warns only when it is on the route (a narrow corridor, wider on
+// the driver's side), ahead by route progress, within a speed- and road-
+// sensitive distance, and guidance is confident. Once passed, never again.
+
+import { HAZARD_WARNING, HazardWarnings, distanceBucket, lastMatchScan, matchToRoute, roadBand, speedBand, warnDistanceM } from '@/lib/hazards/warnings';
+import { connectHazardWarnings } from '@/lib/hazards/warningController';
+
+/** A straight route north, 3 km (no road number unless given) */
+const STRAIGHT3 = polyline3([[0, 0], [0, 3000]]);
+const straightRoute3 = (ref: string | null = null) => route3(STRAIGHT3, [
+  { at: 0, type: 'depart', name: 'High Street', ref },
+  { at: STRAIGHT3.length - 1, type: 'arrive' },
+]);
+const hzFix3 = (t: number, o: Record<string, unknown> = {}) => ({ speedMs: 13, headingDeg: 0, accuracyM: 8, timestamp: t, ...o });
+
+/** Navigation with the hazard store and warnings connected as in the app */
+function hazardDrive3(route: Nav3Route) {
+  const h = nav3Session();
+  const store = new HazardStore();
+  const logs: Array<Record<string, unknown>> = [];
+  const warnings = new HazardWarnings({ log: (event, d) => logs.push({ event, ...d }) });
+  let last: { latitude: number; longitude: number; speedMs: number | null; headingDeg: number | null; accuracyM: number | null; timestamp: number } | null = null;
+  const stop = connectHazardWarnings({ session: h.s, store, latestFix: () => last, warnings, now: () => h.clock.t });
+  void h.s.start({ route, destination: N3_DEST });
+  const drive = (fixes: GpsFix[]) => {
+    for (const f of fixes) {
+      last = { latitude: f.latitude, longitude: f.longitude, speedMs: f.speedMs, headingDeg: f.headingDeg, accuracyM: f.accuracyM, timestamp: f.time };
+      h.feed([f]);
+    }
+  };
+  const next = () => h.clock.t + 1000;
+  const hazard = (id: string, x: number, y: number, kind = 'accident') =>
+    parseHazard({ id, kind, ...at3(x, y), reportedAt: new Date(h.clock.t).toISOString(), expiresInMs: 3_600_000 }, h.clock.t)!;
+  const set = (...hs: RoadHazard[]) => store.replace(areaAround(N3_BASE.latitude, N3_BASE.longitude, 15), hs, h.clock.t);
+  return { h, store, warnings, logs, drive, next, hazard, set, stop, get w() { return warnings.warning; } };
+}
+
+test('hazard warnings: matching — on the route matches; the opposite carriageway, a parallel road or far away does not', () => {
+  const p = prepareRoute(straightRoute3());
+  const along = (x: number, y: number) => matchToRoute(p, at3(x, y).latitude, at3(x, y).longitude);
+  const on = along(-3, 1000);
+  assert.equal(on.length, 1);
+  assert.ok(Math.abs(on[0]! - 1000) < 1, 'its place along the route');
+  // UK (drive on the left), heading north: the driver's side is west (left), oncoming traffic east
+  assert.equal(along(-25, 1000).length, 1, '25 m on the driver\'s side: on the route (GPS and road width)');
+  assert.equal(along(10, 1000).length, 1, '10 m towards oncoming traffic: the same single-carriageway road');
+  assert.deepEqual(along(22, 1000), [], 'a dual carriageway\'s opposite side, ~22 m over: not this route');
+  assert.deepEqual(along(-45, 1000), [], 'a parallel road 45 m away: no');
+  assert.deepEqual(along(300, 1000), [], 'far from the route: no');
+  // Driving south the sides swap: east is the driver's side
+  const south = prepareRoute(route3(polyline3([[0, 3000], [0, 0]]), [{ at: 0, type: 'depart' }, { at: 300, type: 'arrive' }]));
+  assert.equal(matchToRoute(south, at3(25, 1000).latitude, at3(25, 1000).longitude).length, 1);
+  assert.deepEqual(matchToRoute(south, at3(-22, 1000).latitude, at3(-22, 1000).longitude), []);
+  // A route past the same place twice: one match per stretch
+  const loop = prepareRoute(route3(polyline3([[0, 0], [0, 1000], [-8, 1000], [-8, 0]]), [{ at: 0, type: 'depart' }, { at: 201, type: 'arrive' }]));
+  assert.equal(matchToRoute(loop, at3(-4, 500).latitude, at3(-4, 500).longitude).length, 2);
+});
+
+test('hazard warnings: matching is prepared, not a scan of the whole route', () => {
+  const long = polyline3([[0, 0], [0, 60_000]]);
+  const p = prepareRoute(route3(long, [{ at: 0, type: 'depart' }, { at: long.length - 1, type: 'arrive' }]));
+  assert.ok(p.n > 6_000);
+  assert.equal(matchToRoute(p, at3(-5, 31_000).latitude, at3(-5, 31_000).longitude).length, 1);
+  assert.ok(lastMatchScan <= HAZARD_WARNING.chunk * 3, `${lastMatchScan} segments examined of ${p.n - 1}`);
+  // Per fix it's only a comparison along the route: 50 hazards, 2,000 updates
+  const w = new HazardWarnings();
+  const hazards = Array.from({ length: 50 }, (_, i) => parseHazard({ id: `h${i}`, kind: 'hazard', ...at3(i % 2 ? -5 : 400, 1_000 + i * 1_000), reportedAt: '2026-10-11T12:00:00Z', expiresInMs: 3_600_000 }, 0)!);
+  const started = Date.now();
+  for (let i = 0; i < 2_000; i++) {
+    w.update({ sessionId: 1, phase: 'navigating', gps: 'ok', prepared: p, progress: progressAt(p, i * 20), fix: hzFix3(i * 1000), hazards, now: i * 1000 });
+  }
+  assert.ok(Date.now() - started < 1_500, `${Date.now() - started} ms`);
+});
+
+test('hazard warnings: ahead warns; passed stops; GPS jitter or a short reverse never brings it back', () => {
+  const d = hazardDrive3(straightRoute3());
+  d.set(d.hazard('a', -4, 800));
+  d.drive(drive3(STRAIGHT3, { to: 350 }));
+  assert.equal(d.w, null, '450 m ahead in town: not yet (400 m)');
+  d.drive(drive3(STRAIGHT3, { from: 363, to: 450, t0: d.next() }));
+  assert.equal(d.w?.hazardId, 'a');
+  assert.ok(d.w!.distanceAheadM > 300 && d.w!.distanceAheadM <= 400, `${d.w!.distanceAheadM} m`);
+  assert.equal(d.w!.kind, 'accident');
+  d.drive(drive3(STRAIGHT3, { from: 463, to: 860, t0: d.next() }));
+  assert.equal(d.w, null, 'passed');
+  // Reversing (or GPS dragging progress back) past it: never again this navigation
+  const back = Array.from({ length: 6 }, (_, i) => fix3(0, 760, d.next() + i * 1000, { speedMs: 0, headingDeg: null }));
+  d.drive(back);
+  assert.ok(active3(d.h.s.state)!.progress!.along < 800, 'progress did go back');
+  assert.equal(d.w, null, 'but the hazard stays passed');
+  assert.deepEqual(d.logs.map((l) => l.event), ['active', 'passed']);
+});
+
+test('hazard warnings: a hazard already behind, beside a parallel road, or on the opposite carriageway never warns', () => {
+  const d = hazardDrive3(straightRoute3());
+  d.set(d.hazard('behind', -3, 150), d.hazard('parallel', -50, 700), d.hazard('opposite', 24, 600));
+  d.drive(drive3(STRAIGHT3, { from: 300, to: 900 }));
+  assert.equal(d.w, null);
+  assert.deepEqual(d.logs, []);
+});
+
+test('hazard warnings: the warning distance grows with speed and road — earlier on a motorway, later in town', () => {
+  assert.deepEqual(HAZARD_WARNING.bands.map((b) => b.warnM), [400, 900, 1_600]);
+  assert.equal(roadBand('M6'), 2);
+  assert.equal(roadBand('A1(M)'), 2);
+  assert.equal(roadBand('A591'), 1);
+  assert.equal(roadBand('B5289'), 0);
+  assert.equal(roadBand(null), 0);
+  assert.equal(speedBand(40, 0), 0);
+  assert.equal(speedBand(70, 0), 1);
+  assert.equal(speedBand(110, 0), 2);
+  assert.equal(speedBand(50, 1), 1, 'dropping a band needs speed well below it (no flicker)');
+  assert.equal(speedBand(40, 1), 0);
+  assert.equal(warnDistanceM(2), 1_600);
+  // Town: 1.5 km ahead is too early
+  const town = hazardDrive3(straightRoute3());
+  town.set(town.hazard('x', -4, 2_000));
+  town.drive(drive3(STRAIGHT3, { to: 450 }));
+  assert.equal(town.w, null, 'in town, 1.55 km ahead: not yet');
+  // A motorway (by its number): the same place warns already
+  const mway = hazardDrive3(straightRoute3('M6'));
+  mway.set(mway.hazard('x', -4, 2_000));
+  mway.drive(drive3(STRAIGHT3, { to: 450 }));
+  assert.equal(mway.w?.hazardId, 'x', 'on the M6, 1.55 km ahead: warns');
+  // Fast on an unnumbered road: speed alone moves the band up
+  const fast = hazardDrive3(straightRoute3());
+  fast.set(fast.hazard('x', -4, 2_000));
+  fast.drive(drive3(STRAIGHT3, { to: 450, speed: 31 }));
+  assert.equal(fast.w?.hazardId, 'x', 'at 112 km/h: warns 1.6 km out');
+});
+
+test('hazard warnings: one at a time — the nearest; severity breaks a near tie; the next takes over once passed', () => {
+  const d = hazardDrive3(straightRoute3());
+  d.set(d.hazard('first', -4, 1_000, 'hazard'), d.hazard('second', -4, 1_300, 'roadworks'));
+  d.drive(drive3(STRAIGHT3, { to: 700 }));
+  assert.equal(d.w?.hazardId, 'first');
+  d.drive(drive3(STRAIGHT3, { from: 713, to: 1_100, t0: d.next() }));
+  assert.equal(d.w?.hazardId, 'second', 'the next one, once the first is passed');
+  assert.deepEqual(d.logs.map((l) => `${l.event}:${l.kind}`), ['active:hazard', 'passed:hazard', 'active:roadworks']);
+  const tie = hazardDrive3(straightRoute3());
+  tie.set(tie.hazard('police', -4, 1_000, 'police'), tie.hazard('crash', -4, 1_030, 'accident'));
+  tie.drive(drive3(STRAIGHT3, { to: 700 }));
+  assert.equal(tie.w?.hazardId, 'crash', 'within 50 m of each other: the accident first');
+});
+
+test('hazard warnings: realtime — a new report on the route appears, a removed one disappears, without restarting', () => {
+  const d = hazardDrive3(straightRoute3());
+  d.set();
+  d.drive(drive3(STRAIGHT3, { to: 700 }));
+  assert.equal(d.w, null);
+  d.store.apply({ type: 'hazard', hazard: d.hazard('live', -4, 1_000) }, d.h.clock.t);
+  assert.equal(d.w?.hazardId, 'live', 'shown as soon as it arrives');
+  d.store.apply({ type: 'hazard', hazard: { ...d.hazard('live', -4, 1_000), confirmations: 3 } }, d.h.clock.t);
+  assert.equal(d.w?.hazardId, 'live', 'a confirmation keeps it');
+  d.store.apply({ type: 'hazard_removed', id: 'live' }, d.h.clock.t);
+  assert.equal(d.w, null, 'removed: gone at once');
+  assert.deepEqual(d.logs.map((l) => l.event), ['active', 'removed']);
+  // Expired while navigating (no message at all)
+  d.store.apply({ type: 'hazard', hazard: parseHazard({ id: 'brief', kind: 'police', ...at3(-4, 1_000), reportedAt: '1970-01-01T00:00:00Z', expiresInMs: 3_000 }, d.h.clock.t)! }, d.h.clock.t);
+  assert.equal(d.w?.hazardId, 'brief');
+  d.drive(drive3(STRAIGHT3, { from: 713, to: 760, t0: d.next() }));
+  assert.equal(d.w, null, 'expired: gone');
+});
+
+test('hazard warnings: a reroute — a warning off the new route clears at once; one on it can warn', () => {
+  const logs: string[] = [];
+  const w = new HazardWarnings({ log: (event, data) => logs.push(`${event}:${data.kind}:${data.distance}`) });
+  const north = prepareRoute(straightRoute3());
+  const east = prepareRoute(route3(polyline3([[0, 0], [3_000, 0]]), [{ at: 0, type: 'depart' }, { at: 300, type: 'arrive' }]));
+  const onNorth = parseHazard({ id: 'n', kind: 'accident', ...at3(-4, 1_000), reportedAt: '2026-10-11T12:00:00Z', expiresInMs: 3_600_000 }, 0)!;
+  const onEast = parseHazard({ id: 'e', kind: 'flooding', ...at3(1_000, 4), reportedAt: '2026-10-11T12:00:00Z', expiresInMs: 3_600_000 }, 0)!;
+  const base = { sessionId: 1, gps: 'ok' as const, fix: hzFix3(10_000), hazards: [onNorth, onEast], now: 10_000 };
+  assert.equal(w.update({ ...base, phase: 'navigating', prepared: north, progress: progressAt(north, 700) })?.hazardId, 'n');
+  assert.equal(w.update({ ...base, phase: 'offRoute', prepared: north, progress: progressAt(north, 710) }), null, 'off route: hidden');
+  assert.equal(w.update({ ...base, phase: 'navigating', prepared: east, progress: null }), null, 'the new route: the old warning is gone');
+  assert.deepEqual(logs, ['active:accident:250-500m', 'rerouted:accident:250-500m']);
+  const onNew = w.update({ ...base, phase: 'navigating', prepared: east, progress: progressAt(east, 700), fix: { ...hzFix3(10_000), headingDeg: 90 } });
+  assert.equal(onNew?.hazardId, 'e', 'a hazard on the new route warns');
+  // A new navigation starts clean: what was passed or announced before doesn't carry over
+  w.update({ ...base, phase: 'navigating', prepared: north, progress: progressAt(north, 1_200) });
+  assert.equal(w.update({ ...base, sessionId: 2, phase: 'navigating', prepared: north, progress: progressAt(north, 700) })?.hazardId, 'n');
+});
+
+test('hazard warnings: confidence — poor accuracy, an old fix, heading the wrong way or off route: no warning', () => {
+  const p = prepareRoute(straightRoute3());
+  const hz = [parseHazard({ id: 'x', kind: 'hazard', ...at3(-4, 1_000), reportedAt: '2026-10-11T12:00:00Z', expiresInMs: 3_600_000 }, 0)!];
+  const run = (o: Partial<Parameters<HazardWarnings['update']>[0]>) => {
+    const w = new HazardWarnings();
+    w.update({ sessionId: 1, phase: 'navigating', gps: 'ok', prepared: p, progress: progressAt(p, 700), fix: hzFix3(10_000), hazards: hz, now: 10_000, ...o });
+    return w.update({ sessionId: 1, phase: 'navigating', gps: 'ok', prepared: p, progress: progressAt(p, 700), fix: hzFix3(10_000), hazards: hz, now: 10_000, ...o });
+  };
+  assert.equal(run({})?.hazardId, 'x', 'all good: warns');
+  assert.equal(run({ fix: hzFix3(10_000, { accuracyM: 45 }) }), null, 'accuracy 45 m');
+  assert.equal(run({ fix: hzFix3(-5_000) }), null, 'a fix 15 s old');
+  assert.equal(run({ fix: hzFix3(10_000, { headingDeg: 180 }) }), null, 'heading against the route');
+  assert.equal(run({ fix: hzFix3(10_000, { headingDeg: 180, speedMs: 1 }) })?.hazardId, 'x', 'crawling: heading is noise, ignored');
+  assert.equal(run({ gps: 'weak' }), null, 'weak GPS');
+  for (const phase of ['offRoute', 'rerouting', 'starting', 'arrived'] as const) assert.equal(run({ phase }), null, phase);
+  assert.equal(run({ fix: null }), null, 'no fix');
+});
+
+test('hazard warnings: background — progress keeps it current; the screen shows it on return; never spoken or notified', () => {
+  const d = hazardDrive3(straightRoute3());
+  d.set(d.hazard('a', -4, 1_000), d.hazard('b', -4, 1_600, 'flooding'));
+  // The background task's fixes reach the session the same way: the warning moves on with them
+  d.drive(drive3(STRAIGHT3, { to: 700 }));
+  assert.equal(d.w?.hazardId, 'a');
+  d.drive(drive3(STRAIGHT3, { from: 713, to: 1_250, t0: d.next() }));
+  assert.equal(d.w?.hazardId, 'b', 'updated with no screen in sight');
+  const ctl = readNav('../lib/hazards/warningController.ts');
+  assert.ok(!/react-native|AppState/.test(ctl), 'nothing in the controller depends on being on screen');
+  const ctx = readNav('../context/HazardsContext.tsx');
+  assert.ok(/return useOnScreenSnapshot\(\s*useCallback\(\(fn: \(\) => void\) => warnings\.subscribe\(fn\), \[warnings\]\),/.test(ctx), 'held off screen, current on return');
+  assert.ok(/connectHazardWarnings\(\{ session, store, latestFix, warnings \}\)/.test(ctx));
+  for (const f of ['../lib/hazards/warnings.ts', '../lib/hazards/warningController.ts', '../components/hazards/HazardWarningPill.tsx']) {
+    assert.ok(!/expo-notifications|expo-speech|Speech|speak\(|scheduleNotification/.test(readNav(f)), `${f}: silent`);
+  }
+});
+
+test('hazard warnings: diagnostics are the event, the kind and a distance bucket — never a place, a road or an id', () => {
+  const d = hazardDrive3(straightRoute3());
+  d.set(d.hazard('7f4c', -4, 800));
+  d.drive(drive3(STRAIGHT3, { to: 900 }));
+  assert.ok(d.logs.length >= 2);
+  for (const l of d.logs) assert.deepEqual(Object.keys(l).sort(), ['distance', 'event', 'kind']);
+  assert.ok(!/7f4c|54\.|-3\.|High Street/.test(JSON.stringify(d.logs)));
+  assert.equal(distanceBucket(120), '<250m');
+  assert.equal(distanceBucket(1_400), '1-2km');
+  assert.ok(/journal\.log\("hazard_warning", \{ event, \.\.\.data \}\)/.test(readNav('../context/HazardsContext.tsx')));
+});
+
+test('hazard warnings: the pill — under the turn card, navigation only; the rest of the app unchanged', () => {
+  const pill = readNav('../components/hazards/HazardWarningPill.tsx');
+  assert.ok(/const text = `\$\{info\.label\} ahead`;/.test(pill) && /` · \$\{distance\}`/.test(pill), '"Accident ahead · 800 yd"');
+  assert.ok(/formatGuidanceDistance\(warning\.distanceAheadM, unitSystem\)/.test(pill), 'in the driver\'s units');
+  assert.ok(/marginRight: 70/.test(pill), 'clear of the controls down the right');
+  const banner = readNav('../components/navigation/GuidanceBanner.tsx');
+  assert.ok(/\{below\}\s*<\/>/.test(banner), 'in the space under the card, after the Then card');
+  const main = banner.slice(banner.indexOf('const next = progress.next;'));
+  assert.ok(main.indexOf('{below}') > main.indexOf('<LaneStrip view={state.lanes} />'), 'never on the manoeuvre card');
+  const drive = readNav('../app/(tabs)/(drive)/index.tsx');
+  assert.equal((drive.match(/<HazardWarningPill /g) ?? []).length, 1);
+  assert.ok(/below=\{<HazardWarningPill unitSystem=\{resolvedUnitSystem\} \/>\}/.test(drive), 'only in the guidance banner (navigation)');
+  assert.ok(!/HazardWarning/.test(readNav('../components/ActiveDriveOverlay.tsx')), 'no warnings in Free Drive');
+  // Navigation, voice, background guidance and lanes know nothing of hazards; the session only lends its prepared route
+  assert.ok(!/hazard/i.test(readNav('../lib/navigation/voice.ts')));
+  assert.ok(!/hazard/i.test(readNav('../lib/navigation/background.ts')));
+  assert.ok(!/hazard/i.test(readNav('../lib/navigation/lanes.ts')));
+  const session = readNav('../lib/navigation/session.ts');
+  assert.ok(!/hazard/i.test(session) && /get preparedRoute\(\): PreparedRoute \| null \{\s*return this\.prepared;\s*\}/.test(session));
+  // Hazard records are never changed by warnings
+  assert.ok(!/upsertOwn|\.apply\(|\.replace\(|\.select\(/.test(readNav('../lib/hazards/warningController.ts')));
+});

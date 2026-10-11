@@ -22,11 +22,17 @@ import { HazardFeed, type HazardChannelStatus } from "@/lib/hazards/feed";
 import { parseHazard, type HazardKind, type RoadHazard } from "@/lib/hazards/model";
 import { FIX_PROBLEM_MESSAGE, reportBody, reportedMessage, reportFixProblem, type ReportFix } from "@/lib/hazards/report";
 import { HazardStore } from "@/lib/hazards/store";
+import { HazardWarnings, type HazardWarning } from "@/lib/hazards/warnings";
+import { connectHazardWarnings } from "@/lib/hazards/warningController";
+import { useLatestNavigationFix, useNavigationSession } from "@/context/NavigationContext";
+import { useOnScreenSnapshot } from "@/hooks/useOnScreenSnapshot";
 
 interface HazardsValue {
   store: HazardStore;
   /** The running feed (null before it starts, or without a backend) */
   feed: React.RefObject<HazardFeed | null>;
+  /** The upcoming hazard warning while navigating (lib/hazards/warnings) */
+  warnings: HazardWarnings;
 }
 
 const HazardsContext = createContext<HazardsValue | null>(null);
@@ -37,6 +43,19 @@ export class HazardActionError extends Error {}
 export function HazardsProvider({ userId, children }: { userId: string; children: React.ReactNode }) {
   const store = useMemo(() => new HazardStore(), [userId]);
   const feedRef = useRef<HazardFeed | null>(null);
+  const session = useNavigationSession();
+  const latestFix = useLatestNavigationFix();
+  // Upcoming hazard warnings: kept current by navigation updates (foreground
+  // and background) and hazard changes; never spoken, never a notification.
+  // Diagnostics: the event, the kind and a distance bucket only.
+  const warnings = useMemo(
+    () => new HazardWarnings({ log: (event, data) => journal.log("hazard_warning", { event, ...data }) }),
+    [userId],
+  );
+  useEffect(
+    () => connectHazardWarnings({ session, store, latestFix, warnings }),
+    [session, store, latestFix, warnings],
+  );
 
   // Created and stopped by the same effect (so a remount starts a fresh one)
   useEffect(() => {
@@ -98,7 +117,7 @@ export function HazardsProvider({ userId, children }: { userId: string; children
     };
   }, [store]);
 
-  const value = useMemo(() => ({ store, feed: feedRef }), [store]);
+  const value = useMemo(() => ({ store, feed: feedRef, warnings }), [store, warnings]);
   return <HazardsContext.Provider value={value}>{children}</HazardsContext.Provider>;
 }
 
@@ -119,6 +138,19 @@ export function useHazardList(): readonly RoadHazard[] {
   return useSyncExternalStore(
     useCallback((fn: () => void) => store.subscribe(fn), [store]),
     () => store.list,
+  );
+}
+
+/**
+ * The upcoming hazard warning while navigating, or null. Held while the app
+ * is in the background (it keeps updating underneath) and current the
+ * moment it is back on screen.
+ */
+export function useHazardWarning(): HazardWarning | null {
+  const { warnings } = useHazardsValue();
+  return useOnScreenSnapshot(
+    useCallback((fn: () => void) => warnings.subscribe(fn), [warnings]),
+    useCallback(() => warnings.warning, [warnings]),
   );
 }
 

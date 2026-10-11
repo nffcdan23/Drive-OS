@@ -86,6 +86,7 @@ import { GuidanceBanner } from "@/components/navigation/GuidanceBanner";
 import { GuidanceBar } from "@/components/navigation/GuidanceBar";
 import { NavigationControls } from "@/components/navigation/NavigationControls";
 import { HazardCard } from "@/components/hazards/HazardCard";
+import { HazardWarningPill } from "@/components/hazards/HazardWarningPill";
 import { ReportHazardSheet } from "@/components/hazards/ReportHazardSheet";
 import { useHazardActions, useHazardStore } from "@/context/HazardsContext";
 import type { ReportFix } from "@/lib/hazards/report";
@@ -2864,6 +2865,7 @@ export default function MapScreen() {
             unitSystem={resolvedUnitSystem}
             onHeight={onGuidanceBannerHeight}
             onCardHeight={onGuidanceCardHeight}
+            below={<HazardWarningPill unitSystem={resolvedUnitSystem} />}
           />
         </View>
       )}
