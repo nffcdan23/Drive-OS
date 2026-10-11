@@ -340,6 +340,31 @@ export const locationShareConvoys = pgTable('location_share_convoys', {
   createdAt: timestamptz('created_at').notNull().defaultNow(),
 }, (t) => [primaryKey({ columns: [t.ownerId, t.convoyId] })]);
 
+// ─── Road hazards (0020): anonymous, temporary; changes only through the API ─
+
+export const roadHazards = pgTable('road_hazards', {
+  id:              uuid('id').primaryKey().defaultRandom(),
+  kind:            text('kind').notNull(),
+  latitude:        doublePrecision('latitude').notNull(),
+  longitude:       doublePrecision('longitude').notNull(),
+  geog:            geographyPoint('geog').notNull().generatedAlwaysAs(
+    sql`extensions.st_setsrid(extensions.st_makepoint(longitude, latitude), 4326)::extensions.geography`),
+  createdAt:       timestamptz('created_at').notNull().defaultNow(),
+  lastConfirmedAt: timestamptz('last_confirmed_at').notNull().defaultNow(),
+  expiresAt:       timestamptz('expires_at').notNull(),
+  support:         integer('support').notNull().default(1),
+  dismissals:      integer('dismissals').notNull().default(0),
+  removedAt:       timestamptz('removed_at'),
+});
+
+/** Who reported or voted: owner-readable only, never shown to anyone else. */
+export const roadHazardVotes = pgTable('road_hazard_votes', {
+  hazardId:  uuid('hazard_id').notNull(),
+  userId:    uuid('user_id').notNull(),
+  vote:      text('vote').notNull(),
+  createdAt: timestamptz('created_at').notNull().defaultNow(),
+}, (t) => [primaryKey({ columns: [t.hazardId, t.userId] })]);
+
 export const friendRequests = pgTable('friend_requests', {
   id:          uuid('id').primaryKey().defaultRandom(),
   fromUserId:  uuid('from_user_id').notNull(),

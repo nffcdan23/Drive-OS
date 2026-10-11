@@ -73,6 +73,8 @@ import {
 import { LatestPoseWriter, sameFollowPose } from "@/lib/cameraWriter";
 import type { RoutePreviewStore } from "@/lib/navigation/previewStore";
 import type { NavigationSession } from "@/lib/navigation/session";
+import { HAZARD_KINDS, hazardFeatures } from "@/lib/hazards/model";
+import type { HazardStore } from "@/lib/hazards/store";
 import { useOnScreenSnapshot } from "@/hooks/useOnScreenSnapshot";
 import {
   ROUTE_COLORS,
@@ -135,6 +137,13 @@ export interface MapboxDriveMapProps {
    * fix or frame. Never touches the camera.
    */
   navigation?: NavigationSession | null;
+  /**
+   * Road hazards near the driver (HazardLayers): small markers above the
+   * route and trail but beneath the location arrow, redrawn only when the
+   * hazards change. A tap opens its card (store.select). Never touches the
+   * camera.
+   */
+  hazards?: HazardStore | null;
   /** Logo and attribution sit this far above the bottom edge */
   ornamentBottom: number;
   ornamentLeft: number;
@@ -157,6 +166,63 @@ const ARROW_IMAGES = {
   "derwent-location-arrow": require("@/assets/images/map/puck-arrow.png"),
   "derwent-location-arrow-shadow": require("@/assets/images/map/puck-shadow.png"),
 };
+
+// The road hazard markers (scripts/generate-hazard-icons.mjs)
+const HAZARD_IMAGES = {
+  "derwent-hazard-accident": require("@/assets/images/map/hazard-accident.png"),
+  "derwent-hazard-hazard": require("@/assets/images/map/hazard-hazard.png"),
+  "derwent-hazard-broken-down": require("@/assets/images/map/hazard-broken-down.png"),
+  "derwent-hazard-roadworks": require("@/assets/images/map/hazard-roadworks.png"),
+  "derwent-hazard-flooding": require("@/assets/images/map/hazard-flooding.png"),
+  "derwent-hazard-police": require("@/assets/images/map/hazard-police.png"),
+};
+// Every kind has its marker registered
+if (__DEV__ && HAZARD_KINDS.some((k) => !(k.markerImage in HAZARD_IMAGES))) {
+  console.warn("[hazards] a hazard kind has no marker image");
+}
+
+/**
+ * Road hazards: one small upright marker each, from the hazard store itself
+ * (so a change never re-renders the map). Hidden when zoomed far out, where
+ * they would only clutter. Mounted before the location arrow, so they draw
+ * beneath it and never cover the car.
+ */
+const HazardLayers = memo(function HazardLayers({ store }: { store: HazardStore }) {
+  const list = useSyncExternalStore(
+    useCallback((fn: () => void) => store.subscribe(fn), [store]),
+    () => store.list,
+  );
+  const shape = useMemo(() => hazardFeatures(list, Date.now()), [list]);
+  const onPress = useCallback(
+    (e: { features?: Array<{ properties?: { id?: unknown } | null }> }) => {
+      const id = e.features?.[0]?.properties?.id;
+      if (typeof id === "string") store.select(id);
+    },
+    [store],
+  );
+  return (
+    <ShapeSource
+      id="derwent-hazards"
+      shape={shape as GeoJSON.FeatureCollection}
+      onPress={onPress}
+      hitbox={{ width: 40, height: 40 }}
+    >
+      <SymbolLayer
+        id="derwent-hazard-markers"
+        minZoomLevel={9}
+        style={{
+          iconImage: ["get", "image"],
+          iconSize: ["interpolate", ["linear"], ["zoom"], 9, 0.7, 13, 0.9, 16, 1],
+          iconAllowOverlap: true,
+          iconIgnorePlacement: true,
+          iconPitchAlignment: "viewport",
+          iconRotationAlignment: "viewport",
+          iconEmissiveStrength: 1,
+        }}
+      />
+    </ShapeSource>
+  );
+});
 
 let tokenSet: string | null = null;
 function useAccessToken(token: string) {
@@ -465,6 +531,7 @@ const MapboxDriveMap = forwardRef<MapboxDriveMapHandle, MapboxDriveMapProps>(
       friendLayer,
       routePreview,
       navigation,
+      hazards,
       ornamentBottom,
       ornamentLeft,
       onUserGesture,
@@ -611,6 +678,7 @@ const MapboxDriveMap = forwardRef<MapboxDriveMapHandle, MapboxDriveMapProps>(
             defaultSettings={initialCamera}
           />
           <Images images={ARROW_IMAGES} />
+          <Images images={HAZARD_IMAGES} />
           {/* Mounted first: the route preview draws beneath the trail and
               the arrow */}
           {routePreview && <RouteLayers store={routePreview} />}
@@ -642,6 +710,8 @@ const MapboxDriveMap = forwardRef<MapboxDriveMapHandle, MapboxDriveMapProps>(
               }}
             />
           </ShapeSource>
+          {/* Above the route and trail, beneath friends and the arrow */}
+          {hazards && <HazardLayers store={hazards} />}
           {friendLayer}
           {showMarker && (
             <MarkerFeeder

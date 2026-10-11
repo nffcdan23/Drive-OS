@@ -83,9 +83,15 @@ import {
   useRoutePreviewStore,
 } from "@/context/NavigationContext";
 import { GuidanceBanner } from "@/components/navigation/GuidanceBanner";
-import { GuidanceBar, GuidanceStrip } from "@/components/navigation/GuidanceBar";
+import { GuidanceBar } from "@/components/navigation/GuidanceBar";
+import { NavigationControls } from "@/components/navigation/NavigationControls";
+import { HazardCard } from "@/components/hazards/HazardCard";
+import { ReportHazardSheet } from "@/components/hazards/ReportHazardSheet";
+import { useHazardActions, useHazardStore } from "@/context/HazardsContext";
+import type { ReportFix } from "@/lib/hazards/report";
 import { GuidanceKeepAwake } from "@/components/navigation/GuidanceKeepAwake";
 import { guidanceZoom, type GuidanceZoom } from "@/lib/navigation/guidanceCamera";
+import { drivePresentation } from "@/lib/drivePresentation";
 import { coordinateDestination } from "@/lib/navigation/coordinates";
 import { describeError } from "@/lib/backend/http";
 import { RoutePreviewPanel } from "@/components/navigation/RoutePreviewPanel";
@@ -578,16 +584,35 @@ export default function MapScreen() {
   const navPhase = useNavigationPhase();
   const latestNavigationFix = useLatestNavigationFix();
   const navigating = USING_MAPBOX && navPhase !== "idle";
+  // What the screen shows (lib/drivePresentation): navigation's own UI
+  // whenever guiding, even with a drive recording underneath (Start
+  // Navigation records it); the recording dashboard only for a free drive
+  const presentation = drivePresentation({ isDriving, navigating });
+  const freeDrive = presentation === "freeDrive";
   // While guiding, the follow camera turns with the car and takes its zoom
   // from speed and the next turn (lib/navigation/guidanceCamera)
   const guidingRef = useRef(false);
   const guidanceZoomRef = useRef<GuidanceZoom | null>(null);
+  // ── Road hazards (0020): nearby markers, Report, the tapped hazard's card ──
+  const hazardStore = useHazardStore();
+  const { notePosition: noteHazardPosition } = useHazardActions();
+  const [reportOpen, setReportOpen] = useState(false);
+  const openReport = useCallback(() => setReportOpen(true), []);
+  const closeReport = useCallback(() => setReportOpen(false), []);
+  // The latest accepted fix as the phone took it (never route-snapped): a report's position
+  const lastAcceptedFixRef = useRef<ReportFix | null>(null);
+  const getReportFix = useCallback(() => lastAcceptedFixRef.current, []);
   const [guidanceBannerHeight, setGuidanceBannerHeight] = useState(0);
   const guidanceBannerHeightRef = useRef(0);
   const onGuidanceBannerHeight = useCallback((h: number) => {
     if (Math.abs(h - guidanceBannerHeightRef.current) < 1) return;
     guidanceBannerHeightRef.current = h;
     setGuidanceBannerHeight(h);
+  }, []);
+  // The main guidance card alone (the controls sit beside the Then card)
+  const [guidanceCardHeight, setGuidanceCardHeight] = useState(0);
+  const onGuidanceCardHeight = useCallback((h: number) => {
+    setGuidanceCardHeight((prev) => (Math.abs(h - prev) < 1 ? prev : h));
   }, []);
 
   // ── Map state ──
@@ -1157,6 +1182,9 @@ export default function MapScreen() {
         }
       }
       lastPositionRef.current = { lat, lon, time: now };
+      lastAcceptedFixRef.current = { latitude: lat, longitude: lon, accuracyM: accuracy, timestamp: fixTime ?? now };
+      // Nearby hazards load only once the driver has moved far enough (never per fix)
+      noteHazardPosition(lat, lon);
 
       // ── Update stored location ──
       const coord = { latitude: lat, longitude: lon };
@@ -1250,7 +1278,7 @@ export default function MapScreen() {
       // ── Draw: marker, heading and follow camera glide from here ──
       wakeFrameLoop();
     },
-    [locationSmoother, headingFilter, updateDriveCoordinate, noteForegroundFix, noteRouteFix, wakeFrameLoop],
+    [locationSmoother, headingFilter, updateDriveCoordinate, noteForegroundFix, noteRouteFix, noteHazardPosition, wakeFrameLoop],
   );
 
   // The live head starts from the recorded trail's newest point, as drawn: a
@@ -1432,8 +1460,9 @@ export default function MapScreen() {
   useEffect(() => {
     const tick = () => setDriveSeconds(Math.floor((activeDriveMs() ?? 0) / 1000));
     tick();
-    // The on-screen timer runs only while the app is on screen
-    if (isDriving && !isPaused && visuals.live) {
+    // The on-screen timer runs only while the app is on screen, and only
+    // for the recording dashboard (not shown while navigating)
+    if (isDriving && !isPaused && visuals.live && freeDrive) {
       driveTimerRef.current = setInterval(tick, 1000);
     }
     // Catch up at once on returning to the app
@@ -1445,7 +1474,7 @@ export default function MapScreen() {
       driveTimerRef.current = null;
       sub.remove();
     };
-  }, [isDriving, isPaused, activeDriveMs, visuals.live]);
+  }, [isDriving, isPaused, activeDriveMs, visuals.live, freeDrive]);
 
   // ── Follow mode resume ────────────────────────────────────────────────────
   const handleResumeFollowing = useCallback(() => {
@@ -2202,6 +2231,11 @@ export default function MapScreen() {
       right: 0,
       zIndex: 20,
     },
+    navControls: {
+      position: "absolute",
+      right: 12,
+      zIndex: 19,
+    },
     bottomArea: {
       position: "absolute",
       left: 0,
@@ -2316,22 +2350,25 @@ export default function MapScreen() {
           styleURL={mapboxStyleFor(mapType, DRIVE_MAPBOX.styleUrl)}
           initialCenter={userLocation ?? CONFIG.DEMO_REGION}
           showMarker={userLocation != null}
-          trail={driveTrail}
+          // The recorded trail belongs to the recording dashboard: while
+          // navigating, the route (and the line still to drive) is the map
+          trail={freeDrive ? driveTrail : null}
           trailColor={colors.primary}
-          trailHead={subscribeLiveTrail}
+          trailHead={freeDrive ? subscribeLiveTrail : undefined}
           routePreview={routePreviewStore}
           navigation={navSession}
+          hazards={hazardStore}
           friendLayer={
             // Like every map write, only while the app is on screen
             showFriends && visuals.live && FriendMarkersMapbox ? <FriendMarkersMapbox /> : null
           }
           ornamentBottom={
-            (isDriving && driveMapAreaHeight > 0
+            (freeDrive && driveMapAreaHeight > 0
               ? Math.max(screenHeight - driveMapAreaHeight, 0)
               : idleBottomHeight) + ORNAMENT_GAP
           }
           // While driving, clear of the locate and zoom buttons on the left
-          ornamentLeft={isDriving ? 66 : ORNAMENT_GAP}
+          ornamentLeft={freeDrive ? 66 : ORNAMENT_GAP}
           onUserGesture={handleMapPanDrag}
           onCameraChange={handleRegionChange}
           onLongPress={handleMapLongPress}
@@ -2469,7 +2506,7 @@ export default function MapScreen() {
       )}
 
       {/* ── Scrims keep the floating UI legible over any map ── */}
-      {!isDriving && (
+      {!freeDrive && (
         <LinearGradient
           pointerEvents="none"
           colors={["rgba(5,8,12,0.85)", "rgba(5,8,12,0.45)", "rgba(5,8,12,0)"]}
@@ -2477,7 +2514,7 @@ export default function MapScreen() {
           style={[styles.scrim, { top: 0, height: insets.top + 210 }]}
         />
       )}
-      {!isDriving && (
+      {!freeDrive && (
         <LinearGradient
           pointerEvents="none"
           colors={["rgba(5,8,12,0)", "rgba(5,8,12,0.8)"]}
@@ -2701,6 +2738,23 @@ export default function MapScreen() {
         />
       )}
 
+      {/* ── A tapped hazard's card (closes itself when it expires or is cleared) ── */}
+      {USING_MAPBOX && visuals.live && (
+        <HazardCard
+          style={{
+            position: "absolute",
+            top: navigating
+              ? SEARCH_TOP + passengerOffset + guidanceBannerHeight + 8
+              : CONTROLS_TOP + passengerOffset,
+            left: 16,
+            right: 72,
+          }}
+        />
+      )}
+
+      {/* ── Report a hazard: Report → a type, sent at the current fix ── */}
+      <ReportHazardSheet visible={reportOpen} onClose={closeReport} getFix={getReportFix} />
+
       {/* ── More: orientation, saved places, passenger mode ── */}
       {!isDriving && !previewing && !navigating && showMore && (
         <GlassSurface
@@ -2768,8 +2822,8 @@ export default function MapScreen() {
         </GlassSurface>
       )}
 
-      {/* ── Active Drive Overlay ── */}
-      {isDriving && (
+      {/* ── Active Drive Overlay: the recording dashboard, free drives only ── */}
+      {freeDrive && (
         <ActiveDriveOverlay
           currentDrive={currentDrive}
           driveSeconds={driveSeconds}
@@ -2791,16 +2845,7 @@ export default function MapScreen() {
           onZoomIn={handleZoomIn}
           onZoomOut={handleZoomOut}
           onMapAreaLayout={USING_MAPBOX ? setDriveMapAreaHeight : undefined}
-          // Navigating too: the banner is above, a slim strip below
-          topContentOffset={navigating ? guidanceBannerHeight + 8 : 0}
-          navigationStrip={
-            navigating ? (
-              <GuidanceStrip
-                unitSystem={resolvedUnitSystem}
-                onFinishDrive={handleFinishNavigationDrive}
-              />
-            ) : null
-          }
+          onReport={openReport}
         />
       )}
 
@@ -2818,6 +2863,23 @@ export default function MapScreen() {
           <GuidanceBanner
             unitSystem={resolvedUnitSystem}
             onHeight={onGuidanceBannerHeight}
+            onCardHeight={onGuidanceCardHeight}
+          />
+        </View>
+      )}
+
+      {/* ── Navigation controls down the right: voice, Record ── */}
+      {presentation === "navigation" && !previewing && (
+        <View
+          pointerEvents="box-none"
+          style={[
+            styles.navControls,
+            { top: SEARCH_TOP + passengerOffset + guidanceCardHeight + 10 },
+          ]}
+        >
+          <NavigationControls
+            recordingActive={isDriving}
+            onRecord={handleStartDrive}
           />
         </View>
       )}
@@ -2841,8 +2903,9 @@ export default function MapScreen() {
         </AboveTabBar>
       )}
 
-      {/* ── Navigation (Phase 3), in place of the drive actions ── */}
-      {navigating && !previewing && !isDriving && (
+      {/* ── Navigation: its own bar, in place of the drive actions and the
+          recording dashboard (a drive may be recording underneath) ── */}
+      {presentation === "navigation" && !previewing && (
         <AboveTabBar
           pointerEvents="box-none"
           fallbackInset={TAB_BAR_FOOTPRINT}
@@ -2858,7 +2921,9 @@ export default function MapScreen() {
             following={followMode === "following"}
             onRecenter={handleResumeFollowing}
             onOverview={showNavigationOverview}
-            onRecord={handleStartDrive}
+            recordingActive={isDriving}
+            onFinishDrive={handleFinishNavigationDrive}
+            onReport={openReport}
           />
         </AboveTabBar>
       )}

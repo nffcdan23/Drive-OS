@@ -47,9 +47,10 @@ select pg_temp.ok(
         'friend_requests','friendships','group_members','groups','journey_categories',
         'journey_route_points','journey_routes','journeys','live_locations','location_share_convoys',
         'location_share_friends','notifications','photos','profiles','push_devices',
+        'road_hazard_votes','road_hazards',
         'saved_locations','user_achievements','user_blocks','user_presence','user_settings','vehicle_documents',
         'vehicle_modifications','vehicle_service_records','vehicles'],
-  'public schema contains exactly the 30 DriveOS tables');
+  'public schema contains exactly the 32 DriveOS tables');
 
 select pg_temp.ok(
   not exists (select 1 from pg_class c join pg_namespace n on n.oid = c.relnamespace

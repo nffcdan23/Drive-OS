@@ -1,4 +1,5 @@
 import { GlassSurface, GlassButton } from "@/components/Glass";
+import { ReportButton } from "@/components/hazards/ReportButton";
 import palette from "@/constants/colors";
 /**
  * ActiveDriveOverlay
@@ -69,6 +70,8 @@ interface Props {
    */
   topContentOffset?: number;
   navigationStrip?: React.ReactNode;
+  /** Opens the hazard report sheet: a Report button at the map area's lower right */
+  onReport?: () => void;
 }
 
 /** Room the navigation strip takes above the drive panel */
@@ -304,6 +307,7 @@ export default function ActiveDriveOverlay({
   onMapAreaLayout,
   topContentOffset = 0,
   navigationStrip = null,
+  onReport,
 }: Props) {
   const [saveConfirm, setSaveConfirm] = useState(false);
   const [showTelemetry, setShowTelemetry] = useState(false);
@@ -437,6 +441,20 @@ export default function ActiveDriveOverlay({
             <Ionicons name="remove" size={22} color={TEXT_PRIMARY} />
           </GlassButton>
         </View>
+
+        {/* Report a hazard: lower right, opposite the map controls */}
+        {onReport ? (
+          <View
+            style={[
+              styles.reportWrap,
+              // Above the centred "Resume following" pill while it shows (narrow phones)
+              { bottom: 24 + (navigationStrip ? STRIP_SPACE : 0) + (followMode === "free" ? 56 : 0) },
+            ]}
+            pointerEvents="box-none"
+          >
+            <ReportButton onPress={onReport} />
+          </View>
+        ) : null}
 
         {/* Resume following pill */}
         {followMode === "free" && (
@@ -771,6 +789,11 @@ const styles = StyleSheet.create({
     left: 12,
     bottom: 24,
     gap: 10,
+  },
+  reportWrap: {
+    position: "absolute",
+    right: 12,
+    bottom: 24,
   },
   navStrip: {
     position: "absolute",

@@ -43,6 +43,9 @@ schema, Row Level Security, Storage buckets and database functions.
 | 0015 | `client_write_guards` | Per-table list of the columns clients may change; everything else is server-only |
 | 0016 | `presence` | `user_presence` (one row per user, written by the API), `user_settings.show_activity_status`, `private.presence_status` (online/away/offline/driving derived from timestamps), `private.can_see_presence` (owner, or friends not blocked while the owner shares activity status) |
 | 0017 | `presence_realtime` | Live presence: `realtime.messages` policy (receive on your own private `inbox:<user id>` only; no client publishing), fan-out triggers on `user_presence`, `show_activity_status` and `friendships` that `realtime.send` presence / hidden / unfriended to permitted friends with the app open |
+| 0018 | `live_location` | Private live location: `live_locations` (current position only, with expiry), WHO/WHEN settings, selected-friend and Convoy grants, one canonical visibility rule, fan-out over the private inbox |
+| 0019 | `live_location_strict_modes` | While Using is foreground only; While Driving follows the drive |
+| 0020 | `road_hazards` | Live road hazards: `road_hazards` (anonymous: no user column; kind, position, expiry from `private.hazard_lifetime`, support / dismissals, removal) and owner-readable `road_hazard_votes` (who reported or voted, for duplicates and limits only); `private.report_hazard` (merging, limits), `private.vote_hazard` (Still there / Not there, one final vote each, conservative removal), `private.hazards_in_view` (bounded areas); broadcasts to 0.5° area topics (`hazards:<lat>:<lng>`, any signed-in user may receive, nobody may publish); read-only policies, no client privileges |
 
 ## Security model (current stage)
 

@@ -1,8 +1,12 @@
 /**
- * The turn-by-turn banner at the top of the Drive screen while navigating
- * (Navigation Phase 3): the next manoeuvre's arrow, how far to it, what to do
- * in Mapbox's en-GB words, the junction and signposts, a "then" for one
- * straight after, and the road the car is on.
+ * The turn-by-turn card at the top of the Drive screen while navigating
+ * (Navigation Phase 3, restyled after the reference design): one compact
+ * card with the next manoeuvre's arrow and how far to it (the strongest
+ * things on it), the road or place it leads to, what to do in Mapbox's en-GB
+ * words, the junction or road number on a shield, and the lanes along its
+ * bottom edge. A small separate "Then" card sits under it, on the left, for
+ * a manoeuvre straight after. Every text line is one line, truncated, so the
+ * card never grows tall.
  *
  * It reads the navigation state itself, so its updates on every GPS fix
  * re-render this banner only, never the Drive screen.
@@ -22,6 +26,7 @@ import { ARRIVAL_ICON, LaneIcon, ManeuverIcon } from "@/components/navigation/Ma
 import type { LaneView } from "@/lib/navigation/lanes";
 import { useNavigationState, useRetryReroute } from "@/context/NavigationContext";
 import { formatGuidanceDistance, NOW_WITHIN_M } from "@/lib/navigation/format";
+import { guidanceLines, guidanceShield } from "@/lib/navigation/guidanceText";
 import type { Maneuver } from "@/lib/navigation/maneuver";
 import type { ResolvedUnitSystem } from "@/lib/units";
 
@@ -36,6 +41,16 @@ function signage(m: Maneuver): string | null {
   return parts.length ? parts.join(" · ") : null;
 }
 
+const Shield = memo(function Shield({ text, motorway }: { text: string; motorway: boolean }) {
+  return (
+    <View style={[styles.shield, motorway ? styles.shieldMotorway : styles.shieldRoad]}>
+      <Text style={[styles.shieldText, !motorway && styles.shieldRoadText]} numberOfLines={1}>
+        {text}
+      </Text>
+    </View>
+  );
+});
+
 const Status = memo(function Status({ icon, text, busy }: { icon?: keyof typeof Ionicons.glyphMap; text: string; busy?: boolean }) {
   return (
     <View style={styles.statusRow}>
@@ -48,8 +63,8 @@ const Status = memo(function Status({ icon, text, busy }: { icon?: keyof typeof 
 });
 
 /**
- * Lane guidance under the manoeuvre: one arrow per lane, left to right, the
- * lanes to use bright on a soft highlight, the others faint. Only the
+ * Lane guidance along the card's bottom edge: one arrow per lane, left to
+ * right, the lanes to use bright on a soft highlight, the others faint. Only the
  * provider's lane data; re-renders only when the lanes change.
  */
 const LaneStrip = memo(function LaneStrip({ view }: { view: LaneView }) {
@@ -59,7 +74,7 @@ const LaneStrip = memo(function LaneStrip({ view }: { view: LaneView }) {
     <View style={styles.lanes} accessible accessibilityLabel={label}>
       {view.lanes.map((lane, i) => (
         <View key={i} style={[styles.lane, i > 0 && styles.laneDivider, lane.recommended && styles.laneUse]}>
-          <LaneIcon lane={lane} drivingSide={view.drivingSide} size={30} color={FG} />
+          <LaneIcon lane={lane} drivingSide={view.drivingSide} size={28} color={FG} />
         </View>
       ))}
     </View>
@@ -69,37 +84,47 @@ const LaneStrip = memo(function LaneStrip({ view }: { view: LaneView }) {
 export function GuidanceBanner({
   unitSystem,
   onHeight,
+  onCardHeight,
 }: {
   unitSystem: ResolvedUnitSystem;
-  /** The banner's height (for laying out what sits below it) */
+  /** The whole banner's height, the Then card included (for what sits below it) */
   onHeight?: (height: number) => void;
+  /** The main card's height alone (for the controls beside the Then card) */
+  onCardHeight?: (height: number) => void;
 }) {
   const state = useNavigationState();
   const retry = useRetryReroute();
   if (state.phase === "idle") return null;
 
   const layout = onHeight ? (e: LayoutChangeEvent) => onHeight(e.nativeEvent.layout.height) : undefined;
+  const cardLayout = onCardHeight ? (e: LayoutChangeEvent) => onCardHeight(e.nativeEvent.layout.height) : undefined;
+  const banner = (card: React.ReactNode, below?: React.ReactNode) => (
+    <View pointerEvents="box-none" onLayout={layout}>
+      <GlassSurface material="dense" style={styles.card} onLayout={cardLayout}>
+        {card}
+      </GlassSurface>
+      {below}
+    </View>
+  );
 
   if (state.phase === "arrived" || state.phase === "error") {
     const arrived = state.phase === "arrived";
-    return (
-      <GlassSurface material="dense" style={styles.banner} onLayout={layout}>
-        <View style={styles.row}>
-          {arrived ? (
-            <ManeuverIcon maneuver={ARRIVAL_ICON} size={48} color={ACCENT} />
-          ) : (
-            <Ionicons name="alert-circle" size={44} color={WARN} />
-          )}
-          <View style={styles.text}>
-            <Text style={styles.title} accessibilityRole="header">
-              {arrived ? "You've arrived" : "Can't navigate this route"}
-            </Text>
-            <Text style={styles.road} numberOfLines={2}>
-              {arrived ? state.destination.name : state.message}
-            </Text>
-          </View>
+    return banner(
+      <View style={styles.row}>
+        {arrived ? (
+          <ManeuverIcon maneuver={ARRIVAL_ICON} size={44} color={ACCENT} />
+        ) : (
+          <Ionicons name="alert-circle" size={40} color={WARN} />
+        )}
+        <View style={styles.text}>
+          <Text style={styles.title} accessibilityRole="header" numberOfLines={1}>
+            {arrived ? "You've arrived" : "Can't navigate this route"}
+          </Text>
+          <Text style={styles.secondary} numberOfLines={2}>
+            {arrived ? state.destination.name : state.message}
+          </Text>
         </View>
-      </GlassSurface>
+      </View>,
     );
   }
 
@@ -120,21 +145,21 @@ export function GuidanceBanner({
       : state.updateFailed
         ? "Route update unavailable"
         : "Your route will update automatically";
-    return (
-      <GlassSurface material="dense" style={styles.banner} onLayout={layout}>
+    return banner(
+      <>
         <View style={styles.row} accessible accessibilityRole="summary" accessibilityLabel={`${title}. ${detail}`} accessibilityLiveRegion="polite">
           {updating ? (
             <View style={styles.offIcon}>
               <ActivityIndicator color={ACCENT} />
             </View>
           ) : (
-            <Ionicons name="git-branch-outline" size={42} color={WARN} />
+            <Ionicons name="git-branch-outline" size={38} color={WARN} />
           )}
           <View style={styles.text}>
-            <Text style={styles.title} accessibilityRole="header">
+            <Text style={styles.title} accessibilityRole="header" numberOfLines={1}>
               {title}
             </Text>
-            <Text style={styles.road} numberOfLines={2}>
+            <Text style={styles.secondary} numberOfLines={1}>
               {detail}
             </Text>
           </View>
@@ -154,110 +179,139 @@ export function GuidanceBanner({
           ) : null}
         </View>
         {gpsNote}
-      </GlassSurface>
+      </>,
     );
   }
 
   // Starting (or just rerouted): finding the car on the route
   if (!progress) {
-    return (
-      <GlassSurface material="dense" style={styles.banner} onLayout={layout}>
+    return banner(
+      <>
         <View style={styles.row}>
-          <ActivityIndicator color={ACCENT} />
+          <View style={styles.offIcon}>
+            <ActivityIndicator color={ACCENT} />
+          </View>
           <View style={styles.text}>
-            <Text style={styles.title} accessibilityRole="header">
+            <Text style={styles.title} accessibilityRole="header" numberOfLines={1}>
               {state.starting === "refreshing" ? "Updating your route…" : "Starting navigation…"}
             </Text>
-            <Text style={styles.road} numberOfLines={2}>
+            <Text style={styles.secondary} numberOfLines={1}>
               {notice ?? `To ${state.destination.name}`}
             </Text>
           </View>
         </View>
         {gpsNote}
-      </GlassSurface>
+      </>,
     );
   }
 
   const next = progress.next;
   const distance = progress.distanceToNextM < NOW_WITHIN_M ? "Now" : formatGuidanceDistance(progress.distanceToNextM, unitSystem);
   const sign = signage(next);
+  const { primary, secondary } = guidanceLines(next);
+  const shield = guidanceShield(next);
   const label = `${distance === "Now" ? "Now" : `In ${distance}`}, ${next.instruction}${sign ? `. ${sign}` : ""}`;
-  return (
-    <GlassSurface material="dense" style={styles.banner} onLayout={layout}>
+  const then = progress.then;
+  return banner(
+    <>
       <View style={styles.row} accessible accessibilityRole="summary" accessibilityLabel={label} accessibilityLiveRegion="polite">
-        <ManeuverIcon maneuver={next} size={56} color={FG} />
+        <ManeuverIcon maneuver={next} size={50} color={FG} />
         <View style={styles.text}>
-          <Text style={styles.distance}>{distance}</Text>
-          <Text style={styles.instruction} numberOfLines={2}>
-            {next.instruction}
+          <Text style={styles.distance} numberOfLines={1}>
+            {distance}
           </Text>
-          {sign ? (
-            <Text style={styles.sign} numberOfLines={1}>
-              {sign}
+          <Text style={styles.primary} numberOfLines={1}>
+            {primary}
+          </Text>
+          {secondary ? (
+            <Text style={styles.secondary} numberOfLines={1}>
+              {secondary}
             </Text>
           ) : null}
         </View>
+        {shield ? <Shield text={shield.text} motorway={shield.motorway} /> : null}
       </View>
       {state.lanes && state.lanes.stepIndex === next.stepIndex ? <LaneStrip view={state.lanes} /> : null}
-      {progress.then ? (
-        <View style={styles.thenRow} accessible accessibilityLabel={`Then ${progress.then.instruction}`}>
-          <Text style={styles.thenText}>Then</Text>
-          <ManeuverIcon maneuver={progress.then} size={24} color={FG} />
-        </View>
-      ) : null}
-      {progress.currentRoad ? (
-        <Text style={styles.current} numberOfLines={1}>
-          On {progress.currentRoad}
-        </Text>
-      ) : null}
       {notice ? <Status icon="information-circle-outline" text={notice} /> : null}
       {gpsNote}
-    </GlassSurface>
+    </>,
+    then ? (
+      <GlassSurface material="dense" style={styles.then} accessible accessibilityLabel={`Then ${then.instruction}`}>
+        <Text style={styles.thenText}>Then</Text>
+        <ManeuverIcon maneuver={then} size={22} color={FG} />
+        {progress.thenAfterM != null ? (
+          <Text style={styles.thenDistance}>{formatGuidanceDistance(progress.thenAfterM, unitSystem)}</Text>
+        ) : null}
+      </GlassSurface>
+    ) : null,
   );
 }
 
 const styles = StyleSheet.create({
-  banner: {
+  card: {
     marginHorizontal: 12,
-    borderRadius: 22,
+    borderRadius: 24,
     paddingHorizontal: 14,
-    paddingVertical: 12,
-    gap: 8,
+    paddingTop: 12,
+    paddingBottom: 12,
+    gap: 10,
+    overflow: "hidden",
   },
-  row: { flexDirection: "row", alignItems: "center", gap: 14 },
+  row: { flexDirection: "row", alignItems: "center", gap: 12 },
   text: { flex: 1, minWidth: 0 },
-  distance: { color: FG, fontSize: 30, fontWeight: "800", letterSpacing: -0.5, fontVariant: ["tabular-nums"] },
-  instruction: { color: FG, fontSize: 17, fontWeight: "600", lineHeight: 22 },
-  sign: { color: MUTED, fontSize: 13, marginTop: 2 },
-  title: { color: FG, fontSize: 20, fontWeight: "700" },
-  road: { color: MUTED, fontSize: 14, marginTop: 2 },
-  thenRow: {
-    flexDirection: "row",
+  // The distance and the arrow carry the card
+  distance: { color: FG, fontSize: 32, fontWeight: "800", letterSpacing: -0.6, lineHeight: 36, fontVariant: ["tabular-nums"] },
+  primary: { color: FG, fontSize: 18, fontWeight: "700", lineHeight: 22 },
+  secondary: { color: MUTED, fontSize: 14, lineHeight: 18, marginTop: 1 },
+  title: { color: FG, fontSize: 19, fontWeight: "700" },
+  shield: {
+    minWidth: 44,
+    maxWidth: 88,
+    height: 30,
+    paddingHorizontal: 8,
+    borderRadius: 7,
     alignItems: "center",
-    gap: 6,
+    justifyContent: "center",
     alignSelf: "flex-start",
-    paddingHorizontal: 10,
-    paddingVertical: 3,
-    borderRadius: 12,
-    backgroundColor: "rgba(255,255,255,0.10)",
+    marginTop: 4,
   },
-  thenText: { color: FG, fontSize: 13, fontWeight: "600" },
-  current: { color: MUTED, fontSize: 13 },
+  // UK road signs: motorways white on blue, other roads yellow on green
+  shieldMotorway: { backgroundColor: "#1F58B5", borderWidth: 1.5, borderColor: "rgba(255,255,255,0.85)" },
+  shieldRoad: { backgroundColor: "#0F6B3E", borderWidth: 1.5, borderColor: "rgba(255,255,255,0.85)" },
+  shieldText: { color: "#FFFFFF", fontSize: 15, fontWeight: "800", letterSpacing: 0.2 },
+  shieldRoadText: { color: "#FFD43B" },
+  // The lanes run along the card's bottom edge, under a hairline
   lanes: {
     flexDirection: "row",
-    alignSelf: "center",
-    borderRadius: 12,
+    justifyContent: "center",
+    marginHorizontal: -14,
+    marginBottom: -12,
+    paddingVertical: 5,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: "rgba(255,255,255,0.18)",
     backgroundColor: "rgba(0,0,0,0.22)",
-    paddingHorizontal: 4,
-    paddingVertical: 3,
   },
-  lane: { paddingHorizontal: 4, paddingVertical: 1, borderRadius: 8 },
+  lane: { paddingHorizontal: 6, paddingVertical: 1, borderRadius: 8 },
   // A lane line between lanes, like the road markings
   laneDivider: { borderLeftWidth: StyleSheet.hairlineWidth, borderLeftColor: "rgba(255,255,255,0.28)" },
   laneUse: { backgroundColor: "rgba(0,207,232,0.22)" },
+  // The small Then card, under the main card on the left
+  then: {
+    flexDirection: "row",
+    alignItems: "center",
+    alignSelf: "flex-start",
+    gap: 7,
+    marginLeft: 12,
+    marginTop: 8,
+    paddingHorizontal: 12,
+    height: 36,
+    borderRadius: 18,
+  },
+  thenText: { color: MUTED, fontSize: 14, fontWeight: "600" },
+  thenDistance: { color: FG, fontSize: 14, fontWeight: "700", fontVariant: ["tabular-nums"] },
   statusRow: { flexDirection: "row", alignItems: "center", gap: 6 },
   statusText: { color: MUTED, fontSize: 13, flexShrink: 1 },
-  offIcon: { width: 42, height: 42, alignItems: "center", justifyContent: "center" },
+  offIcon: { width: 44, height: 44, alignItems: "center", justifyContent: "center" },
   // Secondary, after repeated failures only: small and quiet
   retry: {
     height: 32,

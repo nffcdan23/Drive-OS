@@ -21,6 +21,8 @@
  *   STORAGE_WORKER_INTERVAL_MS  how often it runs (default 60000)
  *   LIVE_LOCATION_CLEANUP_INTERVAL_MS  how often expired live positions and
  *                               delivered live-location messages are removed (default 60000)
+ *   ROAD_HAZARD_CLEANUP_INTERVAL_MS  how often ended road hazards and delivered
+ *                               hazard messages are removed (default 600000)
  */
 import { readDvlaConfig, type DvlaConfig } from "./lib/dvla";
 import { readDirectionsConfig, type DirectionsConfig } from "./lib/mapboxDirections";
@@ -37,6 +39,7 @@ export interface Config {
   storageWorker: boolean;
   storageWorkerIntervalMs: number;
   liveLocationCleanupIntervalMs: number;
+  roadHazardCleanupIntervalMs: number;
 }
 
 function read(env: NodeJS.ProcessEnv): Config {
@@ -62,6 +65,7 @@ function read(env: NodeJS.ProcessEnv): Config {
     storageWorker: env.STORAGE_WORKER !== "off",
     storageWorkerIntervalMs: Math.max(200, Number(env.STORAGE_WORKER_INTERVAL_MS) || 60_000),
     liveLocationCleanupIntervalMs: Math.max(200, Number(env.LIVE_LOCATION_CLEANUP_INTERVAL_MS) || 60_000),
+    roadHazardCleanupIntervalMs: Math.max(200, Number(env.ROAD_HAZARD_CLEANUP_INTERVAL_MS) || 10 * 60_000),
   };
 
   if (!config.supabaseUrl) {

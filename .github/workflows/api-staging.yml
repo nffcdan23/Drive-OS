@@ -33,6 +33,8 @@ on:
 
 permissions:
   contents: read
+  # Read-only: to wait for the Supabase staging deploy of the same commit
+  actions: read
 
 concurrency:
   group: api-staging-deploy
@@ -45,7 +47,8 @@ jobs:
       (github.event_name == 'push' && contains(github.event.head_commit.message, '[deploy api-staging]')) ||
       (github.event_name == 'workflow_dispatch' && (inputs.confirm == 'deploy-api-staging' || inputs.confirm == 'verify-api-staging'))
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # Includes up to 40 minutes waiting for a Supabase staging deploy of the same commit
+    timeout-minutes: 75
     env:
       RAILWAY_TOKEN: ${{ secrets.RAILWAY_STAGING_TOKEN }}
       RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_STAGING_PROJECT_ID }}
@@ -232,6 +235,53 @@ jobs:
           pnpm --filter @workspace/api-server run typecheck
           pnpm --filter @workspace/api-server run build
 
+      - name: Install PostgreSQL client
+        if: env.MODE == 'deploy'
+        run: |
+          sudo apt-get update -q
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q postgresql-client-16
+
+      # A commit carrying both [deploy supabase-staging] and [deploy api-staging]
+      # starts both workflows at once, and GitHub doesn't order runs across
+      # workflows: the API (which may need the new migrations) waits here for
+      # the Supabase staging deploy of this same commit to finish
+      # successfully. If it fails, nothing below runs and the API is not
+      # deployed. Nothing has been changed on staging up to this point.
+      - name: Wait for the Supabase staging deploy of this commit
+        if: env.MODE == 'deploy' && github.event_name == 'push' && contains(github.event.head_commit.message, '[deploy supabase-staging]')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for i in $(seq 1 120); do
+            run=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/supabase-staging.yml/runs?head_sha=$GITHUB_SHA&event=push" \
+              --jq '.workflow_runs[0] // empty | "\(.id) \(.status) \(.conclusion)"')
+            if [ -z "$run" ]; then
+              echo "Waiting for the Supabase staging run of $GITHUB_SHA to appear"
+            else
+              read -r id status conclusion <<< "$run"
+              echo "Supabase staging run $id: $status ${conclusion:-}"
+              if [ "$status" = completed ]; then
+                if [ "$conclusion" = success ]; then echo "Supabase staging deployed this commit; continuing."; exit 0; fi
+                echo "::error::The Supabase staging deploy of this commit did not succeed ($conclusion); the API is not deployed."; exit 1
+              fi
+            fi
+            sleep 20
+          done
+          echo "::error::Timed out waiting for the Supabase staging deploy of this commit; the API is not deployed."; exit 1
+
+      # Whatever triggered it, the API is never deployed ahead of the database
+      # it needs: every migration in this commit must already be on staging.
+      - name: Staging has every migration this commit needs (read-only)
+        if: env.MODE == 'deploy'
+        run: |
+          repo=$(ls supabase/migrations/*.sql | xargs -n1 basename | cut -d_ -f1 | sort)
+          staging=$(psql "$STAGING_DB_URL" -X -A -t -c "select version from supabase_migrations.schema_migrations order by version")
+          missing=$(comm -23 <(echo "$repo") <(echo "$staging"))
+          if [ -n "$missing" ]; then
+            echo "::error::Staging is missing migrations this commit needs: $(echo $missing). Deploy Supabase staging first."; exit 1
+          fi
+          echo "All $(echo "$repo" | wc -l) migrations in this commit are recorded on staging."
+
       - name: Set the staging service's variables (staging values only)
         if: env.MODE == 'deploy'
         run: |
@@ -330,12 +380,6 @@ jobs:
           echo "readyz: $ready"
           [ "$ready" = '{"status":"ok","database":"ok"}' ]
 
-      - name: Install PostgreSQL client
-        if: env.MODE == 'deploy'
-        run: |
-          sudo apt-get update -q
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q postgresql-client-16
-
       - name: Test the app's data layer against the hosted staging API
         if: env.MODE == 'deploy'
         env:
@@ -348,6 +392,8 @@ jobs:
           # Likewise only compared against route responses; its presence also
           # means this deploy must return a real Mapbox route
           LEAK_CHECK_MAPBOX_TOKEN: ${{ secrets.MAPBOX_DIRECTIONS_STAGING_TOKEN }}
+          # The hazard test drivers' ids and test addresses, for the log check below
+          HAZARD_LEAK_CHECK_FILE: ${{ runner.temp }}/hazard-identities.txt
         run: pnpm --filter @workspace/mobile run test:staging
 
       - name: The DVLA key is not in the staging logs
@@ -389,3 +435,27 @@ jobs:
           fi
           rm -f "$logs"
           echo "Checked $lines lines of staging runtime and build logs: no Mapbox Directions token, route coordinates or Directions URL."
+
+      - name: No hazard reporters, tokens or report positions in the staging logs
+        if: env.MODE == 'deploy'
+        run: |
+          logs="$RUNNER_TEMP/railway-logs.txt"
+          r() { railway "$@" -p "$RAILWAY_PROJECT_ID" -e "$RAILWAY_ENVIRONMENT" -s "$RAILWAY_SERVICE"; }
+          r logs --deployment --lines 3000 > "$logs" 2>&1 || true
+          lines=$(wc -l < "$logs")
+          fail() { rm -f "$logs"; echo "::error::$1"; exit 1; }
+          # The API started and its hazard clean-up runs without errors
+          grep -q "Server listening" "$logs" || fail "The API's start-up line is not in the staging logs"
+          ! grep -q "Road hazard clean-up failed\|Hazard message clean-up failed" "$logs" || fail "The hazard clean-up job is failing"
+          # Who reported or voted (the hosted tests' drivers): ids and addresses, compared quietly
+          ids="$RUNNER_TEMP/hazard-identities.txt"
+          [ -s "$ids" ] || fail "The hosted hazard tests did not record their drivers"
+          ! grep -qFf "$ids" "$logs" || fail "A hazard test driver's id or email appears in the staging logs"
+          # Access tokens or authorization headers
+          ! grep -qE "eyJ[A-Za-z0-9_-]{10,}\.|[Bb]earer [A-Za-z0-9]" "$logs" || fail "An access token appears in the staging logs"
+          # Where the test hazards were reported (as sent, and as stored)
+          ! grep -qE "47\.0123|47\.01235|-35\.0123|-35\.01235" "$logs" || fail "A hazard report's position appears in the staging logs"
+          # No request bodies at all
+          ! grep -qE '"(latitude|longitude|minLat|maxLat)"' "$logs" || fail "A request body with coordinates appears in the staging logs"
+          rm -f "$logs" "$ids"
+          echo "Checked $lines lines of staging runtime logs: started cleanly, hazard clean-up healthy; no test driver ids or emails, tokens, report positions or request bodies."

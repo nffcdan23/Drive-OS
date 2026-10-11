@@ -397,6 +397,14 @@ export const endpoints = (api: ApiClient) => ({
   removeLiveLocation: () => api.request<void>('DELETE', '/me/live-location', undefined, { quiet: true }),
   /** Positions currently shared with you (there is no per-user lookup). */
   listLiveLocations: () => api.request<LiveLocation[]>('GET', '/live-locations', undefined, { quiet: true }),
+  // Road hazards (quiet: a hazard failure never raises the app-wide server
+  // banner). Positions travel in the body only.
+  hazardsInView: (area: { minLat: number; minLng: number; maxLat: number; maxLng: number }) =>
+    api.request<unknown[]>('POST', '/hazards/in-view', area, { quiet: true }),
+  reportHazard: (body: { kind: string; latitude: number; longitude: number; accuracyM: number | null; capturedAt: string }) =>
+    api.request<{ outcome: string; hazard: unknown }>('POST', '/hazards', body, { quiet: true }),
+  voteHazard: (id: string, vote: 'still_there' | 'not_there') =>
+    api.request<{ outcome: string; hazard: unknown }>('POST', `/hazards/${id}/vote`, { vote }, { quiet: true }),
   getLocationSharing: () => api.get<ServerLocationSharing>('/me/location-sharing'),
   updateLocationSharing: (fields: { mode?: LocationSharingMode; friendAudience?: LocationFriendAudience }) =>
     api.patch<ServerLocationSharing>('/me/location-sharing', fields),

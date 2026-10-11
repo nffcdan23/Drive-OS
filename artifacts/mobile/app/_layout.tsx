@@ -26,6 +26,7 @@ import { AppProvider, useApp } from "@/context/AppContext";
 import LoadingScreen from "@/components/LoadingScreen";
 import { AuthProvider, useAuth } from "@/context/AuthContext";
 import { NavigationProvider } from "@/context/NavigationContext";
+import { HazardsProvider } from "@/context/HazardsContext";
 import { configError } from "@/lib/backendClient";
 
 SplashScreen.preventAutoHideAsync();
@@ -99,11 +100,13 @@ function RootLayoutNav() {
   return (
     <AppProvider key={userId} userId={userId}>
       <NavigationProvider userId={userId}>
-        <DataLoaded onLoaded={dataLoaded} />
-        <View style={{ flex: 1 }}>
-          <ConnectionBanner />
-          <AppStack signedIn recovering={recoveringPassword} />
-        </View>
+        <HazardsProvider userId={userId}>
+          <DataLoaded onLoaded={dataLoaded} />
+          <View style={{ flex: 1 }}>
+            <ConnectionBanner />
+            <AppStack signedIn recovering={recoveringPassword} />
+          </View>
+        </HazardsProvider>
       </NavigationProvider>
     </AppProvider>
   );

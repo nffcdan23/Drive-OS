@@ -2873,8 +2873,9 @@ test('the Mapbox Drive map draws the live head from the same position as its puc
   // Both maps get the same head: Mapbox through its trailHead prop
   const jsx = screen.search(/<MapboxDriveMap\s/); // the element, not the Handle type
   const mapbox = screen.slice(jsx, screen.indexOf('/>', jsx));
-  assert.ok(/trailHead=\{subscribeLiveTrail\}/.test(mapbox));
-  assert.ok(/trail=\{driveTrail\}/.test(mapbox));
+  assert.ok(/trailHead=\{freeDrive \? subscribeLiveTrail : undefined\}/.test(mapbox));
+  // (the recorded trail is the free drive's: not drawn while navigating)
+  assert.ok(/trail=\{freeDrive \? driveTrail : null\}/.test(mapbox));
   assert.ok(/<LiveTrailHeadLines\s+subscribe=\{subscribeLiveTrail\}/.test(screen));
   // Pause, passenger mode and drive start/end clear it
   for (const where of ['function handlePause()', 'isPassengerModeRef.current = isPassengerMode;', 'isDrivingRef.current = isDriving;']) {
@@ -6140,7 +6141,7 @@ test('the crash fixes are wired in: no per-frame Mapbox command, nothing visual 
   assert.match(screen, /frameLoopRef\.current = \(\) => \{\s*frameIdRef\.current = null;[^]*?if \(!visualsLiveRef\.current\) return;/);
   assert.match(screen, /if \(prev\.live && !next\.live\) \{\s*if \(frameIdRef\.current != null\) cancelAnimationFrame\(frameIdRef\.current\);\s*frameIdRef\.current = null;\s*mapboxRef\.current\?\.setVisualsLive\(false\);/);
   assert.match(screen, /followCamera\.enter\(false, \{\}, followTargetFor\(position\)\)/, 'back on screen: the camera starts at the current target');
-  assert.match(screen, /if \(isDriving && !isPaused && visuals\.live\) \{\s*driveTimerRef\.current = setInterval\(tick, 1000\);/);
+  assert.match(screen, /if \(isDriving && !isPaused && visuals\.live && freeDrive\) \{\s*driveTimerRef\.current = setInterval\(tick, 1000\);/);
   assert.match(screen, /Platform\.OS !== "web" && !visuals\.mounted \? \(/, 'no map until the app has been on screen');
   // AppContext: the live route is held off screen; recording is untouched
   assert.match(ctx, /cloud\.onDriveFix\(\(fix\) => \{ latestFixRef\.current = fix; liveFeed\.addFix\(fix\); \}\)/);
@@ -8297,7 +8298,7 @@ test('guidance privacy: nothing is stored; the diagnostics journal has events, n
 test('guidance and recording: navigation uses the one existing recorder, only through Start Drive and End Drive', () => {
   const read = (rel: string) => readFileSync(toPath(new URL(rel, import.meta.url)), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
   // No navigation module reaches into recording internals or sharing
-  for (const f of ['lib/navigation/session.ts', 'lib/navigation/routeProgress.ts', 'lib/navigation/offRoute.ts', 'lib/navigation/startNavigation.ts', 'components/navigation/GuidanceBar.tsx', 'components/navigation/GuidanceBanner.tsx']) {
+  for (const f of ['lib/navigation/session.ts', 'lib/navigation/routeProgress.ts', 'lib/navigation/offRoute.ts', 'lib/navigation/startNavigation.ts', 'components/navigation/GuidanceBar.tsx', 'components/navigation/GuidanceBanner.tsx', 'components/navigation/NavigationControls.tsx', 'lib/navigation/guidanceText.ts']) {
     const src = read(`../${f}`);
     assert.ok(!/journeyRecorder|cloudSync|updateDriveCoordinate|endDrive|discardDrive|liveLocation|presence|startDrive/.test(src), `${f} reaches into recording or sharing`);
   }
@@ -8308,7 +8309,8 @@ test('guidance and recording: navigation uses the one existing recorder, only th
   assert.ok(/canRecord: \(\) => !app\.current\.isPassengerMode/.test(recorder));
   assert.ok(!/cloud|endDrive|discardDrive|liveLocation|presence/.test(recorder));
   const bar = read('../components/navigation/GuidanceBar.tsx');
-  assert.ok(/onRecord/.test(bar) && /onFinishDrive/.test(bar), 'the bar asks the screen to record or finish');
+  assert.ok(/onFinishDrive/.test(bar), 'the bar asks the screen to finish');
+  assert.ok(/onRecord/.test(read('../components/navigation/NavigationControls.tsx')), 'the controls ask the screen to record');
   const drive = read('../app/(tabs)/(drive)/index.tsx');
   // Recording still gets the raw fix, exactly as before
   assert.ok(/updateDriveCoordinate\(\{\s*latitude: lat,\s*longitude: lon,/.test(drive));
@@ -8616,10 +8618,13 @@ test('navigation UI: passive off-route states, End asks before finishing a drive
   const bar = read('../components/navigation/GuidanceBar.tsx');
   assert.ok(bar.includes('"End navigation and finish drive", onPress: onFinishDrive'));
   assert.ok(bar.includes('{ text: "Continue navigation", style: "cancel" }'));
-  assert.ok(/if \(ownsDrive && onFinishDrive\) \{[\s\S]*?return;\s*\}\s*end\("user"\);/.test(bar), 'otherwise End ends navigation only');
-  assert.ok(/ownsDrive=\{state\.recording === "navigation"\} onFinishDrive=\{onFinishDrive\}/.test(bar));
-  assert.ok(/<EndButton ownsDrive=\{false\} \/>/.test(bar), 'the bar shows only without a recording');
-  assert.ok(/state\.recording === "none" \? \(\s*<GlassButton\s*accessibilityLabel="Record this drive"/.test(bar));
+  assert.ok(/if \(ownsDrive\) \{[\s\S]*?return;\s*\}\s*end\("user"\);/.test(bar), 'otherwise End ends navigation only');
+  assert.ok(/const ownsDrive = recordingActive && state\.recording === "navigation";/.test(bar));
+  assert.ok(/<EndButton ownsDrive=\{ownsDrive\} onFinishDrive=\{onFinishDrive\} \/>/.test(bar), 'one End: it asks only for a drive navigation started');
+  const controls = read('../components/navigation/NavigationControls.tsx');
+  assert.ok(/const canRecord = state\.phase !== "error" && !recordingActive && state\.recording === "none";/.test(controls), 'Record only with nothing recording');
+  assert.ok(/\{canRecord \? \(\s*<GlassButton[\s\S]*?accessibilityLabel="Record this drive"/.test(controls));
+  assert.ok(!/onRecord/.test(bar), 'Record is in the controls, not the bottom panel');
   // The map draws the remaining line, not the whole route
   const map = read('../components/MapboxDriveMap.tsx');
   const layer = map.slice(map.indexOf('const NavigationRouteLayers = memo('), map.indexOf('const MapboxDriveMap = forwardRef'));
@@ -9935,6 +9940,225 @@ test('lane guidance changes nothing else: progress, banner, voice, rerouting; di
   assert.ok(!/normalizeLaneJunctions|indications/.test(read('../lib/navigation/session.ts')));
 });
 
+// ─── Drive screen: navigation and free-drive presentations kept apart ──────
+// Start Navigation records the drive underneath; the recording dashboard is
+// for free drives only. Navigation looks the same with or without a drive.
+
+import { drivePresentation } from '@/lib/drivePresentation';
+
+test('presentation: free drive shows the recording dashboard; navigation (with or without a drive underneath) shows navigation only', () => {
+  // The rule
+  assert.equal(drivePresentation({ isDriving: false, navigating: false }), 'idle');
+  assert.equal(drivePresentation({ isDriving: true, navigating: false }), 'freeDrive', 'Start Drive: the full dashboard');
+  assert.equal(drivePresentation({ isDriving: true, navigating: true }), 'navigation', 'navigation recording underneath (its own or the user\'s): navigation only');
+  assert.equal(drivePresentation({ isDriving: false, navigating: true }), 'navigation', 'Passenger Mode, or no recording: the same navigation UI');
+  // The screen applies it
+  const read = (rel: string) => readFileSync(toPath(new URL(rel, import.meta.url)), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+  const drive = read('../app/(tabs)/(drive)/index.tsx');
+  assert.ok(/const presentation = drivePresentation\(\{ isDriving, navigating \}\);/.test(drive));
+  assert.ok(/const freeDrive = presentation === "freeDrive";/.test(drive));
+  // The recording dashboard (speedometer, statistics, Pause, End Drive, Save Point, GPS status) only for a free drive
+  assert.ok(/\{freeDrive && \(\s*<ActiveDriveOverlay/.test(drive), 'the dashboard is gated on the presentation, not on recording');
+  assert.equal((drive.match(/<ActiveDriveOverlay/g) ?? []).length, 1);
+  assert.ok(!/isDriving && \(\s*<ActiveDriveOverlay/.test(drive), 'never on "a drive is recording" alone');
+  const overlayJsx = drive.slice(drive.indexOf('<ActiveDriveOverlay'), drive.indexOf('/>', drive.indexOf('<ActiveDriveOverlay')));
+  assert.ok(!/GuidanceStrip|navigationStrip|guidanceBannerHeight/.test(overlayJsx), 'no navigation squeezed into the dashboard');
+  for (const control of ['onPause={handlePause}', 'onEndDrive={handlePanelEndDrive}', 'onSavePoint={handleSavePoint}', 'gpsAccuracy={gpsAccuracy}', 'driveSeconds={driveSeconds}']) {
+    assert.ok(overlayJsx.includes(control), `free drive keeps ${control}`);
+  }
+  // The dashboard itself is unchanged: speedometer, Pause, End Drive, Save Point
+  const overlay = readFileSync(toPath(new URL('../components/ActiveDriveOverlay.tsx', import.meta.url)), 'utf8');
+  for (const part of ['<Speedometer speedKmh={currentSpeedKmh}', 'onPause();', 'text: "End Drive"', '{/* Save Point */}']) assert.ok(overlay.includes(part), part);
+  // Navigation: its own bar whenever guiding, recording underneath or not
+  assert.ok(/\{presentation === "navigation" && !previewing && \(\s*<AboveTabBar/.test(drive));
+  assert.ok(!/navigating && !previewing && !isDriving/.test(drive), 'no longer hidden by a recording');
+  const barJsx = drive.slice(drive.indexOf('<GuidanceBar'), drive.indexOf('/>', drive.indexOf('<GuidanceBar')));
+  assert.ok(/recordingActive=\{isDriving\}/.test(barJsx) && /onFinishDrive=\{handleFinishNavigationDrive\}/.test(barJsx));
+  // The bar: navigation's controls only, plus one quiet recording mark; no recording dashboard controls
+  const bar = read('../components/navigation/GuidanceBar.tsx');
+  for (const part of ['<Summary state={state}', '<EndButton ownsDrive={ownsDrive} onFinishDrive={onFinishDrive} />', '"Overview"', '"Recenter"']) assert.ok(bar.includes(part), part);
+  assert.ok(read('../components/navigation/NavigationControls.tsx').includes('<VoiceToggle />'), 'voice in the controls down the right');
+  assert.ok(/recordingActive \? \([\s\S]*?accessibilityLabel="This drive is being recorded"[\s\S]*?>Recording<\/Text>/.test(bar), 'a single "Recording" mark');
+  assert.ok(!/Speedometer|onPause|Save Point|End Drive"|driveSeconds|distanceKm/.test(bar), 'no speedometer, Pause, Save Point, End Drive or drive statistics');
+  assert.ok(!/export function GuidanceStrip/.test(bar), 'the strip that sat inside the dashboard is gone');
+  // The recorded trail and the dashboard's timer are the free drive's; recording itself is untouched
+  assert.ok(/trail=\{freeDrive \? driveTrail : null\}/.test(drive));
+  assert.ok(/updateDriveCoordinate\(\{\s*latitude: lat,\s*longitude: lon,/.test(drive), 'recording still gets every fix');
+  assert.ok(/liveTrail\.followTrail\(driveTrail\)/.test(drive), 'the recorded route is still followed underneath');
+  // The search, layers and map controls stay hidden while navigating, as before
+  assert.ok(/\{!isDriving && !navigating && \(\s*<View/.test(drive));
+});
+
+test('presentation: ending navigation finishes only a drive navigation started; a drive the user started carries on in the dashboard', () => {
+  // Navigation-owned: End asks, then the usual End Drive (Drive Complete); arrival does the same by itself
+  const read = (rel: string) => readFileSync(toPath(new URL(rel, import.meta.url)), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+  const drive = read('../app/(tabs)/(drive)/index.tsx');
+  assert.ok(/function handleFinishNavigationDrive\(\) \{\s*navSession\.end\("user"\);\s*handleEndDrive\(\);\s*\}/.test(drive));
+  assert.ok(/st\.recording !== "navigation"\) return;\s*navSession\.end\("arrived"\);\s*endDriveRef\.current\(\);/.test(drive));
+  const bar = read('../components/navigation/GuidanceBar.tsx');
+  assert.ok(/const ownsDrive = recordingActive && state\.recording === "navigation";/.test(bar));
+  assert.ok(bar.includes('"End navigation and finish drive", onPress: onFinishDrive'));
+  // In the session: who owns the drive decides; the session never stops one
+  for (const recording of ['navigation', 'existing'] as const) {
+    const h = nav3Session();
+    void h.s.start({ route: L_ROUTE(), destination: N3_DEST, recording });
+    h.feed(drive3(L_PTS, { to: 500 }));
+    assert.equal((h.s.state as { recording: string }).recording, recording);
+    h.s.end('user');
+    assert.equal(h.s.phase, 'idle');
+  }
+  // A user's drive left running: navigation idle, recording on → the free-drive dashboard again
+  assert.equal(drivePresentation({ isDriving: true, navigating: false }), 'freeDrive');
+  // Arrived (a drive the user started): still the navigation bar (arrival, Done) until Done
+  assert.equal(drivePresentation({ isDriving: true, navigating: true }), 'navigation');
+});
+
+// ─── Drive screen: the reference-led navigation layout ─────────────────────
+// Map first: a compact manoeuvre card (lanes along its bottom edge), a small
+// Then card, a speed HUD, voice and Record on the right, and a bottom panel
+// with Overview / Recenter, the time left and End.
+
+import { guidanceLines, guidanceShield } from '@/lib/navigation/guidanceText';
+
+const readNav = (rel: string) => readFileSync(toPath(new URL(rel, import.meta.url)), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+
+test('navigation layout: search, map controls and the free-drive dashboard are hidden; the native tab bar stays', () => {
+  const drive = readNav('../app/(tabs)/(drive)/index.tsx');
+  // The search bar ("Where are we going?") never while navigating
+  const search = drive.slice(drive.lastIndexOf('{', drive.indexOf('accessibilityLabel="Where are we going? Search destinations"')) - 200, drive.indexOf('accessibilityLabel="Where are we going? Search destinations"'));
+  assert.ok(/\{!isDriving && !navigating && \(\s*<View\s*style=\{\[styles\.searchBarWrap/.test(search), 'search bar gated on navigating');
+  // Layers, More and the other map controls: none while navigating
+  assert.ok((drive.match(/\{!isDriving && !previewing && !navigating && /g) ?? []).length >= 4);
+  // The recording dashboard: free drives only
+  assert.equal(drivePresentation({ isDriving: true, navigating: true }), 'navigation');
+  assert.ok(/\{freeDrive && \(\s*<ActiveDriveOverlay/.test(drive));
+  // The tab bar: expo-router's native tabs, not ours to hide from this screen; navigation sits above it
+  const tabs = readFileSync(toPath(new URL('../app/(tabs)/_layout.tsx', import.meta.url)), 'utf8');
+  assert.ok(/NativeTabs/.test(tabs) && !/navigat|presentation|guidance/i.test(tabs.replace(/navigate-outline/g, '')), 'the tab layout knows nothing of navigation');
+  assert.ok(/\{presentation === "navigation" && !previewing && \(\s*<AboveTabBar[\s\S]*?<GuidanceBar/.test(drive), 'the bottom panel sits above the tab bar');
+});
+
+test('navigation layout: the top card shows the arrow, distance, road, instruction and a shield, one line each', () => {
+  // The words, from the manoeuvre's own data
+  const p = prepareRoute(L_ROUTE());
+  const turn = p.maneuvers[1]!;
+  assert.deepEqual(guidanceLines(turn), { primary: 'Chestnut Hill', secondary: 'Turn left onto Chestnut Hill' }, 'the road it leads onto, then what to do');
+  const bare = { ...turn, primaryText: null, roadRef: null, roadName: null, secondaryText: null, signposts: 'Keswick' };
+  assert.deepEqual(guidanceLines(bare), { primary: 'Turn left onto Chestnut Hill', secondary: 'Keswick' }, 'no road: the instruction leads');
+  assert.deepEqual(guidanceLines({ ...bare, signposts: null }), { primary: 'Turn left onto Chestnut Hill', secondary: null });
+  assert.deepEqual(guidanceLines({ ...turn, primaryText: turn.instruction }), { primary: turn.instruction, secondary: null }, 'never the same line twice');
+  // The shield: junction first, else the road number; motorways blue
+  assert.deepEqual(guidanceShield({ ...turn, junctionRef: '36', roadRef: 'M6' }), { text: 'J36', motorway: true });
+  assert.deepEqual(guidanceShield({ ...turn, junctionRef: null, roadRef: 'M6' }), { text: 'M6', motorway: true });
+  assert.deepEqual(guidanceShield({ ...turn, junctionRef: null, roadRef: 'A1(M)' }), { text: 'A1(M)', motorway: true });
+  assert.deepEqual(guidanceShield({ ...turn, junctionRef: null, roadRef: 'A6013' }), { text: 'A6013', motorway: false });
+  assert.equal(guidanceShield({ ...turn, junctionRef: null, roadRef: null }), null, 'no number, no shield');
+  // The card: arrow and distance strongest, every line one line (never tall)
+  const banner = readNav('../components/navigation/GuidanceBanner.tsx');
+  const main = banner.slice(banner.indexOf('const next = progress.next;'), banner.indexOf('const styles = StyleSheet.create'));
+  assert.ok(/<ManeuverIcon maneuver=\{next\} size=\{50\}/.test(main));
+  assert.ok(/<Text style=\{styles\.distance\} numberOfLines=\{1\}>\s*\{distance\}/.test(main));
+  assert.ok(/<Text style=\{styles\.primary\} numberOfLines=\{1\}>\s*\{primary\}/.test(main));
+  assert.ok(/<Text style=\{styles\.secondary\} numberOfLines=\{1\}>\s*\{secondary\}/.test(main));
+  assert.ok(/\{shield \? <Shield text=\{shield\.text\} motorway=\{shield\.motorway\} \/> : null\}/.test(main));
+  assert.ok(!/numberOfLines=\{[3-9]\}/.test(banner), 'nothing wraps past two lines');
+  const size = (k: string) => Number(new RegExp(`${k}: \\{[^}]*fontSize: (\\d+)`).exec(banner)?.[1]);
+  assert.ok(size('distance') > size('primary') && size('primary') > size('secondary'), 'distance, then road, then instruction');
+  // Roundabouts keep their icon (and its exit number): the same ManeuverIcon
+  assert.ok(!/onRoundabout/.test(main));
+});
+
+test('navigation layout: lanes along the card\'s bottom edge; a small Then card under it', () => {
+  const banner = readNav('../components/navigation/GuidanceBanner.tsx');
+  const main = banner.slice(banner.indexOf('const next = progress.next;'), banner.indexOf('const styles = StyleSheet.create'));
+  // Lanes are inside the main card (before the Then card, which is outside it)
+  const lanesAt = main.indexOf('<LaneStrip view={state.lanes} />');
+  const thenAt = main.indexOf('then ? (');
+  assert.ok(lanesAt > 0 && thenAt > lanesAt);
+  assert.ok(/lanes: \{[^}]*borderTopWidth: StyleSheet\.hairlineWidth[^}]*\}/.test(banner), 'a hairline above the lanes, along the edge');
+  // Then: the session's own "then", with how far after the next manoeuvre it comes
+  const pts = polyline3([[0, 0], [0, 600], [0, 700], [-300, 700]]);
+  const p = prepareRoute(route3(pts, [
+    { at: 0, type: 'depart' },
+    { at: 60, type: 'roundabout turn', modifier: 'straight', name: 'Main Street', instruction: 'At the roundabout, go straight on' },
+    { at: 70, type: 'turn', modifier: 'left', name: 'Mill Lane' },
+    { at: pts.length - 1, type: 'arrive' },
+  ]));
+  const pr = progressAt(p, 400);
+  assert.equal(pr.then?.direction, 'left');
+  assert.ok(Math.abs(pr.thenAfterM! - 100) < 1, 'the turn 100 m after');
+  const far = progressAt(prepareRoute(L_ROUTE()), 200);
+  assert.equal(far.then, null);
+  assert.equal(far.thenAfterM, null, 'no then, no distance');
+  assert.ok(/<GlassSurface material="dense" style=\{styles\.then\}[\s\S]*?>Then<\/Text>\s*<ManeuverIcon maneuver=\{then\} size=\{22\}/.test(main));
+  assert.ok(/progress\.thenAfterM != null \?[\s\S]*?formatGuidanceDistance\(progress\.thenAfterM, unitSystem\)/.test(main));
+  assert.ok(/then: \{[^}]*alignSelf: "flex-start"[^}]*\}/.test(banner), 'small, on the left');
+  // The controls on the right start under the main card, beside the Then card
+  const drive = readNav('../app/(tabs)/(drive)/index.tsx');
+  assert.ok(/onCardHeight=\{onGuidanceCardHeight\}/.test(drive));
+  assert.ok(/top: SEARCH_TOP \+ passengerOffset \+ guidanceCardHeight \+ 10/.test(drive));
+});
+
+test('navigation layout: the bottom panel has time left, distance and arrival; Overview / Recenter; End', () => {
+  const p = prepareRoute(L_ROUTE());
+  const pr = progressAt(p, 300);
+  assert.ok(pr.durationRemainingS > 0 && pr.distanceRemainingM > 0, 'time and distance left come from progress');
+  const bar = readNav('../components/navigation/GuidanceBar.tsx');
+  const summary = bar.slice(bar.indexOf('function Summary('), bar.indexOf('function SpeedHud('));
+  assert.ok(/const eta = formatClock\(arrivalTime\(/.test(summary) && /const time = formatDuration\(progress\.durationRemainingS\);/.test(summary) && /formatGuidanceDistance\(progress\.distanceRemainingM, unitSystem\)/.test(summary));
+  assert.ok(/<Text style=\{styles\.time\}[^>]*>\s*\{time\}/.test(summary), 'time left is the main figure');
+  assert.ok(/\{distance\} • \{eta\}/.test(summary), 'distance • arrival beneath');
+  // Overview while following, Recenter otherwise: the screen's own camera actions
+  assert.ok(/if \(following\) onOverview\(\);\s*else onRecenter\(\);/.test(bar));
+  const drive = readNav('../app/(tabs)/(drive)/index.tsx');
+  const barJsx = drive.slice(drive.indexOf('<GuidanceBar'), drive.indexOf('/>', drive.indexOf('<GuidanceBar')));
+  assert.ok(/following=\{followMode === "following"\}/.test(barJsx) && /onRecenter=\{handleResumeFollowing\}/.test(barJsx) && /onOverview=\{showNavigationOverview\}/.test(barJsx));
+  // Left Overview / Recenter, centre summary, right End
+  const row = bar.slice(bar.indexOf('<View style={styles.row}>'), bar.indexOf('</GlassSurface>', bar.indexOf('<View style={styles.row}>')));
+  const order = ['label={following ? "Overview" : "Recenter"}', '<Summary state={state}', '<EndButton'].map((x) => row.indexOf(x));
+  assert.ok(order.every((i) => i >= 0) && order[0]! < order[1]! && order[1]! < order[2]!, 'Overview, summary, End');
+});
+
+test('navigation layout: the speed HUD is the real GPS speed only; no speed limit is ever shown', () => {
+  const bar = readNav('../components/navigation/GuidanceBar.tsx');
+  const hud = bar.slice(bar.indexOf('function SpeedHud('), bar.indexOf('export function GuidanceBar('));
+  assert.ok(/const fix = useLatestNavigationFix\(\)\(\);|const latestFix = useLatestNavigationFix\(\);\s*const fix = latestFix\(\);/.test(hud), 'the newest real fix');
+  assert.ok(/fix\.speedMs >= 0 && Date\.now\(\) - fix\.timestamp <= SPEED_FRESH_MS/.test(hud), 'a missing, negative or old speed shows as --');
+  assert.ok(/convertSpeed\(msToKmh\(fix!\.speedMs\), unitSystem\)/.test(hud) && /speedUnit\(unitSystem\)/.test(hud), 'in the user\'s units');
+  assert.ok(/\{value \?\? "--"\}/.test(hud));
+  // The context hands over the last fix navigation was given, untouched
+  const ctx = readNav('../context/NavigationContext.tsx');
+  assert.ok(/const latestFix = useCallback\(\(\) => lastFix\.current\?\.fix \?\? null, \[\]\);/.test(ctx));
+  // The units: m/s → km/h → mph
+  assert.equal(Math.round(convertSpeed(msToKmh(27.78), 'imperial')), 62);
+  assert.equal(speedUnit('imperial'), 'mph');
+  // No speed limit anywhere in the navigation UI
+  for (const f of ['GuidanceBar.tsx', 'GuidanceBanner.tsx', 'NavigationControls.tsx']) {
+    assert.ok(!/maxspeed|speedLimit|speed limit|limitKmh/i.test(readNav(`../components/navigation/${f}`)), `${f}: no speed limit`);
+  }
+});
+
+test('navigation layout: right controls are real ones only; recording is one quiet mark; Free Drive is unchanged', () => {
+  const controls = readNav('../components/navigation/NavigationControls.tsx');
+  assert.ok(/<VoiceToggle \/>/.test(controls) && /toggleMute\(\)/.test(controls), 'mute is the voice preference');
+  assert.ok(!/Report|Options|compass|north/i.test(controls), 'no report, options or a compass that would do nothing (guidance always turns with the car)');
+  const drive = readNav('../app/(tabs)/(drive)/index.tsx');
+  assert.ok(/guidingRef\.current \|\| headingModeRef\.current === "heading-up"/.test(drive), 'guidance turns with the car regardless');
+  assert.ok(/\{presentation === "navigation" && !previewing && \(\s*<View[\s\S]*?<NavigationControls\s*recordingActive=\{isDriving\}\s*onRecord=\{handleStartDrive\}/.test(drive));
+  assert.equal((drive.match(/<NavigationControls/g) ?? []).length, 1);
+  // Recording: a small dot and the word, nothing else
+  const bar = readNav('../components/navigation/GuidanceBar.tsx');
+  assert.ok(/recordingText: \{ color: MUTED, fontSize: 12/.test(bar) && /recDotLive: \{ width: 7, height: 7/.test(bar));
+  const mark = bar.slice(bar.indexOf('{recordingActive ? ('), bar.indexOf(') : null}', bar.indexOf('{recordingActive ? (')));
+  assert.equal((mark.match(/<Text/g) ?? []).length, 1, 'one line of text');
+  assert.ok(!/driveSeconds|distanceKm|Speedometer|formatDuration/.test(mark));
+  // Free Drive: the same dashboard with the same controls, and its file untouched by navigation
+  assert.equal(drivePresentation({ isDriving: true, navigating: false }), 'freeDrive');
+  const overlay = readFileSync(toPath(new URL('../components/ActiveDriveOverlay.tsx', import.meta.url)), 'utf8');
+  assert.ok(!/navigation\//.test(overlay), 'the dashboard imports nothing from navigation');
+  for (const part of ['<Speedometer speedKmh={currentSpeedKmh}', 'onPause();', 'text: "End Drive"', '{/* Save Point */}']) assert.ok(overlay.includes(part), part);
+});
+
 // ─── iOS build number: one source of truth (app.json ios.buildNumber) ───────
 // `expo prebuild` writes ios.buildNumber into Info.plist (CFBundleVersion);
 // without it, "1". app.config.js also writes it into the Xcode project's
@@ -9954,4 +10178,420 @@ test('the iOS build number comes from app.json, is a whole number, and reaches X
   const src = readFileSync(toPath(new URL('../app.config.js', import.meta.url)), 'utf8');
   assert.ok(/settings\.CURRENT_PROJECT_VERSION = cfg\.ios\?\.buildNumber \?\? '1';/.test(src));
   assert.ok(/settings\.MARKETING_VERSION = cfg\.version;/.test(src));
+});
+
+// ─── Live road hazards (migration 0020) ────────────────────────────────────
+// Report → a type, at the accepted GPS fix; nearby hazards on the map, live,
+// anonymous, gone at expiry; Still there / Not there. The server owns every
+// rule; the app parses, filters and draws.
+
+import { HAZARD_KINDS, areaAround, hazardFeatures, hazardTopic, hazardTopicsFor, inArea, kindInfo, parseHazard, parseHazardEvent, reportedAgo, type RoadHazard } from '@/lib/hazards/model';
+import { HazardStore } from '@/lib/hazards/store';
+import { HazardFeed, HAZARD_FEED, type HazardChannelStatus } from '@/lib/hazards/feed';
+import { FIX_PROBLEM_MESSAGE, REPORT_FIX, reportBody, reportedMessage, reportFixProblem } from '@/lib/hazards/report';
+
+const HZ_T0 = Date.parse('2026-10-11T12:00:00Z');
+/** A hazard as the server sends it */
+function hzRaw(o: Record<string, unknown> = {}) {
+  return {
+    id: 'h1', kind: 'accident', latitude: 54.5, longitude: -3.0, reportedAt: '2026-10-11T11:50:00.000Z',
+    lastConfirmedAt: '2026-10-11T11:55:00.000Z', expiresAt: '2026-10-11T12:50:00.000Z', expiresInMs: 50 * 60_000,
+    confirmations: 1, myVote: null, ...o,
+  };
+}
+const hz = (o: Record<string, unknown> = {}, at = HZ_T0) => parseHazard(hzRaw(o), at)!;
+
+test('hazards: six kinds, each with a label, a colour and a marker the map registers (1x, 2x, 3x)', () => {
+  assert.deepEqual(HAZARD_KINDS.map((k) => k.kind), ['accident', 'hazard', 'broken_down', 'roadworks', 'flooding', 'police']);
+  assert.deepEqual(HAZARD_KINDS.map((k) => k.label), ['Accident', 'Hazard', 'Broken-down vehicle', 'Roadworks', 'Flooding', 'Police']);
+  assert.equal(new Set(HAZARD_KINDS.map((k) => k.markerImage)).size, 6);
+  const map = readFileSync(toPath(new URL('../components/MapboxDriveMap.tsx', import.meta.url)), 'utf8');
+  for (const k of HAZARD_KINDS) {
+    const file = k.markerImage.replace('derwent-', '');
+    assert.ok(map.includes(`"${k.markerImage}": require("@/assets/images/map/${file}.png")`), `${k.kind} registered with the map`);
+    for (const scale of ['', '@2x', '@3x']) assert.ok(existsSync(toPath(new URL(`../assets/images/map/${file}${scale}.png`, import.meta.url))), `${file}${scale}.png`);
+  }
+  // The same kinds as the server (the database's check is the authority)
+  const sql = readFileSync(toPath(new URL('../../../supabase/migrations/20261011000100_road_hazards.sql', import.meta.url)), 'utf8');
+  const check = /constraint road_hazards_kind\s+check \(kind in \(([^)]*)\)\)/.exec(sql)![1]!;
+  assert.deepEqual(check.split(',').map((x) => x.trim().replace(/'/g, '')), HAZARD_KINDS.map((k) => k.kind));
+  // A kind a newer server adds still draws, as a generic hazard
+  assert.equal(kindInfo('black_ice').kind, 'hazard');
+});
+
+test('hazards: the server owns the lifetimes, centrally (accident 1 h, hazard and breakdown 45 min, police 30 min, roadworks 6 h, flooding 4 h)', () => {
+  const sql = readFileSync(toPath(new URL('../../../supabase/migrations/20261011000100_road_hazards.sql', import.meta.url)), 'utf8');
+  const lifetimes = sql.slice(sql.indexOf('create function private.hazard_lifetime'), sql.indexOf('create function private.hazard_max_lifetime'));
+  for (const [kind, interval] of [['accident', '60 minutes'], ['hazard', '45 minutes'], ['broken_down', '45 minutes'], ['police', '30 minutes'], ['roadworks', '6 hours'], ['flooding', '4 hours']]) {
+    assert.ok(new RegExp(`when '${kind}'\\s+then interval '${interval}'`).test(lifetimes), `${kind}: ${interval}`);
+  }
+  assert.ok(/select private\.hazard_lifetime\(p_kind\) \* 3/.test(sql), 'capped at three lifetimes');
+  // The app keeps no lifetimes of its own: only the server's remaining time
+  const model = readFileSync(toPath(new URL('../lib/hazards/model.ts', import.meta.url)), 'utf8');
+  assert.ok(!/minutes|60_000 \*|45|hours/.test(model.replace(/\/\/.*$/gm, '').replace(/reportedAgo[\s\S]*$/, '')), 'no client-side lifetimes');
+});
+
+test('hazards: what arrives is parsed strictly; expiry comes from the server\'s clock; nobody\'s identity is ever kept', () => {
+  const h = hz();
+  assert.deepEqual(Object.keys(h).sort(), ['confirmations', 'expiresAt', 'id', 'kind', 'lastConfirmedAt', 'latitude', 'longitude', 'myVote', 'reportedAt']);
+  assert.equal(h.expiresAt, HZ_T0 + 50 * 60_000, 'remaining lifetime counted from receipt, whatever the phone\'s clock says');
+  assert.equal(h.reportedAt, Date.parse('2026-10-11T11:50:00Z'));
+  // Extra fields (a reporter, say) are never carried
+  const sneaky = parseHazard(hzRaw({ reporterId: 'u1', userId: 'u1', name: 'Alice' }), HZ_T0)!;
+  assert.ok(!JSON.stringify(sneaky).includes('u1') && !JSON.stringify(sneaky).includes('Alice'));
+  for (const bad of [null, 'x', {}, hzRaw({ id: '' }), hzRaw({ latitude: 95 }), hzRaw({ longitude: 'x' }), hzRaw({ reportedAt: 'never' }), hzRaw({ expiresInMs: undefined, expiresAt: undefined })]) {
+    assert.equal(parseHazard(bad, HZ_T0), null);
+  }
+  assert.equal(hz({ myVote: 'reported' }).myVote, 'reported');
+  assert.equal(hz({ myVote: 'something' }).myVote, null);
+  assert.equal(hz({ confirmations: -3 }).confirmations, 0);
+  // Broadcasts: a hazard or a removal; they never say how this driver voted
+  const e = parseHazardEvent({ ...hzRaw({ myVote: 'reported' }), type: 'hazard' }, HZ_T0);
+  assert.equal(e?.type, 'hazard');
+  assert.equal(e?.type === 'hazard' && e.hazard.myVote, null);
+  assert.deepEqual(parseHazardEvent({ type: 'hazard_removed', id: 'h1' }, HZ_T0), { type: 'hazard_removed', id: 'h1' });
+  assert.equal(parseHazardEvent({ type: 'presence', id: 'h1' }, HZ_T0), null);
+  assert.equal(parseHazardEvent({ type: 'hazard_removed' }, HZ_T0), null);
+  assert.equal(reportedAgo(HZ_T0 - 20_000, HZ_T0), 'Reported just now');
+  assert.equal(reportedAgo(HZ_T0 - 12 * 60_000, HZ_T0), 'Reported 12 min ago');
+  assert.equal(reportedAgo(HZ_T0 - 130 * 60_000, HZ_T0), 'Reported 2 h ago');
+});
+
+test('hazards: map markers — one per active hazard, expired ones gone, only a position and an image', () => {
+  const list = [hz({ id: 'a' }), hz({ id: 'b', kind: 'roadworks', latitude: 54.6, longitude: -3.1 }), hz({ id: 'c', expiresInMs: 0 }), hz({ id: 'd', kind: 'mystery' })];
+  const fc = hazardFeatures(list, HZ_T0 + 1);
+  assert.deepEqual(fc.features.map((f) => f.id), ['a', 'b', 'd'], 'the expired one is not drawn');
+  assert.deepEqual(fc.features[1]!.geometry.coordinates, [-3.1, 54.6], 'GeoJSON order: longitude, latitude');
+  assert.deepEqual(fc.features[1]!.properties, { id: 'b', image: 'derwent-hazard-roadworks' });
+  assert.equal(fc.features[2]!.properties.image, 'derwent-hazard-hazard', 'unknown kinds draw as a generic hazard');
+  assert.deepEqual(hazardFeatures(list, HZ_T0 + 60 * 60_000).features, [], 'all gone once expired');
+});
+
+test('hazards: nearby loading is bounded — about 15 km around the driver, within the server\'s limits, a few Realtime areas', () => {
+  for (const lat of [50.1, 52.5, 54.5, 57.5, 60.8]) {
+    const a = areaAround(lat, -3.0, HAZARD_FEED.radiusKm);
+    assert.ok(a.maxLat - a.minLat <= 1.0 && a.maxLng - a.minLng <= 1.6, `within the server's area limit at ${lat}°`);
+    assert.ok(inArea(a, lat, -3.0));
+    assert.ok(!inArea(a, lat + 0.3, -3.0), 'about 33 km north is outside');
+    assert.ok(hazardTopicsFor(a).length <= 6, `${hazardTopicsFor(a).length} areas at ${lat}°`);
+  }
+  assert.ok(hazardTopicsFor(areaAround(54.5, -3.0, HAZARD_FEED.radiusKm)).length <= 4, 'at most four in England');
+  // The same cells as the server's private.hazard_topic (and its tests)
+  assert.equal(hazardTopic(54.5, -3.0), 'hazards:109:-6');
+  assert.equal(hazardTopic(52.0, -1.0), 'hazards:104:-2');
+  assert.equal(hazardTopic(55.2, -3.2), 'hazards:110:-7');
+  assert.equal(hazardTopic(-60.0, -150.0), 'hazards:-120:-300');
+  const a = areaAround(54.5, -3.0, HAZARD_FEED.radiusKm);
+  assert.ok(hazardTopicsFor(a).includes(hazardTopic(54.5, -3.0)));
+  assert.ok(hazardTopicsFor(a).every((t) => /^hazards:-?[0-9]{1,3}:-?[0-9]{1,3}$/.test(t)), 'only topics the database lets clients join');
+});
+
+test('hazards: the store — a snapshot replaces, live updates merge, own votes are kept, expired ones drop out', () => {
+  const s = new HazardStore();
+  let changes = 0;
+  s.subscribe(() => changes++);
+  const area = areaAround(54.5, -3.0, 15);
+  s.replace(area, [hz({ id: 'a' }), hz({ id: 'b', myVote: 'reported' }), hz({ id: 'old', expiresInMs: 0 })], HZ_T0 + 1);
+  assert.deepEqual(s.list.map((h) => h.id), ['a', 'b'], 'expired ones never enter');
+  // A live update keeps the driver's own vote (broadcasts never carry it)
+  s.apply({ type: 'hazard', hazard: hz({ id: 'b', confirmations: 4 }) }, HZ_T0 + 2);
+  assert.equal(s.list.find((h) => h.id === 'b')!.confirmations, 4);
+  assert.equal(s.list.find((h) => h.id === 'b')!.myVote, 'reported');
+  // New ones nearby appear; ones outside the loaded area are ignored
+  s.apply({ type: 'hazard', hazard: hz({ id: 'c', latitude: 54.55 }) }, HZ_T0 + 2);
+  s.apply({ type: 'hazard', hazard: hz({ id: 'far', latitude: 56.0 }) }, HZ_T0 + 2);
+  assert.deepEqual(s.list.map((h) => h.id).sort(), ['a', 'b', 'c']);
+  // Removed, and the open card closes with it
+  s.select('a');
+  assert.equal(s.selected?.id, 'a');
+  s.apply({ type: 'hazard_removed', id: 'a' }, HZ_T0 + 3);
+  assert.equal(s.selected, null);
+  assert.ok(!s.list.some((h) => h.id === 'a'));
+  // Expiry: gone at its time with no message from anyone
+  s.prune(HZ_T0 + 51 * 60_000);
+  assert.deepEqual(s.list, []);
+  // The driver's own report or vote answer
+  s.upsertOwn('x', hz({ id: 'x', myVote: 'still_there' }));
+  assert.equal(s.list[0]!.myVote, 'still_there');
+  s.upsertOwn('x', null);
+  assert.deepEqual(s.list, [], 'their vote cleared it');
+  assert.ok(changes > 0);
+  s.select('nope');
+  assert.equal(s.selected, null, 'only an existing hazard can be selected');
+  s.replace(area, [hz({ id: 'z' })], HZ_T0);
+  s.clear();
+  assert.deepEqual(s.list, []);
+  assert.equal(s.loadedArea, null);
+});
+
+/** A HazardFeed with a fake clock, server and Realtime */
+function hazardFeed3() {
+  let now = HZ_T0;
+  const timers: Array<{ at: number; fn: () => void; id: number; every?: number }> = [];
+  let nextId = 1;
+  const loads: Array<{ area: ReturnType<typeof areaAround>; resolve: (h: RoadHazard[]) => void; reject: (e: Error) => void }> = [];
+  const joins: Array<{ topics: string[]; onEvent: (p: unknown) => void; onStatus: (s: HazardChannelStatus) => void; closed: boolean }> = [];
+  const store = new HazardStore();
+  const feed = new HazardFeed({
+    store,
+    now: () => now,
+    load: (area) => new Promise((resolve, reject) => loads.push({ area, resolve, reject })),
+    openTopics: async (topics, h) => {
+      const j = { topics, ...h, closed: false };
+      joins.push(j);
+      return { close: () => { j.closed = true; } };
+    },
+    setTimeout: (fn, ms) => { const id = nextId++; timers.push({ at: now + ms, fn, id }); return id; },
+    clearTimeout: (id) => { const i = timers.findIndex((t) => t.id === id); if (i >= 0) timers.splice(i, 1); },
+    setInterval: (fn, ms) => { const id = nextId++; timers.push({ at: now + ms, fn, id, every: ms }); return id; },
+    clearInterval: (id) => { const i = timers.findIndex((t) => t.id === id); if (i >= 0) timers.splice(i, 1); },
+  });
+  const advance = async (ms: number) => {
+    const end = now + ms;
+    for (;;) {
+      timers.sort((a, b) => a.at - b.at);
+      const t = timers[0];
+      if (!t || t.at > end) break;
+      now = t.at;
+      if (t.every) t.at += t.every; else timers.shift();
+      t.fn();
+      await Promise.resolve();
+    }
+    now = end;
+    await Promise.resolve();
+  };
+  const flush = async () => { for (let i = 0; i < 5; i++) await Promise.resolve(); };
+  return { feed, store, loads, joins, advance, flush, get now() { return now; }, set now(v: number) { now = v; } };
+}
+/** Metres north as degrees */
+const north3 = (m: number) => m / 111_320;
+
+test('hazards: nearby loading — once, then only after moving 4 km or 5 minutes; never per GPS fix', async () => {
+  const f = hazardFeed3();
+  f.feed.notePosition(54.5, -3.0);
+  assert.equal(f.loads.length, 0, 'nothing until the app is on screen');
+  f.feed.setActive(true);
+  f.feed.notePosition(54.5, -3.0);
+  assert.equal(f.loads.length, 1, 'the first fix on screen loads');
+  await f.flush();
+  assert.ok(f.joins.length === 1 && f.joins[0]!.topics.includes('hazards:109:-6'), 'the area topics are joined with it');
+  f.loads[0]!.resolve([hz({ id: 'a' })]);
+  await f.flush();
+  assert.deepEqual(f.store.list.map((h) => h.id), ['a']);
+  // A drive's worth of fixes within a few km: no more loads
+  for (let i = 1; i <= 120; i++) {
+    f.now = HZ_T0 + i * 1000;
+    f.feed.notePosition(54.5 + north3(i * 25), -3.0);
+  }
+  assert.equal(f.loads.length, 1, '120 fixes over 3 km: still one request');
+  f.now = HZ_T0 + 130_000;
+  f.feed.notePosition(54.5 + north3(4100), -3.0);
+  assert.equal(f.loads.length, 2, 'past 4 km: the area moves with the driver');
+  f.loads[1]!.resolve([]);
+  await f.flush();
+  // Standing still: again after 5 minutes, not before
+  f.now += HAZARD_FEED.refreshEveryMs - 1000;
+  f.feed.notePosition(54.5 + north3(4100), -3.0);
+  assert.equal(f.loads.length, 2);
+  f.now += 2000;
+  f.feed.notePosition(54.5 + north3(4100), -3.0);
+  assert.equal(f.loads.length, 3, 'every 5 minutes on screen');
+  // Never more often than every 20 s, however far it jumps
+  f.loads[2]!.resolve([]);
+  await f.flush();
+  f.now += 5000;
+  f.feed.notePosition(55.5, -3.0);
+  assert.equal(f.loads.length, 3, 'within 20 s of the last load');
+  f.now += HAZARD_FEED.minGapMs;
+  f.feed.notePosition(55.5, -3.0);
+  assert.equal(f.loads.length, 4);
+});
+
+test('hazards: realtime — new and removed hazards arrive without a refresh; updates during a load are not lost', async () => {
+  const f = hazardFeed3();
+  f.feed.setActive(true);
+  f.feed.notePosition(54.5, -3.0);
+  await f.flush();
+  const j = f.joins[0]!;
+  j.onStatus('subscribed');
+  // Arrives while the snapshot loads: applied after it, not overwritten by it
+  j.onEvent({ ...hzRaw({ id: 'live' }), type: 'hazard' });
+  f.loads[0]!.resolve([hz({ id: 'a' })]);
+  await f.flush();
+  assert.deepEqual(f.store.list.map((h) => h.id).sort(), ['a', 'live']);
+  j.onEvent({ ...hzRaw({ id: 'new', latitude: 54.52 }), type: 'hazard' });
+  assert.ok(f.store.list.some((h) => h.id === 'new'), 'a new report nearby appears at once');
+  j.onEvent({ type: 'hazard_removed', id: 'a' });
+  assert.ok(!f.store.list.some((h) => h.id === 'a'), 'a cleared one disappears at once');
+  j.onEvent({ type: 'presence', userId: 'x' });
+  j.onEvent('garbage');
+  assert.equal(f.store.list.length, 2, 'anything else is ignored');
+  assert.equal(f.loads.length, 1, 'no extra requests');
+  // Dropped connection: rejoin with backoff; once back, one load to catch up
+  j.onStatus('error');
+  await f.advance(HAZARD_FEED.retryMs[0]!);
+  await f.flush();
+  assert.equal(f.joins.length, 2, 'rejoined');
+  assert.ok(j.closed);
+  f.now += HAZARD_FEED.minGapMs;
+  f.joins[1]!.onStatus('subscribed');
+  assert.equal(f.loads.length, 2, 'caught up after the reconnect');
+  // Events from the old connection are ignored
+  j.onEvent({ ...hzRaw({ id: 'ghost' }), type: 'hazard' });
+  f.loads[1]!.resolve(f.store.list.slice());
+  await f.flush();
+  assert.ok(!f.store.list.some((h) => h.id === 'ghost'));
+});
+
+test('hazards: off screen nothing loads or listens; back on screen it loads again; failures back off', async () => {
+  const f = hazardFeed3();
+  f.feed.setActive(true);
+  f.feed.notePosition(54.5, -3.0);
+  await f.flush();
+  f.feed.setActive(false);
+  assert.ok(f.joins[0]!.closed, 'the area topics are left');
+  f.loads[0]!.resolve([hz({ id: 'late' })]);
+  await f.flush();
+  assert.deepEqual(f.store.list, [], 'a load that finishes off screen is ignored');
+  f.now += 60_000;
+  f.feed.notePosition(54.6, -3.0);
+  assert.equal(f.loads.length, 1, 'nothing loads off screen');
+  f.feed.setActive(true);
+  assert.equal(f.loads.length, 2, 'back on screen: at once');
+  f.loads[1]!.reject(new Error('offline'));
+  await f.flush();
+  f.feed.notePosition(54.6, -3.0);
+  assert.equal(f.loads.length, 2, 'after a failure it waits');
+  f.now += HAZARD_FEED.retryMs[0]!;
+  f.feed.notePosition(54.6, -3.0);
+  assert.equal(f.loads.length, 3, 'then tries again (5 s)');
+  f.loads[2]!.reject(new Error('offline'));
+  await f.flush();
+  f.now += HAZARD_FEED.retryMs[0]!;
+  f.feed.notePosition(54.6, -3.0);
+  assert.equal(f.loads.length, 3, 'a second failure waits longer');
+  f.now += HAZARD_FEED.retryMs[1]! - HAZARD_FEED.retryMs[0]!;
+  f.feed.notePosition(54.6, -3.0);
+  assert.equal(f.loads.length, 4, '(15 s)');
+  // Expired hazards drop out on screen without any message
+  f.loads[3]!.resolve([hz({ id: 'soon', expiresInMs: 40_000 }, f.now)]);
+  await f.flush();
+  assert.equal(f.store.list.length, 1);
+  await f.advance(HAZARD_FEED.pruneEveryMs * 3);
+  assert.deepEqual(f.store.list, [], 'expired reports disappear');
+  f.feed.stop();
+  assert.equal(f.store.loadedArea, null);
+});
+
+test('hazards: a report uses the current accepted fix only — no stale, vague or missing positions, nothing queued', () => {
+  const fix = { latitude: 54.51234, longitude: -3.01234, accuracyM: 8, timestamp: HZ_T0 - 3000 };
+  assert.equal(reportFixProblem(fix, HZ_T0), null);
+  assert.equal(reportFixProblem(null, HZ_T0), 'no_fix');
+  assert.equal(reportFixProblem({ ...fix, timestamp: HZ_T0 - REPORT_FIX.maxAgeMs - 1 }, HZ_T0), 'stale_fix');
+  assert.equal(reportFixProblem({ ...fix, accuracyM: 120 }, HZ_T0), 'inaccurate_fix');
+  assert.equal(reportFixProblem({ ...fix, accuracyM: null }, HZ_T0), null);
+  for (const m of Object.values(FIX_PROBLEM_MESSAGE)) assert.ok(/wasn't sent/.test(m), 'never pretends it went');
+  assert.deepEqual(reportBody('flooding', fix), {
+    kind: 'flooding', latitude: 54.51234, longitude: -3.01234, accuracyM: 8, capturedAt: new Date(HZ_T0 - 3000).toISOString(),
+  });
+  assert.equal(reportedMessage('created'), 'Reported. Thanks.');
+  assert.match(reportedMessage('merged'), /Already reported here/);
+  assert.match(reportedMessage('already_reported'), /already reported/);
+  // The client: failures say so; nothing is stored or retried later
+  const ctx = readNav('../context/HazardsContext.tsx');
+  assert.ok(/if \(problem\) \{[\s\S]*?throw new HazardActionError\(FIX_PROBLEM_MESSAGE\[problem\]\);/.test(ctx));
+  assert.ok(/The report wasn't sent\./.test(ctx));
+  assert.ok(!/outbox|AsyncStorage|writeJson|deviceStorage|setTimeout/.test(ctx), 'no queue, no storage, no delayed resend');
+  // The journal records outcomes only: never a position or an id
+  for (const m of ctx.matchAll(/journal\.log\("hazard_(?:report|vote)", \{([^}]*)\}\)/g)) assert.ok(!/latitude|longitude|fix|id\b|hazard\.id/.test(m[1]!), m[1]);
+});
+
+test('hazards: the report sheet is two taps — Report, then a type; nothing to type, no extra confirmation', () => {
+  const sheet = readNav('../components/hazards/ReportHazardSheet.tsx');
+  assert.ok(/\{HAZARD_KINDS\.map\(\(k\) => \{/.test(sheet), 'every type on one screen');
+  assert.ok(/onPress=\{\(\) => void send\(k\.kind\)\}/.test(sheet), 'tapping a type sends it');
+  assert.ok(/const message = await report\(kind, getFix\(\)\);/.test(sheet), 'at the fix as it is when tapped');
+  assert.ok(!/TextInput|Alert\.alert|Switch/.test(sheet), 'no typing, no confirmation dialog');
+  assert.ok(/minHeight: 104/.test(sheet), 'large targets');
+  assert.ok(/step: "failed"/.test(sheet) && /setPhase\(\{ step: "failed", message:/.test(sheet), 'a failure is shown as one');
+  assert.ok(/closeTimer\.current = setTimeout\(onClose, DONE_MS\)/.test(sheet), 'it closes itself once sent');
+  const button = readNav('../components/hazards/ReportButton.tsx');
+  assert.ok(/accessibilityLabel="Report a hazard"/.test(button) && />Report<\/Text>/.test(button));
+});
+
+test('hazards: Report in navigation (lower right, by the speed HUD) and in Free Drive (dashboard map area, lower right)', () => {
+  const drive = readNav('../app/(tabs)/(drive)/index.tsx');
+  const bar = readNav('../components/navigation/GuidanceBar.tsx');
+  // Navigation: in the HUD row, opposite the speed, as in the reference design
+  const hud = bar.slice(bar.indexOf('<View style={styles.hud}'), bar.indexOf('<GlassSurface material="dense" style={styles.panel}>'));
+  assert.ok(/<SpeedHud unitSystem=\{unitSystem\} \/>[\s\S]*\{onReport && state\.phase !== "error" \? \([\s\S]*<ReportButton onPress=\{onReport\} \/>/.test(hud));
+  const barJsx = drive.slice(drive.indexOf('<GuidanceBar'), drive.indexOf('/>', drive.indexOf('<GuidanceBar')));
+  assert.ok(/onReport=\{openReport\}/.test(barJsx));
+  assert.ok(!/Report/.test(readNav('../components/navigation/NavigationControls.tsx')), 'the right-hand controls are unchanged');
+  // Free Drive: one optional button on the dashboard, its own controls untouched
+  const overlay = readNav('../components/ActiveDriveOverlay.tsx');
+  assert.ok(/\{onReport \? \([\s\S]*?<ReportButton onPress=\{onReport\} \/>/.test(overlay));
+  assert.ok(/reportWrap: \{\s*position: "absolute",\s*right: 12,/.test(overlay));
+  const overlayJsx = drive.slice(drive.indexOf('<ActiveDriveOverlay'), drive.indexOf('/>', drive.indexOf('<ActiveDriveOverlay')));
+  assert.ok(/onReport=\{openReport\}/.test(overlayJsx));
+  for (const control of ['onPause={handlePause}', 'onEndDrive={handlePanelEndDrive}', 'onSavePoint={handleSavePoint}', 'onLocateButton={handleLocateButton}']) {
+    assert.ok(overlayJsx.includes(control), `free drive keeps ${control}`);
+  }
+  // One sheet for both, at the screen's accepted fix
+  assert.equal((drive.match(/<ReportHazardSheet /g) ?? []).length, 1);
+  assert.ok(/<ReportHazardSheet visible=\{reportOpen\} onClose=\{closeReport\} getFix=\{getReportFix\} \/>/.test(drive));
+});
+
+test('hazards: the report position is the raw accepted fix, never a route-snapped one; the feed hears each fix cheaply', () => {
+  const drive = readNav('../app/(tabs)/(drive)/index.tsx');
+  const process = drive.slice(drive.indexOf('const processPosition = useCallback('), drive.indexOf('// ── Visual smoothing'));
+  const filters = process.indexOf('if (impliedKmh > MAX_PLAUSIBLE_KMH) return;');
+  const stored = process.indexOf('lastAcceptedFixRef.current = { latitude: lat, longitude: lon, accuracyM: accuracy, timestamp: fixTime ?? now };');
+  assert.ok(filters > 0 && stored > filters, 'after the accuracy and plausibility filters');
+  assert.ok(process.indexOf('noteHazardPosition(lat, lon);') > stored);
+  assert.ok(/const getReportFix = useCallback\(\(\) => lastAcceptedFixRef\.current, \[\]\);/.test(drive));
+  assert.equal((drive.match(/lastAcceptedFixRef\.current =/g) ?? []).length, 1, 'set in one place only');
+  assert.ok(!/snapped|progress/.test(drive.slice(drive.indexOf('const getReportFix'), drive.indexOf('const getReportFix') + 120)));
+  // Recording still gets every fix, unchanged
+  assert.ok(/updateDriveCoordinate\(\{\s*latitude: lat,\s*longitude: lon,/.test(drive));
+});
+
+test('hazards: map markers sit above the route, beneath the arrow, never move the camera; a tap opens an anonymous card', () => {
+  const map = readNav('../components/MapboxDriveMap.tsx');
+  const tree = map.slice(map.indexOf('<MapView'), map.indexOf('</MapView>'));
+  const at = (s: string) => tree.indexOf(s);
+  assert.ok(at('<NavigationRouteLayers') < at('<HazardLayers') && at('id="derwent-drive-trail"') < at('<HazardLayers'), 'above the route and trail');
+  assert.ok(at('<HazardLayers') < at('{friendLayer}') && at('{friendLayer}') < tree.lastIndexOf('<MarkerFeeder'), 'beneath friends and the location arrow');
+  const layer = map.slice(map.indexOf('const HazardLayers = memo('), map.indexOf('let tokenSet'));
+  assert.ok(layer.length > 200 && layer.length < 3000);
+  assert.ok(/minZoomLevel=\{9\}/.test(layer), 'hidden when zoomed far out (no clutter)');
+  assert.ok(/iconSize: \["interpolate"/.test(layer) && /iconPitchAlignment: "viewport"/.test(layer));
+  assert.ok(!/Camera|setCamera|followCamera|easeTo|flyTo/.test(layer), 'no camera writes');
+  assert.ok(/store\.select\(id\)/.test(layer));
+  const card = readNav('../components/hazards/HazardCard.tsx');
+  assert.ok(/>Still there<\/Text>/.test(card) && />Not there<\/Text>/.test(card));
+  assert.ok(/\{mine \? null : \(/.test(card), 'one vote: the buttons go once they have voted or reported');
+  assert.ok(/reportedAgo\(hazard\.reportedAt, now\)/.test(card));
+  assert.ok(!/userId|reporter|avatar|displayName|initials|\.name\b|profile/i.test(card), 'no identity anywhere on the card');
+  assert.ok(/friendMapSelection\.select\(null\)/.test(card), 'one card at a time with a friend\'s');
+});
+
+test('hazards: realtime reuses Supabase broadcast on area topics, receive only; the private inbox and presence are untouched', () => {
+  const ctx = readNav('../context/HazardsContext.tsx');
+  assert.ok(/client\.channel\(topic, \{ config: \{ private: true \} \}\)/.test(ctx), 'private channels (the database authorises them)');
+  assert.ok(/channel\.on\("broadcast", \{ event: "hazard" \}/.test(ctx));
+  assert.ok(!/\.send\(|httpSend|track\(|inbox:/.test(ctx), 'never publishes; never the inbox');
+  const presence = readNav('../lib/realtimePresence.ts');
+  assert.ok(!/hazard/i.test(presence), 'the inbox feed knows nothing of hazards');
+  assert.ok(/const channel = supabase\.channel\(topic, \{ config: \{ private: true \} \}\);/.test(presence));
+  // Friends' markers are drawn exactly as before
+  const drive = readNav('../app/(tabs)/(drive)/index.tsx');
+  assert.ok(/showFriends && visuals\.live && FriendMarkersMapbox \? <FriendMarkersMapbox \/> : null/.test(drive));
+  // The database: anyone signed in may receive on a well-formed area topic, nobody may publish
+  const sql = readFileSync(toPath(new URL('../../../supabase/migrations/20261011000100_road_hazards.sql', import.meta.url)), 'utf8');
+  assert.ok(/create policy driveos_hazard_area_receive on realtime\.messages\s+for select to authenticated/.test(sql));
+  assert.ok(!/on realtime\.messages\s+for insert/.test(sql));
+  // One provider per signed-in account, next to navigation's
+  const layout = readNav('../app/_layout.tsx');
+  assert.ok(/<NavigationProvider userId=\{userId\}>\s*<HazardsProvider userId=\{userId\}>/.test(layout));
 });

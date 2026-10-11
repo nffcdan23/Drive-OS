@@ -3,6 +3,7 @@ import { config } from "./config";
 import { logger } from "./lib/logger";
 import { startStorageWorker } from "./workers/storageCleanup";
 import { startLiveLocationCleanup } from "./workers/liveLocationCleanup";
+import { startRoadHazardCleanup } from "./workers/roadHazardCleanup";
 
 const server = app.listen(config.port, (err) => {
   if (err) {
@@ -20,6 +21,8 @@ if (config.supabaseSecretKey && config.storageWorker) {
 
 // Expired live positions are already unreadable; this only tidies the table.
 startLiveLocationCleanup(config.liveLocationCleanupIntervalMs);
+// Ended road hazards are already unreadable; this only tidies the table.
+startRoadHazardCleanup(config.roadHazardCleanupIntervalMs);
 
 for (const signal of ["SIGTERM", "SIGINT"] as const) {
   process.on(signal, () => {

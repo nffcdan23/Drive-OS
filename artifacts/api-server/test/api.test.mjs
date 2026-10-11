@@ -251,7 +251,7 @@ before(async () => {
     env: {
       PATH: process.env.PATH, NODE_ENV: "test", PORT: String(API_PORT), DATABASE_URL: DB_URL,
       SUPABASE_URL: supabaseUrl, SUPABASE_SECRET_KEY: SECRET_KEY, SUPABASE_JWT_SECRET: JWT_SECRET,
-      STORAGE_WORKER_INTERVAL_MS: "300", LIVE_LOCATION_CLEANUP_INTERVAL_MS: "300", LOG_LEVEL: "warn",
+      STORAGE_WORKER_INTERVAL_MS: "300", LIVE_LOCATION_CLEANUP_INTERVAL_MS: "300", ROAD_HAZARD_CLEANUP_INTERVAL_MS: "300", LOG_LEVEL: "warn",
       DVLA_API_KEY: DVLA_KEY, DVLA_VES_URL: dvlaUrl, DVLA_TIMEOUT_MS: "300",
       MAPBOX_DIRECTIONS_TOKEN: MAPBOX_TOKEN, MAPBOX_DIRECTIONS_URL: mapboxUrl,
     },
@@ -1412,6 +1412,153 @@ test("the DVLA key and looked-up registrations never appear in responses or logs
 const KESWICK = { lat: 54.600123, lng: -3.134567 };
 const AMBLESIDE = { lat: 54.428765, lng: -2.961234 };
 const routes = (u, body) => post(u, "/navigation/routes", body);
+
+// ─── Road hazards (0020) ─────────────────────────────────────────────────────
+const hz = {
+  report: (u, body) => post(u, "/hazards", body),
+  view: (u, area) => post(u, "/hazards/in-view", area),
+  vote: (u, id, vote) => post(u, `/hazards/${id}/vote`, { vote }),
+};
+/** A map area around a point (about ±5.5 km) */
+const around = (lat, lng, d = 0.05) => ({ minLat: lat - d, minLng: lng - d, maxLat: lat + d, maxLng: lng + d });
+const HZ_KEYS = ["confirmations", "expiresAt", "expiresInMs", "id", "kind", "lastConfirmedAt", "latitude", "longitude", "myVote", "reportedAt"];
+
+test("hazards: signed-in drivers only; the report is validated", async () => {
+  const u = await newUser();
+  expect(await call(null, "POST", "/hazards", { kind: "accident", latitude: 55.1, longitude: -3.1 }), 401, "report without a token");
+  expect(await call(null, "POST", "/hazards/in-view", around(55.1, -3.1)), 401, "map without a token");
+  expect(await call(null, "POST", `/hazards/${randomUUID()}/vote`, { vote: "still_there" }), 401, "vote without a token");
+  expect(await hz.report(u, { kind: "alien", latitude: 55.1, longitude: -3.1 }), 400, "unknown kind");
+  expect(await hz.report(u, { kind: "accident", latitude: 91, longitude: -3.1 }), 400, "impossible latitude");
+  expect(await hz.report(u, { kind: "accident" }), 400, "no position");
+  const vague = await hz.report(u, { kind: "accident", latitude: 55.1, longitude: -3.1, accuracyM: 400 });
+  expect(vague, 422, "a vague fix");
+  assert.equal(vague.body.error, "inaccurate_fix");
+  const stale = await hz.report(u, { kind: "accident", latitude: 55.1, longitude: -3.1, capturedAt: new Date(Date.now() - 10 * 60_000).toISOString() });
+  expect(stale, 422, "a fix from ten minutes ago (no stale queued reports)");
+  assert.equal(stale.body.error, "stale_fix");
+  expect(await hz.vote(u, randomUUID(), "maybe"), 400, "unknown vote");
+  assert.equal((await db.query("select count(*)::int n from public.road_hazards where latitude between 55.0 and 55.2 and longitude between -3.2 and -3.0")).rows[0].n, 0,
+    "nothing was stored");
+});
+
+test("hazards: a report appears on nearby maps, anonymously; the same incident is one marker", async () => {
+  const [r, s, v] = [await newUser("Reporter"), await newUser("Second"), await newUser("Viewer")];
+  const created = await hz.report(r, { kind: "accident", latitude: 55.2000012, longitude: -3.2000049, accuracyM: 8, capturedAt: new Date().toISOString() });
+  expect(created, 201, "report");
+  assert.equal(created.body.outcome, "created");
+  const h = created.body.hazard;
+  assert.deepEqual(Object.keys(h).sort(), HZ_KEYS);
+  assert.equal(h.kind, "accident");
+  assert.equal(h.latitude, 55.2);
+  assert.equal(h.longitude, -3.2, "stored to 5 decimal places");
+  assert.equal(h.myVote, "reported");
+  assert.equal(h.confirmations, 0);
+  assert.ok(h.expiresInMs > 59 * 60_000 && h.expiresInMs <= 60 * 60_000, "up for an hour");
+  // Another driver nearby sees it, with nobody's identity
+  const seen = await hz.view(v, around(55.2, -3.2));
+  expect(seen, 200, "map");
+  assert.deepEqual(seen.body.map((x) => x.id), [h.id]);
+  assert.equal(seen.body[0].myVote, null);
+  for (const leaked of [r.id, r.name, "reporter", "userId", "avatar"]) {
+    assert.ok(!JSON.stringify(seen.body).includes(leaked), `the map shows ${leaked}`);
+  }
+  // Far away: not loaded
+  assert.deepEqual((await hz.view(v, around(55.6, -3.2))).body, [], "a map 44 km away doesn't get it");
+  const huge = await hz.view(v, { minLat: 50, minLng: -6, maxLat: 58, maxLng: 2 });
+  expect(huge, 400, "the whole country at once");
+  assert.equal(huge.body.error, "area_too_large");
+  // The same kind 60 m away: the same marker, confirmed
+  const merged = await hz.report(s, { kind: "accident", latitude: 55.20054, longitude: -3.2 });
+  expect(merged, 200, "second report");
+  assert.equal(merged.body.outcome, "merged");
+  assert.equal(merged.body.hazard.id, h.id);
+  assert.equal(merged.body.hazard.confirmations, 1);
+  const again = await hz.report(s, { kind: "accident", latitude: 55.2001, longitude: -3.2 });
+  assert.equal(again.body.outcome, "already_reported", "reporting it twice doesn't boost it");
+  assert.equal(again.body.hazard.confirmations, 1);
+  assert.equal((await hz.view(v, around(55.2, -3.2))).body.length, 1, "still one marker");
+  // A different kind is its own marker
+  expect(await hz.report(s, { kind: "police", latitude: 55.2, longitude: -3.2 }), 201, "police at the same spot");
+  assert.equal((await hz.view(v, around(55.2, -3.2))).body.length, 2);
+  // Sent live to the area, without anyone's identity
+  const msgs = (await db.query("select payload from realtime.messages where topic = 'hazards:110:-7' and event = 'hazard'")).rows.map((m) => m.payload);
+  assert.ok(msgs.some((m) => m.type === "hazard" && m.id === h.id), "broadcast to the area");
+  assert.ok(!JSON.stringify(msgs).includes(r.id) && !JSON.stringify(msgs).includes(s.id), "no user in any broadcast");
+});
+
+test("hazards: Still there / Not there — one final vote each, not on your own, conservative removal", async () => {
+  const [r, a, b, c] = [await newUser(), await newUser(), await newUser(), await newUser()];
+  const h = (await hz.report(r, { kind: "broken_down", latitude: 55.3, longitude: -3.3 })).body.hazard;
+  const own = await hz.vote(r, h.id, "still_there");
+  expect(own, 409, "confirming your own report");
+  assert.equal(own.body.error, "own_report");
+  const yes = await hz.vote(a, h.id, "still_there");
+  expect(yes, 200, "still there");
+  assert.equal(yes.body.hazard.confirmations, 1);
+  assert.equal(yes.body.hazard.myVote, "still_there");
+  const twice = await hz.vote(a, h.id, "not_there");
+  expect(twice, 409, "changing your vote");
+  assert.equal(twice.body.error, "already_voted");
+  expect(await hz.vote(b, h.id, "not_there"), 200, "one says gone");
+  assert.equal((await hz.view(c, around(55.3, -3.3))).body.length, 1, "one disagreement doesn't clear it");
+  const two = await hz.vote(c, h.id, "not_there");
+  expect(two, 200, "a second says gone");
+  assert.ok(two.body.hazard, "two don't outnumber the report and a confirmation");
+  const d = await newUser();
+  const third = await hz.vote(d, h.id, "not_there");
+  expect(third, 200, "a third says gone");
+  assert.equal(third.body.hazard, null, "now cleared");
+  assert.deepEqual((await hz.view(d, around(55.3, -3.3))).body, [], "and gone from the map");
+  const late = await hz.vote(await newUser(), h.id, "still_there");
+  expect(late, 404, "a cleared hazard can't be voted back");
+  assert.equal(late.body.error, "hazard_gone");
+  expect(await hz.vote(a, randomUUID(), "still_there"), 404, "an unknown hazard");
+  const removed = (await db.query("select payload from realtime.messages where topic = 'hazards:110:-7' and payload->>'type' = 'hazard_removed' and payload->>'id' = $1", [h.id])).rows;
+  assert.equal(removed.length, 1, "the area is told to remove it");
+});
+
+test("hazards: expired reports are gone without any clean-up, and can't be revived", async () => {
+  const [r, v] = [await newUser(), await newUser()];
+  const { rows: [old] } = await db.query(`
+    insert into public.road_hazards (kind, latitude, longitude, created_at, last_confirmed_at, expires_at)
+    values ('police', 55.4, -3.4, now() - interval '2 hours', now() - interval '2 hours', now() - interval '1 hour') returning id`);
+  assert.deepEqual((await hz.view(v, around(55.4, -3.4))).body, [], "an expired hazard is not on the map");
+  expect(await hz.vote(v, old.id, "still_there"), 404, "nor can it be confirmed");
+  const fresh = await hz.report(r, { kind: "police", latitude: 55.4, longitude: -3.4 });
+  expect(fresh, 201, "a new report there");
+  assert.notEqual(fresh.body.hazard.id, old.id, "is a new hazard, not a revival");
+  assert.ok(fresh.body.hazard.expiresInMs <= 30 * 60_000, "police reports last 30 minutes");
+});
+
+test("hazards: at most 5 reports in 10 minutes per driver", async () => {
+  const u = await newUser();
+  for (let i = 0; i < 5; i++) expect(await hz.report(u, { kind: "hazard", latitude: 55.5 + i * 0.01, longitude: -3.5 }), 201, `report ${i + 1}`);
+  const sixth = await hz.report(u, { kind: "hazard", latitude: 55.56, longitude: -3.5 });
+  expect(sixth, 429, "6th report");
+  assert.equal(sixth.body.error, "hazard_rate_limited");
+  expect(await hz.report(await newUser(), { kind: "hazard", latitude: 55.57, longitude: -3.5 }), 201, "other drivers unaffected");
+});
+
+test("hazards: ended reports and delivered broadcasts are cleaned up; nothing about a report is logged", async () => {
+  const u = await newUser();
+  const h = (await hz.report(u, { kind: "flooding", latitude: 55.612345, longitude: -3.612345 })).body.hazard;
+  assert.equal((await db.query("select count(*)::int n from public.road_hazard_votes where hazard_id = $1", [h.id])).rows[0].n, 1);
+  await db.query("update realtime.messages set inserted_at = now() - interval '11 minutes' where event = 'hazard' and payload->>'id' = $1", [h.id]);
+  await db.query("delete from public.road_hazards where id = $1", [h.id]);
+  await db.query(`insert into public.road_hazards (id, kind, latitude, longitude, created_at, last_confirmed_at, expires_at)
+    values ($1, 'flooding', 55.612345, -3.612345, now() - interval '3 days', now() - interval '3 days', now() - interval '2 days')`, [h.id]);
+  let gone = false;
+  for (let i = 0; i < 40 && !gone; i++) {
+    await new Promise((r) => setTimeout(r, 100));
+    gone = (await db.query("select count(*)::int n from public.road_hazards where id = $1", [h.id])).rows[0].n === 0
+      && (await db.query("select count(*)::int n from realtime.messages where event = 'hazard' and inserted_at < now() - interval '10 minutes'")).rows[0].n === 0;
+  }
+  assert.ok(gone, "a hazard ended a day ago, and delivered broadcasts, are removed");
+  for (const leaked of ["55.612345", "-3.612345", "55.61235", "-3.61235", u.id]) {
+    assert.ok(!serverOutput.includes(leaked), `server log mentions ${leaked}`);
+  }
+});
 
 test("routes: signed-in users only; the body is validated", async () => {
   expect(await routes(null, { origin: KESWICK, destination: AMBLESIDE }), 401, "no token");

@@ -24,6 +24,9 @@ import { MemoryStore, LEGACY_KEYS } from '@/lib/backend/storage';
 import type { Vehicle } from '@/lib/backend/model';
 import { toJourney } from '@/lib/backend/mappers';
 import { decodePolyline } from '@/lib/backend/geo';
+import { writeFileSync } from 'node:fs';
+import { createClient } from '@supabase/supabase-js';
+import { areaAround, hazardTopic } from '@/lib/hazards/model';
 
 const need = (k: string) => {
   const v = process.env[k];
@@ -635,6 +638,9 @@ async function run() {
   }
   check('a route request never marks the API as down', p1.connection !== 'server_error', String(p1.connection));
 
+  // ─── 20. Road hazards (migration 0020), against the hosted API and real Realtime
+  await hazardChecks();
+
   // ─── 15. Account deletion ────────────────────────────────────────────────
   section('15. Account deletion');
   await p1.ep.deleteAccount();
@@ -655,7 +661,198 @@ async function run() {
   void userB;
 }
 
+// ─── Road hazards ────────────────────────────────────────────────────────────
+// A test area in the open North Atlantic that no real report is near. Every
+// hazard there, and its broadcasts, are deleted afterwards (cleanup()).
+const HZ = { lat: 47.012345, lng: -35.012345 };
+const HZ_BOX = "latitude between 46.5 and 47.6 and longitude between -35.6 and -34.4";
+const HZ_TOPIC = hazardTopic(HZ.lat, HZ.lng);
+const HZ_KEYS = 'confirmations,expiresAt,expiresInMs,id,kind,lastConfirmedAt,latitude,longitude,myVote,reportedAt';
+const near = (d = 0.05) => ({ minLat: HZ.lat - d, minLng: HZ.lng - d, maxLat: HZ.lat + d, maxLng: HZ.lng + d });
+
+async function hazardChecks() {
+  section('20. Road hazards (hosted API, staging database, real Realtime)');
+  // Drivers: R reports, S reports the same incident, C confirms, D and E say it's gone, F hits the limit
+  const drivers: Record<string, { id: string; email: string; d: Device; token: string }> = {};
+  const hzPassword = randomBytes(18).toString('base64url');
+  console.log(`::add-mask::${hzPassword}`);
+  for (const k of ['r', 's', 'c', 'd', 'e', 'f']) {
+    const email = `driveos-mobile-${RUN}-hz-${k}@example.com`;
+    const id = await adminCreate(email, hzPassword, `Hazard ${k.toUpperCase()}`);
+    const d = device(`hazard ${k}`);
+    await signInWithEmail(d.auth, email, hzPassword);
+    const token = (await d.auth.auth.getSession()).data.session!.access_token;
+    console.log(`::add-mask::${token}`);
+    drivers[k] = { id, email, d, token };
+  }
+  const { r, s, c, d, e, f } = drivers as Required<typeof drivers>;
+  if (process.env.HAZARD_LEAK_CHECK_FILE) {
+    // For the workflow's log check (ids and test addresses only; never tokens)
+    writeFileSync(process.env.HAZARD_LEAK_CHECK_FILE, Object.values(drivers).flatMap((x) => [x.id, x.email]).join('\n') + '\n');
+  }
+  const bodies: string[] = [];
+  const keep = <T,>(v: T) => { bodies.push(JSON.stringify(v)); return v; };
+  const err = (x: unknown) => (x instanceof ApiError ? `${x.status} ${x.code}` : x instanceof Error ? x.message : 'accepted');
+
+  // Signed-in drivers only
+  for (const path of ['/api/hazards', '/api/hazards/in-view', `/api/hazards/${randomUUID()}/vote`]) {
+    const anon = await fetch(`${API_URL}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    check(`POST ${path.replace(/[0-9a-f-]{36}/, ':id')} needs a signed-in driver`, anon.status === 401, `HTTP ${anon.status}`);
+  }
+
+  // Realtime: two drivers listen on the test area's cell before anything is reported
+  const rt = await hazardListeners(s, c);
+  check(`realtime: a signed-in driver can join the hazard area ${HZ_TOPIC}`, rt.a.status === 'SUBSCRIBED', rt.a.status);
+
+  // Create
+  const fix = () => ({ accuracyM: 6, capturedAt: new Date().toISOString() });
+  const created = keep(await r.d.ep.reportHazard({ kind: 'accident', latitude: HZ.lat, longitude: HZ.lng, ...fix() }).catch((x) => x));
+  const h = created?.hazard as Record<string, unknown> | undefined;
+  check('create: a report creates a hazard', created?.outcome === 'created' && typeof h?.id === 'string', err(created));
+  check('create: only the map\'s fields come back', !!h && Object.keys(h).sort().join(',') === HZ_KEYS, h ? Object.keys(h).sort().join(',') : '');
+  check('create: the position is stored to 5 decimal places', h?.latitude === 47.01235 && h?.longitude === -35.01235, `${h?.latitude}, ${h?.longitude}`);
+  check('create: an accident is up for an hour', typeof h?.expiresInMs === 'number' && h.expiresInMs > 59 * 60_000 && h.expiresInMs <= 60 * 60_000);
+  check('create: the reporter sees only their own relation to it', h?.myVote === 'reported');
+  const stale = keep(await r.d.ep.reportHazard({ kind: 'hazard', latitude: HZ.lat, longitude: HZ.lng, accuracyM: 6, capturedAt: new Date(Date.now() - 10 * 60_000).toISOString() }).catch((x) => x));
+  check('create: a ten-minute-old fix is refused (no stale reports)', stale instanceof ApiError && stale.code === 'stale_fix', err(stale));
+  const id = String(h?.id ?? '');
+  const gotCreate = await waitUntil(() => rt.a.received.some((m) => m.type === 'hazard' && m.id === id));
+  check('realtime: the new hazard reaches drivers listening on its cell', gotCreate);
+
+  // Nearby
+  const seen = keep(await s.d.ep.hazardsInView(near()).catch((x) => x)) as Array<Record<string, unknown>>;
+  check('nearby: it appears to another driver in the area', Array.isArray(seen) && seen.some((x) => x.id === id));
+  check('nearby: with no vote of theirs and nobody\'s identity', Array.isArray(seen) && seen.find((x) => x.id === id)?.myVote === null);
+  const outside = keep(await s.d.ep.hazardsInView({ minLat: HZ.lat + 0.5, minLng: HZ.lng - 0.05, maxLat: HZ.lat + 0.6, maxLng: HZ.lng + 0.05 }).catch((x) => x));
+  check('nearby: it is not loaded for an area 55 km away', Array.isArray(outside) && !outside.some((x: Record<string, unknown>) => x.id === id));
+  const huge = await s.d.ep.hazardsInView({ minLat: 40, minLng: -40, maxLat: 55, maxLng: -20 }).catch((x) => x);
+  check('nearby: an oversized area is refused (no global download)', huge instanceof ApiError && huge.code === 'area_too_large', err(huge));
+
+  // Duplicate
+  const merged = keep(await s.d.ep.reportHazard({ kind: 'accident', latitude: HZ.lat + 0.00054, longitude: HZ.lng, ...fix() }).catch((x) => x));
+  check('duplicate: the same kind 60 m away confirms it instead of adding a marker',
+    merged?.outcome === 'merged' && (merged.hazard as Record<string, unknown>)?.id === id, err(merged) || merged?.outcome);
+  const again = keep(await s.d.ep.reportHazard({ kind: 'accident', latitude: HZ.lat, longitude: HZ.lng, ...fix() }).catch((x) => x));
+  check('duplicate: reporting it again changes nothing', again?.outcome === 'already_reported'
+    && (again.hazard as Record<string, unknown>)?.confirmations === 1, again?.outcome);
+  const one = keep(await c.d.ep.hazardsInView(near()).catch((x) => x)) as Array<Record<string, unknown>>;
+  check('duplicate: still one marker', Array.isArray(one) && one.filter((x) => x.kind === 'accident').length === 1);
+
+  // Vote
+  const own = await r.d.ep.voteHazard(id, 'still_there').catch((x) => x);
+  check('vote: the reporter cannot confirm their own report', own instanceof ApiError && own.code === 'own_report', err(own));
+  const ownMerged = await s.d.ep.voteHazard(id, 'still_there').catch((x) => x);
+  check('vote: nor can a driver whose report was merged into it', ownMerged instanceof ApiError && ownMerged.code === 'own_report', err(ownMerged));
+  const yes = keep(await c.d.ep.voteHazard(id, 'still_there').catch((x) => x));
+  check('vote: Still there counts', yes?.outcome === 'counted' && (yes.hazard as Record<string, unknown>)?.confirmations === 2, err(yes));
+  const twice = await c.d.ep.voteHazard(id, 'not_there').catch((x) => x);
+  check('vote: one vote per driver, final', twice instanceof ApiError && twice.code === 'already_voted', err(twice));
+  const gotUpdate = await waitUntil(() => rt.a.received.some((m) => m.type === 'hazard' && m.id === id && m.confirmations === 2));
+  check('realtime: the confirmation reaches the cell', gotUpdate);
+
+  // Removal: one disagreement is not enough; enough who outnumber its support remove it
+  const police = keep(await r.d.ep.reportHazard({ kind: 'police', latitude: HZ.lat + 0.01, longitude: HZ.lng, ...fix() }).catch((x) => x));
+  const pid = String((police?.hazard as Record<string, unknown>)?.id ?? '');
+  const no1 = keep(await d.d.ep.voteHazard(pid, 'not_there').catch((x) => x));
+  check('removal: one Not there is counted but leaves it up', no1?.outcome === 'counted' && no1.hazard != null, err(no1));
+  const no2 = keep(await e.d.ep.voteHazard(pid, 'not_there').catch((x) => x));
+  check('removal: a second, outnumbering its one report, removes it', no2?.outcome === 'counted' && no2.hazard === null, err(no2));
+  const afterRemoval = await c.d.ep.hazardsInView(near()).catch((x) => x);
+  check('removal: it is gone from the map', Array.isArray(afterRemoval) && !afterRemoval.some((x: Record<string, unknown>) => x.id === pid));
+  const gotRemoved = await waitUntil(() => rt.a.received.some((m) => m.type === 'hazard_removed' && m.id === pid));
+  check('realtime: its removal reaches the cell', gotRemoved);
+  const late = await c.d.ep.voteHazard(pid, 'still_there').catch((x) => x);
+  check('removal: it cannot be voted back', late instanceof ApiError && late.code === 'hazard_gone', err(late));
+
+  // Expiry (a hazard that ended an hour ago, written straight to the staging database)
+  const expired = sql(`insert into public.road_hazards (kind, latitude, longitude, created_at, last_confirmed_at, expires_at)
+    values ('flooding', ${HZ.lat + 0.02}, ${HZ.lng}, now() - interval '5 hours', now() - interval '5 hours', now() - interval '1 hour') returning id`);
+  const listed = await c.d.ep.hazardsInView(near()).catch((x) => x);
+  check('expiry: an expired hazard is not listed (no clean-up needed)', Array.isArray(listed) && !listed.some((x: Record<string, unknown>) => x.id === expired));
+  const revive = await c.d.ep.voteHazard(expired, 'still_there').catch((x) => x);
+  check('expiry: it cannot be confirmed back to life', revive instanceof ApiError && revive.code === 'hazard_gone', err(revive));
+  const fresh = keep(await d.d.ep.reportHazard({ kind: 'flooding', latitude: HZ.lat + 0.02, longitude: HZ.lng, ...fix() }).catch((x) => x));
+  check('expiry: a new report there is a new hazard, not a revival', fresh?.outcome === 'created' && (fresh.hazard as Record<string, unknown>)?.id !== expired, err(fresh));
+
+  // Limits (enforced by the database)
+  const outcomes: string[] = [];
+  for (let i = 0; i < 6; i++) {
+    const x = await f.d.ep.reportHazard({ kind: 'hazard', latitude: HZ.lat - 0.05 - i * 0.01, longitude: HZ.lng + 0.1, ...fix() }).catch((y) => y);
+    outcomes.push(x instanceof ApiError ? x.code : x.outcome);
+  }
+  check('limits: at most 5 reports in 10 minutes per driver', outcomes.join(',') === 'created,created,created,created,created,hazard_rate_limited', outcomes.join(','));
+
+  // Realtime: clients can't publish, malformed or anonymous joins are refused
+  const fakeId = randomUUID();
+  await rt.channelA?.send({ type: 'broadcast', event: 'hazard', payload: { type: 'hazard', id: fakeId, kind: 'accident' } }).catch(() => null);
+  await sleep(4000);
+  check('realtime: a client cannot publish to a hazard cell', !rt.b.received.some((m) => m.id === fakeId)
+    && sql(`select count(*) from realtime.messages where payload->>'id' = '${fakeId}'`) === '0');
+  const malformed = await joinHazardTopic(c.token, `${HZ_TOPIC}:x`);
+  check('realtime: a malformed hazard topic is refused', malformed.status !== 'SUBSCRIBED', malformed.status);
+  const anonJoin = await joinHazardTopic(null, HZ_TOPIC);
+  check('realtime: a signed-out client cannot join a hazard cell', anonJoin.status !== 'SUBSCRIBED', anonJoin.status);
+  const sent = sql(`select coalesce(string_agg(payload::text, ' '), '') from realtime.messages where event = 'hazard' and topic = '${HZ_TOPIC}'`);
+  const received = JSON.stringify([...rt.a.received, ...rt.b.received]);
+
+  // Privacy: nothing about any driver anywhere a hazard travels
+  const everything = [bodies.join('\n'), received, sent].join('\n');
+  const leaked = Object.values(drivers).flatMap((x) => [['user id', x.id], ['email', x.email], ['token', x.token]] as const)
+    .concat([['display name', 'Hazard '] as const, ['reporter field', 'reporter'] as const, ['user field', 'userId'] as const])
+    .filter(([, v]) => everything.includes(v)).map(([what]) => what);
+  check('privacy: no user id, email, name, profile or token in any hazard response or broadcast', leaked.length === 0, [...new Set(leaked)].join(', '));
+  check('privacy: broadcasts carry only the map\'s fields', [...rt.a.received].every((m) => m.type === 'hazard_removed'
+    ? Object.keys(m).sort().join(',') === 'id,type'
+    : Object.keys(m).sort().join(',') === 'confirmations,expiresAt,expiresInMs,id,kind,lastConfirmedAt,latitude,longitude,reportedAt,type'));
+  await rt.close();
+  console.log(`     hazard area cell: ${HZ_TOPIC}; topics a driver here would join: ${hazardTopicsNear().join(', ')}`);
+}
+
+type HazardMessage = Record<string, unknown> & { type?: string; id?: string };
+async function joinHazardTopic(token: string | null, topic: string) {
+  const client = createClient(BASE, PUB_KEY, { auth: { persistSession: false, autoRefreshToken: false } });
+  if (token) await client.realtime.setAuth(token);
+  const received: HazardMessage[] = [];
+  const channel = client.channel(topic, { config: { private: true } });
+  const status = await new Promise<string>((resolve) => {
+    const timer = setTimeout(() => resolve('NO_ANSWER'), 15_000);
+    channel.on('broadcast', { event: 'hazard' }, (m) => received.push(m.payload as HazardMessage))
+      .subscribe((st) => { if (st !== 'CLOSED') { clearTimeout(timer); resolve(st); } });
+  });
+  return { status, received, channel, close: async () => { await client.removeAllChannels(); } };
+}
+async function hazardListeners(a: { token: string }, b: { token: string }) {
+  let first = await joinHazardTopic(a.token, HZ_TOPIC);
+  if (first.status !== 'SUBSCRIBED') {
+    // The first connection to a project's Realtime may still be setting it up
+    console.log(`     hazard cell: ${first.status} on the first try; retrying in 10 s`);
+    await first.close();
+    await sleep(10_000);
+    first = await joinHazardTopic(a.token, HZ_TOPIC);
+  }
+  const second = await joinHazardTopic(b.token, HZ_TOPIC);
+  return { a: first, b: second, channelA: first.channel, close: async () => { await first.close(); await second.close(); } };
+}
+async function waitUntil(test: () => boolean, ms = 15_000) {
+  for (const end = Date.now() + ms; Date.now() < end; await sleep(250)) if (test()) return true;
+  return false;
+}
+/** The cells the app would join around the test point (its 15 km area) */
+function hazardTopicsNear(): string[] {
+  const a = areaAround(HZ.lat, HZ.lng, 15);
+  const out = new Set<string>();
+  for (const lat of [a.minLat, a.maxLat]) for (const lng of [a.minLng, a.maxLng]) out.add(hazardTopic(lat, lng));
+  return [...out];
+}
+
 async function cleanup() {
+  // Test hazards (their votes go with them) and their broadcasts
+  try {
+    sql(`delete from public.road_hazards where ${HZ_BOX}`);
+    // Only the test area's cells (45–50° N, 35–40° W: open ocean)
+    sql(`delete from realtime.messages where event = 'hazard' and topic like 'hazards:9_:-7_'`);
+  } catch (err) { console.error(`Hazard cleanup: ${(err as Error).message}`); }
+
   for (const id of createdUsers) {
     const files = sql(`select bucket_id || '|' || name from storage.objects where split_part(name, '/', 1) = '${id}'`);
     const byBucket: Record<string, string[]> = {};
@@ -697,6 +894,9 @@ const leftovers = sql(`
   select (select count(*) from auth.users where email like 'driveos-mobile-${RUN}-%')
        + (select count(*) from public.profiles p join auth.users u on u.id = p.id where u.email like 'driveos-mobile-${RUN}-%')`);
 check('nothing left behind (test accounts)', leftovers === '0', `${leftovers} leftover rows`);
+const hazardLeftovers = sql(`select (select count(*) from public.road_hazards where ${HZ_BOX})
+  + (select count(*) from realtime.messages where event = 'hazard' and topic = '${HZ_TOPIC}')`);
+check('nothing left behind (test hazards and their broadcasts)', hazardLeftovers === '0', `${hazardLeftovers} leftover rows`);
 const bad = results.filter((r) => !r.ok);
 console.log(`\n${results.length - bad.length}/${results.length} Phase 5 staging checks passed`);
 process.exit(failed || bad.length ? 1 : 0);

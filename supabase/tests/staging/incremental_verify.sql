@@ -13,7 +13,10 @@
 --      temporary fixture users (@example.test) that no other row refers to;
 --   4. the Realtime inbox (0017);
 --   5. private live location (0018): who may read a position, and who is
---      sent it, with the same fixture users and a temporary Convoy.
+--      sent it, with the same fixture users and a temporary Convoy;
+--   6. road hazards (0020): anonymous, read-only to clients, reported,
+--      merged, voted and removed only through the API's functions, at a
+--      test position in the open Pacific that no real report is near.
 -- The workflow runs it INSIDE A TRANSACTION THAT IS ALWAYS ROLLED BACK, and
 -- then confirms nothing was left behind. Never run it any other way against a
 -- hosted project.
@@ -381,5 +384,53 @@ insert into public.live_locations (user_id, latitude, longitude, driving, expire
 select pg_temp.ok(pg_temp.live_seen_by(pg_temp.id('f')), 'while driving, backgrounded during a drive: still shared');
 update public.user_presence set driving = false where user_id = pg_temp.id('o');
 select pg_temp.ok(not pg_temp.live_seen_by(pg_temp.id('f')), 'while driving, the drive ends: hidden');
+
+-- ─── 6. Road hazards (0020) ──────────────────────────────────────────────────
+\echo '--- road hazards (0020)'
+select pg_temp.ok(
+  (select array_agg(column_name::text order by ordinal_position) from information_schema.columns
+    where table_schema = 'public' and table_name = 'road_hazards')
+  = array['id','kind','latitude','longitude','geog','created_at','last_confirmed_at','expires_at','support','dismissals','removed_at'],
+  'road_hazards has the expected columns, and no user column');
+select pg_temp.ok(
+  (select array_agg(policyname::text order by policyname) from pg_policies
+    where schemaname = 'public' and tablename in ('road_hazards', 'road_hazard_votes'))
+  = array['road_hazard_votes_select_own', 'road_hazards_select_active']
+  and not exists (select 1 from pg_policies where schemaname = 'public'
+                   and tablename in ('road_hazards', 'road_hazard_votes') and cmd <> 'SELECT'),
+  'hazard tables are read-only to clients (no write policies)');
+select pg_temp.ok(
+  not has_function_privilege('authenticated', 'private.report_hazard(uuid, text, double precision, double precision)', 'EXECUTE')
+  and not has_function_privilege('authenticated', 'private.vote_hazard(uuid, uuid, text)', 'EXECUTE')
+  and not has_function_privilege('authenticated', 'private.hazards_in_view(uuid, double precision, double precision, double precision, double precision, integer)', 'EXECUTE')
+  and not has_function_privilege('anon', 'private.report_hazard(uuid, text, double precision, double precision)', 'EXECUTE'),
+  'only the API can report, vote or list hazards');
+create temp table hz_v (label text primary key, id uuid);
+insert into hz_v select 'a', hazard_id from private.report_hazard(pg_temp.id('o'), 'accident', -60.0, -150.0) where outcome = 'created';
+select pg_temp.ok((select count(*) = 1 from hz_v), 'a report creates a hazard');
+select pg_temp.ok((select outcome = 'merged' from private.report_hazard(pg_temp.id('f'), 'accident', -60.0007, -150.0)),
+  'a second report 80 m away confirms it instead of adding a marker');
+select pg_temp.ok((select outcome = 'already_reported' from private.report_hazard(pg_temp.id('f'), 'accident', -60.0, -150.0)),
+  'reporting it again changes nothing');
+select pg_temp.ok(private.vote_hazard(pg_temp.id('o'), (select id from hz_v), 'still_there') = 'own_report', 'a reporter cannot confirm their own');
+select pg_temp.ok(private.vote_hazard(pg_temp.id('s'), (select id from hz_v), 'not_there') = 'counted'
+              and private.vote_hazard(pg_temp.id('s'), (select id from hz_v), 'not_there') = 'already_voted', 'one vote per person');
+select pg_temp.ok((select removed_at is null and support = 2 and dismissals = 1 from public.road_hazards where id = (select id from hz_v)),
+  'one "Not there" against two reports leaves it up');
+select pg_temp.ok(
+  (select array_agg(k order by k) from private.hazards_in_view(pg_temp.id('s'), -60.1, -150.1, -59.9, -149.9) h, jsonb_object_keys(h.hazard) k)
+  = array['confirmations','expiresAt','expiresInMs','id','kind','lastConfirmedAt','latitude','longitude','reportedAt'],
+  'a viewer gets the kind, position and times only, nobody''s identity');
+select pg_temp.ok((select my_vote = 'not_there' from private.hazards_in_view(pg_temp.id('s'), -60.1, -150.1, -59.9, -149.9)),
+  'and their own vote');
+select pg_temp.ok(not exists (select 1 from private.hazards_in_view(pg_temp.id('s'), -70.0, -160.0, -50.0, -140.0)),
+  'an oversized area returns nothing');
+select pg_temp.ok(pg_temp.can_join('s', 'hazards:-120:-300'), 'a signed-in user can join a hazard area');
+select pg_temp.ok(not pg_temp.can_join('s', 'hazards:-120:-300:x'), 'not a malformed one');
+select pg_temp.ok(
+  exists (select 1 from realtime.messages where topic = 'hazards:-120:-300' and event = 'hazard' and payload->>'type' = 'hazard')
+  and not exists (select 1 from realtime.messages where topic = 'hazards:-120:-300' and event = 'hazard'
+                   and payload::text ~ ('(' || pg_temp.id('o') || '|' || pg_temp.id('f') || '|userId|reporter)')),
+  'the report was broadcast to its area, carrying no user');
 
 \echo '=== ALL INCREMENTAL VERIFICATION CHECKS PASSED ==='
