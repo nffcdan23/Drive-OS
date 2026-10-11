@@ -16,10 +16,15 @@
 //    rerouting), GPS good, a recent fix accurate to 30 m, and (when moving)
 //    the car heading the way the route goes there.
 //
-// Hazards carry no direction of travel (reports store only a position), so
-// a report from the opposite carriageway close to the route, or from a road
-// crossing over or under it right at the crossing, can still match. That is
-// a known limitation, not something this pretends to know.
+// A hazard reported with the reporter's direction of travel (0021: a 10°
+// bucket, only when the GPS course was reliable) must also run the way the
+// route runs where it matches: within 60° of the route's direction there
+// (smoothed over ±20 m, so a corner or a curve doesn't decide it). Clearly
+// opposite (over 120°: the other carriageway) or in between (a road
+// crossing over or under) is not on this route. A hazard without a
+// direction is matched as before; the limitation then remains that a report
+// from a nearby opposite carriageway, or a road crossing right at the
+// crossing, can still match.
 //
 // Matching a hazard to the route is done once per route (and once per new
 // hazard): the prepared route's segments are grouped into chunks with
@@ -33,7 +38,8 @@
 // No React Native imports, so it is unit-tested under node.
 
 import { turnDeg } from '../backend/geo';
-import { segmentAt, type PreparedRoute, type RouteProgress } from '../navigation/routeProgress';
+import { bearingDeg } from '../backend/geo';
+import { pointAt, segmentAt, type PreparedRoute, type RouteProgress } from '../navigation/routeProgress';
 import type { GpsStatus, NavPhase } from '../navigation/session';
 import { msToKmh } from '../units';
 import type { RoadHazard } from './model';
@@ -69,6 +75,18 @@ export const HAZARD_WARNING = {
   tieWithinM: 50,
   /** Segments per chunk of the route index */
   chunk: 32,
+  /**
+   * A known direction of travel within this of the route's direction (°)
+   * runs the same way. GPS course at 15 km/h and up wanders by about ±20°,
+   * the stored bucket adds up to 5°, and the route's direction is taken over
+   * ±20 m, so a real same-way report is well inside 60° even on a bend; the
+   * other carriageway is near 180°, a crossing road near 90°.
+   */
+  sameDirectionDeg: 60,
+  /** Beyond this (°) it is clearly the opposite way; in between, uncertain (treated as not this route) */
+  oppositeDirectionDeg: 120,
+  /** The route's direction is taken between points this far either side (m) */
+  directionSpanM: 20,
 } as const;
 
 /** Most severe first (only a tie-breaker between hazards at about the same distance) */
@@ -85,9 +103,29 @@ export interface HazardWarning {
   routeAlongM: number;
   /** Severity rank (0 most severe) */
   priority: number;
+  /** The hazard's direction of travel was known (and matched the route's) */
+  directionKnown: boolean;
 }
 
-export type HazardWarningEvent = 'active' | 'passed' | 'removed' | 'rerouted';
+export type HazardWarningEvent = 'active' | 'passed' | 'removed' | 'rerouted' | 'direction_rejected';
+
+export type DirectionVerdict = 'same' | 'opposite' | 'uncertain';
+
+/** The route's direction at `along` (°), over ±directionSpanM so a single vertex doesn't decide it */
+export function routeDirectionAt(p: PreparedRoute, along: number): number {
+  const span = HAZARD_WARNING.directionSpanM;
+  const a = pointAt(p, Math.max(0, along - span));
+  const b = pointAt(p, Math.min(p.total, along + span));
+  return a.latitude === b.latitude && a.longitude === b.longitude ? p.segBearing[segmentAt(p, along)]! : bearingDeg(a, b);
+}
+
+/** How a hazard's known direction of travel relates to the route where it matches (circular, across north) */
+export function directionVerdict(p: PreparedRoute, along: number, headingDeg: number): DirectionVerdict {
+  const diff = turnDeg(headingDeg, routeDirectionAt(p, along));
+  if (diff <= HAZARD_WARNING.sameDirectionDeg) return 'same';
+  if (diff > HAZARD_WARNING.oppositeDirectionDeg) return 'opposite';
+  return 'uncertain';
+}
 
 /** Distance buckets for diagnostics (never an exact distance or a place) */
 export function distanceBucket(m: number): string {
@@ -252,7 +290,7 @@ export interface HazardWarningInput {
 
 export interface HazardWarningsDeps {
   /** Diagnostics: the event, the hazard kind and a distance bucket only */
-  log?: (event: HazardWarningEvent, data: { kind: string; distance: string }) => void;
+  log?: (event: HazardWarningEvent, data: { kind: string; distance?: string; direction?: string }) => void;
 }
 
 export class HazardWarnings {
@@ -260,6 +298,10 @@ export class HazardWarnings {
   private matchedFor: PreparedRoute | null = null;
   /** Hazard id → where it is along the current route (one entry per stretch); empty: not on it */
   private matches = new Map<string, number[]>();
+  /** The direction each match was made with (a hazard that gains one is matched again) */
+  private matchedHeading = new Map<string, number | null>();
+  /** Hazards on the route by position but not by direction (logged once a navigation) */
+  private directionLogged = new Set<string>();
   /** Passed in this navigation: never again */
   private passed = new Set<string>();
   /** Warned in this navigation (logged once) */
@@ -292,6 +334,8 @@ export class HazardWarnings {
       this.matches.clear();
       this.passed.clear();
       this.announced.clear();
+      this.matchedHeading.clear();
+      this.directionLogged.clear();
       this.band = 0;
       this.lowerSince = null;
       this.shown = null;
@@ -308,7 +352,13 @@ export class HazardWarnings {
     const live = input.hazards.filter((h) => h.expiresAt > input.now);
     const liveIds = new Set(live.map((h) => h.id));
     for (const id of [...this.matches.keys()]) if (!liveIds.has(id)) this.matches.delete(id);
-    if (p) for (const h of live) if (!this.matches.has(h.id)) this.matches.set(h.id, matchToRoute(p, h.latitude, h.longitude));
+    if (p) {
+      for (const h of live) {
+        if (this.matches.has(h.id) && this.matchedHeading.get(h.id) === h.travelHeadingDeg) continue;
+        this.matches.set(h.id, this.matchFor(p, h));
+        this.matchedHeading.set(h.id, h.travelHeadingDeg);
+      }
+    }
 
     const progress = input.progress;
     if (!p || !progress || input.phase === 'idle') return this.finish(null, liveIds, rerouted);
@@ -351,6 +401,7 @@ export class HazardWarnings {
           distanceAheadM: Math.max(0, Math.round(pick.distance)),
           routeAlongM: Math.round(ahead.get(pick.h.id)!),
           priority: severityOf(pick.h.kind),
+          directionKnown: pick.h.travelHeadingDeg != null,
         };
       }
     }
@@ -379,11 +430,32 @@ export class HazardWarnings {
     if (next) {
       if (!this.announced.has(next.hazardId)) {
         this.announced.add(next.hazardId);
-        this.deps.log?.('active', { kind: next.kind, distance: distanceBucket(next.distanceAheadM) });
+        this.deps.log?.('active', {
+          kind: next.kind,
+          distance: distanceBucket(next.distanceAheadM),
+          direction: next.directionKnown ? 'known' : 'unknown',
+        });
       }
       this.shown = next;
     }
     return this.publish(next);
+  }
+
+  /**
+   * Where a hazard is on this route: each stretch it's within the corridor
+   * of and, when its direction of travel is known, running the same way.
+   */
+  private matchFor(p: PreparedRoute, h: RoadHazard): number[] {
+    const at = matchToRoute(p, h.latitude, h.longitude);
+    if (h.travelHeadingDeg == null || !at.length) return at;
+    const kept = at.filter((along) => directionVerdict(p, along, h.travelHeadingDeg!) === 'same');
+    if (kept.length < at.length && !this.directionLogged.has(h.id)) {
+      // Kind and why only: never the direction itself
+      this.directionLogged.add(h.id);
+      const opposite = at.some((along) => directionVerdict(p, along, h.travelHeadingDeg!) === 'opposite');
+      this.deps.log?.('direction_rejected', { kind: h.kind, direction: opposite ? 'opposite' : 'uncertain' });
+    }
+    return kept;
   }
 
   private headingAgrees(p: PreparedRoute, progress: RouteProgress, fix: NonNullable<HazardWarningInput['fix']>): boolean {

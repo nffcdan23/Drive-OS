@@ -667,7 +667,7 @@ async function run() {
 const HZ = { lat: 47.012345, lng: -35.012345 };
 const HZ_BOX = "latitude between 46.5 and 47.6 and longitude between -35.6 and -34.4";
 const HZ_TOPIC = hazardTopic(HZ.lat, HZ.lng);
-const HZ_KEYS = 'confirmations,expiresAt,expiresInMs,id,kind,lastConfirmedAt,latitude,longitude,myVote,reportedAt';
+const HZ_KEYS = 'confirmations,expiresAt,expiresInMs,id,kind,lastConfirmedAt,latitude,longitude,myVote,reportedAt,travelHeadingDeg';
 const near = (d = 0.05) => ({ minLat: HZ.lat - d, minLng: HZ.lng - d, maxLat: HZ.lat + d, maxLng: HZ.lng + d });
 
 async function hazardChecks() {
@@ -803,7 +803,7 @@ async function hazardChecks() {
   check('privacy: no user id, email, name, profile or token in any hazard response or broadcast', leaked.length === 0, [...new Set(leaked)].join(', '));
   check('privacy: broadcasts carry only the map\'s fields', [...rt.a.received].every((m) => m.type === 'hazard_removed'
     ? Object.keys(m).sort().join(',') === 'id,type'
-    : Object.keys(m).sort().join(',') === 'confirmations,expiresAt,expiresInMs,id,kind,lastConfirmedAt,latitude,longitude,reportedAt,type'));
+    : Object.keys(m).sort().join(',') === 'confirmations,expiresAt,expiresInMs,id,kind,lastConfirmedAt,latitude,longitude,reportedAt,travelHeadingDeg,type'));
   await rt.close();
   console.log(`     hazard area cell: ${HZ_TOPIC}; topics a driver here would join: ${hazardTopicsNear().join(', ')}`);
 }

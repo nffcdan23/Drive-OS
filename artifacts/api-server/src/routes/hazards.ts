@@ -11,6 +11,7 @@ import {
   presentHazard,
   reportAnswer,
   reportFixProblem,
+  reportHeading,
   round5,
   viewAreaProblem,
   voteAnswer,
@@ -92,6 +93,10 @@ router.post("/hazards/in-view", requireUser, listLimit, handler(async (req, res)
 //   latitude, longitude   the phone's current accepted GPS fix (not a
 //                         route-snapped point)
 //   accuracyM   optional; a fix vaguer than 75 m is refused
+//   headingDeg  optional (0 ≤ h < 360): the driver's direction of travel, sent
+//               by the app only when it judged the GPS course reliable; kept
+//               only with a fresh (30 s), accurate (30 m) fix; stored as a
+//               10° bucket. Older apps send none: nothing changes for them
 //   capturedAt  optional; a fix older than 2 minutes is refused (no stale
 //               reports sent long after the fact)
 // 201 created, or 200 when it confirmed one already there (outcome "merged",
@@ -103,13 +108,17 @@ router.post("/hazards", requireUser, reportLimit, handler(async (req, res) => {
   const longitude = round5(b.num("longitude", { min: -180, max: 180 })!);
   const accuracyM = b.num("accuracyM", { optional: true, nullable: true, min: 0, max: 100_000 }) ?? null;
   const capturedAt = b.timestamp("capturedAt", { optional: true }) ?? null;
+  const rawHeading = b.num("headingDeg", { optional: true, nullable: true, min: 0, max: 360 }) ?? null;
+  if (rawHeading === 360) throw badRequest("invalid_body", "headingDeg must be below 360");
+  const headingDeg = reportHeading({ headingDeg: rawHeading, accuracyM, capturedAt });
   const problem = reportFixProblem({ accuracyM, capturedAt });
   if (problem === "inaccurate_fix") throw new HttpError(422, problem, "Your location isn't accurate enough to report a hazard.");
   if (problem) throw new HttpError(422, problem, "That location is too old to report a hazard with.");
 
   const result = await withoutValues(asUser(req.userId, async (tx) => {
     const r = first<{ hazard_id: string | null; outcome: string }>(await tx.execute(sql`
-      select hazard_id, outcome from private.report_hazard(${req.userId}, ${kind}, ${latitude}, ${longitude})`))!;
+      select hazard_id, outcome
+      from private.report_hazard(${req.userId}, ${kind}, ${latitude}, ${longitude}, ${headingDeg}::double precision)`))!;
     const a = reportAnswer(r.outcome);
     answer(a);
     return { status: a.status, outcome: r.outcome, hazard: r.hazard_id ? await hazardFor(tx, req.userId, r.hazard_id) : null };

@@ -181,10 +181,12 @@ export function useHazardActions() {
     if (!ep) throw new HazardActionError("Reporting isn't available right now.");
     try {
       const receivedAt = Date.now();
-      const res = await ep.reportHazard(reportBody(kind, fix!));
+      const body = reportBody(kind, fix!, receivedAt);
+      const res = await ep.reportHazard(body);
       const hazard = parseHazard(res.hazard, receivedAt);
       if (hazard) store.upsertOwn(hazard.id, hazard);
-      journal.log("hazard_report", { kind, outcome: res.outcome });
+      // Whether a direction went with it: yes or no, never which
+      journal.log("hazard_report", { kind, outcome: res.outcome, direction: "headingDeg" in body ? "yes" : "no" });
       return reportedMessage(res.outcome);
     } catch (err) {
       journal.log("hazard_report", { kind, outcome: err instanceof ApiError ? err.code : "network" });

@@ -46,6 +46,7 @@ schema, Row Level Security, Storage buckets and database functions.
 | 0018 | `live_location` | Private live location: `live_locations` (current position only, with expiry), WHO/WHEN settings, selected-friend and Convoy grants, one canonical visibility rule, fan-out over the private inbox |
 | 0019 | `live_location_strict_modes` | While Using is foreground only; While Driving follows the drive |
 | 0020 | `road_hazards` | Live road hazards: `road_hazards` (anonymous: no user column; kind, position, expiry from `private.hazard_lifetime`, support / dismissals, removal) and owner-readable `road_hazard_votes` (who reported or voted, for duplicates and limits only); `private.report_hazard` (merging, limits), `private.vote_hazard` (Still there / Not there, one final vote each, conservative removal), `private.hazards_in_view` (bounded areas); broadcasts to 0.5° area topics (`hazards:<lat>:<lng>`, any signed-in user may receive, nobody may publish); read-only policies, no client privileges |
+| 0021 | `road_hazard_direction` | Optional `road_hazards.travel_heading_deg` (the reporter's direction of travel as a 10° bucket, only when the app judged the GPS course reliable; fixed once set); `private.report_hazard` gains a direction (the 0020 call stays, with none) and keeps reports clearly opposite in direction (over 120°) as separate hazards; the map's hazard JSON (and broadcasts) carry the direction; no speed, route or reporter is stored |
 
 ## Security model (current stage)
 

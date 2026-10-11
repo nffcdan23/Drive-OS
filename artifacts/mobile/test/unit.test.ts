@@ -10233,7 +10233,8 @@ test('hazards: the server owns the lifetimes, centrally (accident 1 h, hazard an
 
 test('hazards: what arrives is parsed strictly; expiry comes from the server\'s clock; nobody\'s identity is ever kept', () => {
   const h = hz();
-  assert.deepEqual(Object.keys(h).sort(), ['confirmations', 'expiresAt', 'id', 'kind', 'lastConfirmedAt', 'latitude', 'longitude', 'myVote', 'reportedAt']);
+  assert.deepEqual(Object.keys(h).sort(), ['confirmations', 'expiresAt', 'id', 'kind', 'lastConfirmedAt', 'latitude', 'longitude', 'myVote', 'reportedAt', 'travelHeadingDeg']);
+  assert.equal(h.travelHeadingDeg, null, 'a hazard from before 0021: unknown direction');
   assert.equal(h.expiresAt, HZ_T0 + 50 * 60_000, 'remaining lifetime counted from receipt, whatever the phone\'s clock says');
   assert.equal(h.reportedAt, Date.parse('2026-10-11T11:50:00Z'));
   // Extra fields (a reporter, say) are never carried
@@ -10546,7 +10547,7 @@ test('hazards: the report position is the raw accepted fix, never a route-snappe
   const drive = readNav('../app/(tabs)/(drive)/index.tsx');
   const process = drive.slice(drive.indexOf('const processPosition = useCallback('), drive.indexOf('// ── Visual smoothing'));
   const filters = process.indexOf('if (impliedKmh > MAX_PLAUSIBLE_KMH) return;');
-  const stored = process.indexOf('lastAcceptedFixRef.current = { latitude: lat, longitude: lon, accuracyM: accuracy, timestamp: fixTime ?? now };');
+  const stored = process.search(/lastAcceptedFixRef\.current = \{\s*latitude: lat, longitude: lon, accuracyM: accuracy, timestamp: fixTime \?\? now, speedMs, headingDeg: gpsHeading,\s*\};/);
   assert.ok(filters > 0 && stored > filters, 'after the accuracy and plausibility filters');
   assert.ok(process.indexOf('noteHazardPosition(lat, lon);') > stored);
   assert.ok(/const getReportFix = useCallback\(\(\) => lastAcceptedFixRef\.current, \[\]\);/.test(drive));
@@ -10821,7 +10822,8 @@ test('hazard warnings: diagnostics are the event, the kind and a distance bucket
   d.set(d.hazard('7f4c', -4, 800));
   d.drive(drive3(STRAIGHT3, { to: 900 }));
   assert.ok(d.logs.length >= 2);
-  for (const l of d.logs) assert.deepEqual(Object.keys(l).sort(), ['distance', 'event', 'kind']);
+  for (const l of d.logs) assert.ok(['distance,event,kind', 'direction,distance,event,kind'].includes(Object.keys(l).sort().join(',')), Object.keys(l).join(','));
+  assert.ok(d.logs.every((l) => l.direction == null || ['known', 'unknown', 'opposite', 'uncertain'].includes(String(l.direction))));
   assert.ok(!/7f4c|54\.|-3\.|High Street/.test(JSON.stringify(d.logs)));
   assert.equal(distanceBucket(120), '<250m');
   assert.equal(distanceBucket(1_400), '1-2km');
@@ -10849,4 +10851,124 @@ test('hazard warnings: the pill — under the turn card, navigation only; the re
   assert.ok(!/hazard/i.test(session) && /get preparedRoute\(\): PreparedRoute \| null \{\s*return this\.prepared;\s*\}/.test(session));
   // Hazard records are never changed by warnings
   assert.ok(!/upsertOwn|\.apply\(|\.replace\(|\.select\(/.test(readNav('../lib/hazards/warningController.ts')));
+});
+
+// ─── Direction-aware hazard reports (migration 0021) ────────────────────────
+// The reporter's direction of travel goes with a report only when the GPS
+// course is reliable; a hazard with one warns only on a route going its way.
+
+import { REPORT_HEADING, reportHeading } from '@/lib/hazards/report';
+import { directionVerdict, routeDirectionAt } from '@/lib/hazards/warnings';
+
+const dirFix3 = (o: Record<string, unknown> = {}) => ({ latitude: 54.6, longitude: -3.1, accuracyM: 8, timestamp: HZ_T0 - 2_000, speedMs: 13, headingDeg: 87.4, ...o });
+const dirHazard3 = (id: string, x: number, y: number, heading: number | null, kind = 'accident') =>
+  parseHazard({ id, kind, ...at3(x, y), travelHeadingDeg: heading, reportedAt: '2026-10-12T12:00:00Z', expiresInMs: 3_600_000 }, 0)!;
+
+test('hazard direction: captured only from a reliable course — moving, valid, fresh and accurate', () => {
+  assert.equal(reportHeading(dirFix3(), HZ_T0), 87.4, 'moving at 47 km/h with a course: sent');
+  assert.equal(reportHeading(dirFix3({ speedMs: 2 }), HZ_T0), null, 'crawling (7 km/h): none');
+  assert.equal(reportHeading(dirFix3({ speedMs: 0 }), HZ_T0), null, 'stationary: none');
+  assert.equal(reportHeading(dirFix3({ speedMs: null }), HZ_T0), null, 'speed unknown: none');
+  assert.equal(REPORT_HEADING.minSpeedKmh, 15);
+  for (const bad of [-1, 360, 400, Number.NaN, null, undefined]) assert.equal(reportHeading(dirFix3({ headingDeg: bad }), HZ_T0), null, `course ${bad}`);
+  assert.equal(reportHeading(dirFix3({ headingDeg: 0 }), HZ_T0), 0, 'due north is a direction');
+  assert.equal(reportHeading(dirFix3({ timestamp: HZ_T0 - 15_000 }), HZ_T0), null, 'a 15 s old fix: none');
+  assert.equal(reportHeading(dirFix3({ accuracyM: 45 }), HZ_T0), null, 'a 45 m fix: none');
+  assert.equal(reportHeading(dirFix3({ accuracyM: null }), HZ_T0), null, 'unknown accuracy: none');
+  assert.equal(reportHeading(null, HZ_T0), null);
+  // The request: the direction only when reliable, otherwise exactly the old body; never the speed
+  const withDir = reportBody('accident', dirFix3(), HZ_T0);
+  assert.deepEqual(Object.keys(withDir).sort(), ['accuracyM', 'capturedAt', 'headingDeg', 'kind', 'latitude', 'longitude']);
+  assert.equal(withDir.headingDeg, 87.4);
+  const without = reportBody('accident', dirFix3({ speedMs: 1 }), HZ_T0);
+  assert.deepEqual(Object.keys(without).sort(), ['accuracyM', 'capturedAt', 'kind', 'latitude', 'longitude']);
+  assert.ok(!/speed|route|journey/i.test(JSON.stringify([withDir, without])), 'no speed, route or journey');
+});
+
+test('hazard direction: parsed from the map and broadcasts; never shown on the map or in the report UI', () => {
+  assert.equal(dirHazard3('a', 0, 0, 270).travelHeadingDeg, 270);
+  assert.equal(dirHazard3('a', 0, 0, null).travelHeadingDeg, null);
+  assert.equal(parseHazard({ ...hzRaw(), travelHeadingDeg: 400 }, HZ_T0)!.travelHeadingDeg, null, 'nonsense: unknown');
+  assert.equal(parseHazard(hzRaw(), HZ_T0)!.travelHeadingDeg, null, 'an older server: unknown');
+  const e = parseHazardEvent({ ...hzRaw({ travelHeadingDeg: 90 }), type: 'hazard' }, HZ_T0);
+  assert.equal(e?.type === 'hazard' && e.hazard.travelHeadingDeg, 90);
+  // Markers carry no direction; reporting shows none
+  assert.deepEqual(hazardFeatures([dirHazard3('m', 0, 0, 90)], 1).features[0]!.properties, { id: 'm', image: 'derwent-hazard-accident' });
+  assert.ok(!/heading|compass|\bdirection\b|bearing/i.test(readNav('../components/hazards/ReportHazardSheet.tsx')), 'two taps, nothing about direction');
+  assert.ok(!/travelHeading|heading/i.test(readNav('../components/MapboxDriveMap.tsx').slice(readNav('../components/MapboxDriveMap.tsx').indexOf('const HazardLayers'))
+    .split('let tokenSet')[0]!), 'no arrows on the map');
+});
+
+test('hazard direction: compared with the route\'s direction there, circularly (355° vs 5°), over ±20 m', () => {
+  const north = prepareRoute(straightRoute3());
+  assert.ok(Math.abs(routeDirectionAt(north, 1_000)) < 1 || Math.abs(routeDirectionAt(north, 1_000) - 360) < 1);
+  assert.equal(directionVerdict(north, 1_000, 0), 'same');
+  assert.equal(directionVerdict(north, 1_000, 350), 'same', '350° on a road going north');
+  assert.equal(directionVerdict(north, 1_000, 10), 'same');
+  assert.equal(directionVerdict(north, 1_000, 60), 'same', 'the edge of the tolerance');
+  assert.equal(directionVerdict(north, 1_000, 90), 'uncertain', 'a road crossing over or under');
+  assert.equal(directionVerdict(north, 1_000, 180), 'opposite');
+  assert.equal(directionVerdict(north, 1_000, 230), 'opposite');
+  // A road heading 355°: 5° is 10° away, not 350°
+  const nnw = prepareRoute(route3(polyline3([[0, 0], [-87, 1_000]]), [{ at: 0, type: 'depart' }, { at: 100, type: 'arrive' }]));
+  assert.ok(Math.abs(routeDirectionAt(nnw, 500) - 355) < 1, `${routeDirectionAt(nnw, 500)}`);
+  assert.equal(directionVerdict(nnw, 500, 5), 'same');
+  assert.equal(directionVerdict(nnw, 500, 175), 'opposite');
+  // A bend: right at the corner the route's direction is between the two legs
+  const bend = prepareRoute(route3(polyline3([[0, 0], [0, 500], [300, 800]]), [{ at: 0, type: 'depart' }, { at: 92, type: 'arrive' }]));
+  assert.equal(directionVerdict(bend, 500, 20), 'same', 'reported mid-bend: still the same way');
+  assert.equal(directionVerdict(bend, 650, 40), 'same', 'on the new leg (45°)');
+  assert.equal(directionVerdict(bend, 650, 225), 'opposite');
+});
+
+test('hazard direction: same-way hazards warn; the opposite carriageway and crossing roads do not; unknown works as before', () => {
+  // Same direction on a motorway: warns
+  const same = hazardDrive3(straightRoute3('M6'));
+  same.set(same.hazard('x', -4, 2_000));
+  same.store.apply({ type: 'hazard', hazard: dirHazard3('same', -4, 1_800, 0) }, same.h.clock.t);
+  same.drive(drive3(STRAIGHT3, { to: 450 }));
+  assert.equal(same.w?.hazardId, 'same');
+  assert.equal(same.w?.directionKnown, true);
+  // Reported going the other way, even right beside the route (within the corridor): never this route
+  const opp = hazardDrive3(straightRoute3());
+  opp.set(dirHazard3('opp', 8, 800, 180), dirHazard3('cross', -2, 900, 90));
+  opp.drive(drive3(STRAIGHT3, { to: 700 }));
+  assert.equal(opp.w, null, 'the other carriageway and a crossing road: no warning');
+  const rejected = opp.logs.filter((l) => l.event === 'direction_rejected');
+  assert.deepEqual(rejected.map((l) => `${l.kind}:${l.direction}`).sort(), ['accident:opposite', 'accident:uncertain']);
+  assert.ok(rejected.every((l) => !('distance' in l) && Object.keys(l).sort().join(',') === 'direction,event,kind'), 'never the direction itself');
+  // Unknown direction: the earlier rules exactly (the same place, no direction, warns)
+  const legacy = hazardDrive3(straightRoute3());
+  legacy.set(dirHazard3('legacy', 8, 800, null));
+  legacy.drive(drive3(STRAIGHT3, { to: 700 }));
+  assert.equal(legacy.w?.hazardId, 'legacy');
+  assert.equal(legacy.w?.directionKnown, false);
+  assert.ok(legacy.logs.some((l) => l.event === 'active' && l.direction === 'unknown'));
+});
+
+test('hazard direction: a hazard that gains a direction later (a merged report) is matched again', () => {
+  const d = hazardDrive3(straightRoute3());
+  d.set(dirHazard3('h', 5, 900, null));
+  d.drive(drive3(STRAIGHT3, { to: 700 }));
+  assert.equal(d.w?.hazardId, 'h', 'unknown direction: warns');
+  // A report from the opposite carriageway merged into it and gave it a direction
+  d.store.apply({ type: 'hazard', hazard: dirHazard3('h', 5, 900, 180) }, d.h.clock.t);
+  assert.equal(d.w, null, 'now known to be the other way: gone');
+  d.store.apply({ type: 'hazard', hazard: dirHazard3('k', -3, 950, 10) }, d.h.clock.t);
+  assert.equal(d.w?.hazardId, 'k', 'one going this way still warns');
+});
+
+test('hazard direction: diagnostics say whether a direction went, never which; nothing else changed', () => {
+  const ctx = readNav('../context/HazardsContext.tsx');
+  assert.ok(/journal\.log\("hazard_report", \{ kind, outcome: res\.outcome, direction: "headingDeg" in body \? "yes" : "no" \}\)/.test(ctx));
+  assert.ok(!/headingDeg:|travelHeadingDeg/.test(ctx.slice(ctx.indexOf('journal.log("hazard_report"'), ctx.indexOf('journal.log("hazard_report"') + 140)));
+  const warnings = readNav('../lib/hazards/warnings.ts');
+  for (const m of warnings.matchAll(/this\.deps\.log\?\.\('[a-z_]+', \{([^}]*)\}/g)) assert.ok(!/heading|Deg|bearing/i.test(m[1]!), m[1]);
+  // Votes need no direction; the report sheet is still two taps
+  assert.ok(!/heading/i.test(readNav('../components/hazards/HazardCard.tsx')));
+  assert.ok(/onPress=\{\(\) => void send\(k\.kind\)\}/.test(readNav('../components/hazards/ReportHazardSheet.tsx')));
+  // The Drive screen keeps speed and course with the accepted fix (memory only) for this judgement
+  const drive = readNav('../app/(tabs)/(drive)/index.tsx');
+  assert.ok(/timestamp: fixTime \?\? now, speedMs, headingDeg: gpsHeading,/.test(drive));
+  assert.ok(!/AsyncStorage|writeJson/.test(readNav('../lib/hazards/report.ts')));
 });

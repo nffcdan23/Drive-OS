@@ -8,6 +8,7 @@ import {
   MAX_REPORT_ACCURACY_M,
   presentHazard,
   reportAnswer,
+  reportHeading,
   reportFixProblem,
   round5,
   viewAreaProblem,
@@ -66,8 +67,26 @@ test("hazards: a hazard as a driver sees it — the map's fields and their own v
     expiresInMs: 1000, confirmations: 2, reporterId: "someone", support: 3, dismissals: 1,
   };
   const out = presentHazard(db, "still_there");
-  assert.deepEqual(Object.keys(out).sort(), ["confirmations", "expiresAt", "expiresInMs", "id", "kind", "lastConfirmedAt", "latitude", "longitude", "myVote", "reportedAt"]);
+  assert.deepEqual(Object.keys(out).sort(), ["confirmations", "expiresAt", "expiresInMs", "id", "kind", "lastConfirmedAt", "latitude", "longitude", "myVote", "reportedAt", "travelHeadingDeg"]);
+  assert.equal(out.travelHeadingDeg, null, "a hazard from before 0021 (no field): unknown direction");
+  assert.equal(presentHazard({ ...db, travelHeadingDeg: 270 }, null).travelHeadingDeg, 270);
+  assert.equal(presentHazard({ ...db, travelHeadingDeg: 400 }, null).travelHeadingDeg, null, "nonsense is never passed on");
   assert.equal(out.myVote, "still_there");
   assert.equal(presentHazard(db, "something else").myVote, null);
   assert.equal(presentHazard(db, null).myVote, null);
+});
+
+test("hazards: a direction of travel is kept only with a fresh, accurate fix (the app gates it first)", () => {
+  const now = Date.parse("2026-10-12T12:00:00Z");
+  const fresh = new Date(now - 3_000);
+  assert.equal(reportHeading({ headingDeg: 87.4, accuracyM: 8, capturedAt: fresh }, now), 87.4);
+  assert.equal(reportHeading({ headingDeg: 0, accuracyM: 8, capturedAt: fresh }, now), 0, "north is a direction");
+  assert.equal(reportHeading({ headingDeg: null, accuracyM: 8, capturedAt: fresh }, now), null);
+  assert.equal(reportHeading({ accuracyM: 8, capturedAt: fresh }, now), null, "an older app sends none");
+  assert.equal(reportHeading({ headingDeg: 87, accuracyM: 8, capturedAt: null }, now), null, "no fix time: not kept");
+  assert.equal(reportHeading({ headingDeg: 87, accuracyM: 8, capturedAt: new Date(now - 60_000) }, now), null, "a minute old: not kept");
+  assert.equal(reportHeading({ headingDeg: 87, accuracyM: 45, capturedAt: fresh }, now), null, "45 m accuracy: not kept");
+  assert.equal(reportHeading({ headingDeg: 87, accuracyM: null, capturedAt: fresh }, now), null, "unknown accuracy: not kept");
+  assert.equal(reportHeading({ headingDeg: -1, accuracyM: 8, capturedAt: fresh }, now), null, "iOS's -1 (no course)");
+  assert.equal(reportHeading({ headingDeg: 360, accuracyM: 8, capturedAt: fresh }, now), null);
 });

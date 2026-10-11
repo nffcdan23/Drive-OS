@@ -5,6 +5,7 @@
 //
 // No React Native imports, so it is unit-tested under node.
 
+import { msToKmh } from '../units';
 import type { HazardKind } from './model';
 
 /** The Drive screen's latest accepted GPS fix: the raw position, never a route-snapped one */
@@ -14,6 +15,27 @@ export interface ReportFix {
   accuracyM: number | null;
   /** When the phone took it (ms) */
   timestamp: number;
+  /** The GPS speed (m/s) and course (degrees; negative = none): only to judge the direction of travel, never sent */
+  speedMs?: number | null;
+  headingDeg?: number | null;
+}
+
+/**
+ * When the direction of travel goes with a report (0021): only from a GPS
+ * course that can be trusted. Below about 15 km/h the course wanders (and
+ * standing still it is meaningless), and an old or vague fix says little.
+ */
+export const REPORT_HEADING = { minSpeedKmh: 15, maxAgeMs: 10_000, maxAccuracyM: 30 } as const;
+
+/** The driver's direction of travel to send with a report, or null (sent as nothing) */
+export function reportHeading(fix: ReportFix | null, now: number): number | null {
+  if (!fix) return null;
+  const h = fix.headingDeg;
+  if (h == null || !Number.isFinite(h) || h < 0 || h >= 360) return null;
+  if (fix.speedMs == null || !Number.isFinite(fix.speedMs) || msToKmh(fix.speedMs) < REPORT_HEADING.minSpeedKmh) return null;
+  if (now - fix.timestamp > REPORT_HEADING.maxAgeMs || fix.timestamp - now > REPORT_HEADING.maxAgeMs) return null;
+  if (fix.accuracyM == null || fix.accuracyM > REPORT_HEADING.maxAccuracyM) return null;
+  return h;
 }
 
 /** The same limits as the API (artifacts/api-server/src/lib/hazards.ts) */
@@ -34,14 +56,20 @@ export const FIX_PROBLEM_MESSAGE: Record<ReportFixProblem, string> = {
   inaccurate_fix: "Your location isn't accurate enough yet. The report wasn't sent.",
 };
 
-/** The request body (POST /hazards): the fix as taken, with when it was taken */
-export function reportBody(kind: HazardKind, fix: ReportFix) {
+/**
+ * The request body (POST /hazards): the fix as taken, with when it was
+ * taken, and the direction of travel only when reliable (otherwise the field
+ * is left out, exactly as before). Never the speed, a route or a journey.
+ */
+export function reportBody(kind: HazardKind, fix: ReportFix, now = Date.now()) {
+  const headingDeg = reportHeading(fix, now);
   return {
     kind,
     latitude: fix.latitude,
     longitude: fix.longitude,
     accuracyM: fix.accuracyM,
     capturedAt: new Date(fix.timestamp).toISOString(),
+    ...(headingDeg != null ? { headingDeg } : {}),
   };
 }
 

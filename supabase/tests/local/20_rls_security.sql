@@ -1308,7 +1308,7 @@ select pg_temp.ok_bool(pg_temp.visible_ids(50.0, -4.0, 56.0, 1.0) = '{}', true, 
 select pg_temp.ok_bool(pg_temp.visible_ids(54.55, -3.05, 54.45, -2.95) = '{}', true, 'an inverted area is refused');
 select pg_temp.ok_bool((select array_agg(k order by k) from private.hazards_in_view(pg_temp.hu('V'), 54.45, -3.05, 54.55, -2.95) h, jsonb_object_keys(h.hazard) k
                          where h.hazard->>'id' = (select id from hz where label = 'acc')::text)
-  = array['confirmations','expiresAt','expiresInMs','id','kind','lastConfirmedAt','latitude','longitude','reportedAt'], true,
+  = array['confirmations','expiresAt','expiresInMs','id','kind','lastConfirmedAt','latitude','longitude','reportedAt','travelHeadingDeg'], true,
   'what a viewer gets: kind, position, times and a count — nobody''s identity');
 select pg_temp.ok_bool((select my_vote from private.hazards_in_view(pg_temp.hu('V'), 54.45, -3.05, 54.55, -2.95) where hazard->>'id' = (select id from hz where label = 'acc')::text) = 'not_there', true,
   'the caller sees their own vote (only theirs)');
@@ -1370,5 +1370,80 @@ delete from auth.users where id = pg_temp.hu('R');
 select pg_temp.ok_bool(not exists (select 1 from public.road_hazard_votes where user_id = pg_temp.hu('R'))
                    and exists (select 1 from public.road_hazards where id = (select id from hz where label = 'acc')), true,
   'deleting an account removes its reports and votes, not the hazards');
+
+\echo '--- road hazard direction (0021)'
+-- Own cast: drivers D1–D4 (the 0020 cast is near its limits)
+create function pg_temp.du(p int) returns uuid language sql immutable as $$
+  select ('30000000-0000-4000-8000-00000000000' || p)::uuid
+$$;
+insert into auth.users (id, email, raw_user_meta_data)
+select pg_temp.du(i), 'heading-' || i || '@example.test', json_build_object('display_name', 'Heading ' || i) from generate_series(1, 4) i;
+create function pg_temp.dreport(p_who int, p_kind text, p_lat double precision, p_lng double precision, p_heading double precision)
+returns text language sql as $$
+  select outcome || ':' || coalesce(hazard_id::text, '-') from private.report_hazard(pg_temp.du(p_who), p_kind, p_lat, p_lng, p_heading)
+$$;
+create temp table hzd (label text primary key, id uuid not null);
+
+-- The column: optional, 10° buckets only, no other travel data
+select pg_temp.ok_bool((select is_nullable = 'YES' and data_type = 'smallint' from information_schema.columns
+                         where table_schema = 'public' and table_name = 'road_hazards' and column_name = 'travel_heading_deg'), true,
+  'travel_heading_deg: optional small integer');
+select pg_temp.ok_bool(exists (select 1 from information_schema.columns where table_schema = 'public' and table_name = 'road_hazards'
+                               and column_name ~ '(speed|route|journey|position|reporter|user|accuracy)'), false,
+  'no speed, route, journey, accuracy or user is stored with a hazard');
+select pg_temp.expect_error_sql($$insert into public.road_hazards (kind, latitude, longitude, expires_at, travel_heading_deg) values ('hazard', 1, 1, now() + interval '1 hour', 355)$$, '23514', 'only 10° buckets are stored');
+select pg_temp.expect_error_sql($$insert into public.road_hazards (kind, latitude, longitude, expires_at, travel_heading_deg) values ('hazard', 1, 1, now() + interval '1 hour', 360)$$, '23514', 'and only 0–359');
+select pg_temp.ok_bool(private.hazard_heading_bucket(4) = 0 and private.hazard_heading_bucket(356) = 0 and private.hazard_heading_bucket(354) = 350
+                   and private.hazard_heading_bucket(87.4) = 90 and private.hazard_heading_bucket(-1) is null and private.hazard_heading_bucket(360) is null
+                   and private.hazard_heading_bucket('NaN') is null and private.hazard_heading_bucket(null) is null, true,
+  'bucketing: nearest 10°, wrapping at north; nonsense is no direction');
+select pg_temp.ok_bool(private.hazard_headings_opposite(0::smallint, 180::smallint) and private.hazard_headings_opposite(10::smallint, 200::smallint)
+                   and private.hazard_headings_opposite(350::smallint, 160::smallint), true, 'opposite directions are recognised across north');
+select pg_temp.ok_bool(private.hazard_headings_opposite(350::smallint, 10::smallint) or private.hazard_headings_opposite(0::smallint, 120::smallint)
+                   or private.hazard_headings_opposite(0::smallint, 90::smallint) or private.hazard_headings_opposite(null, 180::smallint), false,
+  'near-same, crossing (90°) or unknown directions are not "opposite"');
+
+-- Reporting with and without a direction
+insert into hzd values ('north', pg_temp.hid(pg_temp.dreport(1, 'accident', 20.0, 20.0, 3.6)));
+select pg_temp.ok_bool((select travel_heading_deg = 0 from public.road_hazards where id = (select id from hzd where label = 'north')), true,
+  'a reliable course is stored as its bucket (3.6° → 0)');
+select pg_temp.ok_bool((select private.hazard_public_json(h) ? 'travelHeadingDeg' and (private.hazard_public_json(h)->>'travelHeadingDeg')::int = 0
+                          from public.road_hazards h where id = (select id from hzd where label = 'north')), true, 'the map gets it');
+insert into hzd values ('legacy', pg_temp.hid((select outcome || ':' || hazard_id from private.report_hazard(pg_temp.du(1), 'hazard', 21.0, 20.0))));
+select pg_temp.ok_bool((select travel_heading_deg is null from public.road_hazards where id = (select id from hzd where label = 'legacy')), true,
+  'the 0020 call (no direction) still works: no direction stored');
+select pg_temp.ok_bool((select private.hazard_public_json(h)->'travelHeadingDeg' = 'null'::jsonb from public.road_hazards h where id = (select id from hzd where label = 'legacy')), true,
+  'and the map says it is unknown');
+
+-- Merging: opposite carriageways stay apart; the same direction, or an unknown one, merges
+select pg_temp.ok_bool(pg_temp.outcome(pg_temp.dreport(2, 'accident', 20.00022, 20.0, 181)) = 'created', true,
+  'an accident 25 m away going the opposite way is a separate hazard (other carriageway)');
+insert into hzd values ('south', (select id from public.road_hazards where kind = 'accident' and latitude = 20.00022 and longitude = 20.0));
+select pg_temp.ok_bool(pg_temp.dreport(3, 'accident', 19.99993, 20.0, 12) = 'merged:' || (select id from hzd where label = 'north'), true,
+  'the same direction (12° vs 0°) 8 m away merges into it');
+select pg_temp.ok_bool(pg_temp.dreport(4, 'accident', 20.00025, 20.0, 175) = 'merged:' || (select id from hzd where label = 'south'), true,
+  'and the opposite report confirms the other carriageway''s one');
+select pg_temp.ok_bool(pg_temp.dreport(3, 'accident', 20.00011, 20.0, null) like 'merged:%', true,
+  'a report without a direction merges spatially, as before');
+-- A direction fills in a hazard that had none, once
+select pg_temp.ok_bool(pg_temp.dreport(2, 'hazard', 21.00005, 20.0, 268) = 'merged:' || (select id from hzd where label = 'legacy'), true,
+  'a directional report merges into a nearby one of unknown direction');
+select pg_temp.ok_bool((select travel_heading_deg = 270 from public.road_hazards where id = (select id from hzd where label = 'legacy')), true,
+  'which then takes its direction');
+select pg_temp.ok_bool(pg_temp.dreport(3, 'hazard', 21.00005, 20.0, 2) = 'merged:' || (select id from hzd where label = 'legacy'), true,
+  'a crossing direction (90° apart) is not "opposite": it still merges');
+select pg_temp.ok_bool((select travel_heading_deg = 270 from public.road_hazards where id = (select id from hzd where label = 'legacy')), true,
+  'and never changes a direction already set');
+select pg_temp.expect_error_sql($$update public.road_hazards set travel_heading_deg = 90 where id = (select id from pg_temp.hzd where label = 'north')$$, '42501',
+  'even the API cannot change a hazard''s direction once set');
+
+-- Votes, expiry and clients are unchanged
+select pg_temp.ok_bool(pg_temp.vote('S', (select id from hzd where label = 'north'), 'still_there') = 'counted', true, 'Still there needs no direction');
+select pg_temp.check_affects('alice', $q$update public.road_hazards set travel_heading_deg = 180$q$, 0, 'a client cannot set or change a direction');
+select pg_temp.ok_bool(not exists (select 1 from realtime.messages where event = 'hazard' and payload ? 'travelHeadingDeg'
+                                   and payload::text ~ '(30000000-0000-4000-8000|userId|reporter|speed)'), true,
+  'broadcasts carry the direction and nothing about the reporter');
+select pg_temp.ok_bool(exists (select 1 from realtime.messages where event = 'hazard' and (payload->>'travelHeadingDeg')::int = 0), true,
+  'and do carry the direction');
 
 \echo '=== ALL RLS AND SECURITY TESTS PASSED ==='

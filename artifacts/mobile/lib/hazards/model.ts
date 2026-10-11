@@ -44,6 +44,8 @@ export interface RoadHazard {
   kind: string;
   latitude: number;
   longitude: number;
+  /** The reporter's direction of travel (10° buckets), when it was reliable; null otherwise (0021) */
+  travelHeadingDeg: number | null;
   reportedAt: number;
   lastConfirmedAt: number;
   /** When it disappears, on this phone's clock (from the server's remaining lifetime) */
@@ -74,11 +76,13 @@ export function parseHazard(raw: unknown, receivedAt: number, myVote?: MyHazardV
   const expiresAt = finite(r.expiresInMs) ? receivedAt + Math.max(0, r.expiresInMs) : time(r.expiresAt);
   if (expiresAt == null) return null;
   const vote = myVote !== undefined ? myVote : r.myVote;
+  const heading = r.travelHeadingDeg;
   return {
     id: r.id,
     kind: r.kind,
     latitude: r.latitude,
     longitude: r.longitude,
+    travelHeadingDeg: finite(heading) && heading >= 0 && heading < 360 ? heading : null,
     reportedAt,
     lastConfirmedAt: time(r.lastConfirmedAt) ?? reportedAt,
     expiresAt,

@@ -1183,7 +1183,9 @@ export default function MapScreen() {
         }
       }
       lastPositionRef.current = { lat, lon, time: now };
-      lastAcceptedFixRef.current = { latitude: lat, longitude: lon, accuracyM: accuracy, timestamp: fixTime ?? now };
+      lastAcceptedFixRef.current = {
+        latitude: lat, longitude: lon, accuracyM: accuracy, timestamp: fixTime ?? now, speedMs, headingDeg: gpsHeading,
+      };
       // Nearby hazards load only once the driver has moved far enough (never per fix)
       noteHazardPosition(lat, lon);
 
