@@ -2873,8 +2873,9 @@ test('the Mapbox Drive map draws the live head from the same position as its puc
   // Both maps get the same head: Mapbox through its trailHead prop
   const jsx = screen.search(/<MapboxDriveMap\s/); // the element, not the Handle type
   const mapbox = screen.slice(jsx, screen.indexOf('/>', jsx));
-  assert.ok(/trailHead=\{subscribeLiveTrail\}/.test(mapbox));
-  assert.ok(/trail=\{driveTrail\}/.test(mapbox));
+  assert.ok(/trailHead=\{freeDrive \? subscribeLiveTrail : undefined\}/.test(mapbox));
+  // (the recorded trail is the free drive's: not drawn while navigating)
+  assert.ok(/trail=\{freeDrive \? driveTrail : null\}/.test(mapbox));
   assert.ok(/<LiveTrailHeadLines\s+subscribe=\{subscribeLiveTrail\}/.test(screen));
   // Pause, passenger mode and drive start/end clear it
   for (const where of ['function handlePause()', 'isPassengerModeRef.current = isPassengerMode;', 'isDrivingRef.current = isDriving;']) {
@@ -6140,7 +6141,7 @@ test('the crash fixes are wired in: no per-frame Mapbox command, nothing visual 
   assert.match(screen, /frameLoopRef\.current = \(\) => \{\s*frameIdRef\.current = null;[^]*?if \(!visualsLiveRef\.current\) return;/);
   assert.match(screen, /if \(prev\.live && !next\.live\) \{\s*if \(frameIdRef\.current != null\) cancelAnimationFrame\(frameIdRef\.current\);\s*frameIdRef\.current = null;\s*mapboxRef\.current\?\.setVisualsLive\(false\);/);
   assert.match(screen, /followCamera\.enter\(false, \{\}, followTargetFor\(position\)\)/, 'back on screen: the camera starts at the current target');
-  assert.match(screen, /if \(isDriving && !isPaused && visuals\.live\) \{\s*driveTimerRef\.current = setInterval\(tick, 1000\);/);
+  assert.match(screen, /if \(isDriving && !isPaused && visuals\.live && freeDrive\) \{\s*driveTimerRef\.current = setInterval\(tick, 1000\);/);
   assert.match(screen, /Platform\.OS !== "web" && !visuals\.mounted \? \(/, 'no map until the app has been on screen');
   // AppContext: the live route is held off screen; recording is untouched
   assert.match(ctx, /cloud\.onDriveFix\(\(fix\) => \{ latestFixRef\.current = fix; liveFeed\.addFix\(fix\); \}\)/);
@@ -8617,9 +8618,9 @@ test('navigation UI: passive off-route states, End asks before finishing a drive
   assert.ok(bar.includes('"End navigation and finish drive", onPress: onFinishDrive'));
   assert.ok(bar.includes('{ text: "Continue navigation", style: "cancel" }'));
   assert.ok(/if \(ownsDrive && onFinishDrive\) \{[\s\S]*?return;\s*\}\s*end\("user"\);/.test(bar), 'otherwise End ends navigation only');
-  assert.ok(/ownsDrive=\{state\.recording === "navigation"\} onFinishDrive=\{onFinishDrive\}/.test(bar));
-  assert.ok(/<EndButton ownsDrive=\{false\} \/>/.test(bar), 'the bar shows only without a recording');
-  assert.ok(/state\.recording === "none" \? \(\s*<GlassButton\s*accessibilityLabel="Record this drive"/.test(bar));
+  assert.ok(/const ownsDrive = recordingActive && state\.recording === "navigation";/.test(bar));
+  assert.ok(/<EndButton ownsDrive=\{ownsDrive\} onFinishDrive=\{onFinishDrive\} \/>/.test(bar), 'one End: it asks only for a drive navigation started');
+  assert.ok(/\) : state\.recording === "none" \? \(\s*<GlassButton\s*accessibilityLabel="Record this drive"/.test(bar), 'Record only with nothing recording');
   // The map draws the remaining line, not the whole route
   const map = read('../components/MapboxDriveMap.tsx');
   const layer = map.slice(map.indexOf('const NavigationRouteLayers = memo('), map.indexOf('const MapboxDriveMap = forwardRef'));
@@ -9933,6 +9934,78 @@ test('lane guidance changes nothing else: progress, banner, voice, rerouting; di
   // Normalised once, when the route comes in; the session only reads the prepared lanes
   assert.ok(/normalizeLaneJunctions\(lanes\)/.test(read('../lib/navigation/model.ts')));
   assert.ok(!/normalizeLaneJunctions|indications/.test(read('../lib/navigation/session.ts')));
+});
+
+// ─── Drive screen: navigation and free-drive presentations kept apart ──────
+// Start Navigation records the drive underneath; the recording dashboard is
+// for free drives only. Navigation looks the same with or without a drive.
+
+import { drivePresentation } from '@/lib/drivePresentation';
+
+test('presentation: free drive shows the recording dashboard; navigation (with or without a drive underneath) shows navigation only', () => {
+  // The rule
+  assert.equal(drivePresentation({ isDriving: false, navigating: false }), 'idle');
+  assert.equal(drivePresentation({ isDriving: true, navigating: false }), 'freeDrive', 'Start Drive: the full dashboard');
+  assert.equal(drivePresentation({ isDriving: true, navigating: true }), 'navigation', 'navigation recording underneath (its own or the user\'s): navigation only');
+  assert.equal(drivePresentation({ isDriving: false, navigating: true }), 'navigation', 'Passenger Mode, or no recording: the same navigation UI');
+  // The screen applies it
+  const read = (rel: string) => readFileSync(toPath(new URL(rel, import.meta.url)), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+  const drive = read('../app/(tabs)/(drive)/index.tsx');
+  assert.ok(/const presentation = drivePresentation\(\{ isDriving, navigating \}\);/.test(drive));
+  assert.ok(/const freeDrive = presentation === "freeDrive";/.test(drive));
+  // The recording dashboard (speedometer, statistics, Pause, End Drive, Save Point, GPS status) only for a free drive
+  assert.ok(/\{freeDrive && \(\s*<ActiveDriveOverlay/.test(drive), 'the dashboard is gated on the presentation, not on recording');
+  assert.equal((drive.match(/<ActiveDriveOverlay/g) ?? []).length, 1);
+  assert.ok(!/isDriving && \(\s*<ActiveDriveOverlay/.test(drive), 'never on "a drive is recording" alone');
+  const overlayJsx = drive.slice(drive.indexOf('<ActiveDriveOverlay'), drive.indexOf('/>', drive.indexOf('<ActiveDriveOverlay')));
+  assert.ok(!/GuidanceStrip|navigationStrip|guidanceBannerHeight/.test(overlayJsx), 'no navigation squeezed into the dashboard');
+  for (const control of ['onPause={handlePause}', 'onEndDrive={handlePanelEndDrive}', 'onSavePoint={handleSavePoint}', 'gpsAccuracy={gpsAccuracy}', 'driveSeconds={driveSeconds}']) {
+    assert.ok(overlayJsx.includes(control), `free drive keeps ${control}`);
+  }
+  // The dashboard itself is unchanged: speedometer, Pause, End Drive, Save Point
+  const overlay = readFileSync(toPath(new URL('../components/ActiveDriveOverlay.tsx', import.meta.url)), 'utf8');
+  for (const part of ['<Speedometer speedKmh={currentSpeedKmh}', 'onPause();', 'text: "End Drive"', '{/* Save Point */}']) assert.ok(overlay.includes(part), part);
+  // Navigation: its own bar whenever guiding, recording underneath or not
+  assert.ok(/\{presentation === "navigation" && !previewing && \(\s*<AboveTabBar/.test(drive));
+  assert.ok(!/navigating && !previewing && !isDriving/.test(drive), 'no longer hidden by a recording');
+  const barJsx = drive.slice(drive.indexOf('<GuidanceBar'), drive.indexOf('/>', drive.indexOf('<GuidanceBar')));
+  assert.ok(/recordingActive=\{isDriving\}/.test(barJsx) && /onFinishDrive=\{handleFinishNavigationDrive\}/.test(barJsx));
+  // The bar: navigation's controls only, plus one quiet recording mark; no recording dashboard controls
+  const bar = read('../components/navigation/GuidanceBar.tsx');
+  for (const part of ['<Summary state={state}', '<VoiceButton />', '<EndButton ownsDrive={ownsDrive} onFinishDrive={onFinishDrive} />', '"Overview"', '"Recenter"']) assert.ok(bar.includes(part), part);
+  assert.ok(/recordingActive \? \([\s\S]*?accessibilityLabel="This drive is being recorded"[\s\S]*?>Recording<\/Text>/.test(bar), 'a single "Recording" mark');
+  assert.ok(!/Speedometer|onPause|Save Point|End Drive"|driveSeconds|distanceKm/.test(bar), 'no speedometer, Pause, Save Point, End Drive or drive statistics');
+  assert.ok(!/export function GuidanceStrip/.test(bar), 'the strip that sat inside the dashboard is gone');
+  // The recorded trail and the dashboard's timer are the free drive's; recording itself is untouched
+  assert.ok(/trail=\{freeDrive \? driveTrail : null\}/.test(drive));
+  assert.ok(/updateDriveCoordinate\(\{\s*latitude: lat,\s*longitude: lon,/.test(drive), 'recording still gets every fix');
+  assert.ok(/liveTrail\.followTrail\(driveTrail\)/.test(drive), 'the recorded route is still followed underneath');
+  // The search, layers and map controls stay hidden while navigating, as before
+  assert.ok(/\{!isDriving && !navigating && \(\s*<View/.test(drive));
+});
+
+test('presentation: ending navigation finishes only a drive navigation started; a drive the user started carries on in the dashboard', () => {
+  // Navigation-owned: End asks, then the usual End Drive (Drive Complete); arrival does the same by itself
+  const read = (rel: string) => readFileSync(toPath(new URL(rel, import.meta.url)), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+  const drive = read('../app/(tabs)/(drive)/index.tsx');
+  assert.ok(/function handleFinishNavigationDrive\(\) \{\s*navSession\.end\("user"\);\s*handleEndDrive\(\);\s*\}/.test(drive));
+  assert.ok(/st\.recording !== "navigation"\) return;\s*navSession\.end\("arrived"\);\s*endDriveRef\.current\(\);/.test(drive));
+  const bar = read('../components/navigation/GuidanceBar.tsx');
+  assert.ok(/const ownsDrive = recordingActive && state\.recording === "navigation";/.test(bar));
+  assert.ok(bar.includes('"End navigation and finish drive", onPress: onFinishDrive'));
+  // In the session: who owns the drive decides; the session never stops one
+  for (const recording of ['navigation', 'existing'] as const) {
+    const h = nav3Session();
+    void h.s.start({ route: L_ROUTE(), destination: N3_DEST, recording });
+    h.feed(drive3(L_PTS, { to: 500 }));
+    assert.equal((h.s.state as { recording: string }).recording, recording);
+    h.s.end('user');
+    assert.equal(h.s.phase, 'idle');
+  }
+  // A user's drive left running: navigation idle, recording on → the free-drive dashboard again
+  assert.equal(drivePresentation({ isDriving: true, navigating: false }), 'freeDrive');
+  // Arrived (a drive the user started): still the navigation bar (arrival, Done) until Done
+  assert.equal(drivePresentation({ isDriving: true, navigating: true }), 'navigation');
 });
 
 // ─── iOS build number: one source of truth (app.json ios.buildNumber) ───────

@@ -1,30 +1,29 @@
 /**
- * The bottom of the Drive screen while navigating (Navigation Phase 3).
- *
- * GuidanceBar, with no drive being recorded: arrival time, time and distance
- * left, End, and the camera (Recenter / Overview) buttons, in place of the
- * drive actions, and Record when navigation has no recording alongside.
- * Compact, so the map stays the screen.
- *
- * GuidanceStrip, while recording (Start Navigation records the drive): one
- * slim row (arrival, what's left, End) that sits above the drive panel,
- * rather than a second panel stacked on it.
+ * The bottom of the Drive screen while navigating: the navigation
+ * presentation (lib/drivePresentation), whether or not a drive is being
+ * recorded underneath. Arrival time, time and distance left, voice, End, and
+ * Overview / Recenter, in place of the drive actions. The recording
+ * dashboard (speedometer, Pause, End Drive, Save Point) is never shown with
+ * it: a drive recording underneath only shows as a small "Recording" mark.
+ * Record appears only with nothing recording (Passenger Mode, or the drive
+ * was finished). Compact, so the map stays the screen.
  *
  * End, when navigation started the drive being recorded, asks first: "End
  * navigation and finish drive" (the Drive screen's usual End Drive, so the
  * drive is saved and Drive Complete opens) or "Continue navigation". With a
- * drive the user started themselves, End ends navigation only.
+ * drive the user started themselves (or none), End ends navigation only and
+ * the drive carries on.
  *
- * On arriving both say so, with Done, and Save Place where the destination
+ * On arriving it says so, with Done, and Save Place where the destination
  * may be saved (not a search result: Mapbox's terms) and isn't already. (A
  * drive navigation started is finished by the Drive screen on arriving.)
  *
- * Both have a small voice button (Phase 4): mute stops guidance speaking at
- * once (and drops anything queued); unmute brings back the last choice, for
- * the prompts still ahead. It's the same preference as Settings.
+ * The small voice button (Phase 4): mute stops guidance speaking at once
+ * (and drops anything queued); unmute brings back the last choice, for the
+ * prompts still ahead. It's the same preference as Settings.
  *
- * Both read the navigation state themselves; the Drive screen doesn't
- * re-render as it changes. They never start or stop a recording themselves.
+ * It reads the navigation state itself; the Drive screen doesn't re-render
+ * as it changes. It never starts or stops a recording itself.
  */
 import React, { useEffect, useState } from "react";
 import { Alert, StyleSheet, Text, TouchableOpacity, View } from "react-native";
@@ -197,13 +196,15 @@ function Summary({ state, unitSystem, compact }: { state: NavigationState; unitS
   );
 }
 
-/** Navigation without a recording: in place of the drive actions */
+/** The navigation bar, in place of the drive actions (with or without a recording underneath) */
 export function GuidanceBar({
   unitSystem,
   following,
   onRecenter,
   onOverview,
   onRecord,
+  recordingActive,
+  onFinishDrive,
 }: {
   unitSystem: ResolvedUnitSystem;
   /** Whether the camera is following the route (else the user moved the map) */
@@ -212,9 +213,14 @@ export function GuidanceBar({
   onOverview: () => void;
   /** Start recording the drive (navigation has none alongside: Passenger Mode, or it was finished) */
   onRecord: () => void;
+  /** A drive is being recorded underneath (navigation's own, or one the user started) */
+  recordingActive: boolean;
+  /** End navigation and finish the drive navigation started (the Drive screen's End Drive) */
+  onFinishDrive: () => void;
 }) {
   const state = useNavigationState();
   if (state.phase === "idle") return null;
+  const ownsDrive = recordingActive && state.recording === "navigation";
   return (
     <GlassSurface material="dense" style={styles.bar}>
       {state.phase === "arrived" ? (
@@ -224,7 +230,7 @@ export function GuidanceBar({
           <View style={styles.row}>
             <Summary state={state} unitSystem={unitSystem} compact={false} />
             <VoiceButton />
-            <EndButton ownsDrive={false} />
+            <EndButton ownsDrive={ownsDrive} onFinishDrive={onFinishDrive} />
           </View>
           {state.phase !== "error" ? (
             <View style={styles.actions}>
@@ -240,7 +246,17 @@ export function GuidanceBar({
                 <Ionicons name={following ? "map-outline" : "navigate"} size={16} color={FG} />
                 <Text style={styles.pillText}>{following ? "Overview" : "Recenter"}</Text>
               </GlassButton>
-              {state.recording === "none" ? (
+              {recordingActive ? (
+                // One quiet mark: the drive is being saved, no second dashboard
+                <View
+                  style={styles.recording}
+                  accessible
+                  accessibilityLabel="This drive is being recorded"
+                >
+                  <View style={styles.recDotLive} />
+                  <Text style={styles.recordingText}>Recording</Text>
+                </View>
+              ) : state.recording === "none" ? (
                 <GlassButton
                   accessibilityLabel="Record this drive"
                   accessibilityHint="Starts recording your drive. Navigation carries on."
@@ -254,32 +270,6 @@ export function GuidanceBar({
             </View>
           ) : null}
         </>
-      )}
-    </GlassSurface>
-  );
-}
-
-/** Navigation while recording: one slim row above the drive panel */
-export function GuidanceStrip({
-  unitSystem,
-  onFinishDrive,
-}: {
-  unitSystem: ResolvedUnitSystem;
-  /** End navigation and finish the drive navigation started (the Drive screen's End Drive) */
-  onFinishDrive: () => void;
-}) {
-  const state = useNavigationState();
-  if (state.phase === "idle") return null;
-  return (
-    <GlassSurface material="dense" style={styles.strip}>
-      {state.phase === "arrived" ? (
-        <Arrived state={state} compact />
-      ) : (
-        <View style={[styles.row, styles.compactRow]}>
-          <Summary state={state} unitSystem={unitSystem} compact />
-          <VoiceButton compact />
-          <EndButton compact ownsDrive={state.recording === "navigation"} onFinishDrive={onFinishDrive} />
-        </View>
       )}
     </GlassSurface>
   );
@@ -337,6 +327,9 @@ const styles = StyleSheet.create({
   },
   pillText: { color: FG, fontSize: 14, fontWeight: "600" },
   recDot: { width: 10, height: 10, borderRadius: 5, backgroundColor: "#22c55e" },
+  recording: { flexDirection: "row", alignItems: "center", gap: 6, marginLeft: "auto", paddingHorizontal: 4 },
+  recDotLive: { width: 7, height: 7, borderRadius: 3.5, backgroundColor: END_RED },
+  recordingText: { color: MUTED, fontSize: 12, fontWeight: "600" },
   done: { height: 44, paddingHorizontal: 24, borderRadius: 22, alignItems: "center", justifyContent: "center" },
   doneText: { color: "#10161C", fontSize: 16, fontWeight: "700" },
 });
