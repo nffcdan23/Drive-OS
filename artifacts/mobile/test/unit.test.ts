@@ -11518,3 +11518,35 @@ test('spoken hazards: one waiting that is removed by votes, expires or is passed
   assert.ok(!p.hazardTexts().some((x) => x.startsWith('Roadworks')));
   assert.ok(p.actions().some((a) => a === 'skipped:too_close' || a.startsWith('cancelled')), p.actions().join(','));
 });
+
+// ─── Drive Complete: nothing floats over Save Drive / Discard ───────────────
+//
+// The completed-drive screen used to render a bottom sync banner (absolute,
+// zIndex 999) over its action buttons.  Upload state is the app-wide
+// ConnectionBanner's job (at the top, in the layout flow), so this screen has
+// no floating bottom overlay at all.
+test('Drive Complete: the actions are never covered by a sync or status banner', () => {
+  const read = (rel: string) => readFileSync(join(MOBILE, rel), 'utf8');
+  const strip = (t: string) => t.replace(/\/\/.*$/gm, '').replace(/\{\/\*[\s\S]*?\*\/\}/g, '').replace(/\/\*[\s\S]*?\*\//g, '');
+  const screen = strip(read('app/drive-summary.tsx'));
+  const view = strip(read('components/driveComplete/DriveCompleteView.tsx'));
+  // No sync banner, and no slot for one
+  assert.ok(!/SyncBanner|syncBanner/.test(screen + view));
+  assert.ok(!existsSync(join(MOBILE, 'components/SyncBanner.tsx')));
+  // The actions are part of the scrolling content, not an overlay
+  const scroll = view.slice(view.indexOf('<ScrollView'), view.indexOf('</ScrollView>'));
+  assert.ok(/accessibilityLabel="Discard"/.test(scroll) && /accessibilityLabel="Save Drive"/.test(scroll));
+  // After the content, only the close button (pinned to the top) is drawn
+  const after = view.slice(view.indexOf('</ScrollView>'), view.indexOf('const styles'));
+  assert.equal(after.match(/<[A-Z][A-Za-z.]*/g)?.join(' '), '<GlassButton <Glyph');
+  assert.match(after, /style=\{\[styles\.close, \{ top: insets\.top \+ 8 \}\]\}/);
+  // No style on the screen floats at the bottom or above everything
+  const styles = view.slice(view.indexOf('const styles'));
+  assert.ok(!/\bbottom:/.test(styles), 'a style is pinned to the bottom');
+  assert.ok(!/zIndex/.test(styles + after), 'a layer is raised over the content');
+  // The app-wide status stays at the top, in the layout flow above the screens
+  const banner = strip(read('components/ConnectionBanner.tsx'));
+  assert.ok(!/position:\s*['"]absolute/.test(banner));
+  const layout = strip(read('app/_layout.tsx'));
+  assert.match(layout, /<View style=\{\{ flex: 1 \}\}>\s*<ConnectionBanner \/>\s*<AppStack signedIn/);
+});

@@ -4,6 +4,11 @@
  *  - Save Drive applies the chosen visibility and opens Drives;
  *  - Discard deletes the saved drive, after confirming;
  *  - the close button leaves the drive saved as it is.
+ *
+ * Upload state isn't shown here: the app-wide ConnectionBanner (top of the
+ * screen, in the layout) already reports drives waiting to upload, offline
+ * and server errors, with Retry.  Nothing floats over this screen, so Save
+ * Drive and Discard are never covered.
  */
 import React, { useEffect, useRef, useState } from 'react';
 import { Alert, Platform } from 'react-native';
@@ -11,7 +16,6 @@ import { useRouter } from 'expo-router';
 import * as Haptics from 'expo-haptics';
 import { useApp, type Journey } from '@/context/AppContext';
 import type { Visibility } from '@/lib/backend/endpoints';
-import { SyncBanner } from '@/components/SyncBanner';
 import DriveCompleteView, { type DriveRewards } from '@/components/driveComplete/DriveCompleteView';
 import { dayStreak, firstNameOf, levelProgress } from '@/lib/driveRewards';
 
@@ -31,7 +35,7 @@ function confirmDiscard(onConfirm: () => void) {
 export default function DriveSummaryScreen() {
   const router = useRouter();
   const {
-    currentDrive, endDrive, updateJourney, deleteJourney, syncStatus, retryJourneySync, resolvedUnitSystem, userProfile,
+    currentDrive, endDrive, updateJourney, deleteJourney, resolvedUnitSystem, userProfile,
     journeys,
   } = useApp();
   const [savedJourney, setJourney] = useState<Journey | null>(null);
@@ -54,7 +58,7 @@ export default function DriveSummaryScreen() {
     recorded: !!currentDrive,
   }).current;
 
-  // End the drive once on mount; the sync banner shows if uploading fails
+  // End the drive once on mount; the ConnectionBanner reports it if uploading fails
   useEffect(() => {
     if (endedRef.current) return;
     endedRef.current = true;
@@ -154,13 +158,6 @@ export default function DriveSummaryScreen() {
       onSave={handleSave}
       onDiscard={handleDiscard}
       onClose={handleClose}
-      syncBanner={
-        <SyncBanner
-          visible={syncStatus !== 'idle'}
-          status={syncStatus === 'syncing' ? 'syncing' : syncStatus === 'error' ? 'error' : 'waiting'}
-          onRetry={retryJourneySync}
-        />
-      }
     />
   );
 }

@@ -41,7 +41,7 @@ export interface DriveRewards {
 
 export default function DriveCompleteView({
   firstName, isSaving, busy, hasJourney, distanceKm, durationS, avgSpeedKmh, topSpeedKmh, route, unitSystem,
-  rewards, visibility, onVisibility, visibilityLocked, onSave, onDiscard, onClose, syncBanner,
+  rewards, visibility, onVisibility, visibilityLocked, onSave, onDiscard, onClose,
 }: {
   firstName: string | undefined;
   isSaving: boolean;
@@ -61,7 +61,6 @@ export default function DriveCompleteView({
   onSave: () => void;
   onDiscard: () => void;
   onClose: () => void;
-  syncBanner?: React.ReactNode;
 }) {
   const insets = useSafeAreaInsets();
   // The hero takes whatever height the content leaves, so the actions sit at
@@ -191,7 +190,6 @@ export default function DriveCompleteView({
         <Glyph sf="xmark" ion="close" size={20} color="#FFFFFF" />
       </GlassButton>
 
-      {syncBanner}
     </View>
   );
 }
