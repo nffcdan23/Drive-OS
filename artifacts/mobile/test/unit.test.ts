@@ -11550,3 +11550,17 @@ test('Drive Complete: the actions are never covered by a sync or status banner',
   const layout = strip(read('app/_layout.tsx'));
   assert.match(layout, /<View style=\{\{ flex: 1 \}\}>\s*<ConnectionBanner \/>\s*<AppStack signedIn/);
 });
+
+// ─── Glass pills: a selected border is one clean outline ────────────────────
+test('Glass: a caller border colour covers every edge and the glass layer sits inside the border', () => {
+  const src = readFileSync(join(MOBILE, 'components/Glass.tsx'), 'utf8');
+  // The material's lighter top edge never overrides a caller's borderColor
+  assert.match(src, /value\.borderColor != null && value\.borderTopColor == null\s*\? \{ borderTopColor: value\.borderColor \}/);
+  assert.equal(src.match(/style,\s*edgeColour\(style\),/g)?.length, 2, 'GlassSurface and GlassButton');
+  // The background layer uses the border's inner radius (outer less width)
+  assert.match(src, /Math\.max\(r - width, 0\)/);
+  assert.equal(src.match(/<GlassBackground shape=\{corners\(style\)\}/g)?.length, 2);
+  // Privacy's visibility pills still colour only borderColor when selected
+  const prefs = readFileSync(join(MOBILE, 'components/AccountPreferences.tsx'), 'utf8');
+  assert.match(prefs, /settings\?\.\[key\] === value && \{\s*borderColor: sectionAccent\.profile,\s*\}/);
+});

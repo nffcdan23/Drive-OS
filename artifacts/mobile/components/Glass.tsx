@@ -74,15 +74,29 @@ type Corners = Pick<
   | "borderBottomLeftRadius"
   | "borderBottomRightRadius"
 >;
-function corners(style: ViewProps["style"]): Corners {
+// The glass layer sits inside the border (absolute children fill the padding
+// box), so its corners use the border's inner radius: the outer radius less
+// the border width.  With the outer radius its corners overdrew the border.
+function corners(style: ViewProps["style"], borderWidth = 1): Corners {
   const value = StyleSheet.flatten(style) ?? {};
+  const width = typeof value.borderWidth === "number" ? value.borderWidth : borderWidth;
+  const inner = (r: unknown) => (typeof r === "number" ? Math.max(r - width, 0) : undefined);
   return {
-    borderRadius: value.borderRadius,
-    borderTopLeftRadius: value.borderTopLeftRadius,
-    borderTopRightRadius: value.borderTopRightRadius,
-    borderBottomLeftRadius: value.borderBottomLeftRadius,
-    borderBottomRightRadius: value.borderBottomRightRadius,
+    borderRadius: inner(value.borderRadius),
+    borderTopLeftRadius: inner(value.borderTopLeftRadius),
+    borderTopRightRadius: inner(value.borderTopRightRadius),
+    borderBottomLeftRadius: inner(value.borderBottomLeftRadius),
+    borderBottomRightRadius: inner(value.borderBottomRightRadius),
   };
+}
+
+// A caller's borderColor (e.g. a selected pill) colours every edge: the
+// material's lighter top edge would otherwise win over it on the top.
+function edgeColour(style: ViewProps["style"]) {
+  const value = StyleSheet.flatten(style) ?? {};
+  return value.borderColor != null && value.borderTopColor == null
+    ? { borderTopColor: value.borderColor }
+    : null;
 }
 type Material = "chrome" | "dense" | "accent";
 export function GlassBackground({
@@ -167,6 +181,7 @@ export function GlassSurface({
       style={[
         styles.material,
         style,
+        edgeColour(style),
         { backgroundColor: "transparent" },
         focused && styles.focused,
       ]}
@@ -220,6 +235,7 @@ export function GlassButton({
       style={[
         styles.material,
         style,
+        edgeColour(style),
         { backgroundColor: "transparent", transform: [{ scale }] },
       ]}
     >
