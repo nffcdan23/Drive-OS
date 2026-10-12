@@ -8632,7 +8632,9 @@ test('navigation UI: passive off-route states, End asks before finishing a drive
   const map = read('../components/MapboxDriveMap.tsx');
   const layer = map.slice(map.indexOf('const NavigationRouteLayers = memo('), map.indexOf('const MapboxDriveMap = forwardRef'));
   assert.ok(/coordinates: trim\.prepared\.coords/.test(layer) && /<ShapeSource id="derwent-nav-route" shape=\{line\} lineMetrics>/.test(layer));
-  assert.equal((layer.match(/\.\.\.style, lineTrimOffset,/g) ?? []).length, 2, 'casing and line trimmed together');
+  const lines = map.slice(map.indexOf('const NavigationRouteLines = memo('), map.indexOf('const NavigationRouteLayers = memo('));
+  assert.equal((lines.match(/\.\.\.style, lineTrimOffset,/g) ?? []).length, 2, 'casing and line trimmed together');
+  assert.equal((lines.match(/sourceID="derwent-nav-route"/g) ?? []).length, 2);
 });
 
 // ─── Navigation Phase 4: foreground voice guidance ──────────────────────────
@@ -11695,8 +11697,14 @@ test('route line: the route is never changed; the map line is the prepared point
   const layer = map.slice(map.indexOf('const NavigationRouteLayers = memo('), map.indexOf('const MapboxDriveMap = forwardRef'));
   assert.ok(/const trim = useMemo\(\(\) => \{[\s\S]*?new RouteLineTrim\(p\)[\s\S]*?\}, \[session, view\.route\]\);/.test(layer), 'a new line only with a new route');
   assert.ok(/\[trim\],\s*\);/.test(layer), 'the geometry depends on the route alone');
-  assert.ok(/const lineTrimOffset = \[0, fraction\];/.test(layer));
-  assert.ok(/const fraction = drawn\.trim === trim \? drawn\.fraction : 0;/.test(layer), 'a new route never takes the old one\'s trim');
+  // Trim updates re-render only the two line layers (NavigationRouteLines), never the ShapeSource,
+  // which serialises the whole line on every render
+  const lines = map.slice(map.indexOf('const NavigationRouteLines = memo('), map.indexOf('const NavigationRouteLayers = memo('));
+  assert.ok(/const lineTrimOffset = \[0, fraction\];/.test(lines));
+  assert.ok(/const fraction = drawn\.trim === trim \? drawn\.fraction : 0;/.test(lines), 'a new route never takes the old one\'s trim');
+  assert.ok(!/useState|setDrawn|lineTrimOffset/.test(layer), 'no trim state in the component holding the ShapeSource');
+  assert.ok(/if \(t && fraction != null\) linesRef\.current\?\.set\(t, fraction\);/.test(layer));
+  assert.ok(/<ShapeSource id="derwent-nav-route" shape=\{line\} lineMetrics>\s*<NavigationRouteLines ref=\{linesRef\} trim=\{trim\} \/>\s*<\/ShapeSource>/.test(layer));
 });
 
 test('route line: driven with navigation — tracks the arrow between 1 Hz fixes; a long route stays cheap', () => {

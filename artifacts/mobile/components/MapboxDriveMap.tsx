@@ -457,6 +457,39 @@ interface NavigationRouteHandle {
   /** The arrow as drawn this frame: the line's start follows just behind it */
   frame(arrow: LatLng | null, now: number): void;
 }
+
+/**
+ * The route line's two layers, with the driven part trimmed away. Their own
+ * small component: a trim update (several a second) re-renders only these
+ * two layers' styles, never the ShapeSource, which serialises the whole
+ * route line each time it renders.
+ */
+interface NavigationRouteLinesHandle {
+  set(trim: RouteLineTrim, fraction: number): void;
+}
+const NavigationRouteLines = memo(forwardRef<NavigationRouteLinesHandle, { trim: RouteLineTrim | null }>(function NavigationRouteLines({ trim }, ref) {
+  const [drawn, setDrawn] = useState<{ trim: RouteLineTrim | null; fraction: number }>({ trim: null, fraction: 0 });
+  useImperativeHandle(ref, () => ({ set: (t, fraction) => setDrawn({ trim: t, fraction }) }), []);
+  // A new route never takes the old one's trim
+  const fraction = drawn.trim === trim ? drawn.fraction : 0;
+  // The driven part hidden: [start, end] of the line, as shares of its length
+  const style = { lineCap: "round", lineJoin: "round", lineEmissiveStrength: 1 } as const;
+  const lineTrimOffset = [0, fraction];
+  return (
+    <>
+      <LineLayer
+        id="derwent-nav-route-casing"
+        sourceID="derwent-nav-route"
+        style={{ ...style, lineTrimOffset, lineColor: ROUTE_COLORS.selectedCasing, lineWidth: 13 }}
+      />
+      <LineLayer
+        id="derwent-nav-route-line"
+        sourceID="derwent-nav-route"
+        style={{ ...style, lineTrimOffset, lineColor: ROUTE_COLORS.selected, lineWidth: 8 }}
+      />
+    </>
+  );
+}));
 const NavigationRouteLayers = memo(forwardRef<NavigationRouteHandle, { session: NavigationSession }>(function NavigationRouteLayers({ session }, ref) {
   // Held still in the background (background guidance keeps the session
   // current); the route as it is now arrives in one update on return
@@ -479,7 +512,7 @@ const NavigationRouteLayers = memo(forwardRef<NavigationRouteHandle, { session: 
     confirm();
     return session.subscribe(confirm);
   }, [session, trim]);
-  const [drawn, setDrawn] = useState<{ trim: RouteLineTrim | null; fraction: number }>({ trim: null, fraction: 0 });
+  const linesRef = useRef<NavigationRouteLinesHandle>(null);
   const trimRef = useRef<RouteLineTrim | null>(null);
   useEffect(() => {
     trimRef.current = trim;
@@ -488,10 +521,9 @@ const NavigationRouteLayers = memo(forwardRef<NavigationRouteHandle, { session: 
     frame(arrow, now) {
       const t = trimRef.current;
       const fraction = t?.frame(arrow, now);
-      if (t && fraction != null) setDrawn({ trim: t, fraction });
+      if (t && fraction != null) linesRef.current?.set(t, fraction);
     },
   }), []);
-  const fraction = drawn.trim === trim ? drawn.fraction : 0;
   const line = useMemo(
     () => ({
       type: "FeatureCollection" as const,
@@ -522,20 +554,10 @@ const NavigationRouteLayers = memo(forwardRef<NavigationRouteHandle, { session: 
     }),
     [view.destination],
   );
-  // The driven part hidden: [start, end] of the line, as shares of its length
-  const style = { lineCap: "round", lineJoin: "round", lineEmissiveStrength: 1 } as const;
-  const lineTrimOffset = [0, fraction];
   return (
     <>
       <ShapeSource id="derwent-nav-route" shape={line} lineMetrics>
-        <LineLayer
-          id="derwent-nav-route-casing"
-          style={{ ...style, lineTrimOffset, lineColor: ROUTE_COLORS.selectedCasing, lineWidth: 13 }}
-        />
-        <LineLayer
-          id="derwent-nav-route-line"
-          style={{ ...style, lineTrimOffset, lineColor: ROUTE_COLORS.selected, lineWidth: 8 }}
-        />
+        <NavigationRouteLines ref={linesRef} trim={trim} />
       </ShapeSource>
       <ShapeSource id="derwent-nav-destination" shape={point}>
         <CircleLayer
