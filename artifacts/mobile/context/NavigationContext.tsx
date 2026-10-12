@@ -60,6 +60,8 @@ import { createSpeaker } from '@/lib/navigation/speech';
 import { VoiceGuidance, type VoiceMode } from '@/lib/navigation/voice';
 import { VoicePreferences } from '@/lib/navigation/voicePrefs';
 import type { HazardSpeechOutput } from '@/lib/hazards/voice';
+import { hudSpeed, SPEED_HUD } from '@/lib/navigation/speedHud';
+import type { ResolvedUnitSystem } from '@/lib/units';
 import { useApp } from '@/context/AppContext';
 import { journal } from '@/lib/diagnostics';
 import { RoutePreviewStore, type PreviewError, type PreviewPhase, type PreviewState } from '@/lib/navigation/previewStore';
@@ -86,6 +88,8 @@ interface NavigationContextValue {
   voicePrefs: VoicePreferences;
   /** The newest fix navigation was given (screen or background), if any */
   latestFix(): BackgroundFix | null;
+  /** Called after each fix navigation is given (for the speed HUD) */
+  subscribeFix(fn: () => void): () => void;
   /** Navigation's voice, for spoken hazard warnings (the same speaker and settings) */
   hazardSpeech: HazardSpeechOutput;
 }
@@ -167,6 +171,11 @@ export function NavigationProvider({ userId, children }: { userId: string; child
     };
   }, [session, voicePrefs]);
   const lastFix = useRef<{ origin: RouteOrigin; time: number; fix: BackgroundFix } | null>(null);
+  const fixListeners = useRef(new Set<() => void>());
+  const subscribeFix = useCallback((fn: () => void) => {
+    fixListeners.current.add(fn);
+    return () => { fixListeners.current.delete(fn); };
+  }, []);
 
   const noteFix = useCallback<NavigationContextValue['noteFix']>((fix) => {
     // The screen's watcher and the background task can both deliver around
@@ -184,6 +193,7 @@ export function NavigationProvider({ userId, children }: { userId: string; child
       latitude: fix.latitude, longitude: fix.longitude, accuracyM: fix.accuracyM,
       speedMs: fix.speedMs, headingDeg: fix.headingDeg, time: fix.time,
     });
+    for (const fn of [...fixListeners.current]) fn();
   }, [store, session]);
 
   // Background guidance: the background task's fixes, while the app is off screen
@@ -229,8 +239,8 @@ export function NavigationProvider({ userId, children }: { userId: string; child
   useEffect(() => { void recents.load(); }, [recents]);
 
   const value = useMemo(
-    () => ({ store, session, noteFix, currentOrigin, recentPosition, recents, voicePrefs, latestFix, hazardSpeech }),
-    [store, session, noteFix, currentOrigin, recentPosition, recents, voicePrefs, latestFix, hazardSpeech],
+    () => ({ store, session, noteFix, currentOrigin, recentPosition, recents, voicePrefs, latestFix, subscribeFix, hazardSpeech }),
+    [store, session, noteFix, currentOrigin, recentPosition, recents, voicePrefs, latestFix, subscribeFix, hazardSpeech],
   );
   return <NavigationContext.Provider value={value}>{children}</NavigationContext.Provider>;
 }
@@ -358,6 +368,28 @@ export function useNavigationState(): NavigationState {
 /** The newest fix navigation has (on screen or from the background), for the camera on coming back */
 export function useLatestNavigationFix(): () => BackgroundFix | null {
   return useNavigation().latestFix;
+}
+
+/**
+ * The speed to show in navigation's HUD (lib/navigation/speedHud.ts): the
+ * newest real GPS fix's speed in the user's units, or null ("--") when there
+ * is none or it is out of date. Re-renders the caller when the shown number
+ * changes: on each fix navigation is given, and once a second so a fix that
+ * stops coming turns into "--". Held while the app is in the background.
+ */
+export function useNavigationSpeed(unitSystem: ResolvedUnitSystem): number | null {
+  const { latestFix, subscribeFix } = useNavigation();
+  return useOnScreenSnapshot(
+    useCallback((fn: () => void) => {
+      const off = subscribeFix(fn);
+      const timer = setInterval(fn, SPEED_HUD.recheckMs);
+      return () => {
+        off();
+        clearInterval(timer);
+      };
+    }, [subscribeFix]),
+    useCallback(() => hudSpeed(latestFix(), Date.now(), unitSystem), [latestFix, unitSystem]),
+  );
 }
 
 /**

@@ -8366,9 +8366,12 @@ test('guidance camera wiring: the follow camera writes, guidance only sets its z
   // The map's route layer reads the session's map view (route changes only), never each fix
   const map = read('../components/MapboxDriveMap.tsx');
   const layer = map.slice(map.indexOf('const NavigationRouteLayers = memo('), map.indexOf('const MapboxDriveMap = forwardRef'));
-  assert.ok(/\(\) => session\.map,/.test(layer) && !/session\.state/.test(layer));
+  // Renders from the session's map view (route changes only); progress is read in a subscription, never during render
+  assert.ok(/\(\) => session\.map,/.test(layer));
+  assert.ok(/const confirm = \(\) => \{\s*const st = session\.state;/.test(layer) && /return session\.subscribe\(confirm\);/.test(layer));
+  assert.equal((layer.match(/session\.state/g) ?? []).length, 1);
   assert.ok(!/Camera|setFollowCamera|LocationPuck|followUserLocation/.test(layer));
-  assert.ok(map.indexOf('<NavigationRouteLayers session={navigation} />') < map.lastIndexOf('<MarkerFeeder'));
+  assert.ok(map.indexOf('<NavigationRouteLayers ref={navRouteRef} session={navigation} />') < map.lastIndexOf('<MarkerFeeder'));
 });
 
 test('guidance performance: a long route, thousands of fixes, local scans only', () => {
@@ -8625,10 +8628,13 @@ test('navigation UI: passive off-route states, End asks before finishing a drive
   assert.ok(/const canRecord = state\.phase !== "error" && !recordingActive && state\.recording === "none";/.test(controls), 'Record only with nothing recording');
   assert.ok(/\{canRecord \? \(\s*<GlassButton[\s\S]*?accessibilityLabel="Record this drive"/.test(controls));
   assert.ok(!/onRecord/.test(bar), 'Record is in the controls, not the bottom panel');
-  // The map draws the remaining line, not the whole route
+  // The map draws only what is still to drive: the prepared line, with the driven part trimmed away
   const map = read('../components/MapboxDriveMap.tsx');
   const layer = map.slice(map.indexOf('const NavigationRouteLayers = memo('), map.indexOf('const MapboxDriveMap = forwardRef'));
-  assert.ok(/view\.remaining \?\?/.test(layer) && /\[view\.route, view\.remaining\]/.test(layer));
+  assert.ok(/coordinates: trim\.prepared\.coords/.test(layer) && /<ShapeSource id="derwent-nav-route" shape=\{line\} lineMetrics>/.test(layer));
+  const lines = map.slice(map.indexOf('const NavigationRouteLines = memo('), map.indexOf('const NavigationRouteLayers = memo('));
+  assert.equal((lines.match(/\.\.\.style, lineTrimOffset,/g) ?? []).length, 2, 'casing and line trimmed together');
+  assert.equal((lines.match(/sourceID="derwent-nav-route"/g) ?? []).length, 2);
 });
 
 // ─── Navigation Phase 4: foreground voice guidance ──────────────────────────
@@ -10122,9 +10128,10 @@ test('navigation layout: the bottom panel has time left, distance and arrival; O
 test('navigation layout: the speed HUD is the real GPS speed only; no speed limit is ever shown', () => {
   const bar = readNav('../components/navigation/GuidanceBar.tsx');
   const hud = bar.slice(bar.indexOf('function SpeedHud('), bar.indexOf('export function GuidanceBar('));
-  assert.ok(/const fix = useLatestNavigationFix\(\)\(\);|const latestFix = useLatestNavigationFix\(\);\s*const fix = latestFix\(\);/.test(hud), 'the newest real fix');
-  assert.ok(/fix\.speedMs >= 0 && Date\.now\(\) - fix\.timestamp <= SPEED_FRESH_MS/.test(hud), 'a missing, negative or old speed shows as --');
-  assert.ok(/convertSpeed\(msToKmh\(fix!\.speedMs\), unitSystem\)/.test(hud) && /speedUnit\(unitSystem\)/.test(hud), 'in the user\'s units');
+  // Subscribed to the fixes (lib/navigation/speedHud.ts), never read once during render
+  assert.ok(/const value = useNavigationSpeed\(unitSystem\);/.test(hud), 'the newest real fix, kept current');
+  assert.ok(!/latestFix\(\)|Date\.now\(\)/.test(hud), 'nothing read during render that could go stale');
+  assert.ok(/speedUnit\(unitSystem\)/.test(hud), 'in the user\'s units');
   assert.ok(/\{value \?\? "--"\}/.test(hud));
   // The context hands over the last fix navigation was given, untouched
   const ctx = readNav('../context/NavigationContext.tsx');
@@ -11563,4 +11570,216 @@ test('Glass: a caller border colour covers every edge and the glass layer sits i
   // Privacy's visibility pills still colour only borderColor when selected
   const prefs = readFileSync(join(MOBILE, 'components/AccountPreferences.tsx'), 'utf8');
   assert.match(prefs, /settings\?\.\[key\] === value && \{\s*borderColor: sectionAccent\.profile,\s*\}/);
+});
+
+// ─── Build 26 real-drive fixes: speed HUD, route consumption, arrow size ────
+
+import { hudSpeed, SPEED_HUD } from '@/lib/navigation/speedHud';
+import { RouteLineTrim, ROUTE_TRIM } from '@/lib/navigation/routeTrim';
+import { LOCATION_ARROW_SCALE } from '@/lib/mapbox';
+
+test('speed HUD: the newest real GPS speed in mph (or km/h); none, bad or stale is --, never a false 0', () => {
+  const now = 5_000_000;
+  const fix = (speedMs: number | null, age = 500) => ({ speedMs, timestamp: now - age });
+  assert.equal(hudSpeed(fix(13.41), now, 'imperial'), 30, '13.4 m/s is 30 mph');
+  assert.equal(hudSpeed(fix(27.78), now, 'imperial'), 62);
+  assert.equal(hudSpeed(fix(31.29), now, 'imperial'), 70);
+  assert.equal(hudSpeed(fix(27.78), now, 'metric'), 100);
+  assert.equal(hudSpeed(fix(0), now, 'imperial'), 0, 'standing still with a real speed: 0');
+  assert.equal(hudSpeed(fix(null), now, 'imperial'), null, 'no speed: --');
+  assert.equal(hudSpeed(fix(-1), now, 'imperial'), null, 'iOS -1 (unknown): --');
+  assert.equal(hudSpeed(fix(Number.NaN), now, 'imperial'), null);
+  assert.equal(hudSpeed(fix(150), now, 'imperial'), null, 'implausible: --');
+  assert.equal(hudSpeed(null, now, 'imperial'), null, 'no fix yet: --');
+  assert.equal(hudSpeed(fix(13.41, SPEED_HUD.freshMs), now, 'imperial'), 30, 'still fresh at 10 s');
+  assert.equal(hudSpeed(fix(13.41, SPEED_HUD.freshMs + 1), now, 'imperial'), null, 'older: --');
+});
+
+test('speed HUD: subscribed to every fix navigation is given (the 0 mph bug), with a staleness check; no second location watcher', () => {
+  const bar = readNav('../components/navigation/GuidanceBar.tsx');
+  const hud = bar.slice(bar.indexOf('function SpeedHud('), bar.indexOf('export function GuidanceBar('));
+  // The bug: read once during render (latestFix(), Date.now()) with nothing to render it again, so with
+  // the React Compiler memoising the HUD it kept its first value: 0 mph, parked at the start
+  assert.ok(/reactCompiler": true/.test(readFileSync(toPath(new URL('../app.json', import.meta.url)), 'utf8')));
+  assert.ok(!/latestFix\(\)|Date\.now\(\)/.test(hud));
+  assert.ok(/useNavigationSpeed\(unitSystem\)/.test(hud));
+  const ctx = readNav('../context/NavigationContext.tsx');
+  const hook = ctx.slice(ctx.indexOf('export function useNavigationSpeed('), ctx.indexOf('export function useStartNavigation'));
+  assert.ok(/return useOnScreenSnapshot\(/.test(hook), 'held off screen like the rest of the guidance UI');
+  assert.ok(/const off = subscribeFix\(fn\);/.test(hook) && /setInterval\(fn, SPEED_HUD\.recheckMs\)/.test(hook) && /clearInterval\(timer\)/.test(hook));
+  assert.ok(/hudSpeed\(latestFix\(\), Date\.now\(\), unitSystem\)/.test(hook), 'the same latest fix navigation uses');
+  // Every fix navigation is given (screen or background task) reaches the HUD, after the session has it
+  const note = ctx.slice(ctx.indexOf('const noteFix = useCallback'), ctx.indexOf('// Background guidance'));
+  assert.ok(note.indexOf('session.noteFix(') < note.indexOf('for (const fn of [...fixListeners.current]) fn();'));
+  assert.ok(/speedMs: fix\.speedMs,/.test(note), 'the raw GPS speed, as recorded');
+  // The fix's speed is the GPS's own (the Drive screen passes it straight through), never route-snapped
+  const drive = readNav('../app/(tabs)/(drive)/index.tsx');
+  assert.ok(/noteRouteFix\(\{\s*latitude: lat,\s*longitude: lon,\s*speedKmh,\s*speedMs,/.test(drive));
+  // One foreground watcher (the Drive screen) and the one background task: nothing new
+  for (const f of ['../context/NavigationContext.tsx', '../components/navigation/GuidanceBar.tsx', '../lib/navigation/speedHud.ts']) {
+    assert.ok(!/watchPositionAsync|startLocationUpdatesAsync|getCurrentPositionAsync\(\{[^}]*\}\)\s*;?\s*\/\/ speed/.test(readNav(f)), f);
+  }
+  assert.ok(!/watchPositionAsync|startLocationUpdatesAsync/.test(readNav('../context/NavigationContext.tsx')));
+});
+
+/** A trim on a straight 3 km route north, with progress confirmed at `along` */
+function trim3(along: number) {
+  const p = prepareRoute(straightRoute3());
+  const t = new RouteLineTrim(p);
+  t.confirm(along);
+  return { p, t, at: (y: number, x = 0) => at3(x, y) };
+}
+
+test('route line: follows just behind the arrow in small steps, about 15 a second — not 15 m chunks once a second', () => {
+  const { t, at } = trim3(100);
+  assert.ok(Math.abs(t.frame(at(100), 0)! - t.fractionAt(95)) < 1e-9, 'first frame: 5 m behind the arrow');
+  // The arrow glides between fixes at 13 m/s (30 mph), drawn every 16 ms
+  let emits = 0;
+  let worstGap = 0;
+  let confirmed = 100;
+  for (let ms = 16; ms <= 3_000; ms += 16) {
+    const arrowAlong = 100 + 13 * ms / 1000;
+    if (ms % 1000 < 16) { confirmed = arrowAlong; t.confirm(confirmed); }
+    if (t.frame(at(arrowAlong), ms) != null) emits++;
+    worstGap = Math.max(worstGap, arrowAlong - t.startAlong);
+  }
+  // At 30 mph the 1 m step decides (~13 a second); faster, the 60 ms cap (~15 a second); never every frame
+  assert.ok(emits >= 35 && emits <= 3_000 / ROUTE_TRIM.minIntervalMs, `${emits} redraws in 3 s`);
+  assert.ok(worstGap <= ROUTE_TRIM.behindM + ROUTE_TRIM.minStepM + 13 * 0.016 + 0.1, `the line starts at most ${worstGap.toFixed(1)} m behind the arrow`);
+  // Before: redrawn only every 15 m of confirmed progress, 5 m behind it: up to ~33 m behind the arrow
+  assert.equal(REMAINING_LINE.redrawEveryM, 15);
+  // Small movements: under 1 m is not worth a redraw; 1 m is
+  const s = trim3(500);
+  s.t.frame(s.at(500), 0);
+  assert.equal(s.t.frame(s.at(500.6), 100), null);
+  assert.ok(s.t.frame(s.at(501.2), 200) != null);
+  // Nothing while stopped
+  assert.equal(s.t.frame(s.at(501.2), 400), null);
+  assert.equal(s.t.frame(s.at(501.2), 800), null);
+});
+
+test('route line: never ahead of the arrow, never far beyond confirmed progress, never backwards, never off the route', () => {
+  const { t, at } = trim3(1_000);
+  t.frame(at(1_000), 0);
+  assert.ok(Math.abs(t.startAlong - 995) < 0.01, 'starts under the arrow (5 m behind)');
+  // An arrow 200 m beyond confirmed progress (a bad position) isn't followed at all
+  t.frame(at(1_200), 50);
+  assert.ok(Math.abs(t.startAlong - 995) < 0.01, `${t.startAlong}`);
+  // 60 m beyond: followed at most 40 m beyond confirmed progress, less 5
+  t.frame(at(1_060), 100);
+  assert.ok(Math.abs(t.startAlong - (1_000 + ROUTE_TRIM.maxAheadM - ROUTE_TRIM.behindM)) < 0.5, `${t.startAlong}`);
+  // Back (the arrow easing back after a fix, or jitter): driven road never comes back
+  const was = t.startAlong;
+  t.frame(at(990), 200);
+  assert.equal(t.startAlong, was);
+  // Off the route (60 m to the side): nothing moves
+  t.confirm(1_100);
+  t.frame(at(1_090, 60), 300);
+  assert.equal(t.startAlong, was);
+  // No confirmed progress yet: nothing drawn trimmed
+  const none = new RouteLineTrim(prepareRoute(straightRoute3()));
+  assert.equal(none.frame(at(500), 0), null);
+  assert.equal(none.startAlong, 0);
+  // The ends
+  assert.equal(t.fractionAt(0), 0);
+  assert.equal(t.fractionAt(t.prepared.total), 1);
+});
+
+test('route line: the fraction is Web Mercator length (as Mapbox measures it), not metres', () => {
+  // 200 km due north from 50°N: Mercator stretches the northern half
+  const pts = polyline3([[0, 0], [0, 200_000]], 500);
+  const p = prepareRoute(route3(pts, [{ at: 0, type: 'depart' }, { at: pts.length - 1, type: 'arrive' }]));
+  const t = new RouteLineTrim(p);
+  const half = p.total / 2;
+  const y = (lat: number) => Math.log(Math.tan(Math.PI / 4 + (lat * Math.PI / 180) / 2));
+  const mid = pointAt(p, half);
+  const expected = (y(mid.latitude) - y(p.lat[0]!)) / (y(p.lat[p.n - 1]!) - y(p.lat[0]!));
+  assert.ok(Math.abs(t.fractionAt(half) - expected) < 1e-6, `${t.fractionAt(half)} vs ${expected}`);
+  assert.ok(Math.abs(t.fractionAt(half) - 0.5) > 0.001, 'a metres fraction would be visibly wrong (>200 m here)');
+});
+
+test('route line: the route is never changed; the map line is the prepared points, sent once per route', () => {
+  const route = straightRoute3();
+  const geometry = JSON.stringify(route.geometry);
+  const p = prepareRoute(route);
+  const coords = JSON.stringify(p.coords);
+  const t = new RouteLineTrim(p);
+  for (let i = 0; i < 500; i++) { t.confirm(i * 5); t.frame(at3(0, i * 5 + 3), i * 70); }
+  assert.equal(JSON.stringify(route.geometry), geometry);
+  assert.equal(JSON.stringify(p.coords), coords);
+  const map = readNav('../components/MapboxDriveMap.tsx');
+  const layer = map.slice(map.indexOf('const NavigationRouteLayers = memo('), map.indexOf('const MapboxDriveMap = forwardRef'));
+  assert.ok(/const trim = useMemo\(\(\) => \{[\s\S]*?new RouteLineTrim\(p\)[\s\S]*?\}, \[session, view\.route\]\);/.test(layer), 'a new line only with a new route');
+  assert.ok(/\[trim\],\s*\);/.test(layer), 'the geometry depends on the route alone');
+  // Trim updates re-render only the two line layers (NavigationRouteLines), never the ShapeSource,
+  // which serialises the whole line on every render
+  const lines = map.slice(map.indexOf('const NavigationRouteLines = memo('), map.indexOf('const NavigationRouteLayers = memo('));
+  assert.ok(/const lineTrimOffset = \[0, fraction\];/.test(lines));
+  assert.ok(/const fraction = drawn\.trim === trim \? drawn\.fraction : 0;/.test(lines), 'a new route never takes the old one\'s trim');
+  assert.ok(!/useState|setDrawn|lineTrimOffset/.test(layer), 'no trim state in the component holding the ShapeSource');
+  assert.ok(/if \(t && fraction != null\) linesRef\.current\?\.set\(t, fraction\);/.test(layer));
+  assert.ok(/<ShapeSource id="derwent-nav-route" shape=\{line\} lineMetrics>\s*<NavigationRouteLines ref=\{linesRef\} trim=\{trim\} \/>\s*<\/ShapeSource>/.test(layer));
+});
+
+test('route line: driven with navigation — tracks the arrow between 1 Hz fixes; a long route stays cheap', () => {
+  const h = nav3Session();
+  void h.s.start({ route: straightRoute3(), destination: N3_DEST });
+  const t = new RouteLineTrim(h.s.preparedRoute!);
+  h.s.subscribe(() => { const st = h.s.state; if ('progress' in st && st.progress) t.confirm(st.progress.along); });
+  let worst = 0;
+  let ahead = 0;
+  const fixes = drive3(STRAIGHT3, { to: 1_500, noise: 2 });
+  for (const f of fixes) {
+    h.feed([f]);
+    const confirmed = active3(h.s.state)?.progress?.along ?? 0;
+    // The arrow dead-reckons on between fixes, as the smoother does
+    for (let ms = 0; ms < 1_000; ms += 16) {
+      const arrow = confirmed + 13 * ms / 1000;
+      t.frame(at3(0, arrow), f.time + ms);
+      worst = Math.max(worst, arrow - t.startAlong);
+      ahead = Math.max(ahead, t.startAlong - confirmed);
+    }
+  }
+  assert.ok(worst < 8, `never more than ${worst.toFixed(1)} m behind the arrow`);
+  assert.ok(ahead <= ROUTE_TRIM.maxAheadM - ROUTE_TRIM.behindM + 0.01, `at most ${ahead.toFixed(1)} m beyond confirmed progress`);
+  // ~60 km, 6000 points: each frame looks at a few segments only
+  const long = polyline3([[0, 0], [0, 60_000]], 10);
+  const lp = prepareRoute(route3(long, [{ at: 0, type: 'depart' }, { at: long.length - 1, type: 'arrive' }]));
+  const lt = new RouteLineTrim(lp);
+  const started = Date.now();
+  for (let i = 0; i < 10_000; i++) { lt.confirm(i * 5); lt.frame(at3(0, i * 5 + 2), i * 16); }
+  assert.ok(lt.scans / 10_000 <= 12, `${(lt.scans / 10_000).toFixed(1)} segments a frame`);
+  assert.ok(Date.now() - started < 1_000, `${Date.now() - started} ms for 10,000 frames`);
+});
+
+test('route line: drawn from the frame loop only — nothing off screen, nothing without navigation', () => {
+  const drive = readNav('../app/(tabs)/(drive)/index.tsx');
+  const loop = drive.slice(drive.indexOf('frameLoopRef.current = () => {'), drive.indexOf('// ── Live trail head ──'));
+  assert.ok(/if \(!visualsLiveRef\.current\) return;/.test(loop), 'the frame loop stops off screen');
+  assert.ok(loop.indexOf('if (!visualsLiveRef.current) return;') < loop.indexOf('mapboxRef.current?.trimRoute(position, now);'));
+  assert.equal((drive.match(/trimRoute\(/g) ?? []).length, 1, 'one caller');
+  const map = readNav('../components/MapboxDriveMap.tsx');
+  assert.ok(/trimRoute\(arrow, now\) \{\s*if \(liveRef\.current\) navRouteRef\.current\?\.frame\(arrow, now\);\s*\}/.test(map), 'never while visuals are paused; a no-op with no navigation layer');
+  // The route line still sits beneath the trail, hazards, friends and the arrow; the camera is untouched
+  assert.ok(map.indexOf('<NavigationRouteLayers ref={navRouteRef} session={navigation} />') < map.indexOf('<HazardLayers'));
+});
+
+test('vehicle arrow: 20% larger, the same artwork, anchor and heading; still above the hazard markers', () => {
+  assert.equal(LOCATION_ARROW_SCALE, 1.2);
+  assert.ok(LOCATION_ARROW_SCALE >= 1.15 && LOCATION_ARROW_SCALE <= 1.25, 'modest: 15–25%');
+  assert.equal(LOCATION_ARROW_SYMBOL.iconSize, LOCATION_ARROW_SCALE);
+  assert.equal(LOCATION_ARROW_SYMBOL.iconAnchor, 'center', 'the car is still at its centre');
+  assert.deepEqual(LOCATION_ARROW_SYMBOL.iconRotate, ['get', 'heading']);
+  assert.equal(LOCATION_ARROW_SYMBOL.iconRotationAlignment, 'map');
+  assert.equal(LOCATION_ARROW_SYMBOL.iconPitchAlignment, 'map');
+  // Same images, arrow and shadow scaled together (both spread the symbol)
+  const map = readNav('../components/MapboxDriveMap.tsx');
+  assert.match(map, /"derwent-location-arrow": require\("@\/assets\/images\/map\/puck-arrow\.png"\)/);
+  assert.equal((map.match(/\.\.\.LOCATION_ARROW_SYMBOL,/g) ?? []).length, 2);
+  // 44 × 48 pt artwork → ~53 × 58 pt; hazard markers top out at 30 pt
+  const png = (f: string) => { const b = readFileSync(toPath(new URL(`../assets/images/map/${f}`, import.meta.url))); return { w: b.readUInt32BE(16), h: b.readUInt32BE(20) }; };
+  const arrow = png('puck-arrow.png');
+  assert.deepEqual(arrow, { w: 44, h: 48 });
+  assert.deepEqual(png('puck-arrow@3x.png'), { w: 132, h: 144 }, 'the @3x artwork: sharp at 1.2× on any iPhone');
+  assert.ok(Math.round(arrow.w * LOCATION_ARROW_SCALE) === 53 && png('hazard-accident.png').w <= 30);
 });

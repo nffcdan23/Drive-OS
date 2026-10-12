@@ -73,6 +73,7 @@ import {
 import { LatestPoseWriter, sameFollowPose } from "@/lib/cameraWriter";
 import type { RoutePreviewStore } from "@/lib/navigation/previewStore";
 import type { NavigationSession } from "@/lib/navigation/session";
+import { RouteLineTrim } from "@/lib/navigation/routeTrim";
 import { HAZARD_KINDS, hazardFeatures } from "@/lib/hazards/model";
 import type { HazardStore } from "@/lib/hazards/store";
 import { useOnScreenSnapshot } from "@/hooks/useOnScreenSnapshot";
@@ -93,6 +94,8 @@ export interface MapboxDriveMapHandle {
   easeToZoom(zoom: number): void;
   /** Moves the location arrow to the smoothed position and heading */
   setMarker(position: LatLng, heading: number): void;
+  /** The arrow as drawn this frame: the navigation route line is consumed up to just behind it */
+  trimRoute(arrow: LatLng | null, now: number): void;
   /**
    * The app is on screen (true) or not (false).  Off screen nothing is
    * written to the map: no camera, no arrow; the waiting camera pose is
@@ -132,9 +135,9 @@ export interface MapboxDriveMapProps {
   routePreview?: RoutePreviewStore | null;
   /**
    * The route being navigated (Phase 3), drawn by NavigationRouteLayers from
-   * the session itself: only the part still to drive, redrawn when the
-   * route changes (a reroute) or every 15 m or so of progress, never per GPS
-   * fix or frame. Never touches the camera.
+   * the session itself: the line sent once per route (a reroute), the part
+   * driven trimmed away just behind the arrow by the frame loop (trimRoute).
+   * Never touches the camera.
    */
   navigation?: NavigationSession | null;
   /**
@@ -442,35 +445,98 @@ const RouteLayers = memo(function RouteLayers({ store }: { store: RoutePreviewSt
 });
 
 /**
- * The route being navigated (the part still ahead: the line behind the car
- * is gone), and its destination. Reads the session's map view, which changes
- * only with the route, the destination, or each REMAINING_LINE.redrawEveryM
- * of progress: not every fix, never every frame. Draws only: no camera, no
- * location component.
+ * The route being navigated, and its destination. The line is the whole
+ * prepared route, sent to the map once per route (a reroute brings a new
+ * one); the part already driven is hidden with the line trim, moved along
+ * just behind the arrow by the Drive screen's frame loop (`frame`, through
+ * the map's trimRoute): one number per update, about 15 a second at speed,
+ * never a new line (lib/navigation/routeTrim.ts). The route itself is never
+ * changed. Draws only: no camera, no location component.
  */
-const NavigationRouteLayers = memo(function NavigationRouteLayers({ session }: { session: NavigationSession }) {
+interface NavigationRouteHandle {
+  /** The arrow as drawn this frame: the line's start follows just behind it */
+  frame(arrow: LatLng | null, now: number): void;
+}
+
+/**
+ * The route line's two layers, with the driven part trimmed away. Their own
+ * small component: a trim update (several a second) re-renders only these
+ * two layers' styles, never the ShapeSource, which serialises the whole
+ * route line each time it renders.
+ */
+interface NavigationRouteLinesHandle {
+  set(trim: RouteLineTrim, fraction: number): void;
+}
+const NavigationRouteLines = memo(forwardRef<NavigationRouteLinesHandle, { trim: RouteLineTrim | null }>(function NavigationRouteLines({ trim }, ref) {
+  const [drawn, setDrawn] = useState<{ trim: RouteLineTrim | null; fraction: number }>({ trim: null, fraction: 0 });
+  useImperativeHandle(ref, () => ({ set: (t, fraction) => setDrawn({ trim: t, fraction }) }), []);
+  // A new route never takes the old one's trim
+  const fraction = drawn.trim === trim ? drawn.fraction : 0;
+  // The driven part hidden: [start, end] of the line, as shares of its length
+  const style = { lineCap: "round", lineJoin: "round", lineEmissiveStrength: 1 } as const;
+  const lineTrimOffset = [0, fraction];
+  return (
+    <>
+      <LineLayer
+        id="derwent-nav-route-casing"
+        sourceID="derwent-nav-route"
+        style={{ ...style, lineTrimOffset, lineColor: ROUTE_COLORS.selectedCasing, lineWidth: 13 }}
+      />
+      <LineLayer
+        id="derwent-nav-route-line"
+        sourceID="derwent-nav-route"
+        style={{ ...style, lineTrimOffset, lineColor: ROUTE_COLORS.selected, lineWidth: 8 }}
+      />
+    </>
+  );
+}));
+const NavigationRouteLayers = memo(forwardRef<NavigationRouteHandle, { session: NavigationSession }>(function NavigationRouteLayers({ session }, ref) {
   // Held still in the background (background guidance keeps the session
-  // current); the line as it is now arrives in one update on return
+  // current); the route as it is now arrives in one update on return
   const view = useOnScreenSnapshot(
     useCallback((fn: () => void) => session.subscribe(fn), [session]),
     useCallback(() => session.map, [session]),
   );
+  // The prepared route behind the route on the map, and its trim
+  const trim = useMemo(() => {
+    const p = view.route ? session.preparedRoute : null;
+    return p && p.route === view.route ? new RouteLineTrim(p) : null;
+  }, [session, view.route]);
+  // Navigation's confirmed progress on this route, from each fix it commits (no render)
+  useEffect(() => {
+    if (!trim) return;
+    const confirm = () => {
+      const st = session.state;
+      if ("progress" in st && st.route === trim.prepared.route && st.progress) trim.confirm(st.progress.along);
+    };
+    confirm();
+    return session.subscribe(confirm);
+  }, [session, trim]);
+  const linesRef = useRef<NavigationRouteLinesHandle>(null);
+  const trimRef = useRef<RouteLineTrim | null>(null);
+  useEffect(() => {
+    trimRef.current = trim;
+  }, [trim]);
+  useImperativeHandle(ref, () => ({
+    frame(arrow, now) {
+      const t = trimRef.current;
+      const fraction = t?.frame(arrow, now);
+      if (t && fraction != null) linesRef.current?.set(t, fraction);
+    },
+  }), []);
   const line = useMemo(
     () => ({
       type: "FeatureCollection" as const,
-      features: view.route
+      features: trim
         ? [{
             type: "Feature" as const,
             properties: {},
-            geometry: {
-              type: "LineString" as const,
-              // Only the part still to drive (derived; the route is never changed)
-              coordinates: (view.remaining ?? view.route.geometry.map((p): [number, number] => [p.longitude, p.latitude])) as [number, number][],
-            },
+            // The prepared route's own points (the route is never changed)
+            geometry: { type: "LineString" as const, coordinates: trim.prepared.coords as [number, number][] },
           }]
         : [],
     }),
-    [view.route, view.remaining],
+    [trim],
   );
   const point = useMemo(
     () => ({
@@ -488,18 +554,10 @@ const NavigationRouteLayers = memo(function NavigationRouteLayers({ session }: {
     }),
     [view.destination],
   );
-  const style = { lineCap: "round", lineJoin: "round", lineEmissiveStrength: 1 } as const;
   return (
     <>
-      <ShapeSource id="derwent-nav-route" shape={line}>
-        <LineLayer
-          id="derwent-nav-route-casing"
-          style={{ ...style, lineColor: ROUTE_COLORS.selectedCasing, lineWidth: 13 }}
-        />
-        <LineLayer
-          id="derwent-nav-route-line"
-          style={{ ...style, lineColor: ROUTE_COLORS.selected, lineWidth: 8 }}
-        />
+      <ShapeSource id="derwent-nav-route" shape={line} lineMetrics>
+        <NavigationRouteLines ref={linesRef} trim={trim} />
       </ShapeSource>
       <ShapeSource id="derwent-nav-destination" shape={point}>
         <CircleLayer
@@ -516,7 +574,7 @@ const NavigationRouteLayers = memo(function NavigationRouteLayers({ session }: {
       </ShapeSource>
     </>
   );
-});
+}));
 
 const MapboxDriveMap = forwardRef<MapboxDriveMapHandle, MapboxDriveMapProps>(
   function MapboxDriveMap(
@@ -548,6 +606,7 @@ const MapboxDriveMap = forwardRef<MapboxDriveMapHandle, MapboxDriveMapProps>(
     const cameraRef = useRef<Camera>(null);
     const followCameraRef = useRef<FollowCameraHandle>(null);
     const markerRef = useRef<MarkerFeederHandle>(null);
+    const navRouteRef = useRef<NavigationRouteHandle>(null);
     const lastCameraRef = useRef<ReportedPose | null>(null);
     const lastMarkerRef = useRef<ArrowPose | null>(null);
     const liveRef = useRef(true);
@@ -593,6 +652,9 @@ const MapboxDriveMap = forwardRef<MapboxDriveMapHandle, MapboxDriveMapProps>(
           const pose = { position, heading };
           lastMarkerRef.current = pose;
           if (liveRef.current) markerRef.current?.set(pose);
+        },
+        trimRoute(arrow, now) {
+          if (liveRef.current) navRouteRef.current?.frame(arrow, now);
         },
         setVisualsLive(live) {
           liveRef.current = live;
@@ -682,7 +744,7 @@ const MapboxDriveMap = forwardRef<MapboxDriveMapHandle, MapboxDriveMapProps>(
           {/* Mounted first: the route preview draws beneath the trail and
               the arrow */}
           {routePreview && <RouteLayers store={routePreview} />}
-          {navigation && <NavigationRouteLayers session={navigation} />}
+          {navigation && <NavigationRouteLayers ref={navRouteRef} session={navigation} />}
           {/* Mounted before the trail: the head draws beneath it (and the
               arrow, mounted last, draws above both) */}
           {trailHead && (
