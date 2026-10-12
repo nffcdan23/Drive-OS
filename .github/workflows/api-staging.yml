@@ -457,5 +457,7 @@ jobs:
           ! grep -qE "47\.0123|47\.01235|-35\.0123|-35\.01235" "$logs" || fail "A hazard report's position appears in the staging logs"
           # No request bodies at all
           ! grep -qE '"(latitude|longitude|minLat|maxLat)"' "$logs" || fail "A request body with coordinates appears in the staging logs"
+          # Nor a direction of travel as sent, an accuracy or a speed (0021: the raw courses test:staging sent)
+          ! grep -qE '93\.6127|272\.3771|4\.3917|88\.8313|"headingDeg"|"accuracyM"|"speedMs"' "$logs" || fail "A raw course, accuracy or speed appears in the staging logs"
           rm -f "$logs" "$ids"
-          echo "Checked $lines lines of staging runtime logs: started cleanly, hazard clean-up healthy; no test driver ids or emails, tokens, report positions or request bodies."
+          echo "Checked $lines lines of staging runtime logs: started cleanly, hazard clean-up healthy; no test driver ids or emails, tokens, report positions, raw courses, accuracies, speeds or request bodies."

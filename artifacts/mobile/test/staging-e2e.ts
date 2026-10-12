@@ -24,7 +24,7 @@ import { MemoryStore, LEGACY_KEYS } from '@/lib/backend/storage';
 import type { Vehicle } from '@/lib/backend/model';
 import { toJourney } from '@/lib/backend/mappers';
 import { decodePolyline } from '@/lib/backend/geo';
-import { writeFileSync } from 'node:fs';
+import { appendFileSync, writeFileSync } from 'node:fs';
 import { createClient } from '@supabase/supabase-js';
 import { areaAround, hazardTopic } from '@/lib/hazards/model';
 
@@ -641,6 +641,9 @@ async function run() {
   // ─── 20. Road hazards (migration 0020), against the hosted API and real Realtime
   await hazardChecks();
 
+  // ─── 21. Hazard direction of travel (migration 0021), hosted ──────────────
+  await hazardDirectionChecks();
+
   // ─── 15. Account deletion ────────────────────────────────────────────────
   section('15. Account deletion');
   await p1.ep.deleteAccount();
@@ -806,6 +809,108 @@ async function hazardChecks() {
     : Object.keys(m).sort().join(',') === 'confirmations,expiresAt,expiresInMs,id,kind,lastConfirmedAt,latitude,longitude,reportedAt,travelHeadingDeg,type'));
   await rt.close();
   console.log(`     hazard area cell: ${HZ_TOPIC}; topics a driver here would join: ${hazardTopicsNear().join(', ')}`);
+}
+
+// Raw courses sent by the direction checks: distinctive, so the log audit can look for them
+const RAW_HEADINGS = { east: 93.6127, west: 272.3771, north: 4.3917, crossing: 88.8313 };
+
+async function hazardDirectionChecks() {
+  section('21. Hazard direction of travel (0021: hosted API, staging database, real Realtime)');
+  const drivers: Record<string, { id: string; email: string; d: Device; token: string }> = {};
+  const pw = randomBytes(18).toString('base64url');
+  console.log(`::add-mask::${pw}`);
+  for (const k of ['g', 'h', 'i', 'j', 'k']) {
+    const email = `driveos-mobile-${RUN}-hzd-${k}@example.com`;
+    const id = await adminCreate(email, pw, `Direction ${k.toUpperCase()}`);
+    const d = device(`direction ${k}`);
+    await signInWithEmail(d.auth, email, pw);
+    const token = (await d.auth.auth.getSession()).data.session!.access_token;
+    console.log(`::add-mask::${token}`);
+    drivers[k] = { id, email, d, token };
+  }
+  const { g, h, i, j, k } = drivers as Required<typeof drivers>;
+  if (process.env.HAZARD_LEAK_CHECK_FILE) {
+    appendFileSync(process.env.HAZARD_LEAK_CHECK_FILE, Object.values(drivers).flatMap((x) => [x.id, x.email]).join('\n') + '\n');
+  }
+  const bodies: string[] = [];
+  const keep = <T,>(v: T) => { bodies.push(JSON.stringify(v)); return v; };
+  const err = (x: unknown) => (x instanceof ApiError ? `${x.status} ${x.code}` : x instanceof Error ? x.message : 'accepted');
+  const fresh = () => ({ accuracyM: 6, capturedAt: new Date().toISOString() });
+  const P1 = { latitude: 47.3, longitude: -35.3 };
+  const P2 = { latitude: 47.32, longitude: -35.3 };
+  const rt = await joinHazardTopic(k.token, hazardTopic(P1.latitude, P1.longitude));
+  check(`realtime: a driver can join the direction test cell ${hazardTopic(P1.latitude, P1.longitude)}`, rt.status === 'SUBSCRIBED', rt.status);
+  type H = Record<string, unknown> & { id?: string; travelHeadingDeg?: number | null };
+  const hz = (r: unknown) => ((r as { hazard?: H })?.hazard ?? {}) as H;
+
+  // Old client: kind and position only
+  const old = keep(await g.d.ep.reportHazard({ kind: 'hazard', ...P1 } as never).catch((x) => x));
+  check('old client: a report without a direction (or fix details) succeeds', old?.outcome === 'created', err(old));
+  check('old client: its direction stays unknown (null)', hz(old).travelHeadingDeg === null, String(hz(old).travelHeadingDeg));
+
+  // Heading fill: a reliable direction merged into it is taken, once
+  const fill = keep(await h.d.ep.reportHazard({ kind: 'hazard', ...P1, latitude: P1.latitude + 0.00005, headingDeg: RAW_HEADINGS.north, ...fresh() }).catch((x) => x));
+  check('heading fill: a nearby report with a reliable direction merges into it', fill?.outcome === 'merged' && hz(fill).id === hz(old).id, err(fill));
+  check('heading fill: which gains the first reliable direction, normalised (4.3917° → 0)', hz(fill).travelHeadingDeg === 0, String(hz(fill).travelHeadingDeg));
+  const later = keep(await i.d.ep.reportHazard({ kind: 'hazard', ...P1, latitude: P1.latitude - 0.00005, headingDeg: RAW_HEADINGS.crossing, ...fresh() }).catch((x) => x));
+  check('immutable: a later report with another (crossing) direction merges', later?.outcome === 'merged' && hz(later).id === hz(old).id, err(later));
+  check('immutable: and does not change the stored direction', hz(later).travelHeadingDeg === 0, String(hz(later).travelHeadingDeg));
+  check('immutable: the database refuses to change it directly too',
+    (() => { try { sql(`update public.road_hazards set travel_heading_deg = 180 where id = '${hz(old).id}'`); return false; } catch { return true; } })());
+
+  // Same direction merges; the opposite carriageway stays separate
+  const east = keep(await g.d.ep.reportHazard({ kind: 'accident', ...P2, headingDeg: RAW_HEADINGS.east, ...fresh() }).catch((x) => x));
+  check('direction: a report with a reliable course stores its 10° bucket (93.6127° → 90)', east?.outcome === 'created' && hz(east).travelHeadingDeg === 90, err(east));
+  const west = keep(await h.d.ep.reportHazard({ kind: 'accident', ...P2, latitude: P2.latitude + 0.000225, headingDeg: RAW_HEADINGS.west, ...fresh() }).catch((x) => x));
+  check('opposite: the same kind 25 m away going the other way stays a separate hazard',
+    west?.outcome === 'created' && hz(west).id !== hz(east).id && hz(west).travelHeadingDeg === 270, `${west?.outcome} ${hz(west).travelHeadingDeg}`);
+  const same = keep(await i.d.ep.reportHazard({ kind: 'accident', ...P2, latitude: P2.latitude - 0.00007, headingDeg: 85, ...fresh() }).catch((x) => x));
+  check('same direction: a nearby report going the same way merges into it', same?.outcome === 'merged' && hz(same).id === hz(east).id, err(same));
+  const both = keep(await k.d.ep.hazardsInView({ minLat: P2.latitude - 0.01, minLng: P2.longitude - 0.01, maxLat: P2.latitude + 0.01, maxLng: P2.longitude + 0.01 }).catch((x) => x)) as H[];
+  check('opposite: two accident markers, one each way', Array.isArray(both)
+    && both.filter((x) => x.kind === 'accident').map((x) => x.travelHeadingDeg).sort((a, b) => Number(a) - Number(b)).join(',') === '90,270');
+
+  // A stale or vague fix cannot force a direction
+  const stale = keep(await j.d.ep.reportHazard({ kind: 'police', latitude: 47.34, longitude: -35.3, headingDeg: RAW_HEADINGS.east, accuracyM: 6, capturedAt: new Date(Date.now() - 60_000).toISOString() }).catch((x) => x));
+  check('gate: a minute-old fix is accepted but its direction is not kept', stale?.outcome === 'created' && hz(stale).travelHeadingDeg === null, err(stale));
+  const vague = keep(await j.d.ep.reportHazard({ kind: 'roadworks', latitude: 47.36, longitude: -35.3, headingDeg: RAW_HEADINGS.east, accuracyM: 45, capturedAt: new Date().toISOString() }).catch((x) => x));
+  check('gate: a 45 m fix is accepted but its direction is not kept', vague?.outcome === 'created' && hz(vague).travelHeadingDeg === null, err(vague));
+
+  // Validation
+  for (const [label, headingDeg] of [['negative', -5], ['360°', 360], ['361°', 361], ['not a number', 'east']] as const) {
+    const x = await k.d.ep.reportHazard({ kind: 'hazard', latitude: 47.38, longitude: -35.3, headingDeg: headingDeg as number, ...fresh() }).catch((e) => e);
+    check(`validation: a ${label} direction is refused`, x instanceof ApiError && x.status === 400, err(x));
+  }
+  check('validation: off-grid courses are accepted and normalised to the 10° grid (stored values are always on it)',
+    sql(`select count(*) from public.road_hazards where latitude between 47.29 and 47.33 and longitude = -35.3 and travel_heading_deg % 10 <> 0`) === '0');
+
+  // Votes and expiry on a hazard of either kind are unchanged
+  const vote = await k.d.ep.voteHazard(String(hz(stale).id), 'still_there').catch((x) => x);
+  check('votes: Still there works on a hazard without a direction', vote?.outcome === 'counted', err(vote));
+  check('expiry: unchanged (a police report is still up for 30 minutes)',
+    typeof hz(stale).expiresInMs === 'number' && (hz(stale).expiresInMs as number) > 29 * 60_000 && (hz(stale).expiresInMs as number) <= 30 * 60_000);
+
+  // Realtime: the normalised direction, nothing else new, nobody's identity
+  await waitUntil(() => rt.received.some((m) => m.id === hz(east).id) && rt.received.some((m) => m.id === hz(old).id && m.travelHeadingDeg === 0));
+  const mine = rt.received.filter((m) => [hz(old).id, hz(east).id, hz(west).id].includes(m.id));
+  check('realtime: broadcasts carry the normalised direction (or null)', mine.some((m) => m.id === hz(east).id && m.travelHeadingDeg === 90)
+    && mine.some((m) => m.id === hz(old).id && m.travelHeadingDeg === null) && mine.some((m) => m.id === hz(old).id && m.travelHeadingDeg === 0));
+  check('realtime: no other new field', mine.every((m) => m.type === 'hazard_removed' ? Object.keys(m).sort().join(',') === 'id,type'
+    : Object.keys(m).sort().join(',') === 'confirmations,expiresAt,expiresInMs,id,kind,lastConfirmedAt,latitude,longitude,reportedAt,travelHeadingDeg,type'));
+  await rt.close();
+
+  // Privacy: nobody, no speed, no accuracy, no journey, no raw course anywhere a hazard travels
+  const sent = sql(`select coalesce(string_agg(payload::text, ' '), '') from realtime.messages where event = 'hazard' and topic like 'hazards:9_:-7_'`);
+  const everything = [bodies.join('\n'), JSON.stringify(rt.received), sent].join('\n');
+  const leaks = [
+    ...Object.values(drivers).flatMap((x) => [['user id', x.id], ['email', x.email], ['token', x.token]] as const),
+    ['speed', 'speed'] as const, ['accuracy', 'accuracy'] as const, ['journey', 'journey'] as const, ['display name', 'Direction '] as const,
+    ...Object.values(RAW_HEADINGS).map((v) => ['raw course', String(v)] as const),
+  ].filter(([, v]) => everything.includes(v)).map(([what]) => what);
+  check('privacy: no user id, email, token, name, speed, accuracy, journey or raw course in any response or broadcast', leaks.length === 0, [...new Set(leaks)].join(', '));
+  check('privacy: the stored row holds no speed, accuracy, route, journey or user',
+    sql(`select count(*) from information_schema.columns where table_schema = 'public' and table_name = 'road_hazards'
+         and column_name ~ '(speed|accuracy|route|journey|reporter|user|position)'`) === '0');
 }
 
 type HazardMessage = Record<string, unknown> & { type?: string; id?: string };
