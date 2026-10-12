@@ -86,6 +86,7 @@ import { GuidanceBanner } from "@/components/navigation/GuidanceBanner";
 import { GuidanceBar } from "@/components/navigation/GuidanceBar";
 import { NavigationControls } from "@/components/navigation/NavigationControls";
 import { HazardCard } from "@/components/hazards/HazardCard";
+import { HazardWarningPill } from "@/components/hazards/HazardWarningPill";
 import { ReportHazardSheet } from "@/components/hazards/ReportHazardSheet";
 import { useHazardActions, useHazardStore } from "@/context/HazardsContext";
 import type { ReportFix } from "@/lib/hazards/report";
@@ -1182,7 +1183,9 @@ export default function MapScreen() {
         }
       }
       lastPositionRef.current = { lat, lon, time: now };
-      lastAcceptedFixRef.current = { latitude: lat, longitude: lon, accuracyM: accuracy, timestamp: fixTime ?? now };
+      lastAcceptedFixRef.current = {
+        latitude: lat, longitude: lon, accuracyM: accuracy, timestamp: fixTime ?? now, speedMs, headingDeg: gpsHeading,
+      };
       // Nearby hazards load only once the driver has moved far enough (never per fix)
       noteHazardPosition(lat, lon);
 
@@ -2864,6 +2867,7 @@ export default function MapScreen() {
             unitSystem={resolvedUnitSystem}
             onHeight={onGuidanceBannerHeight}
             onCardHeight={onGuidanceCardHeight}
+            below={<HazardWarningPill unitSystem={resolvedUnitSystem} />}
           />
         </View>
       )}

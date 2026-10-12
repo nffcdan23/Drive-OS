@@ -14,7 +14,7 @@
  */
 import { sql } from 'drizzle-orm';
 import {
-  pgTable, uuid, text, integer, real, doublePrecision, boolean, timestamp, date, jsonb,
+  pgTable, uuid, text, integer, smallint, real, doublePrecision, boolean, timestamp, date, jsonb,
   primaryKey, customType,
 } from 'drizzle-orm/pg-core';
 
@@ -355,6 +355,8 @@ export const roadHazards = pgTable('road_hazards', {
   support:         integer('support').notNull().default(1),
   dismissals:      integer('dismissals').notNull().default(0),
   removedAt:       timestamptz('removed_at'),
+  /** 0021: the reporter's direction of travel, 10° buckets, when reliable; else null */
+  travelHeadingDeg: smallint('travel_heading_deg'),
 });
 
 /** Who reported or voted: owner-readable only, never shown to anyone else. */

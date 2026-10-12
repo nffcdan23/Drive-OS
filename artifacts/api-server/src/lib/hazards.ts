@@ -54,6 +54,25 @@ export function reportFixProblem(fix: { accuracyM?: number | null; capturedAt?: 
   return null;
 }
 
+/** A direction of travel is kept only from a fix this fresh (ms) and accurate (m) */
+export const MAX_HEADING_FIX_AGE_MS = 30_000;
+export const MAX_HEADING_ACCURACY_M = 30;
+
+/**
+ * The reporter's direction of travel to store, or null. The app sends one
+ * only when moving briskly with a valid GPS course (its own reliability
+ * gate); this keeps it only with a fresh, accurate fix as well. The
+ * database stores it as a 10° bucket. Out-of-range values are refused
+ * before this (validation).
+ */
+export function reportHeading(r: { headingDeg?: number | null; accuracyM?: number | null; capturedAt?: Date | null }, now = Date.now()): number | null {
+  const h = r.headingDeg;
+  if (h == null || !Number.isFinite(h) || h < 0 || h >= 360) return null;
+  if (!r.capturedAt || Math.abs(now - r.capturedAt.getTime()) > MAX_HEADING_FIX_AGE_MS) return null;
+  if (r.accuracyM == null || r.accuracyM > MAX_HEADING_ACCURACY_M) return null;
+  return h;
+}
+
 export type ReportOutcome = "created" | "merged" | "already_reported" | "rate_limited";
 export type VoteOutcome = "counted" | "already_voted" | "own_report" | "not_found" | "rate_limited";
 
@@ -93,6 +112,9 @@ export type MyHazardVote = "reported" | "still_there" | "not_there" | null;
 export function presentHazard(json: Record<string, unknown>, myVote: string | null): Record<string, unknown> {
   // Only the fields the map shows, whatever the database adds later
   const { id, kind, latitude, longitude, reportedAt, lastConfirmedAt, expiresAt, expiresInMs, confirmations } = json;
+  // 0021: the reporter's direction of travel (10° bucket) or null; absent before it
+  const heading = json.travelHeadingDeg;
+  const travelHeadingDeg = typeof heading === "number" && Number.isInteger(heading) && heading >= 0 && heading < 360 ? heading : null;
   const mine: MyHazardVote = myVote === "reported" || myVote === "still_there" || myVote === "not_there" ? myVote : null;
-  return { id, kind, latitude, longitude, reportedAt, lastConfirmedAt, expiresAt, expiresInMs, confirmations, myVote: mine };
+  return { id, kind, latitude, longitude, travelHeadingDeg, reportedAt, lastConfirmedAt, expiresAt, expiresInMs, confirmations, myVote: mine };
 }

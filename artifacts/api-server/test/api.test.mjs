@@ -1421,7 +1421,7 @@ const hz = {
 };
 /** A map area around a point (about ±5.5 km) */
 const around = (lat, lng, d = 0.05) => ({ minLat: lat - d, minLng: lng - d, maxLat: lat + d, maxLng: lng + d });
-const HZ_KEYS = ["confirmations", "expiresAt", "expiresInMs", "id", "kind", "lastConfirmedAt", "latitude", "longitude", "myVote", "reportedAt"];
+const HZ_KEYS = ["confirmations", "expiresAt", "expiresInMs", "id", "kind", "lastConfirmedAt", "latitude", "longitude", "myVote", "reportedAt", "travelHeadingDeg"];
 
 test("hazards: signed-in drivers only; the report is validated", async () => {
   const u = await newUser();
@@ -1558,6 +1558,49 @@ test("hazards: ended reports and delivered broadcasts are cleaned up; nothing ab
   for (const leaked of ["55.612345", "-3.612345", "55.61235", "-3.61235", u.id]) {
     assert.ok(!serverOutput.includes(leaked), `server log mentions ${leaked}`);
   }
+});
+
+test("hazards: the reporter's direction of travel is optional, range-checked, bucketed, and keeps opposite carriageways apart", async () => {
+  const [a, b, c, d] = [await newUser(), await newUser(), await newUser(), await newUser()];
+  const fresh = () => ({ accuracyM: 6, capturedAt: new Date().toISOString() });
+  // An older app: kind and position only, exactly as before
+  const old = await hz.report(a, { kind: "hazard", latitude: 55.7, longitude: -3.7 });
+  expect(old, 201, "a report without a direction");
+  assert.equal(old.body.hazard.travelHeadingDeg, null, "unknown direction");
+  // Validation
+  expect(await hz.report(a, { kind: "accident", latitude: 55.71, longitude: -3.7, headingDeg: 361, ...fresh() }), 400, "361°");
+  expect(await hz.report(a, { kind: "accident", latitude: 55.71, longitude: -3.7, headingDeg: 360, ...fresh() }), 400, "360°");
+  expect(await hz.report(a, { kind: "accident", latitude: 55.71, longitude: -3.7, headingDeg: -5, ...fresh() }), 400, "negative");
+  expect(await hz.report(a, { kind: "accident", latitude: 55.71, longitude: -3.7, headingDeg: "east", ...fresh() }), 400, "not a number");
+  // Stored as a 10° bucket, and only from a fresh, accurate fix
+  const east = await hz.report(a, { kind: "accident", latitude: 55.72, longitude: -3.7, headingDeg: 93.6, ...fresh() });
+  expect(east, 201, "with a direction");
+  assert.equal(east.body.hazard.travelHeadingDeg, 90);
+  const vague = await hz.report(b, { kind: "police", latitude: 55.73, longitude: -3.7, headingDeg: 93.6, accuracyM: 60, capturedAt: new Date().toISOString() });
+  assert.equal(vague.body.hazard.travelHeadingDeg, null, "a 60 m fix: the direction is not kept");
+  // The other carriageway, 25 m away, going the other way: a separate accident
+  const other = await hz.report(b, { kind: "accident", latitude: 55.72022, longitude: -3.7, headingDeg: 272, ...fresh() });
+  expect(other, 201, "opposite direction nearby");
+  assert.notEqual(other.body.hazard.id, east.body.hazard.id);
+  assert.equal(other.body.hazard.travelHeadingDeg, 270);
+  // The same direction merges; no direction merges spatially as before
+  const same = await hz.report(c, { kind: "accident", latitude: 55.71995, longitude: -3.7, headingDeg: 85, ...fresh() });
+  assert.equal(same.body.outcome, "merged");
+  assert.equal(same.body.hazard.id, east.body.hazard.id);
+  const unknown = await hz.report(d, { kind: "accident", latitude: 55.72005, longitude: -3.7 });
+  assert.equal(unknown.body.outcome, "merged", "no direction: the spatial rule");
+  // Votes need no direction; the map and broadcasts carry it, and nothing else new
+  expect(await hz.vote(await newUser(), other.body.hazard.id, "still_there"), 200, "still there");
+  const seen = (await hz.view(d, around(55.72, -3.7))).body;
+  assert.deepEqual(seen.filter((x) => x.kind === "accident").map((x) => x.travelHeadingDeg).sort((x, y) => x - y), [90, 270]);
+  assert.ok(seen.filter((x) => x.kind !== "accident").every((x) => x.travelHeadingDeg === null), "unknown stays unknown");
+  const row = (await db.query("select * from public.road_hazards where id = $1", [east.body.hazard.id])).rows[0];
+  assert.ok(!Object.keys(row).some((k) => /speed|route|journey|accuracy|user|reporter/.test(k)), "no speed, route, journey or user stored");
+  assert.equal(row.travel_heading_deg, 90);
+  const msgs = (await db.query("select payload from realtime.messages where event = 'hazard' and payload->>'id' = $1", [east.body.hazard.id])).rows;
+  assert.ok(msgs.length && msgs.every((m) => m.payload.travelHeadingDeg === 90));
+  assert.ok(!JSON.stringify(msgs).includes(a.id) && !JSON.stringify(msgs).includes(c.id), "no reporter in any broadcast");
+  for (const leaked of ["93.6", '"headingDeg"']) assert.ok(!serverOutput.includes(leaked), `server log mentions ${leaked}`);
 });
 
 test("routes: signed-in users only; the body is validated", async () => {

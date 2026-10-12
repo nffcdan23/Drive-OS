@@ -85,12 +85,15 @@ export function GuidanceBanner({
   unitSystem,
   onHeight,
   onCardHeight,
+  below,
 }: {
   unitSystem: ResolvedUnitSystem;
   /** The whole banner's height, the Then card included (for what sits below it) */
   onHeight?: (height: number) => void;
   /** The main card's height alone (for the controls beside the Then card) */
   onCardHeight?: (height: number) => void;
+  /** Shown under the card (and the Then card) while guiding: the upcoming hazard warning */
+  below?: React.ReactNode;
 }) {
   const state = useNavigationState();
   const retry = useRetryReroute();
@@ -235,15 +238,18 @@ export function GuidanceBanner({
       {notice ? <Status icon="information-circle-outline" text={notice} /> : null}
       {gpsNote}
     </>,
-    then ? (
-      <GlassSurface material="dense" style={styles.then} accessible accessibilityLabel={`Then ${then.instruction}`}>
-        <Text style={styles.thenText}>Then</Text>
-        <ManeuverIcon maneuver={then} size={22} color={FG} />
-        {progress.thenAfterM != null ? (
-          <Text style={styles.thenDistance}>{formatGuidanceDistance(progress.thenAfterM, unitSystem)}</Text>
-        ) : null}
-      </GlassSurface>
-    ) : null,
+    <>
+      {then ? (
+        <GlassSurface material="dense" style={styles.then} accessible accessibilityLabel={`Then ${then.instruction}`}>
+          <Text style={styles.thenText}>Then</Text>
+          <ManeuverIcon maneuver={then} size={22} color={FG} />
+          {progress.thenAfterM != null ? (
+            <Text style={styles.thenDistance}>{formatGuidanceDistance(progress.thenAfterM, unitSystem)}</Text>
+          ) : null}
+        </GlassSurface>
+      ) : null}
+      {below}
+    </>,
   );
 }
 

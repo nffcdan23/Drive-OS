@@ -16,7 +16,9 @@
 --      sent it, with the same fixture users and a temporary Convoy;
 --   6. road hazards (0020): anonymous, read-only to clients, reported,
 --      merged, voted and removed only through the API's functions, at a
---      test position in the open Pacific that no real report is near.
+--      test position in the open Pacific that no real report is near;
+--   7. the reporter's direction of travel (0021): optional, bucketed,
+--      fixed once set; clearly opposite reports stay separate.
 -- The workflow runs it INSIDE A TRANSACTION THAT IS ALWAYS ROLLED BACK, and
 -- then confirms nothing was left behind. Never run it any other way against a
 -- hosted project.
@@ -390,7 +392,7 @@ select pg_temp.ok(not pg_temp.live_seen_by(pg_temp.id('f')), 'while driving, the
 select pg_temp.ok(
   (select array_agg(column_name::text order by ordinal_position) from information_schema.columns
     where table_schema = 'public' and table_name = 'road_hazards')
-  = array['id','kind','latitude','longitude','geog','created_at','last_confirmed_at','expires_at','support','dismissals','removed_at'],
+  = array['id','kind','latitude','longitude','geog','created_at','last_confirmed_at','expires_at','support','dismissals','removed_at','travel_heading_deg'],
   'road_hazards has the expected columns, and no user column');
 select pg_temp.ok(
   (select array_agg(policyname::text order by policyname) from pg_policies
@@ -419,7 +421,7 @@ select pg_temp.ok((select removed_at is null and support = 2 and dismissals = 1 
   'one "Not there" against two reports leaves it up');
 select pg_temp.ok(
   (select array_agg(k order by k) from private.hazards_in_view(pg_temp.id('s'), -60.1, -150.1, -59.9, -149.9) h, jsonb_object_keys(h.hazard) k)
-  = array['confirmations','expiresAt','expiresInMs','id','kind','lastConfirmedAt','latitude','longitude','reportedAt'],
+  = array['confirmations','expiresAt','expiresInMs','id','kind','lastConfirmedAt','latitude','longitude','reportedAt','travelHeadingDeg'],
   'a viewer gets the kind, position and times only, nobody''s identity');
 select pg_temp.ok((select my_vote = 'not_there' from private.hazards_in_view(pg_temp.id('s'), -60.1, -150.1, -59.9, -149.9)),
   'and their own vote');
@@ -432,5 +434,34 @@ select pg_temp.ok(
   and not exists (select 1 from realtime.messages where topic = 'hazards:-120:-300' and event = 'hazard'
                    and payload::text ~ ('(' || pg_temp.id('o') || '|' || pg_temp.id('f') || '|userId|reporter)')),
   'the report was broadcast to its area, carrying no user');
+
+-- ─── 7. Road hazard direction (0021) ─────────────────────────────────────────
+\echo '--- road hazard direction (0021)'
+select pg_temp.ok(
+  (select data_type = 'smallint' and is_nullable = 'YES' from information_schema.columns
+    where table_schema = 'public' and table_name = 'road_hazards' and column_name = 'travel_heading_deg'),
+  'travel_heading_deg is an optional small integer');
+select pg_temp.ok(
+  not exists (select 1 from information_schema.columns where table_schema = 'public' and table_name = 'road_hazards'
+               and column_name ~ '(speed|route|journey|reporter|user)'),
+  'no speed, route, journey or user is stored with a hazard');
+select pg_temp.ok(
+  private.hazard_heading_bucket(4) = 0 and private.hazard_heading_bucket(356) = 0 and private.hazard_heading_bucket(87) = 90
+  and private.hazard_heading_bucket(-1) is null and private.hazard_heading_bucket(360) is null and private.hazard_heading_bucket(null) is null,
+  'headings are kept as 10° buckets; invalid ones as none');
+select pg_temp.ok(
+  not has_function_privilege('authenticated', 'private.report_hazard(uuid, text, double precision, double precision, double precision)', 'EXECUTE')
+  and has_function_privilege('postgres', 'private.report_hazard(uuid, text, double precision, double precision)', 'EXECUTE'),
+  'only the API reports; the 0020 call (no direction) still works for the API deployed before');
+create temp table hzd_v (label text primary key, id uuid);
+insert into hzd_v select 'east', hazard_id from private.report_hazard(pg_temp.id('o'), 'accident', -61.0, -151.0, 92) where outcome = 'created';
+select pg_temp.ok((select travel_heading_deg = 90 from public.road_hazards where id = (select id from hzd_v where label = 'east')),
+  'a report with a reliable direction stores its bucket');
+select pg_temp.ok((select outcome = 'created' from private.report_hazard(pg_temp.id('f'), 'accident', -61.00022, -151.0, 268)),
+  'the opposite carriageway 25 m away is a separate accident');
+select pg_temp.ok((select outcome = 'merged' from private.report_hazard(pg_temp.id('s'), 'accident', -60.99990, -151.0, 100)),
+  'the same direction nearby still merges');
+select pg_temp.ok((select (private.hazard_public_json(h)->>'travelHeadingDeg')::int = 90 from public.road_hazards h where id = (select id from hzd_v where label = 'east')),
+  'the map gets the direction (and still no user)');
 
 \echo '=== ALL INCREMENTAL VERIFICATION CHECKS PASSED ==='

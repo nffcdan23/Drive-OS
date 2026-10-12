@@ -401,7 +401,7 @@ export const endpoints = (api: ApiClient) => ({
   // banner). Positions travel in the body only.
   hazardsInView: (area: { minLat: number; minLng: number; maxLat: number; maxLng: number }) =>
     api.request<unknown[]>('POST', '/hazards/in-view', area, { quiet: true }),
-  reportHazard: (body: { kind: string; latitude: number; longitude: number; accuracyM: number | null; capturedAt: string }) =>
+  reportHazard: (body: { kind: string; latitude: number; longitude: number; accuracyM: number | null; capturedAt: string; headingDeg?: number }) =>
     api.request<{ outcome: string; hazard: unknown }>('POST', '/hazards', body, { quiet: true }),
   voteHazard: (id: string, vote: 'still_there' | 'not_there') =>
     api.request<{ outcome: string; hazard: unknown }>('POST', `/hazards/${id}/vote`, { vote }, { quiet: true }),
