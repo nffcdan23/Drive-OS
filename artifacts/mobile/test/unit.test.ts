@@ -10799,7 +10799,7 @@ test('hazard warnings: confidence — poor accuracy, an old fix, heading the wro
   assert.equal(run({ fix: null }), null, 'no fix');
 });
 
-test('hazard warnings: background — progress keeps it current; the screen shows it on return; never spoken or notified', () => {
+test('hazard warnings: background — progress keeps it current; the screen shows it on return; never a notification', () => {
   const d = hazardDrive3(straightRoute3());
   d.set(d.hazard('a', -4, 1_000), d.hazard('b', -4, 1_600, 'flooding'));
   // The background task's fixes reach the session the same way: the warning moves on with them
@@ -10811,9 +10811,13 @@ test('hazard warnings: background — progress keeps it current; the screen show
   assert.ok(!/react-native|AppState/.test(ctl), 'nothing in the controller depends on being on screen');
   const ctx = readNav('../context/HazardsContext.tsx');
   assert.ok(/return useOnScreenSnapshot\(\s*useCallback\(\(fn: \(\) => void\) => warnings\.subscribe\(fn\), \[warnings\]\),/.test(ctx), 'held off screen, current on return');
-  assert.ok(/connectHazardWarnings\(\{ session, store, latestFix, warnings \}\)/.test(ctx));
+  assert.ok(/connectHazardWarnings\(\{ session, store, latestFix, warnings, voice: hazardVoice \}\)/.test(ctx));
+  // The engine and the pill never speak or notify (speech is lib/hazards/voice.ts, through navigation's voice)
   for (const f of ['../lib/hazards/warnings.ts', '../lib/hazards/warningController.ts', '../components/hazards/HazardWarningPill.tsx']) {
     assert.ok(!/expo-notifications|expo-speech|Speech|speak\(|scheduleNotification/.test(readNav(f)), `${f}: silent`);
+  }
+  for (const f of ['../lib/hazards/voice.ts', '../context/HazardsContext.tsx']) {
+    assert.ok(!/expo-notifications|scheduleNotification/.test(readNav(f)), `${f}: no notifications`);
   }
 });
 
@@ -10843,8 +10847,10 @@ test('hazard warnings: the pill — under the turn card, navigation only; the re
   assert.equal((drive.match(/<HazardWarningPill /g) ?? []).length, 1);
   assert.ok(/below=\{<HazardWarningPill unitSystem=\{resolvedUnitSystem\} \/>\}/.test(drive), 'only in the guidance banner (navigation)');
   assert.ok(!/HazardWarning/.test(readNav('../components/ActiveDriveOverlay.tsx')), 'no warnings in Free Drive');
-  // Navigation, voice, background guidance and lanes know nothing of hazards; the session only lends its prepared route
-  assert.ok(!/hazard/i.test(readNav('../lib/navigation/voice.ts')));
+  // Navigation, background guidance and lanes know nothing of hazards; voice only says a hazard
+  // warning it is handed (lib/hazards/voice.ts), as an alert; the session only lends its prepared route
+  const navVoice = readNav('../lib/navigation/voice.ts');
+  assert.ok(!/from '\.\.\/hazards|HazardWarning|travelHeading|matchToRoute/.test(navVoice), 'voice judges no hazard');
   assert.ok(!/hazard/i.test(readNav('../lib/navigation/background.ts')));
   assert.ok(!/hazard/i.test(readNav('../lib/navigation/lanes.ts')));
   const session = readNav('../lib/navigation/session.ts');
@@ -10971,4 +10977,544 @@ test('hazard direction: diagnostics say whether a direction went, never which; n
   const drive = readNav('../app/(tabs)/(drive)/index.tsx');
   assert.ok(/timestamp: fixTime \?\? now, speedMs, headingDeg: gpsHeading,/.test(drive));
   assert.ok(!/AsyncStorage|writeJson/.test(readNav('../lib/hazards/report.ts')));
+});
+
+// ─── Spoken hazard warnings ─────────────────────────────────────────────────
+// The warning engine decides which hazard matters; navigation's own voice
+// says it once, below every turn prompt.
+
+import { HAZARD_VOICE, HAZARD_SPOKEN, HazardVoice, hazardPhrase, hazardSentence, spokenDistance, turnIsClose, type HazardSpeechOutput } from '@/lib/hazards/voice';
+import type { HazardWarning } from '@/lib/hazards/warnings';
+import type { SpeechPriority, VoiceMode } from '@/lib/navigation/voice';
+
+/**
+ * Navigation with voice guidance, the hazard warning engine and spoken
+ * warnings wired as in the app (the hazards provider connects first, as its
+ * effects run before navigation's), on a fake speaker that is busy while it
+ * talks and, like the real one, never takes a hazard warning while busy.
+ */
+function spokenHazards3(route: Nav3Route, o: { fetch?: (body: unknown) => Promise<ServerRoutes>; mode?: VoiceMode; backgroundSpeech?: boolean; talkMs?: number } = {}) {
+  const h = nav3Session({ fetch: o.fetch });
+  const said: Array<{ text: string; priority: SpeechPriority; along: number | null; t: number; phase: string }> = [];
+  const talk = o.talkMs ?? 2_000;
+  let busyUntil = -Infinity;
+  let stops = 0;
+  const speaker: Speaker = {
+    speak: (text, priority = 'preparation') => {
+      if (priority === 'hazard' && h.clock.t < busyUntil) return false;
+      said.push({ text, priority, along: active3(h.s.state)?.progress?.along ?? null, t: h.clock.t, phase: h.s.phase });
+      busyUntil = Math.max(busyUntil, h.clock.t) + talk;
+      return true;
+    },
+    stop: () => { stops++; busyUntil = -Infinity; },
+    get busy() { return h.clock.t < busyUntil; },
+  };
+  const navLogs: Array<Record<string, unknown>> = [];
+  const logs: Array<Record<string, unknown>> = [];
+  const v = new VoiceGuidance({ session: h.s, speaker, now: () => h.clock.t, journal: { log: (event, data) => navLogs.push({ event, ...data }) } });
+  v.setBackgroundSpeech(o.backgroundSpeech ?? true);
+  // As NavigationContext's hazardSpeech
+  const out: HazardSpeechOutput = { blocked: () => v.hazardBlocked(), busy: () => v.speechBusy, say: (text) => v.sayHazard(text) };
+  const voice = new HazardVoice({ out, log: (action, data) => logs.push({ action, ...data }) });
+  const store = new HazardStore();
+  const warnings = new HazardWarnings();
+  let last: { latitude: number; longitude: number; speedMs: number | null; headingDeg: number | null; accuracyM: number | null; timestamp: number } | null = null;
+  const stop = connectHazardWarnings({ session: h.s, store, latestFix: () => last, warnings, voice, now: () => h.clock.t });
+  v.attach();
+  if (o.mode) v.setMode(o.mode);
+  const seen: Array<string | null> = [];
+  const drive = (fixes: GpsFix[], each?: () => void) => {
+    for (const f of fixes) {
+      last = { latitude: f.latitude, longitude: f.longitude, speedMs: f.speedMs, headingDeg: f.headingDeg, accuracyM: f.accuracyM, timestamp: f.time };
+      h.feed([f]);
+      seen.push(warnings.warning?.hazardId ?? null);
+      each?.();
+    }
+  };
+  const hazard = (id: string, x: number, y: number, kind = 'accident', travelHeadingDeg: number | null = null) =>
+    parseHazard({ id, kind, ...at3(x, y), travelHeadingDeg, reportedAt: new Date(h.clock.t).toISOString(), expiresInMs: 3_600_000 }, h.clock.t)!;
+  const set = (...hs: RoadHazard[]) => store.replace(areaAround(N3_BASE.latitude, N3_BASE.longitude, 15), hs, h.clock.t);
+  const spoken = () => said.filter((x) => x.priority === 'hazard');
+  return {
+    ...h, v, voice, store, warnings, said, logs, navLogs, drive, hazard, set, stop, seen,
+    next: () => h.clock.t + 1000, spoken, hazardTexts: () => spoken().map((x) => x.text), stops: () => stops,
+    actions: () => logs.map((l) => `${l.action}${l.reason ? `:${l.reason}` : ''}`),
+  };
+}
+
+test('spoken hazards: a relevant hazard is said once, as its warning comes up — "Accident ahead in 400 yards"', () => {
+  const d = spokenHazards3(straightRoute3());
+  void d.s.start({ route: straightRoute3(), destination: N3_DEST });
+  d.set(d.hazard('a', -4, 800));
+  d.drive(drive3(STRAIGHT3, { to: 900 }));
+  assert.deepEqual(d.hazardTexts(), ['Accident ahead in 400 yards']);
+  const said = d.spoken()[0]!;
+  const firstShown = d.seen.indexOf('a');
+  assert.ok(firstShown >= 0);
+  // The same fix the warning first came up on: 387–400 m before it
+  assert.ok(said.along! >= 400 && said.along! <= 414, `said at ${said.along!.toFixed(0)} m`);
+  assert.equal(said.phase, 'navigating');
+  assert.deepEqual(d.actions(), ['queued', 'spoken']);
+  assert.equal(d.voice.spoken, 1);
+});
+
+test('spoken hazards: wording — one short phrase per kind, a single UK distance, never raw kinds, age, counts or places', () => {
+  assert.deepEqual(Object.keys(HAZARD_SPOKEN).sort(), HAZARD_KINDS.map((k) => k.kind).sort(), 'every kind the app knows');
+  assert.equal(hazardPhrase('accident'), 'Accident ahead');
+  assert.equal(hazardPhrase('hazard'), 'Hazard ahead');
+  assert.equal(hazardPhrase('broken_down'), 'Broken-down vehicle ahead');
+  assert.equal(hazardPhrase('roadworks'), 'Roadworks ahead');
+  assert.equal(hazardPhrase('flooding'), 'Flooding ahead');
+  assert.equal(hazardPhrase('police'), 'Police reported ahead');
+  assert.equal(hazardPhrase('speed_camera'), 'Hazard ahead', 'a kind this version doesn\'t know');
+  assert.equal(hazardPhrase('toString'), 'Hazard ahead', 'never an object property');
+  for (const text of Object.values(HAZARD_SPOKEN)) {
+    assert.ok(!/_|camera|trap|speed|enforcement|checkpoint|confirm|minutes?|ago|\d/i.test(text), text);
+    assert.ok(text.split(' ').length <= 4, `${text}: short`);
+  }
+  // British imperial, as Mapbox's own prompts: yards, then fractions of a mile
+  const cases: Array<[number, string | null]> = [
+    [30, null], [49, null], [60, '50 yards'], [120, '150 yards'], [250, '250 yards'],
+    [366, '400 yards'], [690, '800 yards'], [731, '800 yards'], [805, 'half a mile'], [1_207, 'three quarters of a mile'],
+    [1_609, '1 mile'], [1_900, '1 mile'], [2_414, '1 and a half miles'], [3_219, '2 miles'],
+  ];
+  for (const [m, want] of cases) assert.equal(spokenDistance(m), want, `${m} m`);
+  assert.equal(spokenDistance(Number.NaN), null);
+  assert.equal(hazardSentence('accident', 805), 'Accident ahead in half a mile');
+  assert.equal(hazardSentence('hazard', 731), 'Hazard ahead in 800 yards');
+  assert.equal(hazardSentence('police', 366), 'Police reported ahead in 400 yards');
+  assert.equal(hazardSentence('police', 30), 'Police reported ahead', 'too close for a distance');
+  assert.equal(hazardSentence('broken_down', 1_600), 'Broken-down vehicle ahead in 1 mile');
+});
+
+test('spoken hazards: settings — Voice Guidance and Alerts Only say it; Off and mute say nothing', () => {
+  for (const mode of ['normal', 'alerts'] as const) {
+    const d = spokenHazards3(straightRoute3(), { mode });
+    void d.s.start({ route: straightRoute3(), destination: N3_DEST });
+    d.set(d.hazard('a', -4, 800));
+    d.drive(drive3(STRAIGHT3, { to: 900 }));
+    assert.deepEqual(d.hazardTexts(), ['Accident ahead in 400 yards'], `${mode}: a hazard warning is an alert`);
+  }
+  // Alerts only: no advance or preparation prompt, but the hazard
+  const alerts = spokenHazards3(straightRoute3(), { mode: 'alerts' });
+  void alerts.s.start({ route: straightRoute3(), destination: N3_DEST });
+  alerts.set(alerts.hazard('a', -4, 800));
+  alerts.drive(drive3(STRAIGHT3, { to: 2_700 }));
+  assert.deepEqual(alerts.said.map((x) => x.priority), ['hazard']);
+  // Off: nothing at all, and it isn't caught up when turned back on
+  const off = spokenHazards3(straightRoute3(), { mode: 'off' });
+  void off.s.start({ route: straightRoute3(), destination: N3_DEST });
+  off.set(off.hazard('a', -4, 800));
+  off.drive(drive3(STRAIGHT3, { to: 450 }));
+  assert.equal(off.warnings.warning?.hazardId, 'a', 'the pill still shows it');
+  off.v.setMode('normal');
+  off.drive(drive3(STRAIGHT3, { from: 463, to: 900, t0: off.next() }));
+  assert.deepEqual(off.hazardTexts(), []);
+  assert.deepEqual(off.actions(), ['queued', 'suppressed:off']);
+  // Mute while it is being said: cut off at once; nothing more
+  const mute = spokenHazards3(straightRoute3());
+  void mute.s.start({ route: straightRoute3(), destination: N3_DEST });
+  mute.set(mute.hazard('a', -4, 800), mute.hazard('b', -4, 1_800, 'flooding'));
+  mute.drive(drive3(STRAIGHT3, { to: 410 }));
+  assert.equal(mute.hazardTexts().length, 1);
+  const stops = mute.stops();
+  mute.v.setMode('off');
+  assert.equal(mute.stops(), stops + 1, 'muting stops the speaker at once');
+  mute.drive(drive3(STRAIGHT3, { from: 423, to: 1_700, t0: mute.next() }));
+  assert.equal(mute.hazardTexts().length, 1, 'the next hazard is not said while muted');
+  assert.ok(mute.actions().includes('suppressed:off'));
+});
+
+test('spoken hazards: never repeated — GPS jitter, Realtime confirmations, a Realtime reload, off screen and back', () => {
+  const d = spokenHazards3(straightRoute3());
+  void d.s.start({ route: straightRoute3(), destination: N3_DEST });
+  const a = d.hazard('a', -4, 1_000);
+  d.set(a);
+  // Noisy GPS on the way in
+  d.drive(drive3(STRAIGHT3, { to: 700, noise: 9, seed: 3 }));
+  assert.equal(d.hazardTexts().length, 1);
+  // Progress dragged back and forth by jitter, still before the hazard
+  const t = d.next();
+  d.drive([620, 700, 640, 720, 660, 740].map((y, i) => fix3(-2, y, t + i * 1000, { headingDeg: 0, speedMs: 13 })));
+  // Realtime: confirmations and a reload of the same hazards (a reconnect)
+  for (let i = 1; i <= 3; i++) d.store.apply({ type: 'hazard', hazard: { ...a, confirmations: i } }, d.clock.t);
+  d.set(a);
+  d.set(a);
+  // Off screen and back, several times (speech carries on off screen here)
+  for (let i = 0; i < 3; i++) { d.v.setForeground(false); d.drive(drive3(STRAIGHT3, { from: 760 + i * 26, to: 772 + i * 26, t0: d.next() })); d.v.setForeground(true); }
+  d.drive(drive3(STRAIGHT3, { from: 850, to: 1_100, t0: d.next() }));
+  assert.deepEqual(d.hazardTexts(), ['Accident ahead in 400 yards'], 'said once, for good');
+  assert.equal(d.logs.filter((l) => l.action === 'queued').length, 1);
+});
+
+test('spoken hazards: direction — same direction may speak; the opposite carriageway never does; unknown as the engine', () => {
+  const run = (heading: number | null) => {
+    const d = spokenHazards3(straightRoute3());
+    void d.s.start({ route: straightRoute3(), destination: N3_DEST });
+    d.set(d.hazard('a', -4, 800, 'accident', heading));
+    d.drive(drive3(STRAIGHT3, { to: 900 }));
+    return d;
+  };
+  assert.deepEqual(run(0).hazardTexts(), ['Accident ahead in 400 yards'], 'reported going north, as the route');
+  assert.deepEqual(run(null).hazardTexts(), ['Accident ahead in 400 yards'], 'no direction: as before');
+  // Reported going south, beside the route: the engine rejects it, so voice never even sees it
+  const opposite = run(180);
+  assert.equal(opposite.seen.filter(Boolean).length, 0);
+  assert.deepEqual(opposite.hazardTexts(), []);
+  assert.deepEqual(opposite.logs, [], 'never queued');
+  assert.deepEqual(run(90).hazardTexts(), [], 'a crossing road (uncertain): not this route, never spoken');
+});
+
+test('audio priority: a turn, the reroute alert or arrival cuts a hazard warning short; a hazard never waits or takes a prompt\'s place', async () => {
+  // A turn while a hazard warning is being said: stopped, and the turn said at once on the same session
+  const a = audio3();
+  assert.equal(a.speaker.speak('Accident ahead in 400 yards', 'hazard'), true);
+  await a.flush();
+  a.speaker.speak('Turn left onto Chestnut Hill', 'immediate');
+  await a.flush();
+  assert.deepEqual(a.log, ['configure', 'active:true', 'speak:Accident ahead in 400 yards', 'stop', 'speak:Turn left onto Chestnut Hill']);
+  assert.ok(a.actions().includes('preempted'));
+  assert.ok(!a.actions().includes('interrupted'), 'not taken as a system interruption');
+  a.finish();
+  a.advance(AUDIO.releaseDelayMs);
+  await a.flush();
+  assert.equal(a.session.active, false, 'released afterwards: nothing left ducked');
+  for (const p of ['preparation', 'alert'] as const) {
+    const b = audio3();
+    b.speaker.speak('Hazard ahead', 'hazard');
+    await b.flush();
+    b.speaker.speak('X', p);
+    await b.flush();
+    assert.deepEqual(b.log.slice(-2), ['stop', 'speak:X'], `${p} beats a hazard`);
+  }
+  // A hazard while a prompt is being said: not taken, never queued
+  const c = audio3();
+  c.speaker.speak('In 300 yards, turn right', 'preparation');
+  await c.flush();
+  assert.equal(c.speaker.busy, true);
+  assert.equal(c.speaker.speak('Accident ahead', 'hazard'), false);
+  c.finish();
+  await c.flush();
+  c.advance(AUDIO.releaseDelayMs);
+  await c.flush();
+  assert.deepEqual(c.log, ['configure', 'active:true', 'speak:In 300 yards, turn right', 'active:false'], 'the hazard was never said over or after it');
+  // An advance prompt ranks below a hazard: it waits for it, then is said
+  const e = audio3();
+  e.speaker.speak('Flooding ahead in half a mile', 'hazard');
+  await e.flush();
+  e.speaker.speak('In 2 miles, keep left', 'advance');
+  await e.flush();
+  assert.equal(e.log[e.log.length - 1], 'speak:Flooding ahead in half a mile', 'not cut off');
+  e.finish();
+  await e.flush();
+  assert.equal(e.log[e.log.length - 1], 'speak:In 2 miles, keep left');
+  // The same audio session as every prompt: activated (ducking), released straight after
+  const f = audio3();
+  f.speaker.speak('Roadworks ahead in 800 yards', 'hazard');
+  await f.flush();
+  assert.equal(f.session.active, true, 'other audio ducks');
+  f.finish();
+  f.advance(AUDIO.releaseDelayMs);
+  await f.flush();
+  assert.equal(f.session.active, false, 'and comes back up');
+  assert.deepEqual(f.log, ['configure', 'active:true', 'speak:Roadworks ahead in 800 yards', 'active:false']);
+});
+
+/** The L route with Mapbox-like prompts and hazard voice */
+function lHazards3() {
+  const d = spokenHazards3(voiceRoute3());
+  void d.s.start({ route: voiceRoute3(), destination: N3_DEST });
+  return d;
+}
+
+test('spoken hazards: a turn comes first — held at the turn, said after it while still useful; never over a prompt', () => {
+  const d = lHazards3();
+  d.set();
+  d.drive(drive3(L_PTS, { to: 930, noise: 0 }));
+  // Reported 350 m after the left turn, on Chestnut Hill (heading west, the driver's side is south),
+  // while the car is 70 m from the turn: the turn has the driver
+  d.store.apply({ type: 'hazard', hazard: d.hazard('a', -350, 996) }, d.clock.t);
+  assert.equal(d.warnings.warning?.hazardId, 'a', 'the pill shows it');
+  d.drive(drive3(L_PTS, { from: 943, to: 1_300, t0: d.next(), noise: 0 }));
+  const texts = d.said.map((x) => x.text);
+  const turn = texts.indexOf('Turn left onto Chestnut Hill');
+  const hz = texts.findIndex((x) => x.startsWith('Accident ahead in'));
+  assert.ok(turn >= 0 && hz > turn, texts.join(' | '));
+  const at = d.said[hz]!;
+  assert.ok(at.along! > 1_000, `said after the turn (at ${at.along!.toFixed(0)} m)`);
+  assert.ok(d.actions().includes('held:turn'), d.actions().join(','));
+  // Never while anything else was being said
+  for (let i = 1; i < d.said.length; i++) {
+    if (d.said[i]!.priority === 'hazard') assert.ok(d.said[i]!.t - d.said[i - 1]!.t >= 2_000 + HAZARD_VOICE.quietGapMs - 1_000, 'after the prompt before it ended');
+  }
+  assert.equal(d.hazardTexts().length, 1);
+});
+
+test('spoken hazards: one that comes up at the turn and is too close by the time it clears is skipped, not said late', () => {
+  const d = lHazards3();
+  d.set();
+  d.drive(drive3(L_PTS, { to: 940, noise: 0 }));
+  // Reported 90 m past the turn while the car is 60 m before it: under 100 m by the time the turn is done
+  d.store.apply({ type: 'hazard', hazard: d.hazard('late', -90, 996) }, d.clock.t);
+  d.drive(drive3(L_PTS, { from: 953, to: 1_300, t0: d.next(), noise: 0 }));
+  assert.deepEqual(d.hazardTexts(), []);
+  assert.ok(d.actions().includes('held:turn'));
+  assert.ok(d.actions().includes('skipped:turn'), d.actions().join(','));
+});
+
+test('spoken hazards: turnIsClose — at the manoeuvre, on a roundabout, a turn prompt due soon or just due; not an advance prompt', () => {
+  const m = (voice: number[]) => ({ voice: voice.map((x) => ({ distanceBeforeM: x, text: '' })) });
+  const p = (distanceToNextM: number, voice: number[], onRoundabout = false) => ({ distanceToNextM, onRoundabout, next: m(voice) }) as unknown as RouteProgress;
+  assert.equal(turnIsClose(p(80, []), 13), true, '80 m from the roundabout: the turn has the driver');
+  assert.equal(turnIsClose(p(500, [], true), 13), true, 'circulating');
+  assert.equal(turnIsClose(p(1_500, [1_000, 800, 400, 60]), 13), false, 'nothing near');
+  assert.equal(turnIsClose(p(1_050, [1_000, 800, 400, 60]), 13), false, 'an advance prompt due soon does not hold it');
+  assert.equal(turnIsClose(p(470, [1_000, 800, 400, 60]), 13), true, 'the preparation prompt in 70 m');
+  assert.equal(turnIsClose(p(390, [1_000, 800, 400, 60]), 13), true, 'the preparation prompt just due');
+  assert.equal(turnIsClose(p(300, [1_000, 800, 400, 60]), 13), false, 'between prompts');
+  assert.equal(turnIsClose(p(150, [1_000, 800, 400, 60]), 13), true, 'the turn itself is due within 8 s');
+  assert.equal(turnIsClose(p(900, [1_600, 800, 400, 60]), 31), true, 'motorway speed: further out');
+});
+
+test('spoken hazards: several — the nearest (the pill\'s choice) first; the next after a cooldown; a severity tie as the pill', () => {
+  const d = spokenHazards3(straightRoute3());
+  void d.s.start({ route: straightRoute3(), destination: N3_DEST });
+  d.set(d.hazard('rw', -4, 700, 'roadworks'), d.hazard('acc', -4, 1_000));
+  d.drive(drive3(STRAIGHT3, { to: 1_100 }));
+  assert.deepEqual(d.hazardTexts(), ['Roadworks ahead in 400 yards', 'Accident ahead in 300 yards']);
+  const [first, second] = d.spoken();
+  assert.ok(second!.t - first!.t >= HAZARD_VOICE.cooldownMs);
+  // A second one coming up straight after the first: it waits out the cooldown, then is said if still useful
+  const c = spokenHazards3(straightRoute3());
+  void c.s.start({ route: straightRoute3(), destination: N3_DEST });
+  c.set(c.hazard('first', -4, 1_000));
+  c.drive(drive3(STRAIGHT3, { to: 620, speed: 5 }));
+  assert.equal(c.hazardTexts().length, 1);
+  c.store.apply({ type: 'hazard', hazard: c.hazard('police', -4, 900, 'police') }, c.clock.t);
+  c.drive(drive3(STRAIGHT3, { from: 625, to: 800, t0: c.next(), speed: 5 }));
+  const spoken = c.spoken();
+  assert.equal(spoken.length, 2);
+  assert.equal(spoken[1]!.text, 'Police reported ahead in 200 yards');
+  assert.ok(spoken[1]!.t - spoken[0]!.t >= HAZARD_VOICE.cooldownMs, `${spoken[1]!.t - spoken[0]!.t} ms apart`);
+  assert.ok(c.actions().includes('held:cooldown'));
+  // The first, passed after the second, is never said again
+  c.drive(drive3(STRAIGHT3, { from: 805, to: 1_100, t0: c.next(), speed: 5 }));
+  assert.equal(c.spoken().length, 2);
+  // Two within 50 m of each other, both in reach: the accident, as the pill shows; the police report is never said
+  const tie = spokenHazards3(straightRoute3());
+  void tie.s.start({ route: straightRoute3(), destination: N3_DEST });
+  tie.set();
+  tie.drive(drive3(STRAIGHT3, { to: 650 }));
+  tie.set(tie.hazard('p', -4, 1_000, 'police'), tie.hazard('x', -4, 1_030));
+  tie.drive(drive3(STRAIGHT3, { from: 663, to: 1_100, t0: tie.next() }));
+  assert.deepEqual(tie.hazardTexts(), ['Accident ahead in 400 yards']);
+});
+
+test('spoken hazards: rerouting cancels what was waiting, never replays one already said, and a new one on the new route speaks', async () => {
+  const srv = routeServer3();
+  const d = spokenHazards3(straightRoute3(), { fetch: srv.fetch });
+  void d.s.start({ route: straightRoute3(), destination: N3_DEST });
+  d.set(d.hazard('x', -4, 1_400));
+  d.drive(drive3(STRAIGHT3, { to: 1_010 }));
+  assert.deepEqual(d.hazardTexts(), ['Accident ahead in 400 yards']);
+  // Reported nearer straight after: it waits out the cooldown…
+  d.store.apply({ type: 'hazard', hazard: d.hazard('q', -4, 1_300, 'flooding') }, d.clock.t);
+  d.drive(drive3(STRAIGHT3, { from: 1_023, to: 1_100, t0: d.next() }));
+  assert.ok(d.actions().includes('held:cooldown'));
+  // …when the driver leaves the route: cancelled with the old route's relevance
+  const away = drive3(polyline3([[0, 1_100], [150, 1_250], [150, 1_600]]), { t0: d.next(), noise: 0 });
+  for (const f of away) { d.drive([f]); if (d.bodies.length) break; }
+  assert.equal(d.s.phase, 'rerouting');
+  assert.ok(d.actions().includes('cancelled:not_relevant'), d.actions().join(','));
+  // The new route: east of the old hazard q, back west and north over x, and past a new one, y
+  const NEW = polyline3([[150, 1_300], [150, 1_350], [0, 1_350], [0, 3_000]]);
+  d.store.apply({ type: 'hazard', hazard: d.hazard('y', -4, 2_200, 'broken_down') }, d.clock.t);
+  srv.answer(serverRoutes3(route3(NEW, [
+    { at: 0, type: 'depart' }, { at: 5, type: 'turn', modifier: 'left' }, { at: 20, type: 'turn', modifier: 'right' }, { at: NEW.length - 1, type: 'arrive' },
+  ], 'r:1')));
+  await settle3();
+  d.drive(drive3(NEW, { t0: d.next(), noise: 0, to: 1_400 }));
+  assert.ok(d.seen.slice(-100).includes('x'), 'x is on the new route and shown again');
+  assert.deepEqual(d.hazardTexts(), ['Accident ahead in 400 yards', 'Broken-down vehicle ahead in 400 yards'], 'x not replayed, q never said, y said');
+});
+
+test('spoken hazards: a new navigation starts afresh; nothing is kept on the device', () => {
+  const d = spokenHazards3(straightRoute3());
+  void d.s.start({ route: straightRoute3(), destination: N3_DEST });
+  d.set(d.hazard('a', -4, 800));
+  d.drive(drive3(STRAIGHT3, { to: 500 }));
+  assert.equal(d.hazardTexts().length, 1);
+  d.s.end('user');
+  void d.s.start({ route: straightRoute3(), destination: N3_DEST });
+  d.drive(drive3(STRAIGHT3, { to: 500, t0: d.next() }));
+  assert.equal(d.hazardTexts().length, 2, 'the same hazard warns again on a new journey');
+  const src = readNav('../lib/hazards/voice.ts');
+  assert.ok(!/storage|Storage|writeJson|AsyncStorage|SecureStore/.test(src), 'in memory only');
+});
+
+test('spoken hazards: background — said off screen with navigation running, on the one speaker; quiet where speech can\'t play there', () => {
+  const d = spokenHazards3(straightRoute3(), { backgroundSpeech: true });
+  void d.s.start({ route: straightRoute3(), destination: N3_DEST });
+  d.set(d.hazard('a', -4, 800));
+  d.drive(drive3(STRAIGHT3, { to: 200 }));
+  d.v.setForeground(false);
+  d.drive(drive3(STRAIGHT3, { from: 213, to: 600, t0: d.next() }));
+  assert.deepEqual(d.hazardTexts(), ['Accident ahead in 400 yards'], 'phone locked / another app open');
+  // A build whose speaker can't play off screen: nothing said away, nothing caught up on return
+  const fg = spokenHazards3(straightRoute3(), { backgroundSpeech: false });
+  void fg.s.start({ route: straightRoute3(), destination: N3_DEST });
+  fg.set(fg.hazard('a', -4, 800));
+  fg.drive(drive3(STRAIGHT3, { to: 200 }));
+  fg.v.setForeground(false);
+  fg.drive(drive3(STRAIGHT3, { from: 213, to: 450, t0: fg.next() }));
+  fg.v.setForeground(true);
+  fg.drive(drive3(STRAIGHT3, { from: 463, to: 600, t0: fg.next() }));
+  assert.deepEqual(fg.hazardTexts(), []);
+  assert.ok(fg.actions().includes('suppressed:background'));
+  // One speaker and audio session in the app: hazard speech goes through navigation's voice
+  const ctx = readNav('../context/NavigationContext.tsx');
+  assert.equal((ctx.match(/createSpeaker\(/g) ?? []).length, 1);
+  assert.ok(/say: \(text\) => voiceRef\.current\?\.sayHazard\(text\) \?\? false/.test(ctx));
+  assert.ok(/blocked: \(\) => voiceRef\.current\?\.hazardBlocked\(\) \?\? 'unavailable'/.test(ctx));
+  const hz = readNav('../context/HazardsContext.tsx');
+  assert.ok(/new HazardVoice\(\{ out: speech,/.test(hz) && /const speech = useHazardSpeech\(\);/.test(hz));
+  for (const f of ['../lib/hazards/voice.ts', '../context/HazardsContext.tsx']) {
+    assert.ok(!/expo-speech|expo-audio|createSpeaker|NavigationSpeaker|setAudioModeAsync/.test(readNav(f)), `${f}: no second audio stack`);
+  }
+});
+
+/** A HazardVoice on hand-made navigation states, with a speaker that is busy on demand */
+function bareVoice3() {
+  const said: string[] = [];
+  const logs: Array<Record<string, unknown>> = [];
+  const o = { busy: false, blocked: null as 'off' | 'background' | null };
+  const voice = new HazardVoice({
+    out: { blocked: () => o.blocked, busy: () => o.busy, say: (t) => { said.push(t); return true; } },
+    log: (action, data) => logs.push({ action, ...data }),
+  });
+  const route = { routeId: 'b:0' };
+  const progress = { distanceToNextM: 5_000, onRoundabout: false, next: { voice: [] } } as unknown as RouteProgress;
+  const nav = (phase: string, sessionId = 1) => ({ phase, sessionId, route, progress, gps: 'ok' }) as unknown as NavigationState;
+  const warning = (distanceAheadM: number, hazardId = 'h', kind = 'accident'): HazardWarning => ({ hazardId, kind, distanceAheadM, routeAlongM: 0, priority: 0, directionKnown: false });
+  return { voice, said, logs, o, nav, warning, actions: () => logs.map((l) => `${l.action}${l.reason ? `:${l.reason}` : ''}`) };
+}
+
+test('spoken hazards: arrival cancels a waiting warning; nothing is said after "You have arrived"', () => {
+  const b = bareVoice3();
+  b.o.busy = true;
+  b.voice.update({ state: b.nav('navigating'), warning: b.warning(380), speedMs: 3, now: 1_000 });
+  assert.deepEqual(b.actions(), ['queued', 'held:speech']);
+  b.voice.update({ state: b.nav('arrived'), warning: b.warning(370), speedMs: 0, now: 2_000 });
+  b.o.busy = false;
+  for (let t = 3_000; t < 10_000; t += 1_000) b.voice.update({ state: b.nav('arrived'), warning: b.warning(360), speedMs: 0, now: t });
+  b.voice.update({ state: { phase: 'idle' } as NavigationState, warning: null, speedMs: null, now: 11_000 });
+  assert.deepEqual(b.said, []);
+  assert.deepEqual(b.actions(), ['queued', 'held:speech', 'cancelled:arrived']);
+  // Driven to the end: the arrival is the last thing said
+  const d = spokenHazards3(straightRoute3());
+  void d.s.start({ route: straightRoute3(), destination: N3_DEST });
+  d.set(d.hazard('end', -4, 2_985, 'roadworks'));
+  d.drive(drive3(STRAIGHT3, { t0: 1_000_000 }));
+  d.drive(Array.from({ length: 4 }, (_, i) => fix3(0, 3_000, d.next() + i * 1000, { speedMs: 0 })));
+  assert.equal(d.s.phase, 'arrived');
+  const last = d.said[d.said.length - 1]!;
+  assert.equal(last.priority, 'alert', `last said: ${last.text}`);
+  assert.ok(!d.said.slice(d.said.indexOf(last) + 1).length);
+});
+
+test('spoken hazards: a warning waiting too long is out of date — skipped, never said minutes later', () => {
+  const b = bareVoice3();
+  b.o.busy = true;
+  for (let t = 0; t <= HAZARD_VOICE.maxWaitMs + 1_000; t += 1_000) b.voice.update({ state: b.nav('navigating'), warning: b.warning(600), speedMs: 0, now: t });
+  b.o.busy = false;
+  for (let t = 40_000; t < 200_000; t += 1_000) b.voice.update({ state: b.nav('navigating'), warning: b.warning(600), speedMs: 0, now: t });
+  assert.deepEqual(b.said, []);
+  assert.deepEqual(b.actions(), ['queued', 'held:speech', 'skipped:stale']);
+  // A different one afterwards is said normally
+  b.voice.update({ state: b.nav('navigating'), warning: b.warning(500, 'other', 'flooding'), speedMs: 10, now: 300_000 });
+  assert.deepEqual(b.said, ['Flooding ahead in 500 yards']);
+  // Muted or Off: suppressed (not caught up); a new session forgets everything
+  const m = bareVoice3();
+  m.o.blocked = 'off';
+  m.voice.update({ state: m.nav('navigating'), warning: m.warning(400), speedMs: 10, now: 0 });
+  m.o.blocked = null;
+  m.voice.update({ state: m.nav('navigating'), warning: m.warning(390), speedMs: 10, now: 1_000 });
+  assert.deepEqual(m.said, []);
+  m.voice.update({ state: m.nav('navigating', 2), warning: m.warning(390), speedMs: 10, now: 2_000 });
+  assert.deepEqual(m.said, ['Accident ahead in 400 yards'], 'a new navigation');
+});
+
+test('spoken hazards: diagnostics — action, kind, a distance bucket and a reason; never the words, the hazard, a place or a heading', () => {
+  const d = spokenHazards3(straightRoute3());
+  void d.s.start({ route: straightRoute3(), destination: N3_DEST });
+  d.set(d.hazard('7f4c9a', -4, 800, 'accident', 0), d.hazard('5e1b', -4, 900, 'police'));
+  d.drive(drive3(STRAIGHT3, { to: 1_000 }));
+  assert.ok(d.logs.length >= 3);
+  for (const l of d.logs) {
+    assert.ok(Object.keys(l).every((k) => ['action', 'kind', 'distance', 'reason'].includes(k)), Object.keys(l).join(','));
+    assert.ok(['queued', 'held', 'spoken', 'skipped', 'cancelled', 'suppressed'].includes(String(l.action)));
+    assert.ok(['<250m', '250-500m', '500m-1km', '1-2km', '>2km'].includes(String(l.distance)));
+  }
+  const json = JSON.stringify(d.logs);
+  assert.ok(!/7f4c9a|5e1b|ahead|yards|mile|54\.|-3\.|High Street|heading|Brow Top/i.test(json), json);
+  assert.ok(/journal\.log\("hazard_voice", \{ action, \.\.\.data \}\)/.test(readNav('../context/HazardsContext.tsx')));
+});
+
+test('spoken hazards: Free Drive stays silent — markers and Report as before, no warnings to speak', () => {
+  const d = spokenHazards3(straightRoute3());
+  d.set(d.hazard('a', -4, 300));
+  // No navigation: fixes go nowhere near hazard speech
+  d.drive(drive3(STRAIGHT3, { to: 400 }));
+  assert.equal(d.s.phase, 'idle');
+  assert.deepEqual(d.said, []);
+  assert.deepEqual(d.logs, []);
+  assert.ok(!/HazardVoice|hazardSpeech|useHazardSpeech/.test(readNav('../components/ActiveDriveOverlay.tsx')));
+});
+
+test('spoken hazards regression: manoeuvre prompts are exactly as before with hazard voice running and no hazards', () => {
+  const before = voice3();
+  void before.s.start({ route: voiceRoute3(), destination: N3_DEST });
+  before.feed(walk3(0, 1995, 1_000_000));
+  before.feed(walk3(1996, 2000, before.clock.t + 1000, 2));
+  const d = lHazards3();
+  d.set();
+  d.drive(walk3(0, 1995, 1_000_000));
+  d.drive(walk3(1996, 2000, d.clock.t + 1000, 2));
+  assert.deepEqual(d.said.map((x) => x.text), before.texts());
+  assert.deepEqual(d.said.map((x) => x.priority), ['advance', 'preparation', 'preparation', 'immediate', 'advance', 'preparation', 'immediate', 'preparation', 'alert']);
+  assert.deepEqual(d.logs, []);
+  // Hazard data is only read: never changed by speaking it
+  assert.ok(!/upsertOwn|\.apply\(|\.replace\(|reportHazard|voteHazard/.test(readNav('../lib/hazards/voice.ts')));
+});
+
+test('spoken hazards: one waiting that is removed by votes, expires or is passed is cancelled — never said', () => {
+  const setup = () => {
+    const d = spokenHazards3(straightRoute3());
+    void d.s.start({ route: straightRoute3(), destination: N3_DEST });
+    d.set(d.hazard('first', -4, 1_000));
+    d.drive(drive3(STRAIGHT3, { to: 620, speed: 5 }));
+    assert.equal(d.hazardTexts().length, 1);
+    return d;
+  };
+  // Removed by votes while it waits out the cooldown
+  const r = setup();
+  r.store.apply({ type: 'hazard', hazard: r.hazard('gone', -4, 900, 'flooding') }, r.clock.t);
+  r.drive(drive3(STRAIGHT3, { from: 625, to: 640, t0: r.next(), speed: 5 }));
+  assert.ok(r.actions().includes('held:cooldown'));
+  r.store.apply({ type: 'hazard_removed', id: 'gone' }, r.clock.t);
+  r.drive(drive3(STRAIGHT3, { from: 645, to: 950, t0: r.next(), speed: 5 }));
+  assert.ok(r.actions().includes('cancelled:superseded') || r.actions().includes('cancelled:not_relevant'), r.actions().join(','));
+  assert.ok(!r.hazardTexts().some((x) => x.startsWith('Flooding')));
+  // Expired while waiting
+  const e = setup();
+  e.store.apply({ type: 'hazard', hazard: parseHazard({ id: 'brief', kind: 'police', ...at3(-4, 900), reportedAt: new Date(e.clock.t).toISOString(), expiresInMs: 5_000 }, e.clock.t)! }, e.clock.t);
+  e.drive(drive3(STRAIGHT3, { from: 625, to: 950, t0: e.next(), speed: 5 }));
+  assert.ok(!e.hazardTexts().some((x) => x.startsWith('Police')));
+  assert.ok(e.actions().some((a) => a.startsWith('cancelled')), e.actions().join(','));
+  // Passed while waiting (still in the cooldown when the car goes by)
+  const p = setup();
+  p.store.apply({ type: 'hazard', hazard: p.hazard('close', -4, 700, 'roadworks') }, p.clock.t);
+  p.drive(drive3(STRAIGHT3, { from: 625, to: 900, t0: p.next(), speed: 5 }));
+  assert.ok(!p.hazardTexts().some((x) => x.startsWith('Roadworks')));
+  assert.ok(p.actions().some((a) => a === 'skipped:too_close' || a.startsWith('cancelled')), p.actions().join(','));
 });

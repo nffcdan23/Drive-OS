@@ -14,6 +14,11 @@
 //     spoken waits for it (only the newest waits; an older waiting one is
 //     replaced), and stop() (a reroute, mute, the end of navigation) drops
 //     both;
+//   - turns before hazards: a hazard warning is only ever started with
+//     nothing else being said (never queued behind or in place of a
+//     prompt), and a turn prompt (preparation or immediate), the reroute
+//     alert or arrival that comes while one is being said cuts it short and
+//     is spoken at once, on the same session (still one voice at a time);
 //   - a prompt that never finishes (a call or Siri took the audio) is ended
 //     by a watchdog. After any prompt that didn't finish normally, the
 //     session is released again a few times over the next twenty minutes,
@@ -30,7 +35,7 @@
 // No React Native imports, so it is unit-tested under node.
 
 import type { Journal } from '../backend/journal';
-import type { Speaker } from './voice';
+import type { Speaker, SpeechPriority } from './voice';
 
 /** The speech engine (expo-speech in the app) */
 export interface SpeechEngine {
@@ -81,7 +86,9 @@ export class NavigationSpeaker implements Speaker {
   private state: State = 'idle';
   /** The prompt being spoken; callbacks for any other are ignored */
   private utterance = 0;
-  private pending: string | null = null;
+  /** What the prompt being spoken is */
+  private current: SpeechPriority | null = null;
+  private pending: { text: string; priority: SpeechPriority } | null = null;
   private configured = false;
   /** The session couldn't be set up at all: speak on the system's own, as before */
   private sessionUnusable = false;
@@ -117,14 +124,33 @@ export class NavigationSpeaker implements Speaker {
     if (active && this.state === 'idle') void this.release(true);
   }
 
-  speak(text: string): void {
+  speak(text: string, priority: SpeechPriority = 'preparation'): boolean {
     if (this.state !== 'idle') {
+      // A hazard warning never waits, and never takes a prompt's place
+      if (priority === 'hazard') return false;
+      if (this.current === 'hazard' && priority !== 'advance') {
+        // A turn, the reroute alert or arrival doesn't wait behind a hazard warning: it stops it
+        this.log('preempted');
+        if (this.pending != null) this.log('replaced');
+        this.pending = null;
+        this.utterance++;
+        this.clearWatchdog();
+        this.state = 'idle';
+        try {
+          this.deps.engine.stop();
+        } catch {
+          // Nothing playing
+        }
+        void this.start(text, priority);
+        return true;
+      }
       // One at a time: this waits for the prompt being spoken (an older waiting one is out of date)
       if (this.pending != null) this.log('replaced');
-      this.pending = text;
-      return;
+      this.pending = { text, priority };
+      return true;
     }
-    void this.start(text);
+    void this.start(text, priority);
+    return true;
   }
 
   /** Stop speaking now and drop anything waiting (reroute, mute, end of navigation) */
@@ -134,6 +160,7 @@ export class NavigationSpeaker implements Speaker {
     this.utterance++;
     this.clearWatchdog();
     this.state = 'idle';
+    this.current = null;
     try {
       this.deps.engine.stop();
     } catch {
@@ -142,9 +169,10 @@ export class NavigationSpeaker implements Speaker {
     this.scheduleRelease();
   }
 
-  private async start(text: string): Promise<void> {
+  private async start(text: string, priority: SpeechPriority): Promise<void> {
     const id = ++this.utterance;
     this.state = 'activating';
+    this.current = priority;
     this.cancelRelease();
     const session = this.sessionUnusable ? null : this.deps.session;
     if (session) {
@@ -194,6 +222,7 @@ export class NavigationSpeaker implements Speaker {
 
   private finishFailed() {
     this.state = 'idle';
+    this.current = null;
     this.pending = null;
     this.wasInterrupted = true;
     this.armSweeps();
@@ -209,6 +238,7 @@ export class NavigationSpeaker implements Speaker {
   private complete(how: 'done' | 'stopped' | 'error' | 'watchdog') {
     this.clearWatchdog();
     this.state = 'idle';
+    this.current = null;
     if (how === 'done') {
       if (this.wasInterrupted) this.log('resumed');
       this.wasInterrupted = false;
@@ -223,7 +253,7 @@ export class NavigationSpeaker implements Speaker {
     const next = this.pending;
     this.pending = null;
     if (next != null && how === 'done') {
-      void this.start(next);
+      void this.start(next.text, next.priority);
       return;
     }
     // After a cut-off, what was waiting is out of date: dropped, not replayed

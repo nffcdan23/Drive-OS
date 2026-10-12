@@ -10,6 +10,10 @@
  * anonymous hazard. This is the same Realtime client and token as the
  * private inbox (lib/realtimePresence); the inbox itself is untouched.
  *
+ * Upcoming warnings while navigating are shown (the pill) and, once each,
+ * spoken (lib/hazards/voice.ts) through navigation's own voice: never in
+ * Free Drive, never a notification.
+ *
  * Reports are never queued: one that can't be sent says so and is dropped.
  * Nothing about where the driver is or what they reported is logged.
  */
@@ -24,7 +28,8 @@ import { FIX_PROBLEM_MESSAGE, reportBody, reportedMessage, reportFixProblem, typ
 import { HazardStore } from "@/lib/hazards/store";
 import { HazardWarnings, type HazardWarning } from "@/lib/hazards/warnings";
 import { connectHazardWarnings } from "@/lib/hazards/warningController";
-import { useLatestNavigationFix, useNavigationSession } from "@/context/NavigationContext";
+import { HazardVoice } from "@/lib/hazards/voice";
+import { useHazardSpeech, useLatestNavigationFix, useNavigationSession } from "@/context/NavigationContext";
 import { useOnScreenSnapshot } from "@/hooks/useOnScreenSnapshot";
 
 interface HazardsValue {
@@ -52,9 +57,15 @@ export function HazardsProvider({ userId, children }: { userId: string; children
     () => new HazardWarnings({ log: (event, data) => journal.log("hazard_warning", { event, ...data }) }),
     [userId],
   );
+  // Spoken once each, as alerts; diagnostics: the action, kind, a distance bucket and why
+  const speech = useHazardSpeech();
+  const hazardVoice = useMemo(
+    () => new HazardVoice({ out: speech, log: (action, data) => journal.log("hazard_voice", { action, ...data }) }),
+    [userId, speech],
+  );
   useEffect(
-    () => connectHazardWarnings({ session, store, latestFix, warnings }),
-    [session, store, latestFix, warnings],
+    () => connectHazardWarnings({ session, store, latestFix, warnings, voice: hazardVoice }),
+    [session, store, latestFix, warnings, hazardVoice],
   );
 
   // Created and stopped by the same effect (so a remount starts a fresh one)

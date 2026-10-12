@@ -30,6 +30,8 @@
  * (lib/navigation/speech.ts: iOS with its audio session, Android), off
  * screen and with the phone locked too. Its preference (Normal / Alerts only / Off) is
  * kept on this device for this user (lib/navigation/voicePrefs.ts).
+ * Spoken hazard warnings (lib/hazards/voice.ts, run by the hazards
+ * provider) go through this same voice and speaker (hazardSpeech).
  *
  * Background guidance (lib/navigation/background.ts): with the app off screen
  * or the phone locked, navigation is fed the fixes of the one background
@@ -57,6 +59,7 @@ import { msToKmh } from '@/lib/units';
 import { createSpeaker } from '@/lib/navigation/speech';
 import { VoiceGuidance, type VoiceMode } from '@/lib/navigation/voice';
 import { VoicePreferences } from '@/lib/navigation/voicePrefs';
+import type { HazardSpeechOutput } from '@/lib/hazards/voice';
 import { useApp } from '@/context/AppContext';
 import { journal } from '@/lib/diagnostics';
 import { RoutePreviewStore, type PreviewError, type PreviewPhase, type PreviewState } from '@/lib/navigation/previewStore';
@@ -83,6 +86,8 @@ interface NavigationContextValue {
   voicePrefs: VoicePreferences;
   /** The newest fix navigation was given (screen or background), if any */
   latestFix(): BackgroundFix | null;
+  /** Navigation's voice, for spoken hazard warnings (the same speaker and settings) */
+  hazardSpeech: HazardSpeechOutput;
 }
 
 const NavigationContext = createContext<NavigationContextValue | null>(null);
@@ -124,6 +129,13 @@ export function NavigationProvider({ userId, children }: { userId: string; child
 
   // Voice guidance: reads the session only; foreground only
   const voicePrefs = useMemo(() => new VoicePreferences(deviceStorage, userId), [userId]);
+  const voiceRef = useRef<VoiceGuidance | null>(null);
+  // Stable: reads whichever voice is running (none yet: nothing is said)
+  const hazardSpeech = useMemo<HazardSpeechOutput>(() => ({
+    blocked: () => voiceRef.current?.hazardBlocked() ?? 'unavailable',
+    busy: () => voiceRef.current?.speechBusy ?? false,
+    say: (text) => voiceRef.current?.sayHazard(text) ?? false,
+  }), []);
   useEffect(() => {
     // The audio side (lib/navigation/audioSession.ts): one prompt at a time,
     // on the app's own audio session where there is one (iOS), so it's heard
@@ -145,7 +157,9 @@ export function NavigationProvider({ userId, children }: { userId: string; child
       speaker.setAppState(state);
     });
     const detach = voice.attach();
+    voiceRef.current = voice;
     return () => {
+      if (voiceRef.current === voice) voiceRef.current = null;
       app.remove();
       offPrefs();
       detach();
@@ -215,8 +229,8 @@ export function NavigationProvider({ userId, children }: { userId: string; child
   useEffect(() => { void recents.load(); }, [recents]);
 
   const value = useMemo(
-    () => ({ store, session, noteFix, currentOrigin, recentPosition, recents, voicePrefs, latestFix }),
-    [store, session, noteFix, currentOrigin, recentPosition, recents, voicePrefs, latestFix],
+    () => ({ store, session, noteFix, currentOrigin, recentPosition, recents, voicePrefs, latestFix, hazardSpeech }),
+    [store, session, noteFix, currentOrigin, recentPosition, recents, voicePrefs, latestFix, hazardSpeech],
   );
   return <NavigationContext.Provider value={value}>{children}</NavigationContext.Provider>;
 }
@@ -382,6 +396,11 @@ export function useRetryReroute() {
 export function useEndNavigation() {
   const session = useNavigationSession();
   return useCallback((reason: EndReason = 'user') => session.end(reason), [session]);
+}
+
+/** Navigation's voice for spoken hazard warnings (stable) */
+export function useHazardSpeech(): HazardSpeechOutput {
+  return useNavigation().hazardSpeech;
 }
 
 /** The navigation voice preference: Normal, Alerts only or Off (this device, this user) */

@@ -39,6 +39,11 @@
 // the prompt at the next manoeuvre is said, and only if the car still hasn't
 // reached it. Then those still ahead, as usual.
 //
+// Hazard warnings (lib/hazards/voice.ts) are spoken through this same
+// voice and speaker, as alerts: in Normal and Alerts only, never when Off or
+// muted, off screen exactly where prompts are. Each utterance carries its
+// priority, so the speaker never lets a hazard warning hold up a turn.
+//
 // The diagnostics journal gets step numbers, prompt kinds and reasons only:
 // never the sentence, a road, the destination or a position.
 //
@@ -50,12 +55,25 @@ import type { NavigationSession, NavigationState } from './session';
 
 export type VoiceMode = 'normal' | 'alerts' | 'off';
 
+/**
+ * What an utterance is, for the speaker's one-at-a-time order
+ * (audioSession.ts): the reroute alert and arrival, the manoeuvre prompts,
+ * and hazard warnings (lib/hazards/voice.ts), which give way to turns.
+ */
+export type SpeechPriority = 'alert' | 'immediate' | 'preparation' | 'hazard' | 'advance';
+
 /** The speech engine (expo-speech in the app, a fake in tests) */
 export interface Speaker {
-  speak(text: string): void;
+  /** Speaks `text`; false: not taken (a hazard warning while something else is being said) */
+  speak(text: string, priority?: SpeechPriority): boolean | void;
   /** Stop speaking now and drop anything queued */
   stop(): void;
+  /** Saying something now, or about to */
+  readonly busy?: boolean;
 }
+
+/** Why a hazard warning can't be heard now */
+export type HazardSpeechBlock = 'off' | 'background';
 
 export type PromptKind = 'advance' | 'preparation' | 'immediate';
 
@@ -200,7 +218,7 @@ export class VoiceGuidance {
     if (!this.quiet.has(key)) return;
     if (p.distanceToNextM < VOICE.relevantWithinM || p.distanceToNextM > prompts[j]!.distanceBeforeM) return;
     this.quiet.delete(key);
-    this.say(prompts[j]!.text);
+    this.say(prompts[j]!.text, 'immediate');
     this.logPrompt({ action: 'spoken', step: p.next.stepIndex, prompt: j, kind: 'immediate', maneuver: p.next.kind, late: true });
   }
 
@@ -217,13 +235,39 @@ export class VoiceGuidance {
     if (this.sessionId != null) this.log('nav_voice', { action: 'cancelled', reason });
   }
 
-  private say(text: string): void {
+  private say(text: string, priority: SpeechPriority): boolean {
     try {
-      this.deps.speaker.speak(text);
+      if (this.deps.speaker.speak(text, priority) === false) return false;
       this.spoken++;
+      return true;
     } catch {
       this.log('nav_voice', { action: 'error', code: 'speak_failed' });
+      return false;
     }
+  }
+
+  // ─── Hazard warnings (lib/hazards/voice.ts decides which and when) ─────────
+
+  /**
+   * Why a hazard warning can't be heard now, or null if it can. Hazard
+   * warnings are alerts: spoken in Normal and Alerts only, never when Off
+   * (or muted), and off screen exactly where manoeuvre prompts are.
+   */
+  hazardBlocked(): HazardSpeechBlock | null {
+    if (this.mode === 'off') return 'off';
+    if (!this.foreground && !this.backgroundSpeech) return 'background';
+    return null;
+  }
+
+  /** The speaker is saying something (or about to) */
+  get speechBusy(): boolean {
+    return this.deps.speaker.busy === true;
+  }
+
+  /** Says a hazard warning on the one speaker, below every turn prompt; false if not said */
+  sayHazard(text: string): boolean {
+    if (this.hazardBlocked()) return false;
+    return this.say(text, 'hazard');
   }
 
   /** The speech engine reported an error (never the text) */
@@ -268,7 +312,7 @@ export class VoiceGuidance {
       if (this.arrivedFor !== s.sessionId) {
         this.arrivedFor = s.sessionId;
         if (this.speaking()) {
-          this.say(this.arrivalText ?? VOICE.arrived);
+          this.say(this.arrivalText ?? VOICE.arrived, 'alert');
           this.logPrompt({ action: 'arrived' });
         }
       }
@@ -297,7 +341,7 @@ export class VoiceGuidance {
         const now = this.deps.now();
         if (this.speaking() && now - this.lastOffAt >= VOICE.offRouteGapMs) {
           this.lastOffAt = now;
-          this.say(VOICE.updating);
+          this.say(VOICE.updating, 'alert');
           this.logPrompt({ action: 'off_route' });
         }
       }
@@ -342,7 +386,7 @@ export class VoiceGuidance {
     // Overshot by far (a gap in fixes): "in 400 yards" would be wrong now, unless it's the last word before the turn
     const overshoot = prompt.distanceBeforeM - distanceM;
     if (kind !== 'immediate' && overshoot > Math.max(VOICE.staleMinM, prompt.distanceBeforeM * VOICE.staleShare)) return;
-    this.say(prompt.text);
+    this.say(prompt.text, kind);
     this.logPrompt({ action: 'spoken', step: next.stepIndex, prompt: due, kind, maneuver: next.kind });
   }
 

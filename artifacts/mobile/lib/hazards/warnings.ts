@@ -93,7 +93,7 @@ export const HAZARD_WARNING = {
 const SEVERITY: Record<string, number> = { accident: 0, hazard: 1, broken_down: 2, flooding: 3, roadworks: 4, police: 5 };
 const severityOf = (kind: string) => SEVERITY[kind] ?? 1;
 
-/** The warning the driver sees (and that voice could use later): one at a time */
+/** The warning the driver sees (and hears once, voice.ts): one at a time */
 export interface HazardWarning {
   hazardId: string;
   kind: string;

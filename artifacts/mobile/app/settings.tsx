@@ -28,8 +28,8 @@ import colors, { sectionAccent } from "@/constants/colors";
 const c = colors.dark;
 /** Voice guidance while navigating (lib/navigation/voice.ts) */
 const VOICE_OPTIONS = [
-  { value: "normal", label: "Voice Guidance", sub: "Spoken directions while navigating." },
-  { value: "alerts", label: "Alerts Only", sub: "Just at each turn, rerouting and arrival." },
+  { value: "normal", label: "Voice Guidance", sub: "Spoken directions and hazard warnings while navigating." },
+  { value: "alerts", label: "Alerts Only", sub: "Just at each turn, hazards ahead, rerouting and arrival." },
   { value: "off", label: "Off", sub: "No spoken directions. The banner still shows them." },
 ] as const;
 const sectionTitles: Record<string, string> = {
