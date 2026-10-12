@@ -156,6 +156,14 @@ export function displayTrail(coordinates: readonly LatLng[] | null | undefined):
 }
 
 /**
+ * The arrow's size against its artwork (44 × 48 pt): 1.2 draws it at about
+ * 53 × 58 pt, easier to read at a glance while driving (it was 1). The same
+ * artwork from its @2x/@3x files, so it stays sharp; the shadow is scaled
+ * with it, and it's still well above the hazard markers (30 pt at most).
+ */
+export const LOCATION_ARROW_SCALE = 1.2;
+
+/**
  * The location arrow's look on the Mapbox map: the Derwent arrow artwork
  * (assets/images/map/puck-arrow.png, over its soft shadow) drawn as a symbol
  * lying flat on the map, the way the first Mapbox build drew it.  Pitch and
@@ -165,6 +173,7 @@ export function displayTrail(coordinates: readonly LatLng[] | null | undefined):
  * never hide it.
  */
 export const LOCATION_ARROW_SYMBOL = {
+  iconSize: LOCATION_ARROW_SCALE,
   iconPitchAlignment: "map",
   iconRotationAlignment: "map",
   iconRotate: ["get", "heading"],

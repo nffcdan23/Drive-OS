@@ -43,18 +43,16 @@ import { Glyph } from "@/components/Glyph";
 import { SavePlaceSheet } from "@/components/places/SavePlaceSheet";
 import { ReportButton } from "@/components/hazards/ReportButton";
 import { useApp } from "@/context/AppContext";
-import { useEndNavigation, useLatestNavigationFix, useNavigationState } from "@/context/NavigationContext";
+import { useEndNavigation, useNavigationSpeed, useNavigationState } from "@/context/NavigationContext";
 import { arrivalTime, formatClock, formatDuration, formatGuidanceDistance } from "@/lib/navigation/format";
 import { saveability } from "@/lib/navigation/places";
 import type { NavigationState } from "@/lib/navigation/session";
-import { convertSpeed, msToKmh, speedUnit, type ResolvedUnitSystem } from "@/lib/units";
+import { speedUnit, type ResolvedUnitSystem } from "@/lib/units";
 
 const FG = "#F3F5F7";
 const MUTED = "rgba(243,245,247,0.62)";
 const ACCENT = "#00CFE8";
 const END_RED = "#F07575";
-/** A fix older than this (ms) shows no speed rather than an old one */
-const SPEED_FRESH_MS = 10_000;
 
 /** Arrival times move on with the clock, even with no fixes coming in */
 function useClock(): number {
@@ -222,13 +220,13 @@ function Summary({ state, unitSystem }: { state: NavigationState; unitSystem: Re
 
 /**
  * The car's current speed, small, from the newest real GPS fix navigation has
- * (re-rendered with each navigation update). No speed limit is shown.
+ * (lib/navigation/speedHud.ts). Subscribed to the fixes themselves: reading
+ * the latest fix during render left it showing its first value (usually 0,
+ * parked at the start), because nothing made it render again. No speed limit
+ * is shown.
  */
 function SpeedHud({ unitSystem }: { unitSystem: ResolvedUnitSystem }) {
-  const latestFix = useLatestNavigationFix();
-  const fix = latestFix();
-  const fresh = fix != null && fix.speedMs != null && fix.speedMs >= 0 && Date.now() - fix.timestamp <= SPEED_FRESH_MS;
-  const value = fresh ? Math.round(convertSpeed(msToKmh(fix!.speedMs), unitSystem)) : null;
+  const value = useNavigationSpeed(unitSystem);
   const unit = speedUnit(unitSystem);
   return (
     <GlassSurface

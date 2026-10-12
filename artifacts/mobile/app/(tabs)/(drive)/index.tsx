@@ -965,6 +965,9 @@ export default function MapScreen() {
           mapboxArrowHeadingRef.current = drawnHeadingRef.current;
           mapboxRef.current?.setMarker(position, drawnHeadingRef.current);
         }
+        // The navigation route line is consumed up to just behind the arrow
+        // as drawn here (nothing without navigation; at most ~15 updates a second)
+        mapboxRef.current?.trimRoute(position, now);
       } else if (moved) {
         markerDrawnAtRef.current = position;
         markerRef.current?.setCoordinates(position);
