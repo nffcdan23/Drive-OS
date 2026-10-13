@@ -92,6 +92,8 @@ import { useHazardActions, useHazardStore } from "@/context/HazardsContext";
 import type { ReportFix } from "@/lib/hazards/report";
 import { GuidanceKeepAwake } from "@/components/navigation/GuidanceKeepAwake";
 import { guidanceZoom, type GuidanceZoom } from "@/lib/navigation/guidanceCamera";
+import { RouteHeading } from "@/lib/navigation/routeHeading";
+import { ZoomGlide } from "@/lib/navigation/zoomGlide";
 import { drivePresentation } from "@/lib/drivePresentation";
 import { coordinateDestination } from "@/lib/navigation/coordinates";
 import { describeError } from "@/lib/backend/http";
@@ -703,6 +705,15 @@ export default function MapScreen() {
   // Fed by exactly one source at a time: compass when stopped, GPS course
   // when moving.  drawnHeadingRef mirrors its output each frame.
   const [headingFilter] = useState(() => new HeadingFilter());
+  // While navigating on the route, the route's direction at the arrow is the
+  // heading (every frame, lib/navigation/routeHeading.ts); course and compass
+  // stand aside meanwhile, so the two never fight
+  const [routeHeading] = useState(() => new RouteHeading());
+  const routeHeadingActiveRef = useRef(false);
+  const lastCourseRef = useRef<number | null>(null);
+  const lastSpeedMsRef = useRef<number | null>(null);
+  // Guidance's zoom, glided to over a few seconds (lib/navigation/zoomGlide.ts)
+  const [zoomGlide] = useState(() => new ZoomGlide());
   const drawnHeadingRef = useRef(0);
   // ── Visual smoothing layer ──
   // Raw fixes still go to recording untouched; these only decide what's drawn.
@@ -933,6 +944,26 @@ export default function MapScreen() {
     );
     lastFrameAtRef.current = now;
 
+    const position = locationSmoother.sample(now);
+    // ── Heading on the route: the road's own direction where the arrow is
+    // drawn, every frame (navigation only; otherwise course or compass) ──
+    let routeDir: number | null = null;
+    {
+      const s = navSession.state;
+      const prepared = navSession.preparedRoute;
+      const on =
+        guidingRef.current && s.phase === "navigating" && s.gps === "ok" &&
+        s.progress != null && prepared != null && prepared.route === s.route;
+      routeDir = routeHeading.at({
+        prepared: on ? prepared : null,
+        confirmedAlong: on ? s.progress!.along : null,
+        arrow: position,
+        courseDeg: lastCourseRef.current,
+        speedMs: lastSpeedMsRef.current,
+      });
+    }
+    routeHeadingActiveRef.current = routeDir != null;
+    if (routeDir != null) headingFilter.update(routeDir, "route");
     // ── Heading: ease the drawn heading toward its target ──
     drawnHeadingRef.current = headingFilter.step(dt);
     const headingSettled = headingFilter.settled;
@@ -948,7 +979,6 @@ export default function MapScreen() {
       Math.abs(lookAheadSpeedRef.current - lastSpeedKmhRef.current) < 0.1;
     if (speedSettled) lookAheadSpeedRef.current = lastSpeedKmhRef.current;
 
-    const position = locationSmoother.sample(now);
     let cameraSettled = true;
     if (position) {
       // ── Marker ── (skipped when nothing it shows has moved).  On Apple
@@ -990,6 +1020,11 @@ export default function MapScreen() {
         hasMap() &&
         Platform.OS !== "web"
       ) {
+        // Guidance's zoom glides to its new value over a few seconds
+        if (guidingRef.current) {
+          const glided = zoomGlide.step(dt);
+          if (glided != null) zoomTarget.set({ zoom: glided });
+        }
         const frame = followCamera.frame(
           followTargetFor(position),
           dt,
@@ -1040,6 +1075,7 @@ export default function MapScreen() {
     const settled =
       headingSettled &&
       speedSettled &&
+      (!guidingRef.current || zoomGlide.settled) &&
       cameraSettled &&
       head.kind !== "wait" &&
       locationSmoother.isSettled(now);
@@ -1100,7 +1136,9 @@ export default function MapScreen() {
         );
         const speedKmh = msToKmh(fix.speedMs);
         lastSpeedKmhRef.current = speedKmh;
-        if (fix.headingDeg != null && fix.headingDeg >= 0 && speedKmh >= MIN_SPEED_FOR_GPS_HEADING) {
+        lastSpeedMsRef.current = fix.speedMs;
+        lastCourseRef.current = fix.headingDeg ?? null;
+        if (fix.headingDeg != null && fix.headingDeg >= 0 && speedKmh >= MIN_SPEED_FOR_GPS_HEADING && !routeHeadingActiveRef.current) {
           headingFilter.update(fix.headingDeg, "course");
         }
       }
@@ -1121,14 +1159,14 @@ export default function MapScreen() {
     (resetZoom: boolean, current?: ReportedPose) => {
       zoomTarget.clearGesture();
       if (resetZoom) {
+        const guided = guidingRef.current && guidanceZoomRef.current ? guidanceZoomRef.current.zoom : null;
         zoomTarget.set({
           // Guiding: the guidance zoom for this speed and turn
-          zoom:
-            guidingRef.current && guidanceZoomRef.current
-              ? guidanceZoomRef.current.zoom
-              : FOLLOW_ZOOM,
+          zoom: guided ?? FOLLOW_ZOOM,
           distance: NAV_CAMERA.distanceM,
         });
+        // Nothing left to glide: Recenter lands on guidance's zoom
+        zoomGlide.reset(guided);
       }
       const wasFollowing = followModeRef.current === "following";
       followModeRef.current = "following";
@@ -1259,10 +1297,14 @@ export default function MapScreen() {
       // path no longer touches it, so the two never fight.
       const speedKmh = msToKmh(speedMs);
       lastSpeedKmhRef.current = speedKmh;
+      lastSpeedMsRef.current = speedMs;
+      lastCourseRef.current = gpsHeading;
       if (
         gpsHeading != null &&
         gpsHeading >= 0 &&
-        speedKmh >= MIN_SPEED_FOR_GPS_HEADING
+        speedKmh >= MIN_SPEED_FOR_GPS_HEADING &&
+        // On the route the frame loop gives the road's direction instead
+        !routeHeadingActiveRef.current
       ) {
         headingFilter.update(gpsHeading, "course");
       }
@@ -1414,8 +1456,9 @@ export default function MapScreen() {
               : h.magHeading;
           if (raw == null || raw < 0) return;
 
-          // Once moving, GPS course is the better signal and processPosition drives
-          if (lastSpeedKmhRef.current >= MIN_SPEED_FOR_GPS_HEADING) return;
+          // Once moving, GPS course is the better signal and processPosition drives;
+          // on the route (even waiting at lights) the road's direction does
+          if (lastSpeedKmhRef.current >= MIN_SPEED_FOR_GPS_HEADING || routeHeadingActiveRef.current) return;
 
           // Raw reading straight in: the filter drops sub-0.4° noise and the
           // frame loop eases toward it, so turning the phone is one smooth
@@ -1821,6 +1864,7 @@ export default function MapScreen() {
         guidingRef.current = guiding;
         if (!guiding) {
           guidanceZoomRef.current = null;
+          zoomGlide.reset(null);
           stopOverview();
           if (followModeRef.current === "following") {
             startFollowing(true);
@@ -1849,17 +1893,19 @@ export default function MapScreen() {
       if (followModeRef.current !== "following") return;
       if (first) {
         zoomTarget.set({ zoom: next.zoom });
+        zoomGlide.reset(next.zoom);
         const position = locationSmoother.sample(Date.now());
         if (position) followCamera.retarget(followTargetFor(position));
         wakeFrameLoop();
       } else if (changed) {
-        zoomTarget.set({ zoom: next.zoom });
+        // Glided to over a few seconds by the frame loop, not switched
+        zoomGlide.setTarget(next.zoom);
         wakeFrameLoop();
       }
     };
     apply();
     return navSession.subscribe(apply);
-  }, [navSession, startFollowing, stopOverview, followCamera, followTargetFor, locationSmoother, wakeFrameLoop, zoomTarget]);
+  }, [navSession, startFollowing, stopOverview, followCamera, followTargetFor, locationSmoother, wakeFrameLoop, zoomTarget, zoomGlide]);
 
   // Navigation's overview: the whole route and the car, the same eased
   // overview as a preview. Guidance carries on; Recenter comes back.

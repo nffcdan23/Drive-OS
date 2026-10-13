@@ -3,7 +3,10 @@
 //
 // Two sensors can supply it — the compass when stopped or crawling, the GPS
 // course once moving — but only one at a time feeds this filter, and the screen
-// reads only its output.  The target is the latest reading as it is (no
+// reads only its output.  While navigating on the route, the route's own
+// direction at the arrow (lib/navigation/routeHeading.ts) takes their place:
+// a target that moves every frame, so bends turn smoothly instead of in
+// once-a-second pulses.  The target is the latest reading as it is (no
 // per-event smoothing, no coarse steps); the drawn value eases toward it every
 // frame on a single time constant, always the short way round north.
 //
@@ -11,7 +14,7 @@
 
 import { angleDelta, approachAngle } from "./locationSmoothing";
 
-export type HeadingSource = "compass" | "course";
+export type HeadingSource = "compass" | "course" | "route";
 
 export const HEADING_FILTER = {
   // Magnetometer noise is high-frequency and readings arrive many times a
@@ -20,6 +23,9 @@ export const HEADING_FILTER = {
   // GPS course arrives about once a second; a longer constant turns those
   // steps into a continuous turn
   courseTauMs: 450,
+  // The route's direction moves on every frame already: a short constant
+  // only rounds off where it changes direction
+  routeTauMs: 200,
   // Compass changes smaller than this are sensor noise, not the phone turning.
   // Far below what the eye can see, so it never makes the arrow step.
   compassNoiseDeg: 0.4,
@@ -82,7 +88,9 @@ export class HeadingFilter {
     const tau =
       this.source === "course"
         ? HEADING_FILTER.courseTauMs
-        : HEADING_FILTER.compassTauMs;
+        : this.source === "route"
+          ? HEADING_FILTER.routeTauMs
+          : HEADING_FILTER.compassTauMs;
     this.drawn = approachAngle(this.drawn, this.target, dtMs, tau);
     if (this.settled) this.drawn = this.target;
     return this.drawn;

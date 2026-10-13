@@ -8350,7 +8350,8 @@ test('guidance camera wiring: the follow camera writes, guidance only sets its z
   assert.ok(/if \(followModeRef\.current !== "following"\) return;/.test(effect));
   // Heading-up while guiding, and the guidance zoom on Recenter
   assert.ok(/guidingRef\.current \|\| headingModeRef\.current === "heading-up"/.test(drive));
-  assert.ok(/guidingRef\.current && guidanceZoomRef\.current\s*\?\s*guidanceZoomRef\.current\.zoom\s*:\s*FOLLOW_ZOOM/.test(drive));
+  assert.ok(/const guided = guidingRef\.current && guidanceZoomRef\.current \? guidanceZoomRef\.current\.zoom : null;/.test(drive));
+  assert.ok(/zoom: guided \?\? FOLLOW_ZOOM,/.test(drive) && /zoomGlide\.reset\(guided\);/.test(drive), 'Recenter lands on the guidance zoom, nothing left to glide');
   assert.ok(/onRecenter=\{handleResumeFollowing\}/.test(drive));
   const resume = drive.slice(drive.indexOf('const handleResumeFollowing'), drive.indexOf('const handleResumeFollowing') + 300);
   assert.ok(/startFollowing\(true\)/.test(resume));
@@ -10139,10 +10140,12 @@ test('navigation layout: the speed HUD is the real GPS speed only; no speed limi
   // The units: m/s → km/h → mph
   assert.equal(Math.round(convertSpeed(msToKmh(27.78), 'imperial')), 62);
   assert.equal(speedUnit('imperial'), 'mph');
-  // No speed limit anywhere in the navigation UI
-  for (const f of ['GuidanceBar.tsx', 'GuidanceBanner.tsx', 'NavigationControls.tsx']) {
+  // The speed limit is only ever the route's own data (lib/navigation/speedLimit.ts), in its own sign beside the HUD
+  for (const f of ['GuidanceBanner.tsx', 'NavigationControls.tsx']) {
     assert.ok(!/maxspeed|speedLimit|speed limit|limitKmh/i.test(readNav(`../components/navigation/${f}`)), `${f}: no speed limit`);
   }
+  assert.ok(!/maxspeed|limitAt|limitKmh/.test(bar), 'the bar never works out a limit itself');
+  assert.ok(/const limit = useNavigationSpeedLimit\(unitSystem\);/.test(bar));
 });
 
 test('navigation layout: right controls are real ones only; recording is one quiet mark; Free Drive is unchanged', () => {
@@ -11726,7 +11729,7 @@ test('route line: the route is never changed; the map line is the prepared point
   assert.ok(/const lineTrimOffset = \[0, fraction\];/.test(lines));
   assert.ok(/const fraction = drawn\.trim === trim \? drawn\.fraction : 0;/.test(lines), 'a new route never takes the old one\'s trim');
   assert.ok(!/useState|setDrawn|lineTrimOffset/.test(layer), 'no trim state in the component holding the ShapeSource');
-  assert.ok(/if \(t && fraction != null\) linesRef\.current\?\.set\(t, fraction\);/.test(layer));
+  assert.ok(/if \(t && fraction != null\) \{\s*linesRef\.current\?\.set\(t, fraction\);\s*(?:\/\/[^\n]*\n\s*)?arrowRef\.current\?\.trimTo\(t\.startAlong\);\s*\}/.test(layer));
   assert.ok(/<ShapeSource id="derwent-nav-route" shape=\{line\} lineMetrics>\s*<NavigationRouteLines ref=\{linesRef\} trim=\{trim\} \/>\s*<\/ShapeSource>/.test(layer));
 });
 
@@ -11984,4 +11987,250 @@ test('Drive Complete waits only for the phone: no network wait, local failure sh
   assert.ok(!/await (updateJourney|deleteJourney|endDrive)/.test(save));
   const ctx = strip(readFileSync(join(MOBILE, 'context/AppContext.tsx'), 'utf8'));
   assert.match(ctx, /if \(err instanceof LocalSaveError\) throw err;/);
+});
+
+// ─── Navigation polish: speed limit, manoeuvre arrow, continuous camera ────
+
+import { segmentLimits, limitAt, limitSign, SPEED_LIMIT } from '@/lib/navigation/speedLimit';
+import { MANEUVER_ARROW, arrowManeuver, drawsArrow, maneuverArrowShape, shaftTrim } from '@/lib/navigation/maneuverArrow';
+import { RouteHeading, ROUTE_HEADING, routeDirection } from '@/lib/navigation/routeHeading';
+import { GLIDE, ZoomGlide } from '@/lib/navigation/zoomGlide';
+import { nearestAlong } from '@/lib/navigation/routeTrim';
+
+/** The straight 3 km route with Mapbox maxspeed values per segment */
+function limitedRoute3(fill: (i: number, n: number) => number | null): Nav3Route {
+  const r = straightRoute3();
+  const segs = r.geometry.length - 1;
+  r.legs[0]!.maxspeedKmh = Array.from({ length: segs }, (_, i) => fill(i, segs));
+  return r;
+}
+
+test('speed limit: the data is Mapbox\'s maxspeed annotation, requested with every route and passed through untouched', () => {
+  const api = readFileSync(toPath(new URL('../../api-server/src/lib/mapboxDirections.ts', import.meta.url)), 'utf8');
+  assert.match(api, /annotations: "duration,distance,congestion,maxspeed"/);
+  assert.match(api, /if \(m\.unit === "mph"\) return Math\.round\(m\.speed \* 1\.609344\);/);
+  // Unknown / "none" segments are null, never a guess
+  assert.match(api, /if \(!isObj\(m\) \|\| typeof m\.speed !== "number" \|\| !Number\.isFinite\(m\.speed\)\) return null;/);
+  // Every UK limit survives mph → whole km/h → mph exactly
+  for (const mph of [10, 20, 30, 40, 50, 60, 70]) assert.equal(limitSign(Math.round(mph * 1.609344), 'imperial'), mph);
+  assert.equal(limitSign(80, 'metric'), 80);
+  assert.equal(limitSign(31, 'imperial'), null, '19 mph is no UK sign: not shown');
+  assert.equal(limitSign(null, 'imperial'), null);
+  assert.equal(limitSign(0, 'imperial'), null);
+});
+
+test('speed limit: placed on the route only when the annotation lines up; the limit where the car is, or nothing', () => {
+  // First half 30 mph, then unknown for 20 segments, then 60 mph
+  const r = limitedRoute3((i, n) => (i < n / 2 ? 48 : i < n / 2 + 20 ? null : 97));
+  const p = prepareRoute(r);
+  const limits = segmentLimits(p)!;
+  assert.equal(limits.length, p.n - 1);
+  assert.equal(limitSign(limitAt(p, 500), 'imperial'), 30);
+  assert.equal(limitAt(p, 1_600), null, 'unknown there: no sign');
+  assert.equal(limitSign(limitAt(p, 2_500), 'imperial'), 60);
+  // A new limit shows just past the change (no flicker at the sign itself)
+  const change = p.cum[Math.floor((p.n - 1) / 2)]!;
+  assert.equal(limitSign(limitAt(p, change + 1), 'imperial'), 30, 'within the lag: still the old one');
+  assert.equal(limitAt(p, change + SPEED_LIMIT.lagM + 1), null);
+  // Repeated points (zero-length segments) are matched to the real segments
+  const rep = limitedRoute3(() => 64);
+  rep.geometry.splice(10, 0, { ...rep.geometry[10]! });
+  rep.legs[0]!.maxspeedKmh = Array.from({ length: rep.geometry.length - 1 }, () => 64);
+  assert.equal(limitSign(limitAt(prepareRoute(rep), 50), 'imperial'), 40);
+  // Anything that doesn't line up, or no annotation: nothing at all
+  const off = limitedRoute3(() => 48);
+  off.legs[0]!.maxspeedKmh!.pop();
+  assert.equal(segmentLimits(prepareRoute(off)), null);
+  const none = straightRoute3();
+  assert.equal(segmentLimits(prepareRoute(none)), null);
+  assert.equal(limitAt(prepareRoute(none), 500), null);
+});
+
+test('speed limit: a UK sign beside the speed HUD, only while navigating on the route with good GPS', () => {
+  const ctx = readNav('../context/NavigationContext.tsx');
+  const hook = ctx.slice(ctx.indexOf('export function useNavigationSpeedLimit('), ctx.indexOf('export function useStartNavigation'));
+  assert.ok(/if \(s\.phase !== 'navigating' \|\| s\.gps !== 'ok' \|\| !s\.progress\) return null;/.test(hook));
+  assert.ok(/if \(!p \|\| p\.route !== s\.route\) return null;/.test(hook));
+  assert.ok(/return limitSign\(limitAt\(p, s\.progress\.along\), unitSystem\);/.test(hook));
+  assert.ok(/return useOnScreenSnapshot\(/.test(hook), 'a number: re-renders only when it changes, held off screen');
+  const bar = readNav('../components/navigation/GuidanceBar.tsx');
+  assert.ok(/<SpeedHud unitSystem=\{unitSystem\} \/>\s*<SpeedLimitSign unitSystem=\{unitSystem\} \/>/.test(bar));
+  const sign = bar.slice(bar.indexOf('function SpeedLimitSign('), bar.indexOf('export function GuidanceBar('));
+  assert.ok(/if \(limit == null\) return null;/.test(sign), 'unknown: no sign at all');
+  assert.ok(/accessibilityLabel=\{`Speed limit \$\{limit\} \$\{speedUnit\(unitSystem\)\}`\}/.test(sign));
+  assert.match(bar, /backgroundColor: "#FFFFFF",\s*borderWidth: 6,\s*borderColor: "#D7261E",/);
+  // Driven: the sign follows the road the car is on
+  const h = nav3Session();
+  void h.s.start({ route: limitedRoute3((i, n) => (i < n / 2 ? 48 : 97)), destination: N3_DEST });
+  const shown: Array<number | null> = [];
+  h.s.subscribe(() => { const st = h.s.state; shown.push(st.phase === 'navigating' && st.progress ? limitSign(limitAt(h.s.preparedRoute!, st.progress.along), 'imperial') : null); });
+  h.feed(drive3(STRAIGHT3, { to: 2_900 }));
+  const seen = [...new Set(shown.filter((x) => x != null))];
+  assert.deepEqual(seen, [30, 60]);
+});
+
+test('manoeuvre arrow: only turns that move — not straight on, departure or arrival', () => {
+  const m = (kind: string, direction: string | null) => ({ kind, direction }) as unknown as Parameters<typeof drawsArrow>[0];
+  assert.equal(drawsArrow(m('turn', 'left')), true);
+  assert.equal(drawsArrow(m('turn', 'slightRight')), true);
+  assert.equal(drawsArrow(m('turn', 'straight')), false);
+  assert.equal(drawsArrow(m('continue', 'straight')), false);
+  assert.equal(drawsArrow(m('continue', 'left')), true);
+  for (const k of ['fork', 'offRamp', 'onRamp', 'endOfRoad', 'roundabout', 'miniRoundabout', 'uturn']) assert.equal(drawsArrow(m(k, null)), true, k);
+  for (const k of ['depart', 'arrive', 'notification', 'roundaboutExit']) assert.equal(drawsArrow(m(k, 'left')), false, k);
+});
+
+test('manoeuvre arrow: the route\'s own shape through the turn, shown on the approach, then the next one, then none', () => {
+  const p = prepareRoute(L_ROUTE());
+  const at = (along: number) => arrowManeuver(p, progressAt(p, along));
+  // The left turn at 1000 m: shown from 25 s at 13.4 m/s (~335 m) before it
+  assert.equal(at(600), null, '400 m before: not yet');
+  assert.equal(at(700), 1);
+  assert.equal(at(990), 1);
+  assert.equal(at(1_040), null, 'past it: the right turn at 1600 m is not yet in range');
+  assert.equal(at(1_300), 2, 'then the right turn');
+  assert.equal(at(1_990), null, 'arriving: no arrow');
+  const shape = maneuverArrowShape(p, 1)!;
+  assert.ok(Math.abs(shape.fromAlong - (1_000 - 13.4 * MANEUVER_ARROW.beforeS)) < 1, `${shape.fromAlong}`);
+  assert.ok(Math.abs(shape.toAlong - (1_000 + 13.4 * MANEUVER_ARROW.afterS)) < 1, `${shape.toAlong}`);
+  // Into the turn heading north, out of it heading west: the route's own points, the corner included
+  const near = (c: [number, number], x: number, y: number) => Math.abs(c[0] - at3(x, y).longitude) < 1e-6 && Math.abs(c[1] - at3(x, y).latitude) < 1e-6;
+  assert.ok(shape.coordinates.some((c) => near(c, 0, 1_000)), 'through the corner');
+  assert.ok(near(shape.coordinates[shape.coordinates.length - 1]!, -(shape.toAlong - 1_000), 1_000));
+  assert.ok(Math.abs(((shape.headBearing + 360) % 360) - 270) < 1, `head points west: ${shape.headBearing}`);
+  assert.equal(maneuverArrowShape(p, 1), shape, 'worked out once per route');
+  // Never far into the neighbouring steps
+  assert.ok(shape.toAlong - 1_000 <= 600 * MANEUVER_ARROW.stepShare);
+  // A reroute's new route gets its own arrow
+  const p2 = prepareRoute(L_ROUTE());
+  assert.notEqual(maneuverArrowShape(p2, 1), shape);
+  // Consumed behind the car with the blue line
+  assert.equal(shaftTrim(shape, shape.fromAlong - 10), 0);
+  assert.ok(Math.abs(shaftTrim(shape, (shape.fromAlong + shape.toAlong) / 2) - 0.5) < 1e-9);
+  assert.equal(shaftTrim(shape, shape.toAlong + 5), 1);
+});
+
+test('manoeuvre arrow: drawn over the blue route, narrower than it, beneath the vehicle arrow; follows the route trim', () => {
+  const map = readNav('../components/MapboxDriveMap.tsx');
+  assert.match(map, /"derwent-maneuver-head": require\("@\/assets\/images\/map\/maneuver-head\.png"\)/);
+  const layer = map.slice(map.indexOf('const NavigationRouteLayers = memo('), map.indexOf('const MapboxDriveMap = forwardRef'));
+  assert.ok(layer.indexOf('<ShapeSource id="derwent-nav-route"') < layer.indexOf('<ManeuverArrowLayers ref={arrowRef} session={session} prepared={trim?.prepared ?? null} />'));
+  const arrow = map.slice(map.indexOf('const ManeuverArrowLayers = memo('), map.indexOf('const NavigationRouteLayers = memo('));
+  assert.ok(/return arrowManeuver\(prepared, st\.progress\) \?\? -1;/.test(arrow) && /if \(st\.phase !== "navigating" \|\| st\.route !== prepared\.route\) return -1;/.test(arrow), 'navigating on this route only');
+  assert.ok(/<ShapeSource id="derwent-nav-maneuver" shape=\{line\} lineMetrics>/.test(arrow));
+  assert.ok(/lineColor: MANEUVER_OUTLINE, lineWidth: 9/.test(arrow) && /lineColor: "#FFFFFF", lineWidth: 6/.test(arrow), 'narrower than the route (13 / 8): blue shows either side');
+  assert.ok(/iconRotationAlignment: "map",\s*iconPitchAlignment: "map",/.test(arrow), 'the head lies on the road, turned with it');
+  assert.ok(map.lastIndexOf('<NavigationRouteLayers ref={navRouteRef}') < map.lastIndexOf('<MarkerFeeder'));
+  // The head artwork: 1x / 2x / 3x
+  const png = (f: string) => { const b = readFileSync(toPath(new URL(`../assets/images/map/${f}`, import.meta.url))); return b.readUInt32BE(16); };
+  assert.deepEqual(['maneuver-head.png', 'maneuver-head@2x.png', 'maneuver-head@3x.png'].map(png), [28, 56, 84]);
+});
+
+test('camera heading: on the route it is the road\'s own direction at the arrow — continuous round a bend, no GPS wobble', () => {
+  const p = prepareRoute(L_ROUTE());
+  // Straight on: north, whatever the course noise
+  assert.ok(Math.abs(routeDirection(p, 500)) < 0.5 || Math.abs(routeDirection(p, 500) - 360) < 0.5);
+  // Round the left turn at 1000 m: from north to west, a little at a time
+  let prev = routeDirection(p, 970);
+  let biggest = 0;
+  for (let a = 970.5; a <= 1_040; a += 0.5) {
+    const d = routeDirection(p, a);
+    biggest = Math.max(biggest, Math.abs(((d - prev + 540) % 360) - 180));
+    prev = d;
+  }
+  assert.ok(biggest < 4, `at most ${biggest.toFixed(2)}° per half metre`);
+  assert.ok(Math.abs(prev - 270) < 1, 'west after the turn');
+  // Frame by frame at 13 m/s: the route heading turns every frame through the bend, the 1 Hz course in pulses
+  const turnFrames = (useRoute: boolean) => {
+    const f = new HeadingFilter();
+    f.update(0, 'course');
+    let still = 0;
+    let last = f.value;
+    for (let ms = 0; ms <= 6_000; ms += 16) {
+      const along = 960 + 13 * ms / 1000;
+      if (useRoute) f.update(routeDirection(p, along), 'route');
+      else if (ms % 1000 < 16) f.update(routeDirection(p, along - 13), 'course');
+      const v = f.step(16);
+      // While the road itself bends under the arrow (the direction is taken from 8 m behind to 22 m ahead)
+      if (along > 980 && along < 1_006 && Math.abs(((v - last + 540) % 360) - 180) < 0.05) still++;
+      last = v;
+    }
+    return still;
+  };
+  assert.equal(turnFrames(true), 0, 'route: turning on every frame of the bend');
+  assert.ok(turnFrames(false) > 10, 'course: rotate, stop, rotate (the old behaviour)');
+  // The short way round north
+  const n = new HeadingFilter();
+  n.update(350, 'route');
+  n.update(10, 'route');
+  for (let i = 0; i < 60; i++) { const v = n.step(16); assert.ok(v >= 349.9 || v <= 10.1, `${v}`); }
+});
+
+test('camera heading: used only while the car follows the route — a missed turn, off route or a new route goes back to GPS', () => {
+  const p = prepareRoute(L_ROUTE());
+  const rh = new RouteHeading();
+  const on = (along: number, course: number | null, speed = 13, x = 0) =>
+    rh.at({ prepared: p, confirmedAlong: along, arrow: at3(x, along), courseDeg: course, speedMs: speed });
+  assert.equal(on(300, 0, 0), null, 'never started while stopped');
+  assert.equal(on(300, 90), null, 'a course across the road: not following it');
+  assert.ok(on(300, 4) != null, 'moving along it: the road\'s direction');
+  assert.ok(on(310, 55) != null, 'kept through a lagging course (under 70°)');
+  assert.ok(on(320, 0, 0) != null, 'stopped at lights on the route: kept');
+  assert.equal(on(330, 95), null, 'the course says otherwise (a missed turn): GPS again');
+  assert.equal(on(340, 50), null, 'and back only within 35°');
+  assert.ok(on(350, 10) != null);
+  assert.equal(on(360, 5, 13, 40), null, 'the arrow 40 m off the line: off route');
+  assert.equal(rh.at({ prepared: null, confirmedAlong: null, arrow: at3(0, 370), courseDeg: 0, speedMs: 13 }), null, 'not navigating');
+  assert.equal(rh.at({ prepared: prepareRoute(L_ROUTE()), confirmedAlong: 380, arrow: at3(0, 380), courseDeg: null, speedMs: 0 }), null, 'a new route starts from the course');
+  assert.ok(nearestAlong(p, at3(0, 380), 380, 30, 70, ROUTE_HEADING.maxLateralM) != null);
+});
+
+test('camera heading: wired into the one frame loop; course and compass stand aside while it is in use; no new watcher', () => {
+  const drive = readNav('../app/(tabs)/(drive)/index.tsx');
+  const loop = drive.slice(drive.indexOf('frameLoopRef.current = () => {'), drive.indexOf('// ── Live trail head ──'));
+  assert.ok(loop.indexOf('if (!visualsLiveRef.current) return;') < loop.indexOf('routeHeading.at('), 'never off screen');
+  assert.ok(/guidingRef\.current && s\.phase === "navigating" && s\.gps === "ok" &&\s*s\.progress != null && prepared != null && prepared\.route === s\.route;/.test(loop));
+  assert.ok(/if \(routeDir != null\) headingFilter\.update\(routeDir, "route"\);\s*drawnHeadingRef\.current = headingFilter\.step\(dt\);/.test(loop));
+  assert.equal((drive.match(/!routeHeadingActiveRef\.current/g) ?? []).length, 2, 'foreground and background-return course updates');
+  assert.ok(/lastSpeedKmhRef\.current >= MIN_SPEED_FOR_GPS_HEADING \|\| routeHeadingActiveRef\.current\) return;/.test(drive), 'compass');
+  for (const f of ['../lib/navigation/routeHeading.ts', '../lib/navigation/zoomGlide.ts', '../lib/navigation/maneuverArrow.ts', '../lib/navigation/speedLimit.ts']) {
+    assert.ok(!/expo-location|watchPositionAsync|watchHeadingAsync|startLocationUpdatesAsync/.test(readNav(f)), f);
+  }
+  assert.equal((drive.match(/watchHeadingAsync\(/g) ?? []).length, 1);
+  assert.equal(HEADING_FILTER.routeTauMs, 200);
+});
+
+test('camera zoom: guidance zoom changes glide over a few seconds — no snap, no overshoot, no pumping', () => {
+  const g = new ZoomGlide();
+  g.reset(16.4);
+  assert.equal(g.step(16), null, 'settled: writes nothing (a pinch is left alone)');
+  g.setTarget(15.8);
+  const values: number[] = [];
+  let t = 0;
+  let mostlyAt = 0;
+  for (; t < 6_000 && !g.settled; t += 16) {
+    values.push(g.step(16)!);
+    if (!mostlyAt && values[values.length - 1]! <= 15.86) mostlyAt = t;
+  }
+  assert.ok(mostlyAt >= 1_200 && mostlyAt <= 3_000, `90% of the way after ${mostlyAt} ms (gradual, not a snap)`);
+  assert.ok(t <= 4_500, `settled after ${t} ms`);
+  for (let i = 1; i < values.length; i++) {
+    assert.ok(values[i]! <= values[i - 1]!, 'one way only');
+    assert.ok(values[i - 1]! - values[i]! <= (GLIDE.maxRatePerS * 16) / 1000 + 1e-9, 'never faster than the cap');
+  }
+  assert.equal(values[values.length - 1], 15.8);
+  // Approaching a turn: zooming in is gradual too
+  g.setTarget(16.4);
+  const first = g.step(16)!;
+  assert.ok(first - 15.8 < 0.01, 'starts gently');
+  // Recenter lands on it
+  g.reset(16.0);
+  assert.equal(g.current, 16.0);
+  assert.equal(g.settled, true);
+  // Wiring: the frame loop glides only while following and guiding; a new zoom no longer jumps
+  const drive = readNav('../app/(tabs)/(drive)/index.tsx');
+  assert.ok(/if \(guidingRef\.current\) \{\s*const glided = zoomGlide\.step\(dt\);\s*if \(glided != null\) zoomTarget\.set\(\{ zoom: glided \}\);\s*\}/.test(drive));
+  const following = drive.slice(drive.indexOf('followModeRef.current === "following" &&\n        hasMap()'), drive.indexOf('const frame = followCamera.frame('));
+  assert.ok(/zoomGlide\.step\(dt\)/.test(following), 'inside the following branch: never while the user explores the map');
+  assert.ok(/zoomGlide\.setTarget\(next\.zoom\);/.test(drive) && /\(!guidingRef\.current \|\| zoomGlide\.settled\) &&/.test(drive));
 });

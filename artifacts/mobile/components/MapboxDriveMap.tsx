@@ -74,6 +74,8 @@ import { LatestPoseWriter, sameFollowPose } from "@/lib/cameraWriter";
 import type { RoutePreviewStore } from "@/lib/navigation/previewStore";
 import type { NavigationSession } from "@/lib/navigation/session";
 import { RouteLineTrim } from "@/lib/navigation/routeTrim";
+import type { PreparedRoute } from "@/lib/navigation/routeProgress";
+import { arrowManeuver, maneuverArrowShape, shaftTrim, type ManeuverArrowShape } from "@/lib/navigation/maneuverArrow";
 import { HAZARD_KINDS, hazardFeatures } from "@/lib/hazards/model";
 import type { HazardStore } from "@/lib/hazards/store";
 import { useOnScreenSnapshot } from "@/hooks/useOnScreenSnapshot";
@@ -168,6 +170,8 @@ const TRAIL_GLOW = "rgba(0,207,232,0.28)";
 const ARROW_IMAGES = {
   "derwent-location-arrow": require("@/assets/images/map/puck-arrow.png"),
   "derwent-location-arrow-shadow": require("@/assets/images/map/puck-shadow.png"),
+  // The head of the white manoeuvre arrow on the route (scripts/generate-maneuver-head.mjs)
+  "derwent-maneuver-head": require("@/assets/images/map/maneuver-head.png"),
 };
 
 // The road hazard markers (scripts/generate-hazard-icons.mjs)
@@ -490,6 +494,83 @@ const NavigationRouteLines = memo(forwardRef<NavigationRouteLinesHandle, { trim:
     </>
   );
 }));
+/**
+ * The white manoeuvre arrow over the route at the turn coming up
+ * (lib/navigation/maneuverArrow.ts): the route's own shape through the
+ * junction, with a head. Changes only when another manoeuvre comes into
+ * range (a step index from the session, not every fix); its shaft is
+ * consumed behind the car with the blue line (`trimTo`, from the same trim).
+ */
+interface ManeuverArrowHandle {
+  trimTo(startAlong: number): void;
+}
+const MANEUVER_OUTLINE = "#0E2B5C";
+const ManeuverArrowLayers = memo(forwardRef<ManeuverArrowHandle, { session: NavigationSession; prepared: PreparedRoute | null }>(function ManeuverArrowLayers({ session, prepared }, ref) {
+  const step = useOnScreenSnapshot(
+    useCallback((fn: () => void) => session.subscribe(fn), [session]),
+    useCallback(() => {
+      if (!prepared) return -1;
+      const st = session.state;
+      if (st.phase !== "navigating" || st.route !== prepared.route) return -1;
+      return arrowManeuver(prepared, st.progress) ?? -1;
+    }, [session, prepared]),
+  );
+  const shape = useMemo(() => (prepared && step >= 0 ? maneuverArrowShape(prepared, step) : null), [prepared, step]);
+  const shapeRef = useRef<ManeuverArrowShape | null>(null);
+  useEffect(() => {
+    shapeRef.current = shape;
+  }, [shape]);
+  const [trim, setTrim] = useState<{ shape: ManeuverArrowShape | null; fraction: number }>({ shape: null, fraction: 0 });
+  useImperativeHandle(ref, () => ({
+    trimTo(startAlong) {
+      const sh = shapeRef.current;
+      if (!sh) return;
+      const fraction = shaftTrim(sh, startAlong);
+      setTrim((prev) => (prev.shape === sh && Math.abs(prev.fraction - fraction) < 0.005 ? prev : { shape: sh, fraction }));
+    },
+  }), []);
+  const fraction = trim.shape === shape ? trim.fraction : 0;
+  const line = useMemo(() => ({
+    type: "FeatureCollection" as const,
+    features: shape
+      ? [{ type: "Feature" as const, properties: {}, geometry: { type: "LineString" as const, coordinates: shape.coordinates } }]
+      : [],
+  }), [shape]);
+  const head = useMemo(() => ({
+    type: "FeatureCollection" as const,
+    features: shape
+      ? [{ type: "Feature" as const, properties: { bearing: shape.headBearing }, geometry: { type: "Point" as const, coordinates: shape.head } }]
+      : [],
+  }), [shape]);
+  const lineTrimOffset = [0, fraction];
+  const lineStyle = { lineCap: "butt", lineJoin: "round", lineEmissiveStrength: 1, lineTrimOffset } as const;
+  return (
+    <>
+      <ShapeSource id="derwent-nav-maneuver" shape={line} lineMetrics>
+        {/* Narrower than the blue route (13 / 8): the route shows either side */}
+        <LineLayer id="derwent-nav-maneuver-casing" style={{ ...lineStyle, lineColor: MANEUVER_OUTLINE, lineWidth: 9 }} />
+        <LineLayer id="derwent-nav-maneuver-line" style={{ ...lineStyle, lineColor: "#FFFFFF", lineWidth: 6 }} />
+      </ShapeSource>
+      <ShapeSource id="derwent-nav-maneuver-head" shape={head}>
+        <SymbolLayer
+          id="derwent-nav-maneuver-head"
+          style={{
+            iconImage: "derwent-maneuver-head",
+            iconRotate: ["get", "bearing"],
+            iconRotationAlignment: "map",
+            iconPitchAlignment: "map",
+            iconAnchor: "center",
+            iconAllowOverlap: true,
+            iconIgnorePlacement: true,
+            iconEmissiveStrength: 1,
+            iconOpacity: fraction >= 1 ? 0 : 1,
+          }}
+        />
+      </ShapeSource>
+    </>
+  );
+}));
+
 const NavigationRouteLayers = memo(forwardRef<NavigationRouteHandle, { session: NavigationSession }>(function NavigationRouteLayers({ session }, ref) {
   // Held still in the background (background guidance keeps the session
   // current); the route as it is now arrives in one update on return
@@ -513,6 +594,7 @@ const NavigationRouteLayers = memo(forwardRef<NavigationRouteHandle, { session: 
     return session.subscribe(confirm);
   }, [session, trim]);
   const linesRef = useRef<NavigationRouteLinesHandle>(null);
+  const arrowRef = useRef<ManeuverArrowHandle>(null);
   const trimRef = useRef<RouteLineTrim | null>(null);
   useEffect(() => {
     trimRef.current = trim;
@@ -521,7 +603,11 @@ const NavigationRouteLayers = memo(forwardRef<NavigationRouteHandle, { session: 
     frame(arrow, now) {
       const t = trimRef.current;
       const fraction = t?.frame(arrow, now);
-      if (t && fraction != null) linesRef.current?.set(t, fraction);
+      if (t && fraction != null) {
+        linesRef.current?.set(t, fraction);
+        // The manoeuvre arrow's shaft is consumed with it
+        arrowRef.current?.trimTo(t.startAlong);
+      }
     },
   }), []);
   const line = useMemo(
@@ -559,6 +645,8 @@ const NavigationRouteLayers = memo(forwardRef<NavigationRouteHandle, { session: 
       <ShapeSource id="derwent-nav-route" shape={line} lineMetrics>
         <NavigationRouteLines ref={linesRef} trim={trim} />
       </ShapeSource>
+      {/* Over the route line, beneath the trail, hazards, friends and the vehicle arrow */}
+      <ManeuverArrowLayers ref={arrowRef} session={session} prepared={trim?.prepared ?? null} />
       <ShapeSource id="derwent-nav-destination" shape={point}>
         <CircleLayer
           id="derwent-nav-destination-dot"

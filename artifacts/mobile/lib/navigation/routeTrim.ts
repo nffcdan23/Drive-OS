@@ -135,27 +135,41 @@ export class RouteLineTrim {
 
   /** Where `pos` lies along the route, looked for close to `base`; null if not near it */
   private alongNear(pos: LatLng, base: number): number | null {
-    const p = this.prepared;
-    const from = segmentAt(p, Math.max(0, base - ROUTE_TRIM.searchBackM));
-    const to = segmentAt(p, Math.min(p.total, base + ROUTE_TRIM.maxAheadM + ROUTE_TRIM.searchBackM));
-    let best: number | null = null;
-    let bestLateral: number = ROUTE_TRIM.maxLateralM;
-    for (let i = from; i <= to; i++) {
-      this.scans++;
-      const cs = p.segCos[i]!;
-      const px = (pos.longitude - p.lng[i]!) * cs * M_PER_DEG;
-      const py = (pos.latitude - p.lat[i]!) * M_PER_DEG;
-      const dx = p.segDx[i]!;
-      const dy = p.segDy[i]!;
-      const len2 = dx * dx + dy * dy;
-      let t = len2 > 0 ? (px * dx + py * dy) / len2 : 0;
-      t = t < 0 ? 0 : t > 1 ? 1 : t;
-      const lateral = Math.hypot(px - t * dx, py - t * dy);
-      if (lateral <= bestLateral) {
-        bestLateral = lateral;
-        best = p.cum[i]! + t * p.segLen[i]!;
-      }
-    }
-    return best;
+    const hit = nearestAlong(this.prepared, pos, base, ROUTE_TRIM.searchBackM, ROUTE_TRIM.maxAheadM + ROUTE_TRIM.searchBackM, ROUTE_TRIM.maxLateralM, this);
+    return hit ? hit.along : null;
   }
+}
+
+/**
+ * Where `pos` lies along the route, looked for between `backM` behind and
+ * `aheadM` beyond `base` (m along): the nearest point of the route there, and
+ * how far off it `pos` is. Null when nothing there is within `maxLateralM`.
+ * Only the few segments in that window are looked at (counted in
+ * `stats.scans` when given).
+ */
+export function nearestAlong(
+  p: PreparedRoute, pos: LatLng, base: number, backM: number, aheadM: number, maxLateralM: number,
+  stats?: { scans: number },
+): { along: number; lateral: number } | null {
+  const from = segmentAt(p, Math.max(0, base - backM));
+  const to = segmentAt(p, Math.min(p.total, base + aheadM));
+  let best: number | null = null;
+  let bestLateral = maxLateralM;
+  for (let i = from; i <= to; i++) {
+    if (stats) stats.scans++;
+    const cs = p.segCos[i]!;
+    const px = (pos.longitude - p.lng[i]!) * cs * M_PER_DEG;
+    const py = (pos.latitude - p.lat[i]!) * M_PER_DEG;
+    const dx = p.segDx[i]!;
+    const dy = p.segDy[i]!;
+    const len2 = dx * dx + dy * dy;
+    let t = len2 > 0 ? (px * dx + py * dy) / len2 : 0;
+    t = t < 0 ? 0 : t > 1 ? 1 : t;
+    const lateral = Math.hypot(px - t * dx, py - t * dy);
+    if (lateral <= bestLateral) {
+      bestLateral = lateral;
+      best = p.cum[i]! + t * p.segLen[i]!;
+    }
+  }
+  return best == null ? null : { along: best, lateral: bestLateral };
 }

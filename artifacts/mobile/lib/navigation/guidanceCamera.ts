@@ -4,7 +4,8 @@
 //
 // This only picks a zoom. The Drive screen hands it to the follow camera's
 // own zoom target (FollowCameraController), which eases to it through the
-// one camera path the map has; nothing here writes to the map. Zoom moves
+// one camera path the map has (glided there over a few seconds,
+// zoomGlide.ts); nothing here writes to the map. Zoom moves
 // in a few steps with hysteresis, never continuously, and changes at most
 // every few seconds, so it never pumps in and out with speed.
 //
