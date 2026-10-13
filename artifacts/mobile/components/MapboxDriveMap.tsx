@@ -94,7 +94,7 @@ export interface MapboxDriveMapHandle {
   easeToZoom(zoom: number): void;
   /** Moves the location arrow to the smoothed position and heading */
   setMarker(position: LatLng, heading: number): void;
-  /** The arrow as drawn this frame: the navigation route line is consumed up to just behind it */
+  /** The arrow as drawn this frame: the navigation route line is consumed up to the arrow (hidden under it) */
   trimRoute(arrow: LatLng | null, now: number): void;
   /**
    * The app is on screen (true) or not (false).  Off screen nothing is
@@ -136,7 +136,7 @@ export interface MapboxDriveMapProps {
   /**
    * The route being navigated (Phase 3), drawn by NavigationRouteLayers from
    * the session itself: the line sent once per route (a reroute), the part
-   * driven trimmed away just behind the arrow by the frame loop (trimRoute).
+   * driven trimmed away up to the arrow by the frame loop (trimRoute).
    * Never touches the camera.
    */
   navigation?: NavigationSession | null;
@@ -448,13 +448,13 @@ const RouteLayers = memo(function RouteLayers({ store }: { store: RoutePreviewSt
  * The route being navigated, and its destination. The line is the whole
  * prepared route, sent to the map once per route (a reroute brings a new
  * one); the part already driven is hidden with the line trim, moved along
- * just behind the arrow by the Drive screen's frame loop (`frame`, through
+ * to just under the arrow by the Drive screen's frame loop (`frame`, through
  * the map's trimRoute): one number per update, about 15 a second at speed,
  * never a new line (lib/navigation/routeTrim.ts). The route itself is never
  * changed. Draws only: no camera, no location component.
  */
 interface NavigationRouteHandle {
-  /** The arrow as drawn this frame: the line's start follows just behind it */
+  /** The arrow as drawn this frame: the line's start follows it, under the arrow */
   frame(arrow: LatLng | null, now: number): void;
 }
 

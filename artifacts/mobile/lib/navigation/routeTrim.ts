@@ -1,11 +1,11 @@
-// The navigation route line, consumed smoothly behind the arrow.
+// The navigation route line, consumed smoothly up to the arrow.
 //
 // The map draws the whole prepared route once (per route: a reroute brings a
 // new one) and hides the part already driven with Mapbox's line trim
 // (`lineTrimOffset`, a fraction of the line), so following the car costs one
 // number per update, never a new line. The route itself is never changed.
 //
-// Where the line starts: just behind the arrow as it is drawn this frame
+// Where the line starts: just ahead of the arrow's centre as it is drawn this frame
 // (the Drive screen's frame loop hands over the same smoothed position it
 // gives the arrow), found on the route near navigation's confirmed progress.
 // GPS progress moves once a second; the arrow glides between fixes (dead-
@@ -14,7 +14,9 @@
 // never run away from navigation:
 //  - never more than ROUTE_TRIM.maxAheadM beyond the confirmed progress (the
 //    arrow's own dead reckoning stays well inside that);
-//  - always ROUTE_TRIM.behindM behind the arrow, so it starts under it;
+//  - ROUTE_TRIM.aheadOfArrowM ahead of the arrow's centre, so it starts
+//    under the arrow's solid body: no blue tail through the notch at the
+//    back of the arrow, and no gap in front of it;
 //  - only ever forwards on a route (GPS jitter or the arrow easing back after
 //    a fix never brings driven road back);
 //  - an arrow that isn't near the route (off route) moves nothing.
@@ -31,8 +33,18 @@ import type { LatLng } from './model';
 import { segmentAt, type PreparedRoute } from './routeProgress';
 
 export const ROUTE_TRIM = {
-  /** The line starts this far behind the arrow (m): under it, never ahead */
-  behindM: 5,
+  /**
+   * The line starts this far ahead of the arrow's centre (m). The arrow
+   * (1.2 × its artwork) is solid from ~22 pt ahead of its centre to ~10 pt
+   * behind (the notch at its back is see-through); the line's round end
+   * reaches 6.5 pt back from where it starts. At navigation zooms (15.1–17,
+   * 1.3–0.35 m a point) 3 m puts that end on the arrow's body, never in the
+   * notch even when the trim is a step behind, and the full-width line
+   * starts within ~9 pt of the centre, where the arrow is still wider than
+   * it: no tail behind, no gap in front. (It was 5 m behind the centre,
+   * which showed the line through the notch.)
+   */
+  aheadOfArrowM: 3,
   /** Never more than this beyond navigation's confirmed progress (m) */
   maxAheadM: 40,
   /** The arrow is looked for this far behind the confirmed progress (m) */
@@ -105,7 +117,8 @@ export class RouteLineTrim {
     if (base == null) return null;
     const at = arrow ? this.alongNear(arrow, base) : null;
     if (at != null) {
-      const target = Math.min(at, base + ROUTE_TRIM.maxAheadM, this.prepared.total) - ROUTE_TRIM.behindM;
+      // Never more than maxAheadM beyond confirmed progress, whatever the offset
+      const target = Math.min(at + ROUTE_TRIM.aheadOfArrowM, base + ROUTE_TRIM.maxAheadM, this.prepared.total);
       if (target > this.start) this.start = target;
     }
     const moved = this.start - this.drawnStart;

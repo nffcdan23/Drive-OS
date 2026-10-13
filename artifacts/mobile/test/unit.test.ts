@@ -11630,22 +11630,26 @@ function trim3(along: number) {
   return { p, t, at: (y: number, x = 0) => at3(x, y) };
 }
 
-test('route line: follows just behind the arrow in small steps, about 15 a second — not 15 m chunks once a second', () => {
+test('route line: starts just ahead of the arrow\'s centre in small steps, about 15 a second — not 15 m chunks once a second', () => {
   const { t, at } = trim3(100);
-  assert.ok(Math.abs(t.frame(at(100), 0)! - t.fractionAt(95)) < 1e-9, 'first frame: 5 m behind the arrow');
+  assert.ok(Math.abs(t.frame(at(100), 0)! - t.fractionAt(103)) < 1e-9, 'first frame: 3 m ahead of the arrow\'s centre');
   // The arrow glides between fixes at 13 m/s (30 mph), drawn every 16 ms
   let emits = 0;
-  let worstGap = 0;
+  let least = Infinity;
+  let most = -Infinity;
   let confirmed = 100;
   for (let ms = 16; ms <= 3_000; ms += 16) {
     const arrowAlong = 100 + 13 * ms / 1000;
     if (ms % 1000 < 16) { confirmed = arrowAlong; t.confirm(confirmed); }
     if (t.frame(at(arrowAlong), ms) != null) emits++;
-    worstGap = Math.max(worstGap, arrowAlong - t.startAlong);
+    least = Math.min(least, t.startAlong - arrowAlong);
+    most = Math.max(most, t.startAlong - arrowAlong);
   }
   // At 30 mph the 1 m step decides (~13 a second); faster, the 60 ms cap (~15 a second); never every frame
   assert.ok(emits >= 35 && emits <= 3_000 / ROUTE_TRIM.minIntervalMs, `${emits} redraws in 3 s`);
-  assert.ok(worstGap <= ROUTE_TRIM.behindM + ROUTE_TRIM.minStepM + 13 * 0.016 + 0.1, `the line starts at most ${worstGap.toFixed(1)} m behind the arrow`);
+  // Always ahead of the arrow's centre (never trailing behind it), by at most the 3 m offset
+  assert.ok(least >= ROUTE_TRIM.aheadOfArrowM - ROUTE_TRIM.minStepM - 13 * 0.016 - 0.1, `at least ${least.toFixed(2)} m ahead of the arrow`);
+  assert.ok(most <= ROUTE_TRIM.aheadOfArrowM + 1e-6, `at most ${most.toFixed(2)} m ahead of the arrow`);
   // Before: redrawn only every 15 m of confirmed progress, 5 m behind it: up to ~33 m behind the arrow
   assert.equal(REMAINING_LINE.redrawEveryM, 15);
   // Small movements: under 1 m is not worth a redraw; 1 m is
@@ -11658,19 +11662,24 @@ test('route line: follows just behind the arrow in small steps, about 15 a secon
   assert.equal(s.t.frame(s.at(501.2), 800), null);
 });
 
-test('route line: never ahead of the arrow, never far beyond confirmed progress, never backwards, never off the route', () => {
+test('route line: starts under the arrow, never far beyond confirmed progress, never backwards, never off the route', () => {
+  // No longer trailing 5 m behind the arrow: 3 m ahead of its centre, under its solid body
+  assert.equal(ROUTE_TRIM.aheadOfArrowM, 3);
+  assert.ok(!('behindM' in ROUTE_TRIM));
   const { t, at } = trim3(1_000);
   t.frame(at(1_000), 0);
-  assert.ok(Math.abs(t.startAlong - 995) < 0.01, 'starts under the arrow (5 m behind)');
+  assert.ok(Math.abs(t.startAlong - 1_003) < 0.01, 'starts 3 m ahead of the arrow\'s centre');
   // An arrow 200 m beyond confirmed progress (a bad position) isn't followed at all
   t.frame(at(1_200), 50);
-  assert.ok(Math.abs(t.startAlong - 995) < 0.01, `${t.startAlong}`);
-  // 60 m beyond: followed at most 40 m beyond confirmed progress, less 5
+  assert.ok(Math.abs(t.startAlong - 1_003) < 0.01, `${t.startAlong}`);
+  // 60 m beyond: the line starts at most 40 m beyond confirmed progress, offset included
   t.frame(at(1_060), 100);
-  assert.ok(Math.abs(t.startAlong - (1_000 + ROUTE_TRIM.maxAheadM - ROUTE_TRIM.behindM)) < 0.5, `${t.startAlong}`);
+  assert.ok(Math.abs(t.startAlong - (1_000 + ROUTE_TRIM.maxAheadM)) < 0.01, `${t.startAlong}`);
+  t.frame(at(1_039), 200);
+  assert.ok(t.startAlong <= 1_000 + ROUTE_TRIM.maxAheadM + 1e-9, 'the offset never pushes it past the cap');
   // Back (the arrow easing back after a fix, or jitter): driven road never comes back
   const was = t.startAlong;
-  t.frame(at(990), 200);
+  t.frame(at(990), 250);
   assert.equal(t.startAlong, was);
   // Off the route (60 m to the side): nothing moves
   t.confirm(1_100);
@@ -11726,7 +11735,8 @@ test('route line: driven with navigation — tracks the arrow between 1 Hz fixes
   void h.s.start({ route: straightRoute3(), destination: N3_DEST });
   const t = new RouteLineTrim(h.s.preparedRoute!);
   h.s.subscribe(() => { const st = h.s.state; if ('progress' in st && st.progress) t.confirm(st.progress.along); });
-  let worst = 0;
+  let least = Infinity;
+  let most = -Infinity;
   let ahead = 0;
   const fixes = drive3(STRAIGHT3, { to: 1_500, noise: 2 });
   for (const f of fixes) {
@@ -11736,12 +11746,15 @@ test('route line: driven with navigation — tracks the arrow between 1 Hz fixes
     for (let ms = 0; ms < 1_000; ms += 16) {
       const arrow = confirmed + 13 * ms / 1000;
       t.frame(at3(0, arrow), f.time + ms);
-      worst = Math.max(worst, arrow - t.startAlong);
+      least = Math.min(least, t.startAlong - arrow);
+      most = Math.max(most, t.startAlong - arrow);
       ahead = Math.max(ahead, t.startAlong - confirmed);
     }
   }
-  assert.ok(worst < 8, `never more than ${worst.toFixed(1)} m behind the arrow`);
-  assert.ok(ahead <= ROUTE_TRIM.maxAheadM - ROUTE_TRIM.behindM + 0.01, `at most ${ahead.toFixed(1)} m beyond confirmed progress`);
+  // The line starts under the arrow throughout: ahead of its centre (no blue tail), never far ahead (no gap)
+  assert.ok(least > 0, `never behind the arrow's centre (closest ${least.toFixed(2)} m ahead)`);
+  assert.ok(most <= ROUTE_TRIM.aheadOfArrowM + 1, `at most ${most.toFixed(2)} m ahead of it`);
+  assert.ok(ahead <= ROUTE_TRIM.maxAheadM + 1e-9, `at most ${ahead.toFixed(1)} m beyond confirmed progress`);
   // ~60 km, 6000 points: each frame looks at a few segments only
   const long = polyline3([[0, 0], [0, 60_000]], 10);
   const lp = prepareRoute(route3(long, [{ at: 0, type: 'depart' }, { at: long.length - 1, type: 'arrive' }]));
