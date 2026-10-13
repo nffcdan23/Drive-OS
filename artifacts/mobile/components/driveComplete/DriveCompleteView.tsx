@@ -41,7 +41,7 @@ export interface DriveRewards {
 
 export default function DriveCompleteView({
   firstName, isSaving, busy, hasJourney, distanceKm, durationS, avgSpeedKmh, topSpeedKmh, route, unitSystem,
-  rewards, visibility, onVisibility, visibilityLocked, onSave, onDiscard, onClose,
+  rewards, visibility, onVisibility, visibilityLocked, onSave, onDiscard, onClose, saveError,
 }: {
   firstName: string | undefined;
   isSaving: boolean;
@@ -61,6 +61,8 @@ export default function DriveCompleteView({
   onSave: () => void;
   onDiscard: () => void;
   onClose: () => void;
+  /** The phone couldn't save the drive: shown above the actions (Save Drive tries again) */
+  saveError?: string | null;
 }) {
   const insets = useSafeAreaInsets();
   // The hero takes whatever height the content leaves, so the actions sit at
@@ -145,6 +147,12 @@ export default function DriveCompleteView({
               </Text>
             </GlassSurface>
           )}
+
+          {saveError ? (
+            <GlassSurface style={styles.notice}>
+              <Text style={styles.noticeText} accessibilityRole="alert">{saveError}</Text>
+            </GlassSurface>
+          ) : null}
 
           <View style={styles.actions}>
             <GlassButton

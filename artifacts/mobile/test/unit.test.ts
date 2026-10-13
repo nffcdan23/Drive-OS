@@ -11783,3 +11783,192 @@ test('vehicle arrow: 20% larger, the same artwork, anchor and heading; still abo
   assert.deepEqual(png('puck-arrow@3x.png'), { w: 132, h: 144 }, 'the @3x artwork: sharp at 1.2× on any iPhone');
   assert.ok(Math.round(arrow.w * LOCATION_ARROW_SCALE) === 53 && png('hazard-accident.png').w <= 30);
 });
+
+// ─── Drive Complete: local-first save ───────────────────────────────────────
+//
+// Ending a drive saves it on the phone and returns; uploading runs in the
+// background.  Neither Save nor Discard ever waits on the network.  Only the
+// phone's own write failing can hold the screen (LocalSaveError).
+import { LocalSaveError } from '@/lib/backend/cloudSync';
+
+/** A fake server whose requests can hang forever or fail with a server error */
+function controllableServer() {
+  const server = new FakeServer();
+  const mode = { hang: false, error: false };
+  const real = server.ep.bind(server);
+  server.ep = () => new Proxy(real(), {
+    get(target, key) {
+      const f = (target as unknown as Record<string | symbol, unknown>)[key];
+      if (typeof f !== 'function') return f;
+      return (...args: unknown[]) => {
+        if (mode.hang) return new Promise(() => {});
+        if (mode.error) return Promise.reject(new ApiError(503, 'unavailable', 'The server is down'));
+        return (f as (...a: unknown[]) => unknown)(...args);
+      };
+    },
+  }) as Endpoints;
+  return { server, mode };
+}
+
+/** Resolves with the result, or rejects if it takes longer than `ms` (a UI stuck waiting) */
+function within<T>(p: Promise<T>, ms = 500): Promise<T> {
+  return Promise.race([p, new Promise<T>((_, reject) => setTimeout(() => reject(new Error(`still waiting after ${ms} ms`)), ms))]);
+}
+
+async function driveAndEnd(r: RecoveryApp, fromS = 0) {
+  await r.app.startDrive(null);
+  for (let s = 1; s <= 120; s++) { r.clock.t += 1000; r.app.addFix(aRoadFix(fromS + s, r.clock.t)); }
+  return within(r.app.endDrive());
+}
+
+const pendingRefs = async (store: MemoryStore) =>
+  ((JSON.parse((await store.getItem(PENDING_KEY)) ?? '[]')) as JourneyRecord[]).map((r) => r.clientRef);
+
+test('local-first save, online: saved on the phone at once, then uploaded in the background', async () => {
+  const { server } = controllableServer();
+  const r = recoveryApp(new FlakyStore(), { t: Date.parse('2026-10-05T13:00:00Z') }, new FakeUpdates(), server);
+  await r.app.start();
+  const journey = await driveAndEnd(r);
+  assert.ok(journey);
+  const ref = journey.id.startsWith('local:') ? journey.id.slice(6) : server.journeys[0]!.clientRef;
+  assert.equal(await r.store.getItem(ACTIVE_KEY), null, 'out of "active"');
+  await settle(); await settle();
+  assert.ok(server.journeys.some((j) => j.clientRef === ref && j.status === 'completed'), 'uploaded');
+  assert.equal(server.journeys.length, 1, 'one journey');
+  assert.deepEqual(await pendingRefs(r.store), [], 'nothing left waiting');
+  r.app.dispose();
+});
+
+test('local-first save, offline: saved on the phone, listed, queued; uploads once when back online', async () => {
+  const { server } = controllableServer();
+  server.offline = true;
+  const r = recoveryApp(new FlakyStore(), { t: Date.parse('2026-10-05T13:00:00Z') }, new FakeUpdates(), server);
+  await r.app.start();
+  const journey = await driveAndEnd(r);
+  assert.ok(journey && journey.id.startsWith('local:'), 'a local journey');
+  const ref = journey.id.slice(6);
+  assert.deepEqual(await pendingRefs(r.store), [ref], 'saved on the phone');
+  assert.ok(r.app.data.journeys.some((j) => j.id === journey.id), 'in the Drives list');
+  assert.equal(r.app.status.pendingJourneys, 1, 'waiting to upload');
+  // Connectivity returns: the queued drive uploads, once, with no duplicate
+  server.offline = false;
+  await r.app.sync();
+  await r.app.syncJourneys();
+  assert.equal(server.journeys.filter((j) => j.clientRef === ref).length, 1, 'no duplicate journey');
+  assert.equal(server.journeys[0]!.status, 'completed');
+  assert.equal(r.app.status.pendingJourneys, 0);
+  assert.ok(!r.app.data.journeys.some((j) => j.id === journey.id), 'the local copy is replaced by the server one');
+  await r.app.syncJourneys();
+  assert.equal(server.journeys.length, 1, 'a second sync adds nothing');
+  r.app.dispose();
+});
+
+test('local-first save: a request that hangs forever never holds Save; the drive stays queued', async () => {
+  const { server, mode } = controllableServer();
+  const r = recoveryApp(new FlakyStore(), { t: Date.parse('2026-10-05T13:00:00Z') }, new FakeUpdates(), server);
+  await r.app.start();
+  mode.hang = true; // from the drive's own start-of-drive upload onwards
+  const journey = await driveAndEnd(r); // rejects if it waits
+  assert.ok(journey);
+  assert.equal((await pendingRefs(r.store)).length, 1, 'saved on the phone');
+  assert.equal(r.app.status.pendingJourneys, 1, 'still waiting to upload');
+  r.app.dispose();
+});
+
+test('local-first save: a server error keeps the drive on the phone and it is retried later', async () => {
+  const { server, mode } = controllableServer();
+  const r = recoveryApp(new FlakyStore(), { t: Date.parse('2026-10-05T13:00:00Z') }, new FakeUpdates(), server);
+  await r.app.start();
+  mode.error = true;
+  const journey = await driveAndEnd(r);
+  assert.ok(journey);
+  await settle(); await settle();
+  const saved = JSON.parse((await r.store.getItem(PENDING_KEY))!) as JourneyRecord[];
+  assert.equal(saved.length, 1, 'kept');
+  assert.ok(!saved[0]!.rejected, 'a server error is retried, never given up on');
+  mode.error = false;
+  await r.app.syncJourneys();
+  assert.equal(server.journeys.filter((j) => j.status === 'completed').length, 1, 'uploaded on the retry');
+  assert.deepEqual(await pendingRefs(r.store), []);
+  r.app.dispose();
+});
+
+test('local-first discard, offline: leaves at once; the server journey\'s deletion is queued and runs when online', async () => {
+  const { server } = controllableServer();
+  const r = recoveryApp(new FlakyStore(), { t: Date.parse('2026-10-05T13:00:00Z') }, new FakeUpdates(), server);
+  await r.app.start();
+  await r.app.startDrive(null);
+  await settle(); // the journey was created on the server as the drive started
+  const serverId = server.journeys[0]!.id;
+  server.offline = true;
+  for (let s = 1; s <= 120; s++) { r.clock.t += 1000; r.app.addFix(aRoadFix(s, r.clock.t)); }
+  const journey = await within(r.app.endDrive());
+  assert.ok(journey && journey.id.startsWith('local:'));
+  // Discard: not waited on by the screen; the phone copy goes at once
+  const discarding = r.app.deleteJourney(journey.id);
+  assert.ok(!r.app.data.journeys.some((j) => j.id === journey.id), 'gone from the list at once');
+  await within(discarding);
+  assert.deepEqual(await pendingRefs(r.store), [], 'gone from the phone');
+  assert.ok(r.app.status.pendingChanges >= 1, 'the server deletion is queued');
+  await settle(); // the offline attempt at sending it ends
+  server.offline = false;
+  await r.app.sync();
+  assert.ok(server.deletedJourneys.includes(serverId), 'deleted on the server once online');
+  r.app.dispose();
+});
+
+test('local-first save: a drive discarded while it is uploading is removed from the server too', async () => {
+  const { server } = controllableServer();
+  server.offline = true;
+  const r = recoveryApp(new FlakyStore(), { t: Date.parse('2026-10-05T13:00:00Z') }, new FakeUpdates(), server);
+  await r.app.start();
+  const journey = await driveAndEnd(r);
+  server.offline = false;
+  const uploading = r.app.syncJourneys();
+  await r.app.deleteJourney(journey!.id);
+  await uploading;
+  await r.app.sync();
+  assert.equal(server.journeys.length, 0, 'nothing left on the server');
+  assert.ok(!r.app.data.journeys.some((j) => j.clientRef === journey!.id.slice(6)));
+  r.app.dispose();
+});
+
+test('local-first save: when the phone\'s own write fails, Save is held with a clear error, and a retry saves it', async () => {
+  const { server } = controllableServer();
+  server.offline = true;
+  const store = new FlakyStore();
+  const r = recoveryApp(store, { t: Date.parse('2026-10-05T13:00:00Z') }, new FakeUpdates(), server);
+  await r.app.start();
+  await r.app.startDrive(null);
+  for (let s = 1; s <= 120; s++) { r.clock.t += 1000; r.app.addFix(aRoadFix(s, r.clock.t)); }
+  store.failWrites = ['journey/pending'];
+  const err = await within(r.app.endDrive()).then(() => null, (e: unknown) => e);
+  assert.ok(err instanceof LocalSaveError, 'reported, not saved');
+  assert.match(err.message, /Couldn't save the drive on this phone/);
+  assert.ok(err.journey.id.startsWith('local:'));
+  assert.deepEqual(await pendingRefs(store), [], 'not falsely in the saved drives');
+  assert.ok(await store.getItem(ACTIVE_KEY), 'still safe in its "active" copy');
+  assert.equal(await r.app.retryDriveSave(), false, 'still failing');
+  store.failWrites = [];
+  assert.equal(await r.app.retryDriveSave(), true);
+  assert.deepEqual(await pendingRefs(store), [err.journey.id.slice(6)]);
+  assert.equal(await store.getItem(ACTIVE_KEY), null);
+  r.app.dispose();
+});
+
+test('Drive Complete waits only for the phone: no network wait, local failure shown, Save retries it', () => {
+  const strip = (t: string) => t.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+  const cloud = strip(readFileSync(join(MOBILE, 'lib/backend/cloudSync.ts'), 'utf8'));
+  const end = cloud.slice(cloud.indexOf('async endDrive()'), cloud.indexOf('async retryDriveSave()'));
+  assert.ok(!/await this\.(syncJourneys|activePush|pushActive|ep\.)/.test(end), 'endDrive waits on the network');
+  assert.match(end, /void this\.syncJourneys\(\)/);
+  const screen = strip(readFileSync(join(MOBILE, 'app/drive-summary.tsx'), 'utf8'));
+  assert.match(screen, /err instanceof LocalSaveError/);
+  assert.match(screen, /if \(!\(await retryDriveSave\(\)\)\)/);
+  assert.match(screen, /saveError=\{saveError\}/);
+  // Save and Discard themselves are never awaited on the network
+  const save = screen.slice(screen.indexOf('async function handleSave'), screen.indexOf('function handleDiscard'));
+  assert.ok(!/await (updateJourney|deleteJourney|endDrive)/.test(save));
+  const ctx = strip(readFileSync(join(MOBILE, 'context/AppContext.tsx'), 'utf8'));
+  assert.match(ctx, /if \(err instanceof LocalSaveError\) throw err;/);
+});

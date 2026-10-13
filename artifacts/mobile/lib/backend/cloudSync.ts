@@ -136,6 +136,14 @@ export interface OrphanJourney {
   outcome: 'candidate' | 'recent' | 'too-few-points' | 'change-queued';
 }
 
+/** The phone couldn't save a finished drive (storage failed); nothing is lost yet, but it isn't safe */
+export class LocalSaveError extends Error {
+  constructor(detail: string, readonly journey: Journey) {
+    super(`Couldn't save the drive on this phone: ${detail}`);
+    this.name = 'LocalSaveError';
+  }
+}
+
 export class CloudSync {
   data: CachedData = emptyData();
   status: SyncStatus = {
@@ -1021,10 +1029,19 @@ export class CloudSync {
 
   /** Throws away a drive that hasn't uploaded (e.g. one the server rejected). */
   async discardPendingJourney(localId: string) {
-    this.pending = this.pending.filter((r) => `local:${r.clientRef}` !== localId);
-    await this.persistPending();
+    const rec = this.pending.find((r) => `local:${r.clientRef}` === localId);
+    this.pending = this.pending.filter((r) => r !== rec);
     this.update((d) => ({ ...d, journeys: d.journeys.filter((j) => j.id !== localId) }));
     this.setStatus({ pendingJourneys: this.pending.length });
+    await this.persistPending();
+    if (!rec) return;
+    // Its journey may already exist on the server (created as the drive
+    // started, or by an upload under way): once any upload of it has
+    // settled, its deletion is queued in the outbox, which works offline and
+    // survives a restart.  (An upload that completes after this is undone by
+    // runJourneySync.)
+    await Promise.all([this.activePush, this.journeySync].map((p) => p?.catch(() => {})));
+    if (rec.serverId) await this.queue({ kind: 'journey.delete', id: rec.serverId });
   }
 
   get isDriving() { return !!this.active; }
@@ -1250,7 +1267,19 @@ export class CloudSync {
     return this.activePush;
   }
 
-  /** Ends the drive; returns the journey (server copy when upload succeeded). */
+  /**
+   * Ends the drive, local-first: it is saved on the phone (pending) and
+   * returned at once, as a local journey unless the server already had it.
+   * Uploading runs in the background (syncJourneys), so ending a drive never
+   * waits on the network: offline, or with a request that hangs, the drive
+   * stays pending and goes up when the connection returns.
+   *
+   * Throws LocalSaveError when writing it into the saved drives failed.  The
+   * drive is still held (in memory and in its "active" copy, retried; see
+   * settleFinished), but it isn't safe yet: retryDriveSave tries again.
+   * Saved drives that merely couldn't be *read* are not that: the new drive
+   * waits safely in its "active" copy beside them (see persistPending).
+   */
   async endDrive(): Promise<Journey | null> {
     const rec = this.active;
     if (!rec) return null;
@@ -1262,8 +1291,8 @@ export class CloudSync {
     }
     // No more fixes from here on.
     await this.stopTracking();
-    // Let an upload that's already running finish first (it shares the record).
-    if (this.activePush) await this.activePush;
+    // An upload already running for this drive isn't waited for: it shares
+    // the record, and the background sync waits for it (runJourneySync).
     rec.endedAt = new Date(this.now()).toISOString();
     this.active = null;
     this.notifyDrive();
@@ -1276,17 +1305,48 @@ export class CloudSync {
     this.pending = dedupeDrives([...this.pending, rec]);
     this.pendingDirty = true;
     this.staleActive = rec.clientRef;
+    let localError: unknown = null;
     try {
       await this.settleFinished();
-    } catch {
+    } catch (err) {
+      localError = err;
       this.scheduleSettleRetry();
     }
     this.update((d) => this.withPendingJourneys(d));
     this.setStatus({ pendingJourneys: this.pending.length });
-    await this.syncJourneys();
+    // Upload in the background; never awaited here
+    void this.syncJourneys().catch(() => {});
+    if (localError && this.pendingWriteFailed) throw new LocalSaveError(errorText(localError), this.placeholderJourney(rec));
     const serverId = this.journeyIds.get(rec.clientRef);
     const id = serverId ?? `local:${rec.clientRef}`;
     return this.data.journeys.find((j) => j.id === id) ?? this.placeholderJourney(rec);
+  }
+
+  /**
+   * Tries again to save a finished drive on the phone after endDrive's local
+   * save failed.  True once it is saved (in pending, out of "active").
+   */
+  async retryDriveSave(): Promise<boolean> {
+    try {
+      await this.settleFinished();
+    } catch {
+      this.scheduleSettleRetry();
+      if (this.pendingWriteFailed) return false;
+    }
+    this.update((d) => this.withPendingJourneys(d));
+    this.setStatus({ pendingJourneys: this.pending.length });
+    void this.syncJourneys().catch(() => {});
+    return true;
+  }
+
+  /** The last attempt to write the saved drives failed (they were readable; the write itself didn't work) */
+  private get pendingWriteFailed(): boolean {
+    return this.pendingDirty && !this.pendingUnreadable;
+  }
+
+  /** Whether a drive is still waiting on this phone (not discarded) */
+  private isPending(rec: JourneyRecord): boolean {
+    return this.pending.some((r) => r.clientRef === rec.clientRef);
   }
 
   /** Uploads finished drives waiting on this device. */
@@ -1298,14 +1358,27 @@ export class CloudSync {
   }
 
   private async runJourneySync() {
+    // A drive ended while its in-progress upload was still running shares
+    // that upload's record: one upload of a record at a time, so nothing is
+    // sent twice (and the server journey is keyed on clientRef anyway).
+    if (this.activePush) await this.activePush;
     for (const rec of [...this.pending]) {
-      if (rec.rejected) continue;
+      // It runs in the background now: an instance disposed or signed out
+      // meanwhile writes nothing more
+      if (this.disposed) return;
+      if (rec.rejected || !this.isPending(rec)) continue;
       try {
         const journey = await syncJourneyRecord(this.ep, rec, {
           resolveId: (id) => this.outbox.resolve(id),
-          save: () => this.persistPending(),
+          save: () => (this.disposed ? Promise.resolve() : this.persistPending()),
         });
+        if (this.disposed) return;
         if (!journey) continue;
+        if (!this.isPending(rec)) {
+          // Discarded while it was uploading: remove what reached the server
+          await this.queue({ kind: 'journey.delete', id: journey.id });
+          continue;
+        }
         this.journeyIds.set(rec.clientRef, journey.id);
         this.completedChanges++;
         this.pending = this.pending.filter((r) => r !== rec);
@@ -1318,6 +1391,7 @@ export class CloudSync {
         // XP, level and totals changed on the server.
         void this.refreshProfile();
       } catch (err) {
+        if (this.disposed) return;
         rec.attempts++;
         rec.lastError = describeError(err);
         if (!isRetryable(err) && err instanceof ApiError && err.status !== 401) rec.rejected = true;

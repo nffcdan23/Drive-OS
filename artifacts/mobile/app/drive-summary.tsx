@@ -1,6 +1,9 @@
 /**
- * Drive Complete.  The drive is saved when this screen opens (endDrive, as
- * before), so nothing recorded is lost whatever is tapped next:
+ * Drive Complete.  The drive is saved on the phone when this screen opens
+ * (endDrive), so nothing recorded is lost whatever is tapped next.  Saving is
+ * local-first: endDrive returns once the phone has it and uploads in the
+ * background, so neither button ever waits on the network (offline, the
+ * drive stays queued and uploads when the connection returns):
  *  - Save Drive applies the chosen visibility and opens Drives;
  *  - Discard deletes the saved drive, after confirming;
  *  - the close button leaves the drive saved as it is.
@@ -15,6 +18,7 @@ import { Alert, Platform } from 'react-native';
 import { useRouter } from 'expo-router';
 import * as Haptics from 'expo-haptics';
 import { useApp, type Journey } from '@/context/AppContext';
+import { LocalSaveError } from '@/lib/backend/cloudSync';
 import type { Visibility } from '@/lib/backend/endpoints';
 import DriveCompleteView, { type DriveRewards } from '@/components/driveComplete/DriveCompleteView';
 import { dayStreak, firstNameOf, levelProgress } from '@/lib/driveRewards';
@@ -35,13 +39,15 @@ function confirmDiscard(onConfirm: () => void) {
 export default function DriveSummaryScreen() {
   const router = useRouter();
   const {
-    currentDrive, endDrive, updateJourney, deleteJourney, resolvedUnitSystem, userProfile,
+    currentDrive, endDrive, retryDriveSave, updateJourney, deleteJourney, resolvedUnitSystem, userProfile,
     journeys,
   } = useApp();
   const [savedJourney, setJourney] = useState<Journey | null>(null);
   const [isSaving, setIsSaving] = useState(true);
   const [visibility, setVisibility] = useState<Visibility>('private');
   const [leaving, setLeaving] = useState(false);
+  // The phone couldn't save the drive (storage failed): it isn't reported as saved
+  const [saveError, setSaveError] = useState<string | null>(null);
   const endedRef = useRef(false);
 
   // Snapshot the drive on mount (before endDrive clears it), shown until the
@@ -73,6 +79,10 @@ export default function DriveSummaryScreen() {
           // starts at the safest, Only me.
           if (!j.id.startsWith('local:') && j.privacy) setVisibility(j.privacy);
         }
+      } catch (err) {
+        if (!(err instanceof LocalSaveError)) return; // reported by AppContext
+        setJourney(err.journey);
+        setSaveError("Couldn't save this drive on your phone. Tap Save Drive to try again.");
       } finally {
         setIsSaving(false);
       }
@@ -112,9 +122,18 @@ export default function DriveSummaryScreen() {
   };
   const busy = isSaving || leaving;
 
-  function handleSave() {
+  async function handleSave() {
     if (busy) return;
     setLeaving(true);
+    if (saveError) {
+      // Only the phone's own save can hold the screen; never the network
+      if (!(await retryDriveSave())) {
+        setLeaving(false);
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+        return;
+      }
+      setSaveError(null);
+    }
     // Sent when changed, and always for a drive still uploading (it goes
     // with the drive when it completes)
     if (journey && (visibility !== journey.privacy || journey.id.startsWith('local:'))) {
@@ -158,6 +177,7 @@ export default function DriveSummaryScreen() {
       onSave={handleSave}
       onDiscard={handleDiscard}
       onClose={handleClose}
+      saveError={saveError}
     />
   );
 }

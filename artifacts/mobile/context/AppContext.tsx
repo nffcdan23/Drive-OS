@@ -13,7 +13,7 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useR
 import { Alert, AppState, Linking } from 'react-native';
 import * as ImageManipulator from 'expo-image-manipulator';
 import { useLocales } from 'expo-localization';
-import { CloudSync, type SyncStatus } from '@/lib/backend/cloudSync';
+import { CloudSync, LocalSaveError, type SyncStatus } from '@/lib/backend/cloudSync';
 import { describeError } from '@/lib/backend/http';
 import type { GpsFix } from '@/lib/backend/journeyRecorder';
 import { LiveDriveFeed, liveDriveFromRecord, newLiveDrive } from '@/lib/backend/liveDrive';
@@ -83,6 +83,8 @@ interface AppContextValue {
   startDrive: () => void;
   updateDriveCoordinate: (coord: Coordinate & { speed: number; accuracy?: number | null; heading?: number | null; altitude?: number | null; timestamp?: number }) => void;
   endDrive: () => Promise<Journey | null>;
+  /** Tries again to save a finished drive on the phone after endDrive threw LocalSaveError; true once saved */
+  retryDriveSave: () => Promise<boolean>;
   /** Ends the drive in progress without saving anything (see CloudSync.discardDrive) */
   discardDrive: () => Promise<void>;
   /** Notes a pause starting or ending on the drive record (see CloudSync.setDrivePaused) */
@@ -421,10 +423,14 @@ export function AppProvider({ userId, children }: { userId: string; children: Re
     try {
       return await cloud.endDrive();
     } catch (err) {
+      // The phone couldn't save it: the Drive Complete screen says so and offers to try again
+      if (err instanceof LocalSaveError) throw err;
       reportFailure('Could not save the drive', err);
       return null;
     }
   }, [cloud, liveFeed]);
+
+  const retryDriveSave = useCallback(() => cloud.retryDriveSave(), [cloud]);
 
   const discardDrive = useCallback(async () => {
     liveFeed.set(null);
@@ -622,7 +628,7 @@ export function AppProvider({ userId, children }: { userId: string; children: Re
     sync: status,
     unsyncedJourneyId: pendingJourney?.id ?? null,
     categories: data.categories,
-    startDrive, updateDriveCoordinate, endDrive, discardDrive, setDrivePaused, isDrivePaused, activeDriveMs, latestDriveFix, diagnosticsState,
+    startDrive, updateDriveCoordinate, endDrive, retryDriveSave, discardDrive, setDrivePaused, isDrivePaused, activeDriveMs, latestDriveFix, diagnosticsState,
     places: data.places,
     friends: data.friends,
     friendRequests: data.friendRequests,
