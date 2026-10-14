@@ -16,7 +16,7 @@ import { msToKmh } from '../units';
 import { bearingDeg, distanceM, turnDeg } from './geo';
 import type { Endpoints, RoutePointInput, ServerJourney, Visibility } from './endpoints';
 import { ApiError } from './http';
-import type { DriveLifecycleState } from './driveLifecycle';
+import { activeDurationMs, type DriveLifecycleState } from './driveLifecycle';
 import { readJson, readJsonChecked, userKey, writeJson, type CheckedRead, type KeyValueStore } from './storage';
 
 export const THINNING = {
@@ -221,6 +221,47 @@ export function acceptDriveFix(rec: JourneyRecord, last: FixRef | null, fix: Gps
   return fix.accuracyM == null || fix.accuracyM <= LIVE_MAX_ACCURACY_M;
 }
 
+/**
+ * How many of a drive's points may go to the server now. While the drive is
+ * stopped (a stop candidate or temporary stop), points recorded after the
+ * stop point wait: the drive may yet end there (End Drive, or the grace
+ * period running out), and then they never belong to it. Once it drives on,
+ * they go up with the rest.
+ */
+export function uploadablePoints(rec: JourneyRecord): number {
+  const stop = rec.endedAt ? null : rec.lifecycle?.stopStartedAt;
+  if (!stop) return rec.points.length;
+  const at = Date.parse(stop);
+  let n = rec.points.length;
+  while (n > 0 && Date.parse(rec.points[n - 1]!.recordedAt) > at) n--;
+  return Math.max(n, Math.min(rec.uploadedCount, rec.points.length));
+}
+
+/**
+ * Ends a drive record at `endMs` (earlier than now when it ends where the car
+ * stopped): points recorded after it are dropped, the on-device distance and
+ * top speed recomputed from what is left, and a pause still open closed then.
+ */
+export function endRecordAt(rec: JourneyRecord, endMs: number): void {
+  const start = Date.parse(rec.startedAt);
+  const end = Math.max(start, endMs);
+  if (rec.pausedAt) setRecordPaused(rec, false, Math.max(Date.parse(rec.pausedAt), end));
+  const kept = rec.points.filter((p) => Date.parse(p.recordedAt) <= end);
+  if (kept.length !== rec.points.length) {
+    rec.points = kept;
+    let km = 0;
+    let top = 0;
+    for (let i = 0; i < kept.length; i++) {
+      if (i > 0) km += distanceM(kept[i - 1]!, kept[i]!) / 1000;
+      top = Math.max(top, kept[i]!.speedKmh);
+    }
+    rec.clientDistanceKm = km;
+    rec.topSpeedKmh = top;
+    rec.uploadedCount = Math.min(rec.uploadedCount, kept.length);
+  }
+  rec.endedAt = new Date(end).toISOString();
+}
+
 /** Adds a fix to a record if it passes thinning; returns true when stored. */
 export function recordFix(rec: JourneyRecord, fix: GpsFix): boolean {
   if (!shouldKeepPoint(rec.points, fix)) return false;
@@ -384,8 +425,9 @@ export async function syncJourneyRecord(
   // Points outside the window the API accepts (e.g. after a device clock
   // change) would be rejected every time, so they are skipped.
   const earliest = Date.parse(rec.startedAt) - CLOCK_SKEW_MS;
-  while (rec.uploadedCount < rec.points.length) {
-    const slice = rec.points.slice(rec.uploadedCount, rec.uploadedCount + BATCH_SIZE);
+  const limit = uploadablePoints(rec);
+  while (rec.uploadedCount < limit) {
+    const slice = rec.points.slice(rec.uploadedCount, Math.min(rec.uploadedCount + BATCH_SIZE, limit));
     const latest = Date.now() + CLOCK_SKEW_MS;
     const batch = slice.filter((p) => { const t = Date.parse(p.recordedAt); return t >= earliest && t <= latest; });
     if (batch.length) {
@@ -403,9 +445,14 @@ export async function syncJourneyRecord(
 
   if (!rec.endedAt) return null;
   const endedAt = new Date(Math.max(Date.parse(rec.endedAt), Date.parse(rec.startedAt))).toISOString();
+  // Time that wasn't driving (pauses, temporary stops): the server's duration
+  // leaves it out (older servers ignore the field and count wall clock)
+  const wallMs = Date.parse(endedAt) - Date.parse(rec.startedAt);
+  const excludedSeconds = Math.max(0, Math.round((wallMs - activeDurationMs(rec, Date.parse(endedAt))) / 1000));
   return ep.completeJourney(rec.serverId!, {
     endedAt,
     distanceKm: Math.round(rec.clientDistanceKm * 1000) / 1000,
+    ...(excludedSeconds > 0 ? { excludedSeconds } : {}),
     ...(rec.name ? { name: rec.name } : {}),
     ...(rec.visibility ? { visibility: rec.visibility } : {}),
   });

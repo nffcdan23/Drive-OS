@@ -232,6 +232,8 @@ router.post("/journeys/:id/complete", requireUser, handler(async (req, res) => {
   const visibility = b.oneOf("visibility", VISIBILITY, { optional: true });
   const categoryId = b.uuid("categoryId", { optional: true, nullable: true });
   const remaining = b.array("remainingPoints", { optional: true, max: MAX_POINTS_PER_BATCH }) ?? [];
+  // Time within the drive that wasn't driving (pauses, temporary stops), left out of its duration
+  const excludedSeconds = b.num("excludedSeconds", { optional: true, min: 0, max: 7 * 24 * 3600 }) ?? 0;
   await checkCategory(req.userId, categoryId);
 
   const result = await asUser(req.userId, async (tx) => {
@@ -246,18 +248,22 @@ router.post("/journeys/:id/complete", requireUser, handler(async (req, res) => {
     await insertPoints(tx, readPoints(remaining, id, startedAt));
     if (endedAtIn.getTime() < startedAt.getTime()) throw badRequest("invalid_input", "endedAt is before the journey started");
     const endedAt = new Date(Math.min(endedAtIn.getTime(), Date.now() + CLOCK_SKEW_MS));
-    const durationSeconds = Math.round((endedAt.getTime() - startedAt.getTime()) / 1000);
+    const wallSeconds = Math.round((endedAt.getTime() - startedAt.getTime()) / 1000);
+    const durationSeconds = Math.max(0, wallSeconds - Math.min(Math.round(excludedSeconds), wallSeconds));
 
+    // Only what was recorded up to the end: a drive ended where the car
+    // stopped leaves out anything sent from after it
     const pts = (await tx.execute(sql`
       select latitude as lat, longitude as lng, speed_kmh, accuracy_m, altitude_m
-      from public.journey_route_points where journey_id = ${id} order by recorded_at`)).rows as Array<
+      from public.journey_route_points where journey_id = ${id} and recorded_at <= ${endedAt.toISOString()}::timestamptz
+      order by recorded_at`)).rows as Array<
       { lat: number; lng: number; speed_kmh: number; accuracy_m: number | null; altitude_m: number | null }>;
     const usable: LatLng[] = pts.filter((p) => p.accuracy_m == null || p.accuracy_m <= MAX_ACCURACY_M).map((p) => ({ lat: p.lat, lng: p.lng }));
 
     const verified = usable.length >= 2;
     let distanceKm = verified ? pathLengthMetres(usable) / 1000 : clientDistanceKm;
     // Never more than a plausible distance for the elapsed time.
-    distanceKm = Math.min(distanceKm, (durationSeconds / 3600) * MAX_SPEED_KMH);
+    distanceKm = Math.min(distanceKm, (wallSeconds / 3600) * MAX_SPEED_KMH);
     distanceKm = Math.round(distanceKm * 1000) / 1000;
     let topSpeedKmh = 0, maxAltitude = -Infinity;
     for (const p of pts) {

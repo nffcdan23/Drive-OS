@@ -1,13 +1,9 @@
 /**
  * The intelligent drive lifecycle: whether a drive is being driven, has
  * stopped for a moment, has (probably) stopped for good, or has been driven
- * on again — worked out from the drive's own GPS fixes.
- *
- * SHADOW MODE (Phase 2A). This only classifies and logs. It never pauses,
- * ends or trims a drive, never touches its points, duration, presence or
- * live location: recording is exactly as before. What it would have done is
- * written to the diagnostics journal so the thresholds can be checked
- * against real drives before anything acts on them.
+ * on again — worked out from the drive's own GPS fixes. CloudSync acts on it
+ * (cloudSync.ts: applyLifecycle): the "Looks like you've stopped" prompt,
+ * driving on by itself, and finishing the drive where it stopped.
  *
  * One module for both places fixes reach a drive: the app (CloudSync.addFix)
  * and the background with no app running (DriveTracking.recordHeadless). Both
@@ -19,12 +15,17 @@
  * worked out again after any restart):
  *   driving             moved like a vehicle recently
  *   stop_candidate      no vehicle movement for LIFECYCLE.candidateAfterMs
+ *                       (lights, queues: nothing happens)
  *   temporarily_stopped none for LIFECYCLE.temporaryStopMs: the stop is
- *                       backdated to the last vehicle movement (stop point)
+ *                       backdated to the last vehicle movement (the stop
+ *                       point); the prompt is offered, the time stopped
+ *                       doesn't count as driving, and points recorded after
+ *                       the stop point wait (they belong to the drive only
+ *                       if it drives on)
  *   manual_paused       the user's Pause: the classifier stands aside
- *   finished            the grace period (from the stop point) ran out, or a
- *                       failsafe fired: the drive would have ended at the
- *                       stop point
+ *   finished            the grace period (from the stop point, or a later
+ *                       Continue Drive) ran out, or a failsafe fired: the
+ *                       drive ends at the stop point
  *
  * Vehicle movement needs a good fix, a vehicle speed (reported, or inferred
  * from two good fixes when the phone gives none) and displacement that
@@ -42,7 +43,7 @@ import { distanceM } from './geo';
 import type { Journal } from './journal';
 import type { GpsFix, JourneyRecord } from './journeyRecorder';
 
-/** Provisional thresholds (Phase 2A shadow mode): to be confirmed from real drives */
+/** Thresholds (provisional: confirmed against real drives through the diagnostics) */
 export const LIFECYCLE = {
   /** A fix this vague (m), or with no accuracy, is no evidence of anything */
   moveMaxAccuracyM: 50,
@@ -50,6 +51,15 @@ export const LIFECYCLE = {
   moveMinSpeedMs: 3,
   /** Displacement must agree with the speed: at least this share of speed × time */
   moveConsistency: 0.5,
+  /** Faster than this (m/s, ~250 km/h) between two fixes is a GPS jump, not driving */
+  maxPlausibleMs: 70,
+  /**
+   * A fix too vague to judge speed by (or with nothing to pair it with) still
+   * shows the car moving when it is clearly away from where it last moved:
+   * accuracy up to this (m), and further than both accuracies plus bridgeMarginM
+   */
+  bridgeMaxAccuracyM: 200,
+  bridgeMarginM: 50,
   /** A speed is checked against a good fix at least this much older (ms)… */
   pairMinGapMs: 5_000,
   /** …and no more than this (ms) */
@@ -110,7 +120,7 @@ export interface DriveLifecycleState {
   closedStops?: Array<{ from: string; to: string }>;
   /** Kept open past the grace period until then (Keep Drive Open, later) */
   keepOpenUntil?: string | null;
-  /** The stop prompt was shown for the current stop (later; never in shadow mode) */
+  /** The stop prompt was answered with Continue Drive for the current stop (not asked again) */
   stopPromptShown?: boolean;
   /** Why the drive would have ended by itself */
   autoEndReason?: AutoEndReason | null;
@@ -224,9 +234,14 @@ export function classifyMovement(fix: GpsFix, prev: FixRefPoint | null): Movemen
   const noise = fix.accuracyM! + (prev.accuracyM ?? L.moveMaxAccuracyM);
   if (disp <= noise) return { moving: false, reason: speed == null ? 'speed_unknown' : 'inconsistent', speedMs: speed, displacementM: disp };
   const s = dt / 1000;
+  // Further than any car could go: a GPS jump, evidence of nothing
+  if (disp / s > L.maxPlausibleMs) return { moving: false, reason: 'inconsistent', speedMs: speed, displacementM: disp };
   if (speed != null) {
-    // The ground covered agrees with the speed: not too little (a spurious speed), not far more (a GPS jump)
-    const moving = disp >= L.moveConsistency * speed * s && disp <= 2 * speed * s + noise;
+    // The ground covered agrees with the speed: never too little (a spurious
+    // speed). More than it says (the reported speed lagging while
+    // accelerating) is still the car moving: a false stop mid-drive is far
+    // worse than a stop noticed a little late.
+    const moving = disp >= L.moveConsistency * speed * s;
     return { moving, reason: moving ? 'moving' : 'inconsistent', speedMs: speed, displacementM: disp };
   }
   // No reported speed: inferred, cautiously
@@ -255,19 +270,20 @@ function remember(s: DriveLifecycleState, fix: GpsFix) {
 }
 
 /**
- * After a GPS gap (a tunnel, the system holding updates back) there is no
- * fix to pair with: the car having got well away from where it last moved,
- * at vehicle speed on average, is movement all the same, so a gap is never
- * taken for a stop.
+ * After a GPS gap (a tunnel, the system holding updates back), or through
+ * fixes too vague to judge a speed by (an urban canyon), there is no pair to
+ * judge: the car having got well away from where it last moved, at vehicle
+ * speed on average, is movement all the same. So neither is ever taken for a
+ * stop; a parked phone's wander (within its accuracy) never adds up to it.
  */
-function bridgeGap(s: DriveLifecycleState, fix: GpsFix, movement: Movement): Movement {
+function bridgeGap(s: DriveLifecycleState, fix: GpsFix, movement: Movement, sinceMs: number): Movement {
   const L = LIFECYCLE;
   const from = s.lastMovingPoint;
-  const at = ms(s.lastMovingAt);
-  if (!from || !Number.isFinite(at) || !good(fix.accuracyM, L.moveMaxAccuracyM)) return movement;
-  const dt = (fix.timestamp - at) / 1000;
+  if (!from || !Number.isFinite(sinceMs) || !good(fix.accuracyM, L.bridgeMaxAccuracyM)) return movement;
+  const dt = (fix.timestamp - sinceMs) / 1000;
   const d = distanceM(from, fix);
-  if (!(dt > 0) || d < L.resumeMinFromStopM || d <= fix.accuracyM! + (from.accuracyM ?? L.moveMaxAccuracyM)) return movement;
+  const noise = fix.accuracyM! + (from.accuracyM ?? L.bridgeMaxAccuracyM) + L.bridgeMarginM;
+  if (!(dt > 0) || d < L.resumeMinFromStopM || d <= noise || d / dt > L.maxPlausibleMs) return movement;
   return d / dt >= L.moveMinSpeedMs ? { moving: true, reason: 'gap_bridged', speedMs: d / dt, displacementM: d } : movement;
 }
 
@@ -335,7 +351,7 @@ export function observeLifecycleFix(rec: Rec, fix: GpsFix, deps: LifecycleDeps):
 const failed = new WeakSet<object>();
 
 /**
- * Shadow mode must never get in the way of recording: whatever goes wrong
+ * The lifecycle must never get in the way of recording: whatever goes wrong
  * in here is logged (its kind only, once per drive) and swallowed.
  */
 function shielded<T>(rec: Rec, deps: Pick<LifecycleDeps, 'journal' | 'path'>, fn: () => T, fallback?: T): T {
@@ -371,9 +387,15 @@ function observe(rec: Rec, fix: GpsFix, deps: LifecycleDeps): void {
   }
 
   sample(s, fix);
+  // Not moved like a vehicle yet: the first usable fix is where it is measured from
+  if (!s.lastMovingPoint && good(fix.accuracyM, LIFECYCLE.bridgeMaxAccuracyM)) {
+    s.lastMovingPoint = { latitude: fix.latitude, longitude: fix.longitude, accuracyM: fix.accuracyM ?? null };
+  }
   let movement = classifyMovement(fix, referenceFor(s, now));
   remember(s, fix);
-  if (!movement.moving && movement.reason === 'no_reference' && !s.stopConfirmed && !s.wouldEndAt) movement = bridgeGap(s, fix, movement);
+  if (!movement.moving && (movement.reason === 'no_reference' || movement.reason === 'poor_accuracy') && !s.stopConfirmed && !s.wouldEndAt) {
+    movement = bridgeGap(s, fix, movement, ms(anchorOf(rec, s)));
+  }
 
   // The safety nets look at every fix: a car "moving" for 24 hours, or GPS wander read as movement
   failsafes(rec, s, now, log);
@@ -401,7 +423,7 @@ function observe(rec: Rec, fix: GpsFix, deps: LifecycleDeps): void {
       const from = s.stopStartedAt!;
       (s.closedStops ??= []).push({ from, to: iso(first.t) });
       bump(s, elapsedBucket(first.t - ms(from)));
-      log.log('would_resume', {
+      log.log('resumed', {
         stopped: elapsedBucket(first.t - ms(from)), speed: speedBucket(movement.speedMs),
         fromStop: displacementBucket(s.lastMovingPoint ? distanceM(s.lastMovingPoint, fix) : null), accuracy: accuracyBucket(fix.accuracyM),
       });
@@ -410,6 +432,7 @@ function observe(rec: Rec, fix: GpsFix, deps: LifecycleDeps): void {
       s.resumeRun = [];
       s.samples = [];
       s.stopPromptShown = false;
+      s.keepOpenUntil = null;
       s.lastMovingAt = iso(now);
       s.lastMovingPoint = { latitude: fix.latitude, longitude: fix.longitude, accuracyM: fix.accuracyM ?? null };
       return;
@@ -492,7 +515,7 @@ function syncPause(rec: Rec, s: DriveLifecycleState, now: number, log: Logger, f
   log.log('manual_pause_ended');
 }
 
-/** The user paused or resumed the drive (shadow): noted at once */
+/** The user paused or resumed the drive: noted at once */
 export function noteLifecyclePause(rec: Rec, now: number, deps: LifecycleDeps): void {
   if (rec.endedAt || !rec.lifecycle) return;
   const s = rec.lifecycle;
@@ -515,29 +538,29 @@ function evaluate(rec: Rec, now: number, log: Logger, reason?: MovementReason) {
     s.stopConfirmed = true;
     s.resumeRun = [];
     // Backdated: the stop began at the last vehicle movement, not now
-    log.log('would_temporarily_stop', { decidedAfter: elapsedBucket(still), by: 'rules', arrivedBefore: s.arrivedAt != null ? elapsedBucket(last - s.arrivedAt) : null });
+    log.log('temporary_stop', { decidedAfter: elapsedBucket(still), by: 'rules', arrivedBefore: s.arrivedAt != null ? elapsedBucket(last - s.arrivedAt) : null });
   }
   const deadline = graceDeadline(s);
   if (s.stopConfirmed && deadline != null && now >= deadline) {
     s.wouldEndAt = s.stopStartedAt!;
     s.autoEndReason = 'stop_grace';
-    log.log('would_auto_finish', { reason: 'stop_grace', stopped: elapsedBucket(now - ms(s.stopStartedAt)), keptOpen: !!s.keepOpenUntil });
+    log.log('auto_finish', { reason: 'stop_grace', stopped: elapsedBucket(now - ms(s.stopStartedAt)), keptOpen: !!s.keepOpenUntil });
   }
 }
 
-/** Shadow-only safety nets: each logged once, when it would have fired */
+/** Safety nets: each logged once, when it fires */
 function failsafes(rec: Rec, s: DriveLifecycleState, now: number, log: Logger) {
   const fired = (s.failsafes ??= []);
   const fire = (f: Failsafe, reason: Exclude<AutoEndReason, 'stop_grace'>, data: Record<string, string | number | boolean | null>) => {
     if (fired.includes(f)) return;
     fired.push(f);
-    log.log('failsafe_would_fire', { failsafe: f, ...data });
+    log.log('failsafe', { failsafe: f, ...data });
     if (!s.wouldEndAt) {
       // Ends where the car last moved like a vehicle (the stop point)
       const anchor = anchorOf(rec, s);
       s.wouldEndAt = anchor;
       s.autoEndReason = reason;
-      log.log('would_auto_finish', { reason, stopped: elapsedBucket(now - ms(anchor)), neverMoved: !s.lastMovingAt });
+      log.log('auto_finish', { reason, stopped: elapsedBucket(now - ms(anchor)), neverMoved: !s.lastMovingAt });
     }
   };
   const last = ms(anchorOf(rec, s));
@@ -554,16 +577,16 @@ function failsafes(rec: Rec, s: DriveLifecycleState, now: number, log: Logger) {
     // temporary stop from the start of the window, so the grace period
     // still applies; never an end by itself
     if (!fired.includes('low_displacement')) fired.push('low_displacement');
-    log.log('failsafe_would_fire', { failsafe: 'low_displacement', window: elapsedBucket(now - first.t), agrees: false });
+    log.log('failsafe', { failsafe: 'low_displacement', window: elapsedBucket(now - first.t), agrees: false });
     s.stopStartedAt = iso(first.t);
     s.stopConfirmed = true;
     s.resumeRun = [];
     s.lastMovingPoint = { latitude: first.latitude, longitude: first.longitude, accuracyM: first.accuracyM };
-    log.log('would_temporarily_stop', { decidedAfter: elapsedBucket(now - first.t), by: 'failsafe', arrivedBefore: null });
+    log.log('temporary_stop', { decidedAfter: elapsedBucket(now - first.t), by: 'failsafe', arrivedBefore: null });
   } else if (!fired.includes('low_displacement')) {
     // The stop rules got there first: the failsafe agrees
     fired.push('low_displacement');
-    log.log('failsafe_would_fire', { failsafe: 'low_displacement', window: elapsedBucket(now - first.t), agrees: true });
+    log.log('failsafe', { failsafe: 'low_displacement', window: elapsedBucket(now - first.t), agrees: true });
   }
 }
 
@@ -612,7 +635,7 @@ function bump(s: DriveLifecycleState, bucket: string) {
   h[bucket] = (h[bucket] ?? 0) + 1;
 }
 
-/** Navigation arrived (shadow): noted, and what the classifier thought then */
+/** Navigation arrived: noted, and what the classifier thought then */
 export function noteLifecycleArrival(rec: Rec, now: number, deps: LifecycleDeps): void {
   shielded(rec, deps, () => arrival(rec, now, deps));
 }
@@ -626,7 +649,7 @@ function arrival(rec: Rec, now: number, deps: LifecycleDeps): void {
   new Logger(s, deps).log('navigation_arrival_seen', { phase: lifecyclePhase(rec, now) });
 }
 
-/** At the end of a drive (shadow): one compact summary for calibration */
+/** At the end of a drive: one compact summary for calibration */
 export function summariseLifecycle(rec: Rec, now: number, journal: Journal | undefined, path: LifecycleDeps['path']): void {
   shielded(rec, { journal, path }, () => summary(rec, now, journal, path));
 }
@@ -650,13 +673,13 @@ function summary(rec: Rec, now: number, journal: Journal | undefined, path: Life
   });
 }
 
-// ─── The future duration (not used for anything yet) ────────────────────────
+// ─── The drive's duration ───────────────────────────────────────────────────
 
 /**
  * How long the drive was actually driven (ms) at `endMs`: wall clock, less
  * manual pauses (including one still open) and temporary stops (closed, and
- * one still open from its backdated start). Not wired into anything in
- * shadow mode.
+ * one still open from its backdated start). The drive timer, Drive Complete
+ * and the saved journey (as excludedSeconds) all use it.
  */
 export function activeDurationMs(rec: Rec, endMs: number): number {
   const start = Date.parse(rec.startedAt);
@@ -669,4 +692,52 @@ export function activeDurationMs(rec: Rec, endMs: number): number {
   for (const stop of s.closedStops ?? []) excluded += clip(Date.parse(stop.from), Date.parse(stop.to));
   if (s.stopConfirmed && s.stopStartedAt) excluded += clip(Date.parse(s.stopStartedAt), end);
   return Math.max(0, end - start - excluded);
+}
+
+// ─── What the app acts on ───────────────────────────────────────────────────
+
+export interface StopState {
+  phase: LifecyclePhase;
+  /** The stop point (ms): where the drive would end, backdated */
+  stoppedAt: number | null;
+  /** When the drive finishes by itself if nothing changes (ms) */
+  graceEndsAt: number | null;
+  /** Ask "Looks like you've stopped" now */
+  prompt: boolean;
+  /** Finished: end the drive at this time (ms) */
+  endAt: number | null;
+}
+
+/** The stop the drive is in (if any), as the app acts on it */
+export function stopState(rec: Rec, now: number): StopState {
+  const phase = lifecyclePhase(rec, now);
+  const s = rec.lifecycle ?? {};
+  const endAt = s.wouldEndAt ? Date.parse(s.wouldEndAt) : null;
+  if (phase === 'finished') return { phase, stoppedAt: endAt, graceEndsAt: null, prompt: false, endAt };
+  if (phase !== 'temporarily_stopped') return { phase, stoppedAt: null, graceEndsAt: null, prompt: false, endAt: null };
+  const stop = ms(s.stopStartedAt ?? anchorOf(rec, s));
+  return {
+    phase,
+    stoppedAt: Number.isFinite(stop) ? stop : null,
+    graceEndsAt: graceDeadline({ ...s, stopStartedAt: s.stopStartedAt ?? anchorOf(rec, s) }),
+    prompt: !s.stopPromptShown,
+    endAt: null,
+  };
+}
+
+/**
+ * Continue Drive, answering the stop prompt: the drive is kept open for
+ * another grace period from now (driving on still resumes it as usual; the
+ * time stopped still doesn't count), and the prompt isn't asked again for
+ * this stop.
+ */
+export function continueAfterStop(rec: Rec, now: number, deps: LifecycleDeps): void {
+  shielded(rec, deps, () => {
+    const s = stateOf(rec);
+    s.stopPromptShown = true;
+    const until = now + LIFECYCLE.graceMs;
+    const keep = ms(s.keepOpenUntil);
+    s.keepOpenUntil = iso(Number.isFinite(keep) ? Math.max(keep, until) : until);
+    new Logger(s, deps).log('user_continued', { stopped: elapsedBucket(now - ms(s.stopStartedAt ?? anchorOf(rec, s))) });
+  });
 }

@@ -13,7 +13,7 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useR
 import { Alert, AppState, Linking } from 'react-native';
 import * as ImageManipulator from 'expo-image-manipulator';
 import { useLocales } from 'expo-localization';
-import { CloudSync, LocalSaveError, type SyncStatus } from '@/lib/backend/cloudSync';
+import { CloudSync, LocalSaveError, type StopPrompt, type SyncStatus } from '@/lib/backend/cloudSync';
 import { describeError } from '@/lib/backend/http';
 import { knownSpeedMs, type GpsFix } from '@/lib/backend/journeyRecorder';
 import { LiveDriveFeed, liveDriveFromRecord, newLiveDrive } from '@/lib/backend/liveDrive';
@@ -82,7 +82,11 @@ interface AppContextValue {
 
   startDrive: () => void;
   updateDriveCoordinate: (coord: Coordinate & { speed: number | null; accuracy?: number | null; heading?: number | null; altitude?: number | null; timestamp?: number }) => void;
-  endDrive: () => Promise<Journey | null>;
+  /**
+   * Ends and saves the drive: now, or at `endAt` (where the car stopped, or
+   * navigation arrived), dropping what was recorded after it
+   */
+  endDrive: (opts?: { endAt?: number | null; reason?: 'user' | 'stop' | 'auto' | 'arrival' }) => Promise<Journey | null>;
   /** Tries again to save a finished drive on the phone after endDrive threw LocalSaveError; true once saved */
   retryDriveSave: () => Promise<boolean>;
   /** Ends the drive in progress without saving anything (see CloudSync.discardDrive) */
@@ -97,6 +101,10 @@ interface AppContextValue {
   latestDriveFix: () => GpsFix | null;
   /** Navigation arrived during the drive: noted for the drive lifecycle diagnostics only (shadow mode) */
   noteNavigationArrival: () => void;
+  /** "Looks like you've stopped": the drive's stop while the prompt should show, else null */
+  stopPrompt: StopPrompt | null;
+  /** Continue Drive, from the stop prompt: the drive stays open */
+  continueAfterStop: () => void;
   /** Drive and orphan-check state for the diagnostics report (no locations) */
   diagnosticsState: () => DiagnosticsState;
   togglePassengerMode: () => void;
@@ -421,10 +429,10 @@ export function AppProvider({ userId, children }: { userId: string; children: Re
     }
   }, [isDriving, status.backgroundTracking]);
 
-  const endDrive = useCallback(async () => {
+  const endDrive = useCallback(async (opts?: { endAt?: number | null; reason?: 'user' | 'stop' | 'auto' | 'arrival' }) => {
     liveFeed.set(null);
     try {
-      return await cloud.endDrive();
+      return await cloud.endDrive(opts);
     } catch (err) {
       // The phone couldn't save it: the Drive Complete screen says so and offers to try again
       if (err instanceof LocalSaveError) throw err;
@@ -449,6 +457,30 @@ export function AppProvider({ userId, children }: { userId: string; children: Re
   const activeDriveMs = useCallback(() => cloud.activeDriveMs(), [cloud]);
   const latestDriveFix = useCallback(() => (cloud.isDriving ? latestFixRef.current : null), [cloud]);
   const noteNavigationArrival = useCallback(() => cloud.noteNavigationArrival(), [cloud]);
+  const continueAfterStop = useCallback(() => cloud.continueAfterStop(), [cloud]);
+
+  // The drive lifecycle (lib/backend/driveLifecycle.ts): the stop prompt, and
+  // a drive that finished by itself where it stopped
+  const [stopPrompt, setStopPrompt] = useState<StopPrompt | null>(() => cloud.stopPrompt);
+  useEffect(() => {
+    setStopPrompt(cloud.stopPrompt);
+    const offPrompt = cloud.onStopPrompt(setStopPrompt);
+    const offFinished = cloud.onDriveAutoFinished((journey, endedAt) => {
+      liveFeed.set(null);
+      if (!journey) return;
+      const at = new Date(endedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      Alert.alert('Drive saved', `Your drive was ended where you stopped, at ${at}, and saved to your drives.`);
+    });
+    return () => { offPrompt(); offFinished(); };
+  }, [cloud, liveFeed]);
+  // Looked at every so often while driving, and on coming back on screen (a
+  // parked phone may send no fixes at all)
+  useEffect(() => {
+    if (!isDriving) return;
+    const timer = setInterval(() => cloud.tickLifecycle(), 15_000);
+    const sub = AppState.addEventListener('change', (state) => { if (state === 'active') cloud.tickLifecycle(); });
+    return () => { clearInterval(timer); sub.remove(); };
+  }, [cloud, isDriving]);
   const diagnosticsState = useCallback((): DiagnosticsState => ({
     driveInProgress: cloud.activeRecord?.clientRef ?? null,
     pendingDrives: cloud.status.pendingJourneys,
@@ -632,7 +664,7 @@ export function AppProvider({ userId, children }: { userId: string; children: Re
     sync: status,
     unsyncedJourneyId: pendingJourney?.id ?? null,
     categories: data.categories,
-    startDrive, updateDriveCoordinate, endDrive, retryDriveSave, discardDrive, setDrivePaused, isDrivePaused, activeDriveMs, latestDriveFix, noteNavigationArrival, diagnosticsState,
+    startDrive, updateDriveCoordinate, endDrive, retryDriveSave, discardDrive, setDrivePaused, isDrivePaused, activeDriveMs, latestDriveFix, noteNavigationArrival, stopPrompt, continueAfterStop, diagnosticsState,
     places: data.places,
     friends: data.friends,
     friendRequests: data.friendRequests,

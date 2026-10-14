@@ -424,6 +424,30 @@ test("journeys: server-side distance, XP, privacy of the route", async () => {
   assert.ok(notes.items.some((n) => n.type === "achievement_unlocked"), "achievement notification");
 });
 
+test("journeys: ended where the car stopped: points from after the end and time not driving are left out", async () => {
+  const u = await newUser();
+  const startedAt = new Date(Date.now() - 90 * 60_000).toISOString();
+  const j = await post(u, "/journeys", { startedAt, timezone: zoneAvoidingEarlyBird(startedAt), clientRef: "stopped-1" });
+  expect(j, 201, "start");
+  const id = j.body.id;
+  // 10 km in 11 minutes, then (sent before the drive was ended) 15 more points from after it
+  const pts = track(startedAt, 11);
+  const after = track(new Date(Date.parse(startedAt) + 30 * 60_000).toISOString(), 15);
+  expect(await post(u, `/journeys/${id}/route-points`, { points: [...pts, ...after] }), 200, "points");
+  const endedAt = new Date(Date.parse(startedAt) + 11 * 60_000).toISOString();
+  const done = await post(u, `/journeys/${id}/complete`, { endedAt, excludedSeconds: 120, distanceKm: 1 });
+  expect(done, 200, "complete");
+  assert.ok(done.body.distanceKm > 9.5 && done.body.distanceKm < 10.5, `only up to the end: ${done.body.distanceKm} km`);
+  assert.equal(done.body.durationSeconds, 11 * 60 - 120, "the time not driving left out");
+  assert.equal(new Date(done.body.endedAt).toISOString(), endedAt);
+  // Never more left out than the drive lasted
+  const k = await post(u, "/journeys", { startedAt, timezone: zoneAvoidingEarlyBird(startedAt), clientRef: "stopped-2" });
+  const over = await post(u, `/journeys/${k.body.id}/complete`, { endedAt, excludedSeconds: 99_999 });
+  expect(over, 200, "complete");
+  assert.equal(over.body.durationSeconds, 0);
+  expect(await post(u, `/journeys/${k.body.id}/complete`, { excludedSeconds: -1 }), 400, "negative refused");
+});
+
 test("journeys: unverifiable distances earn the minimum", async () => {
   const u = await newUser();
   const startedAt = new Date(Date.now() - 60 * 60_000).toISOString();

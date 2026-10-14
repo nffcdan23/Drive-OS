@@ -1,12 +1,21 @@
 /**
  * Drive Complete.  The drive is saved on the phone when this screen opens
- * (endDrive), so nothing recorded is lost whatever is tapped next.  Saving is
+ * (endDrive), so nothing recorded is lost whatever is tapped next; ended at
+ * `endAt` when given (where the car stopped: "Looks like you've stopped" →
+ * End Drive), else now.  Saving is
  * local-first: endDrive returns once the phone has it and uploads in the
  * background, so neither button ever waits on the network (offline, the
  * drive stays queued and uploads when the connection returns):
  *  - Save Drive applies the chosen visibility and opens Drives;
  *  - Discard deletes the saved drive, after confirming;
  *  - the close button leaves the drive saved as it is.
+ *
+ * Arrived with navigation (`arrivedAt`, a drive navigation started): the
+ * drive is NOT ended on opening.  Continue Drive goes back to the map with
+ * the same drive still recording, as a plain drive (navigation has already
+ * ended); Save Drive ends it at the moment of arrival and saves it as above;
+ * Discard throws it away (after confirming); the close button saves it like
+ * Save Drive, so nothing is lost.
  *
  * Upload state isn't shown here: the app-wide ConnectionBanner (top of the
  * screen, in the layout) already reports drives waiting to upload, offline
@@ -15,7 +24,7 @@
  */
 import React, { useEffect, useRef, useState } from 'react';
 import { Alert, Platform } from 'react-native';
-import { useRouter } from 'expo-router';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 import * as Haptics from 'expo-haptics';
 import { useApp, type Journey } from '@/context/AppContext';
 import { LocalSaveError } from '@/lib/backend/cloudSync';
@@ -38,12 +47,17 @@ function confirmDiscard(onConfirm: () => void) {
 
 export default function DriveSummaryScreen() {
   const router = useRouter();
+  const params = useLocalSearchParams<{ endAt?: string; arrivedAt?: string }>();
+  const endAt = params.endAt ? Number(params.endAt) : null;
+  const arrivedAt = params.arrivedAt ? Number(params.arrivedAt) : null;
   const {
-    currentDrive, endDrive, retryDriveSave, updateJourney, deleteJourney, resolvedUnitSystem, userProfile,
-    journeys,
+    currentDrive, endDrive, retryDriveSave, updateJourney, deleteJourney, discardDrive, activeDriveMs, resolvedUnitSystem,
+    userProfile, journeys,
   } = useApp();
+  // Arrived: the drive is still recording until Save Drive (or Discard, or Continue Drive)
+  const [arrived, setArrived] = useState(arrivedAt != null && Number.isFinite(arrivedAt) && !!currentDrive);
   const [savedJourney, setJourney] = useState<Journey | null>(null);
-  const [isSaving, setIsSaving] = useState(true);
+  const [isSaving, setIsSaving] = useState(!arrived);
   const [visibility, setVisibility] = useState<Visibility>('private');
   const [leaving, setLeaving] = useState(false);
   // The phone couldn't save the drive (storage failed): it isn't reported as saved
@@ -60,18 +74,21 @@ export default function DriveSummaryScreen() {
       : 0,
     startTime: currentDrive?.startTime ?? Date.now(),
     coordinates: currentDrive?.coordinates ?? [],
-    endedAt: Date.now(),
+    endedAt: Number.isFinite(endAt) && endAt != null ? endAt : arrived ? arrivedAt! : Date.now(),
     recorded: !!currentDrive,
+    // The drive's own driving time (pauses and temporary stops left out), until the saved journey's arrives
+    drivenS: Math.round((activeDriveMs() ?? 0) / 1000),
   }).current;
 
-  // End the drive once on mount; the ConnectionBanner reports it if uploading fails
-  useEffect(() => {
+  /** Ends and saves the drive (once): where it stopped, at arrival, or now */
+  function save(at: number | null, reason: 'user' | 'stop' | 'arrival') {
     if (endedRef.current) return;
     endedRef.current = true;
     if (!currentDrive) { setIsSaving(false); return; }
+    setIsSaving(true);
     (async () => {
       try {
-        const j = await endDrive();
+        const j = await endDrive({ endAt: at, reason });
         if (j) {
           setJourney(j);
           // A drive already on the server has the visibility it was given
@@ -87,6 +104,13 @@ export default function DriveSummaryScreen() {
         setIsSaving(false);
       }
     })();
+  }
+
+  // End the drive once on mount (not when arrived: the driver chooses first);
+  // the ConnectionBanner reports it if uploading fails
+  useEffect(() => {
+    if (arrived) return;
+    save(endAt != null && Number.isFinite(endAt) ? endAt : null, endAt != null ? 'stop' : 'user');
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -101,7 +125,7 @@ export default function DriveSummaryScreen() {
     : null;
 
   const distance = journey?.distance ?? snapshot.distance;
-  const duration = journey?.duration ?? Math.round((snapshot.endedAt - snapshot.startTime) / 1000);
+  const duration = journey?.duration ?? (snapshot.drivenS || Math.round((snapshot.endedAt - snapshot.startTime) / 1000));
   const avgSpeed = journey?.averageSpeed ?? snapshot.avgSpeed;
   const topSpeed = journey?.topSpeed ?? snapshot.topSpeed;
   const route = journey && journey.routeCoordinates.length > 1 ? journey.routeCoordinates : snapshot.coordinates;
@@ -124,6 +148,14 @@ export default function DriveSummaryScreen() {
 
   async function handleSave() {
     if (busy) return;
+    if (arrived) {
+      // Ends it now, at the moment of arrival, then on as usual (the visibility goes with it)
+      setArrived(false);
+      if (!currentDrive) { router.replace('/(tabs)/journeys'); return; }
+      save(arrivedAt, 'arrival');
+      pendingSave.current = true;
+      return;
+    }
     setLeaving(true);
     if (saveError) {
       // Only the phone's own save can hold the screen; never the network
@@ -143,8 +175,36 @@ export default function DriveSummaryScreen() {
     router.replace('/(tabs)/journeys');
   }
 
+  // Save Drive tapped while arrived: finished once the drive is saved
+  const pendingSave = useRef(false);
+  useEffect(() => {
+    if (!pendingSave.current || isSaving) return;
+    pendingSave.current = false;
+    void handleSave();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isSaving]);
+
+  function handleContinue() {
+    if (busy || !arrived) return;
+    // The same drive carries on recording, now a plain drive (navigation already ended)
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    setLeaving(true);
+    router.replace('/(tabs)/(drive)');
+  }
+
   function handleDiscard() {
-    if (busy || !journey) return;
+    if (busy) return;
+    if (arrived) {
+      confirmDiscard(() => {
+        setLeaving(true);
+        endedRef.current = true;
+        void discardDrive();
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+        router.replace('/(tabs)/(drive)');
+      });
+      return;
+    }
+    if (!journey) return;
     confirmDiscard(() => {
       setLeaving(true);
       deleteJourney(journey.id);
@@ -155,6 +215,8 @@ export default function DriveSummaryScreen() {
 
   function handleClose() {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    // Arrived: closing saves it (at arrival), so nothing is lost
+    if (arrived) save(arrivedAt, 'arrival');
     router.replace('/(tabs)/(drive)');
   }
 
@@ -163,7 +225,7 @@ export default function DriveSummaryScreen() {
       firstName={firstName}
       isSaving={isSaving}
       busy={busy}
-      hasJourney={!!journey}
+      hasJourney={arrived ? !!currentDrive : !!journey}
       distanceKm={distance}
       durationS={duration}
       avgSpeedKmh={avgSpeed}
@@ -178,6 +240,7 @@ export default function DriveSummaryScreen() {
       onDiscard={handleDiscard}
       onClose={handleClose}
       saveError={saveError}
+      onContinue={arrived ? handleContinue : undefined}
     />
   );
 }

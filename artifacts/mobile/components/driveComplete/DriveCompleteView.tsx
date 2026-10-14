@@ -41,7 +41,7 @@ export interface DriveRewards {
 
 export default function DriveCompleteView({
   firstName, isSaving, busy, hasJourney, distanceKm, durationS, avgSpeedKmh, topSpeedKmh, route, unitSystem,
-  rewards, visibility, onVisibility, visibilityLocked, onSave, onDiscard, onClose, saveError,
+  rewards, visibility, onVisibility, visibilityLocked, onSave, onDiscard, onClose, saveError, onContinue,
 }: {
   firstName: string | undefined;
   isSaving: boolean;
@@ -63,6 +63,11 @@ export default function DriveCompleteView({
   onClose: () => void;
   /** The phone couldn't save the drive: shown above the actions (Save Drive tries again) */
   saveError?: string | null;
+  /**
+   * Arrived with navigation, the drive not ended yet: Continue Drive keeps
+   * recording the same drive (Save Drive and Discard as usual)
+   */
+  onContinue?: () => void;
 }) {
   const insets = useSafeAreaInsets();
   // The hero takes whatever height the content leaves, so the actions sit at
@@ -79,7 +84,9 @@ export default function DriveCompleteView({
     { label: 'Max Speed', value: formatSpeed(topSpeedKmh, unitSystem), sf: 'gauge.with.dots.needle.100percent', ion: 'flash-outline' },
   ] as const;
 
-  const greeting = isSaving ? 'Saving your drive…' : firstName ? `Great drive, ${firstName}.` : 'Great drive.';
+  const greeting = onContinue
+    ? firstName ? `You've arrived, ${firstName}.` : "You've arrived."
+    : isSaving ? 'Saving your drive…' : firstName ? `Great drive, ${firstName}.` : 'Great drive.';
 
   return (
     <View style={styles.screen}>
@@ -152,6 +159,20 @@ export default function DriveCompleteView({
             <GlassSurface style={styles.notice}>
               <Text style={styles.noticeText} accessibilityRole="alert">{saveError}</Text>
             </GlassSurface>
+          ) : null}
+
+          {onContinue ? (
+            <GlassButton
+              accessibilityLabel="Continue Drive"
+              accessibilityHint="Keeps recording this drive, without navigation"
+              accessibilityState={{ disabled: busy }}
+              disabled={busy}
+              onPress={onContinue}
+              style={[styles.continueButton, busy && styles.dimmed]}
+            >
+              <Glyph sf="arrow.triangle.turn.up.right.circle" ion="navigate-circle-outline" size={20} color="#FFFFFF" />
+              <Text style={styles.discardText}>Continue Drive</Text>
+            </GlassButton>
           ) : null}
 
           <View style={styles.actions}>
@@ -233,6 +254,10 @@ const styles = StyleSheet.create({
     shadowColor: '#18C2F0', shadowOpacity: 0.4, shadowRadius: 14, shadowOffset: { width: 0, height: 4 },
   },
   discardText: { color: '#FFFFFF', fontSize: 17, fontWeight: '600' },
+  continueButton: {
+    height: 56, borderRadius: 28, marginTop: 14, marginBottom: 8, flexDirection: 'row', gap: 8, overflow: 'hidden',
+    alignItems: 'center', justifyContent: 'center',
+  },
   saveText: { color: '#04121B', fontSize: 17, fontWeight: '700' },
   dimmed: { opacity: 0.5 },
 });

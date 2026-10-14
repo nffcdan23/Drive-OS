@@ -17,10 +17,13 @@
 import type { Endpoints, LocationKind, SpotCategory, Visibility } from './endpoints';
 import { ApiError, describeError, isRetryable, type ConnectionState } from './http';
 import {
-  JourneyStore, MIN_DRIVE_MS, acceptDriveFix, activeDriveMs, dedupeDrives, isLongEnoughToSave, lastActivityMs, lastRecordedFix,
+  JourneyStore, MIN_DRIVE_MS, acceptDriveFix, dedupeDrives, endRecordAt, isLongEnoughToSave, lastActivityMs, lastRecordedFix,
   newJourneyRecord, noteFixTime, recordFix, setRecordPaused, syncJourneyRecord, type FixRef, type GpsFix, type JourneyRecord,
 } from './journeyRecorder';
-import { evaluateLifecycle, noteLifecycleArrival, noteLifecyclePause, observeLifecycleFix, summariseLifecycle } from './driveLifecycle';
+import {
+  activeDurationMs as activeDriveMs, continueAfterStop, evaluateLifecycle, noteLifecycleArrival, noteLifecyclePause,
+  observeLifecycleFix, stopState, summariseLifecycle,
+} from './driveLifecycle';
 import { noJournal, type Journal } from './journal';
 import type { BackgroundTracking, DriveTracker } from './driveTracking';
 import { decayPresence, type DriveState, type FriendPresenceStatus, type PresenceEvent } from './presence';
@@ -48,6 +51,14 @@ export interface SyncStatus {
   rejected: Rejection[];
   /** Whether the drive in progress is also recorded in the background. */
   backgroundTracking: BackgroundTracking;
+}
+
+/** "Looks like you've stopped": the drive's current stop, while the prompt should show */
+export interface StopPrompt {
+  /** The stop point (ms): where the drive ends if it isn't driven on */
+  stoppedAt: number;
+  /** When it finishes by itself, ending at the stop point (ms) */
+  graceEndsAt: number | null;
 }
 
 export interface CloudSyncDeps {
@@ -165,6 +176,10 @@ export class CloudSync {
   private fixListeners = new Set<(fix: GpsFix) => void>();
   private driveListeners = new Set<(drive: DriveState) => void>();
   private activityListeners = new Set<() => void>();
+  private stopListeners = new Set<(prompt: StopPrompt | null) => void>();
+  private autoFinishListeners = new Set<(journey: Journey | null, endedAt: number) => void>();
+  private stopPromptValue: StopPrompt | null = null;
+  private autoFinishing = false;
   private lastDriveState: DriveState = { driving: false, journeyId: null };
   private detachTracker: (() => void) | null = null;
   private journeySync: Promise<void> | null = null;
@@ -372,12 +387,15 @@ export class CloudSync {
     const tracking = session === 'unknown'
       || (!!session && session.userId === this.deps.userId && session.clientRef === rec.clientRef);
     const quietMs = this.now() - lastActivityMs(rec);
-    const resume = !alreadyPending && tracking && this.isRecent(rec);
-    // Shadow mode: what the lifecycle makes of the drive now, beside what recovery actually does
-    if (rec.lifecycle) {
-      const phase = evaluateLifecycle(rec, this.now(), { journal: this.journal, path: 'app' });
-      this.journal.log('drive_lifecycle', { step: 'recovery', path: 'app', phase, actual: resume ? 'resume' : 'finish' });
-    }
+    // The drive lifecycle, worked out again from what was saved (a drive from
+    // an older build has none: recovered as before)
+    const phase = rec.lifecycle ? evaluateLifecycle(rec, this.now(), { journal: this.journal, path: 'app' }) : null;
+    const stop = rec.lifecycle ? stopState(rec, this.now()) : null;
+    // Stopped within its grace period: still the drive in progress (the
+    // prompt is asked again), however quiet the parked phone has been
+    const stoppedInGrace = phase === 'temporarily_stopped' || phase === 'stop_candidate';
+    const resume = !alreadyPending && tracking && phase !== 'finished' && (this.isRecent(rec) || stoppedInGrace);
+    if (phase) this.journal.log('drive_lifecycle', { step: 'recovery', path: 'app', phase, actual: resume ? 'resume' : 'finish' });
     if (resume) {
       // Still being recorded in the background (the system relaunched the
       // app, or it was reopened moments after closing): carry on with it.
@@ -391,11 +409,14 @@ export class CloudSync {
         quietS: Math.round(quietMs / 1000), sessionUnreadable: session === 'unknown',
       });
       void this.pushActive();
+      this.applyLifecycle(rec, this.now());
       return;
     }
-    // A drive that was still "active" when the app was killed is finished now.
+    // A drive that was still "active" when the app was killed is finished now:
+    // where it stopped when it had stopped (backdated), else at its last activity
     this.active = null;
-    await this.finishInterrupted(rec, alreadyPending ? 'already-pending' : !tracking ? 'not-tracking' : 'quiet');
+    const endAt = stop?.endAt ?? (phase === 'temporarily_stopped' ? stop?.stoppedAt ?? null : null);
+    await this.finishInterrupted(rec, phase === 'finished' ? 'stopped' : alreadyPending ? 'already-pending' : !tracking ? 'not-tracking' : 'quiet', endAt);
   }
 
   /**
@@ -408,9 +429,12 @@ export class CloudSync {
    * server journey is left as it is; the orphan check (findOrphanJourneys)
    * reports it, and changes nothing.
    */
-  private async finishInterrupted(rec: JourneyRecord, reason: string): Promise<void> {
-    const ended: JourneyRecord = { ...rec, endedAt: rec.endedAt ?? new Date(lastActivityMs(rec)).toISOString() };
-    if (!rec.endedAt) summariseLifecycle(ended, this.now(), this.journal, 'app');
+  private async finishInterrupted(rec: JourneyRecord, reason: string, endAt: number | null = null): Promise<void> {
+    const ended: JourneyRecord = { ...rec };
+    if (!rec.endedAt) {
+      endRecordAt(ended, Math.min(endAt ?? lastActivityMs(rec), lastActivityMs(rec)));
+      summariseLifecycle(ended, this.now(), this.journal, 'app');
+    }
     const drivenMs = activeDriveMs(ended, this.now());
     const kept = isLongEnoughToSave(drivenMs);
     this.journal.log('recovery_finish', {
@@ -1118,13 +1142,82 @@ export class CloudSync {
   }
 
   /**
-   * Navigation arrived at its destination during the drive (shadow mode):
-   * noted for the lifecycle diagnostics. Changes nothing about the drive.
+   * Navigation arrived at its destination during the drive: noted for the
+   * lifecycle diagnostics. Changes nothing about the drive by itself.
    */
   noteNavigationArrival(): void {
     const rec = this.active;
     if (!rec || this.passenger) return;
     noteLifecycleArrival(rec, this.now(), { journal: this.journal, path: 'app' });
+  }
+
+  // ── The drive lifecycle, acted on (lib/backend/driveLifecycle.ts) ──
+
+  /**
+   * "Looks like you've stopped": the stop the drive is in, while the prompt
+   * should show (temporarily stopped and not answered), else null.
+   */
+  get stopPrompt(): StopPrompt | null {
+    return this.stopPromptValue;
+  }
+
+  onStopPrompt(fn: (prompt: StopPrompt | null) => void): () => void {
+    this.stopListeners.add(fn);
+    return () => { this.stopListeners.delete(fn); };
+  }
+
+  /** Called when a drive finished by itself (the grace period ran out), with where it was ended */
+  onDriveAutoFinished(fn: (journey: Journey | null, endedAt: number) => void): () => void {
+    this.autoFinishListeners.add(fn);
+    return () => { this.autoFinishListeners.delete(fn); };
+  }
+
+  private setStopPrompt(next: StopPrompt | null) {
+    const prev = this.stopPromptValue;
+    if (prev === next || (prev && next && prev.stoppedAt === next.stoppedAt && prev.graceEndsAt === next.graceEndsAt)) return;
+    this.stopPromptValue = next;
+    for (const fn of this.stopListeners) fn(next);
+  }
+
+  /**
+   * Looks at the drive's lifecycle now, with or without a new fix (the app
+   * calls this every so often and when it comes on screen): the prompt, and
+   * the drive finished where it stopped once its grace period is over.
+   */
+  tickLifecycle(): void {
+    const rec = this.active;
+    if (!rec || this.passenger) return;
+    evaluateLifecycle(rec, this.now(), { journal: this.journal, path: 'app' });
+    this.applyLifecycle(rec, this.now());
+  }
+
+  private applyLifecycle(rec: JourneyRecord, now: number) {
+    if (this.active !== rec) return;
+    const st = stopState(rec, now);
+    if (st.phase === 'finished' && st.endAt != null) {
+      this.setStopPrompt(null);
+      if (this.autoFinishing) return;
+      // Nobody drove on: saved, ending where it stopped (not now)
+      this.autoFinishing = true;
+      const endAt = st.endAt;
+      void this.endDrive({ endAt, reason: 'auto' })
+        .then((journey) => { for (const fn of this.autoFinishListeners) fn(journey, endAt); }, () => {})
+        .finally(() => { this.autoFinishing = false; });
+      return;
+    }
+    this.setStopPrompt(st.prompt && st.stoppedAt != null ? { stoppedAt: st.stoppedAt, graceEndsAt: st.graceEndsAt } : null);
+  }
+
+  /**
+   * Continue Drive, from the stop prompt: the drive stays open (another grace
+   * period from now) and the prompt goes; driving on resumes it as usual.
+   */
+  continueAfterStop(): void {
+    const rec = this.active;
+    if (!rec) return;
+    continueAfterStop(rec, this.now(), { journal: this.journal, path: 'app' });
+    this.applyLifecycle(rec, this.now());
+    void this.persistActive(rec);
   }
 
   /** The drive was paused or resumed: noted on the record so it survives a restart */
@@ -1133,6 +1226,7 @@ export class CloudSync {
     if (!rec) return;
     setRecordPaused(rec, paused, this.now());
     noteLifecyclePause(rec, this.now(), { journal: this.journal, path: 'app' });
+    this.applyLifecycle(rec, this.now());
     void this.persistActive(rec);
   }
 
@@ -1148,6 +1242,7 @@ export class CloudSync {
     this.journal.log('drive_discard', { clientRef: rec.clientRef, serverId: rec.serverId, drivenS: Math.round(activeDriveMs(rec, this.now()) / 1000) });
     this.active = null;
     this.notifyDrive();
+    this.setStopPrompt(null);
     await this.stopTracking();
     await this.journeys.saveActive(null);
     // The start-of-drive upload may still be creating the server journey
@@ -1244,8 +1339,13 @@ export class CloudSync {
     if (!rec) return false;
     const now = this.now();
     noteFixTime(rec, fix);
-    // Shadow mode: classified and logged, every fix, nothing else changes
-    if (!this.passenger) observeLifecycleFix(rec, fix, { journal: this.journal, path: 'app' });
+    // The drive lifecycle: every fix classified, then acted on
+    if (!this.passenger) {
+      observeLifecycleFix(rec, fix, { journal: this.journal, path: 'app' });
+      this.applyLifecycle(rec, now);
+      // It just finished by itself (ending where it stopped): nothing more goes into it
+      if (this.autoFinishing) return false;
+    }
     for (const fn of this.activityListeners) fn();
     if (this.passenger || !acceptDriveFix(rec, this.lastFix, fix)) {
       if (now - this.lastPointPersist >= PERSIST_HEARTBEAT_EVERY_MS) {
@@ -1301,12 +1401,15 @@ export class CloudSync {
    * Saved drives that merely couldn't be *read* are not that: the new drive
    * waits safely in its "active" copy beside them (see persistPending).
    */
-  async endDrive(): Promise<Journey | null> {
+  async endDrive(opts: { endAt?: number | null; reason?: 'user' | 'stop' | 'auto' | 'arrival' } = {}): Promise<Journey | null> {
     const rec = this.active;
     if (!rec) return null;
+    // When it ends: now, or earlier (where the car stopped, or arrived), never before it started
+    const now = this.now();
+    const endAt = Math.min(Math.max(opts.endAt ?? now, Date.parse(rec.startedAt)), now);
     // Backstop for the Drive screen's own check: under 10 s of active driving
     // never saves
-    if (!isLongEnoughToSave(activeDriveMs(rec, this.now()))) {
+    if (!isLongEnoughToSave(activeDriveMs(rec, endAt))) {
       await this.discardDrive();
       return null;
     }
@@ -1314,13 +1417,16 @@ export class CloudSync {
     await this.stopTracking();
     // An upload already running for this drive isn't waited for: it shares
     // the record, and the background sync waits for it (runJourneySync).
-    rec.endedAt = new Date(this.now()).toISOString();
+    // Ended earlier than now: what was recorded after it is dropped.
+    endRecordAt(rec, endAt);
     this.active = null;
     this.notifyDrive();
-    summariseLifecycle(rec, this.now(), this.journal, 'app');
+    this.setStopPrompt(null);
+    summariseLifecycle(rec, now, this.journal, 'app');
     this.journal.log('drive_end', {
       clientRef: rec.clientRef, serverId: rec.serverId, pointCount: rec.points.length,
-      drivenS: Math.round(activeDriveMs(rec, this.now()) / 1000),
+      drivenS: Math.round(activeDriveMs(rec, endAt) / 1000),
+      reason: opts.reason ?? 'user', backdatedS: Math.round((now - endAt) / 1000),
     });
     // Pending first, then "active" cleared (see settleFinished).  If saving
     // fails the drive stays in memory and in "active", and is retried.
