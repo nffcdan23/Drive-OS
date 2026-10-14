@@ -27,6 +27,10 @@ import { decodePolyline } from '@/lib/backend/geo';
 import { appendFileSync, writeFileSync } from 'node:fs';
 import { createClient } from '@supabase/supabase-js';
 import { areaAround, hazardTopic } from '@/lib/hazards/model';
+import { routesFromServer } from '@/lib/navigation/model';
+import { prepareRoute } from '@/lib/navigation/routeProgress';
+import { limitAt, limitSign, speedLimitSource } from '@/lib/navigation/speedLimit';
+import type { ServerRoutes } from '@/lib/backend/endpoints';
 
 const need = (k: string) => {
   const v = process.env[k];
@@ -635,8 +639,57 @@ async function run() {
     check('raw intersection data never reaches the app', !/"(intersections|bearings|entry|geometry_index|classes|toll_collection|mapbox_streets_v8)"/.test(raw));
     check('steps without lane data carry no lanes field', [routed, motorway].every((res) => res instanceof Error
       || res.routes.every((r) => r.legs.every((l) => l.steps.every((st) => !('lanes' in st) || (Array.isArray(st.lanes) && st.lanes.length > 0))))));
+
+    // ─── 22. Speed limits (Build 31): Mapbox maxspeed → the API's stretches → the app's sign
+    section('22. Speed limits on real routes (Mapbox maxspeed → distance stretches → the app\'s sign)');
+    const byRoute: Array<{ label: string; res: ServerRoutes }> = [];
+    if (!(routed instanceof Error)) byRoute.push({ label: 'A591', res: routed });
+    if (!(motorway instanceof Error)) byRoute.push({ label: 'M6', res: motorway });
+    const legs = byRoute.flatMap((b) => b.res.routes.flatMap((r) => r.legs));
+    check('every leg still carries Mapbox\'s per-segment maxspeedKmh (older apps unchanged)', legs.length > 0 && legs.every((l) => Array.isArray(l.maxspeedKmh)), `${legs.length} legs`);
+    const placed = legs.filter((l) => Array.isArray(l.speedLimits) && typeof l.annotatedM === 'number');
+    check('every leg carries its limits placed along the route by distance (speedLimits, annotatedM)', placed.length === legs.length, `${placed.length} of ${legs.length}`);
+    check('Mapbox\'s per-segment distances add up to the leg (within 3%)', placed.every((l) => Math.abs(l.annotatedM! / l.distanceM - 1) < 0.03),
+      placed.map((l) => `${Math.round((l.annotatedM! / l.distanceM - 1) * 1000) / 10}%`).join(' '));
+    const ranges = placed.flatMap((l) => l.speedLimits!);
+    check('stretches are in order along the route, each a real limit', ranges.length > 0 && placed.every((l) => l.speedLimits!.every((r, i, a) =>
+      Number.isFinite(r.fromM) && r.toM > r.fromM && r.kmh > 0 && (i === 0 || r.fromM >= a[i - 1]!.toM - 0.5))), `${ranges.length} stretches`);
+    check('every stretch is one of Mapbox\'s own values for that leg (nothing invented)', placed.every((l) => {
+      const known = new Set(l.maxspeedKmh!.filter((v): v is number => v != null));
+      return l.speedLimits!.every((r) => known.has(r.kmh));
+    }));
+    const unknownSegs = placed.reduce((n, l) => n + l.maxspeedKmh!.filter((v) => v == null).length, 0);
+    const covered = ranges.reduce((m, r) => m + (r.toM - r.fromM), 0);
+    const annotated = placed.reduce((m, l) => m + l.annotatedM!, 0);
+    console.log(`     ${unknownSegs} segment(s) with no known limit; stretches cover ${Math.round(covered / 100) / 10} of ${Math.round(annotated / 100) / 10} km`);
+    check('where Mapbox has no limit, there is none (never guessed)', unknownSegs === 0 ? Math.abs(covered - annotated) < 5 : covered < annotated);
+    // Through the app's own route model, exactly as navigation uses it
+    const seen = new Map<string, Set<number>>();
+    const sources: string[] = [];
+    for (const b of byRoute) {
+      const signs = new Set<number>();
+      for (const [i, r] of b.res.routes.entries()) {
+        const nav = routesFromServer({ ...b.res, routes: [r] }, `${b.label}${i}`)[0]!;
+        const p = prepareRoute(nav);
+        sources.push(speedLimitSource(p).kind);
+        for (let along = 0; along < p.total; along += 50) {
+          const v = limitSign(limitAt(p, along), 'imperial');
+          if (v != null) signs.add(v);
+        }
+      }
+      seen.set(b.label, signs);
+    }
+    console.log(`     signs along the routes: ${[...seen].map(([k, v]) => `${k} ${[...v].sort((a, b) => a - b).join('/')} mph`).join('; ')}`);
+    check('the app places every route\'s limits by distance', sources.length > 0 && sources.every((k) => k === 'distance'), sources.join(','));
+    const all = [...seen.values()].flatMap((v) => [...v]);
+    check('they come out as real UK signs (whole multiples of 5 mph, 10–70)', all.length > 0 && all.every((v) => v % 5 === 0 && v >= 10 && v <= 70));
+    check('the A591 shows more than one limit', (seen.get('A591')?.size ?? 0) >= 2);
+    check('the M6 shows 70 mph', seen.get('M6')?.has(70) === true);
   }
   check('a route request never marks the API as down', p1.connection !== 'server_error', String(p1.connection));
+
+  // ─── 23. A drive ended where the car stopped (Build 31), hosted
+  await driveEndChecks(p1, userA);
 
   // ─── 20. Road hazards (migration 0020), against the hosted API and real Realtime
   await hazardChecks();
@@ -662,6 +715,83 @@ async function run() {
   check('the account\'s files were removed from Storage', filesGone);
   createdUsers.delete(userA);
   void userB;
+}
+
+// ─── A drive ended where the car stopped ─────────────────────────────────────
+// The server's side of Build 31's drive stop: a backdated end, time not
+// driving left out of the duration, points from after the end left out, and
+// older apps unchanged. Then the app's own End Drive at the stop point.
+async function driveEndChecks(p1: Device, userA: string) {
+  section('23. A drive ended where the car stopped (hosted API)');
+  const iso = (ms: number) => new Date(ms).toISOString();
+  const t0 = Date.now() - 60 * 60_000;
+  // A minute apart, ~1 km each (10 km in 10 steps), at 60 km/h
+  const track = (from: number, count: number, lat0: number, speedKmh: number) => Array.from({ length: count }, (_, i) => ({
+    recordedAt: iso(from + (i + 1) * 60_000), latitude: lat0 + i * 0.009, longitude: -3.05, speedKmh, accuracyM: 5, altitudeM: 100, headingDeg: 0,
+  }));
+  const start = async (tag: string) => p1.ep.startJourney({ clientRef: `e2e-stop-${tag}-${RUN}-${randomUUID()}`, startedAt: iso(t0), timezone: 'Europe/London', vehicleId: null });
+  const drive = track(t0, 11, 54.40, 60);
+  const endAt = t0 + 11 * 60_000;
+  // Normal drive: ended at its last point, nothing left out
+  const a = await start('normal');
+  await p1.ep.addRoutePoints(a.id, drive);
+  const done = await p1.ep.completeJourney(a.id, { endedAt: iso(endAt), distanceKm: 10 });
+  check('a normal drive: duration is start to end, distance from its points', done.durationSeconds === 660 && done.distanceKm > 9.5 && done.distanceKm < 10.5,
+    `${done.durationSeconds} s, ${done.distanceKm} km`);
+  // Ended where it stopped: points sent from after the end (held back by Build 31, but an older copy may have sent some)
+  const b = await start('backdated');
+  const later = track(t0 + 25 * 60_000, 10, 54.20, 150);
+  await p1.ep.addRoutePoints(b.id, [...drive, ...later]);
+  const back = await p1.ep.completeJourney(b.id, { endedAt: iso(endAt), distanceKm: 10, excludedSeconds: 120 });
+  check('a backdated end is kept as sent', back.endedAt != null && Date.parse(back.endedAt) === endAt);
+  check('time not driving (excludedSeconds) is left out of the duration', back.durationSeconds === 540, `${back.durationSeconds} s`);
+  check('points from after the end are left out of the distance', back.distanceKm > 9.5 && back.distanceKm < 10.5, `${back.distanceKm} km`);
+  check('…and out of the top speed', back.topSpeedKmh <= 60, `${back.topSpeedKmh} km/h`);
+  const route = toJourney(await p1.ep.getJourney(b.id)).routeCoordinates;
+  const lastPt = route[route.length - 1];
+  check('…and out of the route drawn', !!lastPt && Math.abs(lastPt.latitude - (54.40 + 10 * 0.009)) < 0.002 && route.every((p) => p.latitude >= 54.399), `${route.length} points`);
+  // An older app: no excludedSeconds, as before
+  const c = await start('old-client');
+  await p1.ep.addRoutePoints(c.id, drive);
+  const old = await p1.ep.completeJourney(c.id, { endedAt: iso(endAt), distanceKm: 10 });
+  check('an older app (no excludedSeconds) gets the wall-clock duration, as before', old.durationSeconds === 660 && old.status === 'completed', `${old.durationSeconds} s`);
+  // Never more left out than the drive lasted; nonsense refused
+  const d = await start('limits');
+  const neg = await p1.ep.completeJourney(d.id, { endedAt: iso(endAt), distanceKm: 0, excludedSeconds: -1 }).catch((e) => e);
+  check('a negative excludedSeconds is refused', neg instanceof ApiError && neg.status === 400, neg instanceof ApiError ? `${neg.status}` : 'accepted');
+  const over = await p1.ep.completeJourney(d.id, { endedAt: iso(endAt), distanceKm: 0, excludedSeconds: 99_999 });
+  check('more left out than the drive lasted: never below zero', over.durationSeconds === 0, `${over.durationSeconds} s`);
+  // The app itself: drives 10 minutes, the driver walks off, End Drive on "Looks like you've stopped"
+  const clock = { t: Date.now() - 40 * 60_000 };
+  const app = cloud(p1, userA, clock);
+  await app.start();
+  await app.startDrive(null);
+  let lat = 54.60;
+  for (let s = 0; s < 600; s++) {
+    clock.t += 1000;
+    lat += 15 / 111_320;
+    app.addFix({ latitude: lat, longitude: -3.2, speedMs: 15, headingDeg: 0, accuracyM: 5, altitudeM: 100, timestamp: clock.t });
+  }
+  const stoppedAt = clock.t;
+  let east = 0;
+  for (let s = 0; s < 420; s++) {
+    clock.t += 1000;
+    east += 1.4;
+    app.addFix({ latitude: lat, longitude: -3.2 + east / 65_000, speedMs: 1.4, headingDeg: 90, accuracyM: 5, altitudeM: 100, timestamp: clock.t });
+    if (s % 60 === 0) await sleep(20);
+  }
+  const prompt = app.stopPrompt;
+  check('the app asks "Looks like you\'ve stopped", from where it stopped', prompt?.stoppedAt === stoppedAt);
+  const saved = await app.endDrive({ endAt: prompt?.stoppedAt ?? null, reason: 'stop' });
+  await app.sync();
+  check('the drive is saved (not discarded)', !!saved);
+  const listed = (await p1.ep.listJourneys()).find((j) => j.endedAt && Date.parse(j.endedAt) === stoppedAt) ?? null;
+  check('End Drive saves it on the server ending at the stop point, not at the tap', !!listed && listed.status === 'completed' && Date.parse(listed.endedAt!) === stoppedAt,
+    listed?.endedAt ? `${Math.round((Date.parse(listed.endedAt) - stoppedAt) / 1000)} s from the stop` : 'not found');
+  check('its distance is the drive alone (the walk left out)', !!listed && listed.distanceKm > 8.5 && listed.distanceKm < 9.5, `${listed?.distanceKm} km`);
+  const raw = listed ? await p1.api.get<Array<{ recordedAt: string }>>(`/journeys/${listed.id}/points`) : [];
+  check('no point from after the stop reached the server', raw.length > 100 && raw.every((p) => Date.parse(p.recordedAt) <= stoppedAt + 20_000), `${raw.length} points`);
+  app.dispose();
 }
 
 // ─── Road hazards ────────────────────────────────────────────────────────────

@@ -51,6 +51,10 @@ export interface ServerRouteLeg {
   steps: ServerRouteStep[];
   congestion: number[] | null;
   maxspeedKmh: Array<number | null> | null;
+  /** Known limits placed along the route by Mapbox's own distances (newer servers) */
+  speedLimits?: Array<{ fromM: number; toM: number; kmh: number }> | null;
+  /** The total of those distances for the leg (m) */
+  annotatedM?: number | null;
 }
 
 export interface ServerRoute {
@@ -346,7 +350,7 @@ export const endpoints = (api: ApiClient) => ({
     api.post<ServerJourney>('/journeys', input),
   addRoutePoints: (id: string, points: RoutePointInput[]) =>
     api.post<{ saved: number; status: string }>(`/journeys/${id}/route-points`, { points }),
-  completeJourney: (id: string, input: { endedAt: string; distanceKm: number; name?: string; visibility?: Visibility }) =>
+  completeJourney: (id: string, input: { endedAt: string; distanceKm: number; name?: string; visibility?: Visibility; excludedSeconds?: number }) =>
     api.post<ServerJourney>(`/journeys/${id}/complete`, input),
   updateJourney: (id: string, fields: { name?: string; notes?: string; categoryId?: string | null; visibility?: Visibility }) =>
     api.patch<ServerJourney>(`/journeys/${id}`, fields),

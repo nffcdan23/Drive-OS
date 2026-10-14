@@ -61,7 +61,7 @@ import { VoiceGuidance, type VoiceMode } from '@/lib/navigation/voice';
 import { VoicePreferences } from '@/lib/navigation/voicePrefs';
 import type { HazardSpeechOutput } from '@/lib/hazards/voice';
 import { hudSpeed, SPEED_HUD } from '@/lib/navigation/speedHud';
-import { limitAt, limitSign } from '@/lib/navigation/speedLimit';
+import { hudSpeedLimit } from '@/lib/navigation/speedLimit';
 import type { ResolvedUnitSystem } from '@/lib/units';
 import { useApp } from '@/context/AppContext';
 import { journal } from '@/lib/diagnostics';
@@ -405,10 +405,11 @@ export function useNavigationSpeedLimit(unitSystem: ResolvedUnitSystem): number 
     useCallback((fn: () => void) => session.subscribe(fn), [session]),
     useCallback(() => {
       const s = session.state;
-      if (s.phase !== 'navigating' || s.gps !== 'ok' || !s.progress) return null;
+      if (s.phase === 'idle' || s.phase === 'arrived' || s.phase === 'error') return null;
       const p = session.preparedRoute;
-      if (!p || p.route !== s.route) return null;
-      return limitSign(limitAt(p, s.progress.along), unitSystem);
+      return hudSpeedLimit(p, {
+        phase: s.phase, gps: s.gps, along: s.progress?.along ?? null, current: !!p && p.route === s.route,
+      }, unitSystem).value;
     }, [session, unitSystem]),
   );
 }

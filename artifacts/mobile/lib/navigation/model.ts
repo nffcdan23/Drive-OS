@@ -96,6 +96,16 @@ export interface RouteLeg {
   /** Per segment: 0 unknown, 1 low, 2 moderate, 3 heavy, 4 severe */
   congestion: number[] | null;
   maxspeedKmh: Array<number | null> | null;
+  /** Known limits placed along the route by distance (m from the route's start); absent from older servers */
+  speedLimits?: SpeedLimitRange[] | null;
+  /** The total of Mapbox's per-segment distances for the leg (m) */
+  annotatedM?: number | null;
+}
+
+export interface SpeedLimitRange {
+  fromM: number;
+  toM: number;
+  kmh: number;
 }
 
 export interface NavRoute {
@@ -129,6 +139,8 @@ function routeFromServer(r: ServerRoute, requestId: string): NavRoute {
       summary: l.summary,
       congestion: l.congestion,
       maxspeedKmh: l.maxspeedKmh,
+      speedLimits: l.speedLimits ?? null,
+      annotatedM: l.annotatedM ?? null,
       steps: l.steps.map(({ lanes, ...s }) => {
         // Lane data normalised once, here (lanes.ts); a step without any has no field at all
         const junctions = normalizeLaneJunctions(lanes);

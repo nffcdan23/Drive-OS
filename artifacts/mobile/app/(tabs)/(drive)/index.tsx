@@ -93,6 +93,7 @@ import type { ReportFix } from "@/lib/hazards/report";
 import { GuidanceKeepAwake } from "@/components/navigation/GuidanceKeepAwake";
 import { guidanceZoom, type GuidanceZoom } from "@/lib/navigation/guidanceCamera";
 import { RouteHeading } from "@/lib/navigation/routeHeading";
+import StopPrompt from "@/components/drive/StopPrompt";
 import { ZoomGlide } from "@/lib/navigation/zoomGlide";
 import { drivePresentation } from "@/lib/drivePresentation";
 import { coordinateDestination } from "@/lib/navigation/coordinates";
@@ -564,6 +565,9 @@ export default function MapScreen() {
     isDrivePaused,
     activeDriveMs,
     latestDriveFix,
+    noteNavigationArrival,
+    stopPrompt,
+    continueAfterStop,
     updateDriveCoordinate,
     noteForegroundFix,
     resolvedUnitSystem,
@@ -963,9 +967,11 @@ export default function MapScreen() {
       });
     }
     routeHeadingActiveRef.current = routeDir != null;
-    if (routeDir != null) headingFilter.update(routeDir, "route");
-    // ── Heading: ease the drawn heading toward its target ──
-    drawnHeadingRef.current = headingFilter.step(dt);
+    if (routeDir != null) headingFilter.update(routeDir, "route", now);
+    // ── Heading: turned toward its target every frame (the GPS course
+    // carried on at its turn rate between fixes), so bends are one
+    // continuous rotation of the arrow and the camera ──
+    drawnHeadingRef.current = headingFilter.step(dt, now);
     const headingSettled = headingFilter.settled;
 
     // ── Speed for look-ahead: smoothed slowly so it drifts, never nudges ──
@@ -1272,7 +1278,7 @@ export default function MapScreen() {
         updateDriveCoordinate({
           latitude: lat,
           longitude: lon,
-          speed: speedMs ?? 0,
+          speed: speedMs,
           heading: gpsHeading,
           accuracy,
           altitude,
@@ -1967,7 +1973,11 @@ export default function MapScreen() {
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
   }
 
-  function handleEndDrive() {
+  /**
+   * End Drive: Drive Complete, which saves the drive as it opens; ending at
+   * `endAt` when given (where the car stopped), else now
+   */
+  function handleEndDrive(endAt: number | null = null) {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     // Under 10 s of active driving, by the on-screen drive timer (paused time
     // doesn't count): thrown away, not saved.  The summary screen saves on
@@ -1984,7 +1994,7 @@ export default function MapScreen() {
       );
       return;
     }
-    router.push("/drive-summary");
+    router.push(endAt != null ? `/drive-summary?endAt=${Math.round(endAt)}` : "/drive-summary");
   }
 
   // ── Navigation and its drive (Phase 3.1) ──
@@ -2007,18 +2017,31 @@ export default function MapScreen() {
     if (navOwnsDrive()) navSession.end("user");
     handleEndDrive();
   }
-  const endDriveRef = useRef(handleEndDrive);
-  endDriveRef.current = handleEndDrive;
-  // Arriving, with a drive navigation started: navigation ends and the drive
-  // finishes the usual way. Otherwise the arrival shows, with Done, and a
-  // drive being recorded carries on.
+  // Arriving, with a drive navigation started: navigation ends and Drive
+  // Complete opens WITHOUT ending the drive, offering Continue Drive (the same
+  // drive carries on recording as a plain drive), Save Drive (ends it at the
+  // moment of arrival) and Discard. A drive the user started themselves
+  // isn't navigation's: the arrival shows, with Done, and it carries on.
+  const arrivalRef = useRef(handleArrivalDrive);
+  arrivalRef.current = handleArrivalDrive;
+  function handleArrivalDrive(arrivedAt: number) {
+    const drivenMs = activeDriveMs() ?? driveSecondsRef.current * 1000;
+    if (!isLongEnoughToSave(drivenMs)) {
+      handleEndDrive();
+      return;
+    }
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    router.push(`/drive-summary?arrivedAt=${Math.round(arrivedAt)}`);
+  }
   useEffect(() => {
     if (navPhase !== "arrived" || !isDriving) return;
     const st = navSession.state;
-    if (st.phase !== "arrived" || st.recording !== "navigation") return;
+    if (st.phase !== "arrived") return;
+    noteNavigationArrival();
+    if (st.recording !== "navigation") return;
     navSession.end("arrived");
-    endDriveRef.current();
-  }, [navPhase, isDriving, navSession]);
+    arrivalRef.current(st.arrivedAt);
+  }, [navPhase, isDriving, navSession, noteNavigationArrival]);
   // The drive stopped (finished from the panel, or it couldn't start):
   // navigation carries on with no recording alongside
   const wasDrivingRef = useRef(isDriving);
@@ -2898,6 +2921,23 @@ export default function MapScreen() {
           onZoomOut={handleZoomOut}
           onMapAreaLayout={USING_MAPBOX ? setDriveMapAreaHeight : undefined}
           onReport={openReport}
+        />
+      )}
+
+      {/* ── "Looks like you've stopped" (lib/backend/driveLifecycle.ts) ── */}
+      {isDriving && !isPaused && stopPrompt && (
+        <StopPrompt
+          stoppedAt={stopPrompt.stoppedAt}
+          graceEndsAt={stopPrompt.graceEndsAt}
+          onContinue={() => {
+            Haptics.selectionAsync();
+            continueAfterStop();
+          }}
+          onEnd={() => {
+            if (navOwnsDrive()) navSession.end("user");
+            handleEndDrive(stopPrompt.stoppedAt);
+          }}
+          bottom={insets.bottom + 120}
         />
       )}
 
