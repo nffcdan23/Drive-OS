@@ -43,6 +43,7 @@ import type { Journal } from '../backend/journal';
 import { routeRequestBody, routesFromServer, type Destination, type NavRoute, type RouteOrigin } from './model';
 import { OffRouteDetector, OFF_ROUTE, awayThresholdM } from './offRoute';
 import { LANES, LaneTracker, type LaneView } from './lanes';
+import { limitGate, speedLimitDiagnostics, type HudLimitGate } from './speedLimit';
 import type { PreviewError } from './previewStore';
 import {
   REMAINING_LINE, RouteTracker, UnusableRouteError, pointAt, prepareRoute, remainingLine, usableFix,
@@ -309,6 +310,23 @@ export class NavigationSession {
     this.begin(sessionId, destination, startedAt, recording, input.route, null, false);
   }
 
+  /** Which HUD speed-limit gate decided each fix on the current route (diagnostics) */
+  private limitTally: Partial<Record<HudLimitGate, number>> = {};
+
+  /** A route is adopted: what it carries for speed limits (counts only) */
+  private noteLimits(p: PreparedRoute) {
+    this.flushLimitTally();
+    this.log('nav_speed_limits', speedLimitDiagnostics(p));
+  }
+
+  /** How the sign fared on the route just left: fixes per gate */
+  private flushLimitTally() {
+    const t = this.limitTally;
+    this.limitTally = {};
+    if (!Object.keys(t).length) return;
+    this.log('nav_speed_limit_hud', Object.fromEntries(Object.entries(t).map(([k, v]) => [k, v ?? 0])));
+  }
+
   private begin(
     sessionId: number, destination: Destination, startedAt: number, recording: NavRecording,
     route: NavRoute, notice: string | null, refreshed: boolean,
@@ -335,6 +353,7 @@ export class NavigationSession {
       refreshed,
       recording,
     });
+    this.noteLimits(this.prepared);
     this.armLostTimer();
     // A recent fix places the car straight away
     const fix = this.lastFix;
@@ -413,6 +432,8 @@ export class NavigationSession {
       return;
     }
     const rerouting = s.phase === 'rerouting';
+    const gate = limitGate(this.prepared, { phase: rerouting ? 'rerouting' : 'navigating', gps, along: progress.along, current: true }).gate;
+    this.limitTally[gate] = (this.limitTally[gate] ?? 0) + 1;
     this.set({
       ...s,
       ...rejoined,
@@ -482,6 +503,7 @@ export class NavigationSession {
     this.stopLostTimer();
     const arrivedAt = this.deps.now();
     this.log('nav_arrived', { minutes: Math.round((arrivedAt - s.startedAt) / 60_000), recording: s.recording });
+    this.flushLimitTally();
     this.tracker = null;
     this.prepared = null;
     this.set({ phase: 'arrived', sessionId: s.sessionId, destination: s.destination, startedAt: s.startedAt, recording: s.recording, arrivedAt });
@@ -588,6 +610,7 @@ export class NavigationSession {
       return;
     }
     this.log('nav_reroute', { result: 'ok', steps: prepared.steps.length });
+    this.noteLimits(prepared);
     this.failures = 0;
     this.nextAutoAt = this.deps.now() + REROUTE.cooldownMs;
     this.prepared = prepared;
@@ -616,6 +639,7 @@ export class NavigationSession {
     const s = this.current;
     if (s.phase === 'idle') return;
     this.stopLostTimer();
+    this.flushLimitTally();
     this.nextRequest++;
     this.tracker = null;
     this.prepared = null;

@@ -204,6 +204,21 @@ export interface RouteLegDto {
   congestion: number[] | null;
   /** Per segment speed limit in km/h; null where unknown (null if not supplied) */
   maxspeedKmh: Array<number | null> | null;
+  /**
+   * The same limits placed along the route by distance (metres from the
+   * start of the route, from Mapbox's own per-segment distances), so the app
+   * never has to match them to the line point by point. Only stretches with
+   * a known limit; null when Mapbox gave no usable maxspeed and distance.
+   */
+  speedLimits?: SpeedLimitRangeDto[] | null;
+  /** The total of Mapbox's per-segment distances for this leg (m), to check the ranges against the line */
+  annotatedM?: number | null;
+}
+
+export interface SpeedLimitRangeDto {
+  fromM: number;
+  toM: number;
+  kmh: number;
 }
 
 export interface RouteDto {
@@ -391,12 +406,13 @@ function parseLeg(l: unknown, routeStartM: number): RouteLegDto {
     : null;
   const maxspeedKmh = a && Array.isArray(a.maxspeed)
     ? a.maxspeed.map((m) => {
-        if (!isObj(m) || typeof m.speed !== "number" || !Number.isFinite(m.speed)) return null;
+        if (!isObj(m) || typeof m.speed !== "number" || !Number.isFinite(m.speed) || m.speed <= 0) return null;
         if (m.unit === "mph") return Math.round(m.speed * 1.609344);
         if (m.unit === "km/h") return Math.round(m.speed);
         return null;
       })
     : null;
+  const placed = maxspeedKmh && a ? speedLimitRanges(maxspeedKmh, a.distance, routeStartM) : null;
   return {
     distanceM: num(l.distance, "leg.distance"),
     durationS: num(l.duration, "leg.duration"),
@@ -404,7 +420,37 @@ function parseLeg(l: unknown, routeStartM: number): RouteLegDto {
     steps,
     congestion,
     maxspeedKmh,
+    speedLimits: placed?.ranges ?? null,
+    annotatedM: placed?.totalM ?? null,
   };
+}
+
+const round1 = (n: number) => Math.round(n * 10) / 10;
+
+/**
+ * The known limits of a leg as stretches along the route, using Mapbox's
+ * per-segment distance annotation (one value per segment, like maxspeed).
+ * Neighbouring segments with the same limit are one stretch. Null when the
+ * two arrays don't line up or a distance is unusable: never a guess.
+ */
+export function speedLimitRanges(
+  kmh: Array<number | null>, distance: unknown, routeStartM: number,
+): { ranges: SpeedLimitRangeDto[]; totalM: number } | null {
+  if (!Array.isArray(distance) || distance.length !== kmh.length || !kmh.length) return null;
+  const ranges: SpeedLimitRangeDto[] = [];
+  let at = routeStartM;
+  for (let i = 0; i < kmh.length; i++) {
+    const d = distance[i];
+    if (typeof d !== "number" || !Number.isFinite(d) || d < 0) return null;
+    const v = kmh[i];
+    const last = ranges[ranges.length - 1];
+    if (v != null && d > 0) {
+      if (last && last.kmh === v && Math.abs(last.toM - round1(at)) < 0.05) last.toM = round1(at + d);
+      else ranges.push({ fromM: round1(at), toM: round1(at + d), kmh: v });
+    }
+    at += d;
+  }
+  return { ranges, totalM: round1(at - routeStartM) };
 }
 
 /**

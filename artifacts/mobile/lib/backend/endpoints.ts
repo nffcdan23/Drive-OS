@@ -51,6 +51,10 @@ export interface ServerRouteLeg {
   steps: ServerRouteStep[];
   congestion: number[] | null;
   maxspeedKmh: Array<number | null> | null;
+  /** Known limits placed along the route by Mapbox's own distances (newer servers) */
+  speedLimits?: Array<{ fromM: number; toM: number; kmh: number }> | null;
+  /** The total of those distances for the leg (m) */
+  annotatedM?: number | null;
 }
 
 export interface ServerRoute {

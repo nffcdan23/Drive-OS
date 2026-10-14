@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
   DIRECTIONS_PARAMS, DirectionsClient, DirectionsConfigError, MAPBOX_API_ORIGIN, RoutingError,
-  REROUTE_PARAMS, directionsUrl, parseDirectionsResponse, rerouteParams, readDirectionsConfig, type DirectionsConfig, type RouteRequest,
+  REROUTE_PARAMS, directionsUrl, parseDirectionsResponse, speedLimitRanges, rerouteParams, readDirectionsConfig, type DirectionsConfig, type RouteRequest,
 } from "../src/lib/mapboxDirections.ts";
 import { encodePolyline } from "../src/lib/geo.ts";
 
@@ -174,6 +174,18 @@ test("parse: routes become Derwent's format (alternatives, steps, UK details, an
   assert.equal(main!.legs[0]!.steps[1]!.startDistanceM, 1000);
   assert.deepEqual(main!.legs[0]!.congestion, [1, 3, 0]);
   assert.deepEqual(main!.legs[0]!.maxspeedKmh, [48, null, 100]);
+  // No distance annotation in this response: not placed by distance
+  assert.equal(main!.legs[0]!.speedLimits, null);
+  // With Mapbox's per-segment distances: known limits as stretches along the route (m), equal neighbours merged
+  assert.deepEqual(speedLimitRanges([48, 48, null, 100, 0 as unknown as null], [10, 20.04, 5, 30, 0], 1000)?.ranges, [
+    { fromM: 1000, toM: 1030, kmh: 48 }, { fromM: 1035, toM: 1065, kmh: 100 },
+  ]);
+  assert.equal(speedLimitRanges([48, 64], [10], 0), null, "arrays that don't line up: nothing");
+  assert.equal(speedLimitRanges([48], [-1], 0), null);
+  assert.equal(speedLimitRanges([48], "x", 0), null);
+  const withDistance = parseDirectionsResponse({ ...OK, routes: [route({ legs: [{ ...route().legs[0], annotation: { maxspeed: [{ speed: 30, unit: "mph" }, { none: true }, { speed: 0, unit: "mph" }], distance: [100, 50, 25] } }] })] });
+  assert.deepEqual(withDistance.routes[0]!.legs[0]!.speedLimits, [{ fromM: 0, toM: 100, kmh: 48 }]);
+  assert.equal(withDistance.routes[0]!.legs[0]!.annotatedM, 175);
   // At most three routes, however many come back
   assert.equal(parseDirectionsResponse({ ...OK, routes: [route(), route(), route(), route()] }).routes.length, 3);
   // Optional detail missing or malformed is dropped, not fatal

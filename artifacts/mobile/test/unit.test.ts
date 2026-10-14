@@ -12010,7 +12010,7 @@ test('speed limit: the data is Mapbox\'s maxspeed annotation, requested with eve
   assert.match(api, /annotations: "duration,distance,congestion,maxspeed"/);
   assert.match(api, /if \(m\.unit === "mph"\) return Math\.round\(m\.speed \* 1\.609344\);/);
   // Unknown / "none" segments are null, never a guess
-  assert.match(api, /if \(!isObj\(m\) \|\| typeof m\.speed !== "number" \|\| !Number\.isFinite\(m\.speed\)\) return null;/);
+  assert.match(api, /if \(!isObj\(m\) \|\| typeof m\.speed !== "number" \|\| !Number\.isFinite\(m\.speed\) \|\| m\.speed <= 0\) return null;/);
   // Every UK limit survives mph → whole km/h → mph exactly
   for (const mph of [10, 20, 30, 40, 50, 60, 70]) assert.equal(limitSign(Math.round(mph * 1.609344), 'imperial'), mph);
   assert.equal(limitSign(80, 'metric'), 80);
@@ -12049,9 +12049,8 @@ test('speed limit: placed on the route only when the annotation lines up; the li
 test('speed limit: a UK sign beside the speed HUD, only while navigating on the route with good GPS', () => {
   const ctx = readNav('../context/NavigationContext.tsx');
   const hook = ctx.slice(ctx.indexOf('export function useNavigationSpeedLimit('), ctx.indexOf('export function useStartNavigation'));
-  assert.ok(/if \(s\.phase !== 'navigating' \|\| s\.gps !== 'ok' \|\| !s\.progress\) return null;/.test(hook));
-  assert.ok(/if \(!p \|\| p\.route !== s\.route\) return null;/.test(hook));
-  assert.ok(/return limitSign\(limitAt\(p, s\.progress\.along\), unitSystem\);/.test(hook));
+  // The hook is the one rule (hudSpeedLimit), fed the session's own state
+  assert.ok(/return hudSpeedLimit\(p, \{\s*phase: s\.phase, gps: s\.gps, along: s\.progress\?\.along \?\? null, current: !!p && p\.route === s\.route,\s*\}, unitSystem\)\.value;/.test(hook));
   assert.ok(/return useOnScreenSnapshot\(/.test(hook), 'a number: re-renders only when it changes, held off screen');
   const bar = readNav('../components/navigation/GuidanceBar.tsx');
   assert.ok(/<SpeedHud unitSystem=\{unitSystem\} \/>\s*<SpeedLimitSign unitSystem=\{unitSystem\} \/>/.test(bar));
@@ -12955,4 +12954,128 @@ test('lifecycle: a drive that waits before it ever moves; and a lifecycle failur
   await headless.deliver(trace.fixes);
   await headless.attach('u1', () => {});
   assert.deepEqual((await savedActive(store)).points, ref.points);
+});
+
+// ─── Build 30 fixes: speed limit end to end ────────────────────────────────
+
+import { parseDirectionsResponse } from '../../api-server/src/lib/mapboxDirections';
+import { hudSpeedLimit, limitGate, speedLimitDiagnostics, speedLimitSource } from '@/lib/navigation/speedLimit';
+
+/**
+ * A Directions response shaped like Mapbox's own for a 3 km road north:
+ * full-resolution polyline6 line with a repeated point (as Mapbox's lines
+ * have), depart and arrive steps, and per-segment distance and maxspeed
+ * annotations (30 mph, a stretch Mapbox doesn't know, 40 mph, then "none").
+ * `extra` adds a trailing zero-length annotation entry the line doesn't have.
+ */
+function mapboxBody(opts: { extra?: boolean; distance?: boolean } = {}) {
+  const pts: Array<[number, number]> = [];
+  for (let y = 0; y <= 3000; y += 25) pts.push([0, y]);
+  pts.splice(40, 0, pts[40]!); // a repeated point
+  const line = pts.map(([x, y]) => at3(x, y));
+  const seg = line.slice(1).map((p, i) => distanceM(line[i]!, p));
+  const maxspeed = seg.map((_, i) => (i < 50 ? { speed: 30, unit: 'mph' } : i < 70 ? { unknown: true } : i < 110 ? { speed: 40, unit: 'mph' } : { none: true }));
+  const distance = seg.map((d) => Math.round(d * 10) / 10);
+  if (opts.extra) { maxspeed.push({ speed: 40, unit: 'mph' }); distance.push(0); }
+  const total = seg.reduce((a, b) => a + b, 0);
+  const loc = (p: { latitude: number; longitude: number }) => [p.longitude, p.latitude];
+  return {
+    code: 'Ok', uuid: 'r1',
+    routes: [{
+      geometry: encodePolyline(line.map((p) => ({ lat: p.latitude, lng: p.longitude })), 6), distance: total, duration: total / 13, weight: 1,
+      legs: [{
+        distance: total, duration: total / 13, summary: 'B5289',
+        steps: [
+          { distance: total, duration: total / 13, name: 'B5289', maneuver: { type: 'depart', location: loc(line[0]!), bearing_after: 0 } },
+          { distance: 0, duration: 0, name: 'B5289', maneuver: { type: 'arrive', location: loc(line[line.length - 1]!) } },
+        ],
+        annotation: { ...(opts.distance === false ? {} : { distance }), maxspeed, congestion: seg.map(() => 'low') },
+      }],
+    }],
+  };
+}
+
+/** Mapbox JSON → the API's parser → the wire → the app's route model, as on a real request */
+function viaApi(body: unknown): Nav3Route {
+  const wire = JSON.parse(JSON.stringify(parseDirectionsResponse(body))) as ServerRoutes;
+  return routesFromServer(wire, 'e2e')[0]! as Nav3Route;
+}
+
+test('speed limit end to end: a Mapbox route with maxspeed reaches the navigation HUD, through the API and the session', () => {
+  const route = viaApi(mapboxBody());
+  // The API placed the limits by Mapbox's own distances
+  const leg = route.legs[0]!;
+  assert.equal(leg.speedLimits!.length, 2);
+  assert.equal(leg.speedLimits![0]!.kmh, 48);
+  assert.equal(leg.speedLimits![1]!.kmh, 64);
+  assert.ok(Math.abs(leg.annotatedM! - 3000) < 1);
+  const p = prepareRoute(route);
+  assert.equal(speedLimitSource(p).kind, 'distance');
+  // Driven along it: exactly what the HUD's hook computes, from the live session
+  const journal = new DiagnosticsJournal({ store: new MemoryStore(), now: () => 0 });
+  const h = nav3Session({ journal });
+  void h.s.start({ route, destination: N3_DEST });
+  const shown = new Map<number, number | null>();
+  h.s.subscribe(() => {
+    const st = h.s.state;
+    if (st.phase !== 'navigating' || !st.progress) return;
+    const pr = h.s.preparedRoute;
+    const r = hudSpeedLimit(pr, { phase: st.phase, gps: st.gps, along: st.progress.along, current: !!pr && pr.route === st.route }, 'imperial');
+    shown.set(Math.round(st.progress.along / 100) * 100, r.value);
+  });
+  h.feed(drive3([[0, 0], [0, 3000]], { to: 2_950, noise: 3 }));
+  assert.equal(shown.get(500), 30, '30 mph stretch');
+  assert.equal(shown.get(1500), null, 'Mapbox doesn\'t know: hidden, never guessed');
+  assert.equal(shown.get(2200), 40, '40 mph stretch');
+  assert.equal(shown.get(2900), null, '"none": hidden');
+  // Diagnostics: what the route carried and how the sign fared, counts only
+  h.s.end('user');
+  return journal.read().then((entries) => {
+    const carried = entries.find((e) => e.event === 'nav_speed_limits')!;
+    assert.equal(carried.source, 'distance');
+    assert.equal(carried.reason, null);
+    assert.equal(carried.known, 90);
+    const hud = entries.find((e) => e.event === 'nav_speed_limit_hud')!;
+    assert.ok((hud.shown as number) > 100 && (hud.unknown_here as number) > 20);
+    for (const e of entries.filter((x) => x.event.startsWith('nav_speed_limit'))) {
+      assert.ok(!Object.keys(e).some((k) => /lat|lon|lng|coord/i.test(k)));
+    }
+  });
+});
+
+test('speed limit: the line and the annotation not lining up one for one no longer hides every limit', () => {
+  // One trailing zero-length annotation entry more than the line has segments
+  const off = viaApi(mapboxBody({ extra: true }));
+  const p = prepareRoute(off);
+  assert.equal(speedLimitSource(p).kind, 'distance', 'placed by distance');
+  assert.equal(limitSign(limitAt(p, 600), 'imperial'), 30);
+  assert.equal(limitSign(limitAt(p, 2_300), 'imperial'), 40);
+  // The same response from an older server (no ranges): by segment, which can't place it, so nothing — and the reason is logged
+  const old = viaApi(mapboxBody({ extra: true }));
+  for (const l of old.legs) { delete l.speedLimits; delete l.annotatedM; }
+  const po = prepareRoute(old);
+  assert.deepEqual(speedLimitSource(po), { kind: 'none', reason: 'count_mismatch' });
+  assert.equal(speedLimitDiagnostics(po).reason, 'count_mismatch');
+  // An older server with a line that does line up still works by segment
+  const aligned = viaApi(mapboxBody());
+  for (const l of aligned.legs) { delete l.speedLimits; delete l.annotatedM; }
+  assert.equal(speedLimitSource(prepareRoute(aligned)).kind, 'segments');
+  // No distance annotation at all: by segment only
+  assert.equal(viaApi(mapboxBody({ distance: false })).legs[0]!.speedLimits, null);
+  // Distances that disagree with the line: never placed by distance
+  const stretched = viaApi(mapboxBody());
+  stretched.legs[0]!.annotatedM = 3500;
+  for (const l of stretched.legs) l.maxspeedKmh = null;
+  assert.deepEqual(speedLimitSource(prepareRoute(stretched)), { kind: 'none', reason: 'length_mismatch' });
+  // Each gate, by name
+  const pr = prepareRoute(viaApi(mapboxBody()));
+  const at = (o: Partial<{ phase: string; gps: string; along: number | null; current: boolean }>) =>
+    limitGate(pr, { phase: 'navigating', gps: 'ok', along: 600, current: true, ...o }).gate;
+  assert.equal(at({}), 'shown');
+  assert.equal(at({ phase: 'offRoute' }), 'not_navigating');
+  assert.equal(at({ gps: 'weak' }), 'gps');
+  assert.equal(at({ along: null }), 'no_progress');
+  assert.equal(at({ current: false }), 'stale_route');
+  assert.equal(at({ along: 1_500 }), 'unknown_here');
+  assert.equal(hudSpeedLimit(pr, { phase: 'navigating', gps: 'ok', along: 600, current: true }, 'metric').gate, 'not_a_sign', '48 km/h is no metric sign');
 });
