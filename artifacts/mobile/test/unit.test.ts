@@ -12142,14 +12142,14 @@ test('camera heading: on the route it is the road\'s own direction at the arrow 
   // Frame by frame at 13 m/s: the route heading turns every frame through the bend, the 1 Hz course in pulses
   const turnFrames = (useRoute: boolean) => {
     const f = new HeadingFilter();
-    f.update(0, 'course');
+    f.update(0, 'course', 0);
     let still = 0;
     let last = f.value;
     for (let ms = 0; ms <= 6_000; ms += 16) {
       const along = 960 + 13 * ms / 1000;
-      if (useRoute) f.update(routeDirection(p, along), 'route');
-      else if (ms % 1000 < 16) f.update(routeDirection(p, along - 13), 'course');
-      const v = f.step(16);
+      if (useRoute) f.update(routeDirection(p, along), 'route', ms);
+      else if (ms % 1000 < 16) f.update(routeDirection(p, along - 13), 'course', ms);
+      const v = f.step(16, ms);
       // While the road itself bends under the arrow (the direction is taken from 8 m behind to 22 m ahead)
       if (along > 980 && along < 1_006 && Math.abs(((v - last + 540) % 360) - 180) < 0.05) still++;
       last = v;
@@ -12157,7 +12157,6 @@ test('camera heading: on the route it is the road\'s own direction at the arrow 
     return still;
   };
   assert.equal(turnFrames(true), 0, 'route: turning on every frame of the bend');
-  assert.ok(turnFrames(false) > 10, 'course: rotate, stop, rotate (the old behaviour)');
   // The short way round north
   const n = new HeadingFilter();
   n.update(350, 'route');
@@ -12189,14 +12188,14 @@ test('camera heading: wired into the one frame loop; course and compass stand as
   const loop = drive.slice(drive.indexOf('frameLoopRef.current = () => {'), drive.indexOf('// ── Live trail head ──'));
   assert.ok(loop.indexOf('if (!visualsLiveRef.current) return;') < loop.indexOf('routeHeading.at('), 'never off screen');
   assert.ok(/guidingRef\.current && s\.phase === "navigating" && s\.gps === "ok" &&\s*s\.progress != null && prepared != null && prepared\.route === s\.route;/.test(loop));
-  assert.ok(/if \(routeDir != null\) headingFilter\.update\(routeDir, "route"\);\s*drawnHeadingRef\.current = headingFilter\.step\(dt\);/.test(loop));
+  assert.ok(/if \(routeDir != null\) headingFilter\.update\(routeDir, "route", now\);[\s\S]{0,40}drawnHeadingRef\.current = headingFilter\.step\(dt, now\);/.test(loop));
   assert.equal((drive.match(/!routeHeadingActiveRef\.current/g) ?? []).length, 2, 'foreground and background-return course updates');
   assert.ok(/lastSpeedKmhRef\.current >= MIN_SPEED_FOR_GPS_HEADING \|\| routeHeadingActiveRef\.current\) return;/.test(drive), 'compass');
   for (const f of ['../lib/navigation/routeHeading.ts', '../lib/navigation/zoomGlide.ts', '../lib/navigation/maneuverArrow.ts', '../lib/navigation/speedLimit.ts']) {
     assert.ok(!/expo-location|watchPositionAsync|watchHeadingAsync|startLocationUpdatesAsync/.test(readNav(f)), f);
   }
   assert.equal((drive.match(/watchHeadingAsync\(/g) ?? []).length, 1);
-  assert.equal(HEADING_FILTER.routeTauMs, 200);
+  assert.ok(/headingFilter\.update\(routeDir, "route", now\);\s*/.test(loop) && /drawnHeadingRef\.current = headingFilter\.step\(dt, now\);/.test(loop), 'one clock for readings and frames');
 });
 
 test('camera zoom: guidance zoom changes glide over a few seconds — no snap, no overshoot, no pumping', () => {
@@ -13078,4 +13077,103 @@ test('speed limit: the line and the annotation not lining up one for one no long
   assert.equal(at({ current: false }), 'stale_route');
   assert.equal(at({ along: 1_500 }), 'unknown_here');
   assert.equal(hudSpeedLimit(pr, { phase: 'navigating', gps: 'ok', along: 600, current: true }, 'metric').gate, 'not_a_sign', '48 km/h is no metric sign');
+});
+
+// ─── Build 30 fixes: continuous camera rotation ────────────────────────────
+
+/** Frames at 60 Hz through a bend whose GPS course arrives once a second (±noise), with the old easing or the new filter */
+function bendFrames(opts: { rateDegS: number; noiseDeg?: number; start?: number; old?: boolean }) {
+  const truth = (t: number) => (opts.start ?? 0) + (t < 2000 ? 0 : t < 8000 ? ((t - 2000) / 1000) * opts.rateDegS : 6 * opts.rateDegS);
+  let seed = 5;
+  const noise = () => ((seed = (seed * 16807) % 2147483647) / 2147483647 - 0.5) * 2 * (opts.noiseDeg ?? 0);
+  const f = new HeadingFilter();
+  f.update(((truth(0) % 360) + 360) % 360, 'course', 0);
+  let oldDrawn = truth(0), oldTarget = truth(0);
+  const frames: Array<{ t: number; v: number; d: number }> = [];
+  let prev = f.value;
+  for (let t = 16; t < 12_000; t += 16) {
+    if (t % 1000 < 16) {
+      const reading = (((truth(t) + noise()) % 360) + 360) % 360;
+      f.update(reading, 'course', t);
+      oldTarget = reading;
+    }
+    // The Build 30 filter: an exponential toward each once-a-second reading (450 ms)
+    oldDrawn = approachAngle(oldDrawn, oldTarget, 16, 450);
+    const v = opts.old ? oldDrawn : f.step(16, t);
+    frames.push({ t, v, d: angleDelta(prev, v) });
+    prev = v;
+  }
+  return { frames, truth };
+}
+
+test('camera rotation: a bend is one continuous turn between 1 Hz GPS fixes — the old easing stopped and started', () => {
+  for (const rate of [6, 12, 25]) {
+    const mid = (r: ReturnType<typeof bendFrames>) => r.frames.filter((f) => f.t > 3_500 && f.t < 8_000);
+    const now = mid(bendFrames({ rateDegS: rate }));
+    const before = mid(bendFrames({ rateDegS: rate, old: true }));
+    const slowest = (fs: typeof now) => Math.min(...fs.map((f) => f.d / 0.016));
+    // New: turning at the bend's own rate on every frame, never pausing
+    assert.ok(slowest(now) > rate * 0.9, `${rate}°/s bend: slowest ${slowest(now).toFixed(1)}°/s`);
+    assert.equal(now.filter((f) => Math.abs(f.d) < 0.05).length, 0);
+    // Old: fast after each fix, nearly stopped before the next (the reported judder)
+    assert.ok(slowest(before) < rate * 0.5, `old ${rate}°/s: slowest ${slowest(before).toFixed(1)}°/s`);
+    // Never a jump in a frame, and no reversal inside the bend
+    assert.ok(now.every((f) => f.d > 0 && f.d < 1));
+  }
+});
+
+test('camera rotation: responsive, shortest way through north, steady on a straight road, settles after a bend', () => {
+  // Lag behind the real heading in a 15°/s bend: under half a second's turn
+  const b = bendFrames({ rateDegS: 15 });
+  const lag = Math.max(...b.frames.filter((f) => f.t > 3_500 && f.t < 8_000).map((f) => Math.abs(angleDelta(f.v, b.truth(f.t)))));
+  assert.ok(lag < 15 * 0.5, `lag ${lag.toFixed(1)}°`);
+  // After the bend: its end can only be known from the next fix, so the turn
+  // is carried on up to a second past it, then eased back; bounded, and no
+  // more than the old easing's lag was
+  const after = b.frames.filter((f) => f.t > 8_000);
+  const over = Math.max(...after.map((f) => angleDelta(90, f.v)));
+  assert.ok(over < 15 * 0.8, `overshoot ${over.toFixed(1)}°`);
+  const oldAfter = bendFrames({ rateDegS: 15, old: true });
+  const oldLag = Math.max(...oldAfter.frames.filter((f) => f.t > 3_500 && f.t < 8_000).map((f) => Math.abs(angleDelta(f.v, oldAfter.truth(f.t)))));
+  assert.ok(over < oldLag, `overshoot ${over.toFixed(1)}° vs the old lag ${oldLag.toFixed(1)}°`);
+  assert.ok(Math.abs(angleDelta(after.at(-1)!.v, 90)) < 0.06);
+  // Through north: 340° → 40° the short way, no long way round
+  const n = bendFrames({ rateDegS: 10, start: 340 });
+  assert.ok(n.frames.every((f) => f.v >= 335 || f.v <= 65), 'never the long way round');
+  assert.ok(n.frames.every((f) => Math.abs(f.d) < 1));
+  // A straight road with ±1° GPS course noise: no drift, no visible wobble
+  const s = bendFrames({ rateDegS: 0, noiseDeg: 1, start: 90 });
+  const vals = s.frames.filter((f) => f.t > 1_000).map((f) => f.v);
+  assert.ok(Math.max(...vals) - Math.min(...vals) < 2.2, `wobble ${(Math.max(...vals) - Math.min(...vals)).toFixed(2)}°`);
+  assert.ok(Math.max(...s.frames.map((f) => Math.abs(f.d))) < 0.2, 'no visible per-frame twitch');
+  // The frame loop can rest: settled once the course stops changing and the prediction window has passed
+  const f = new HeadingFilter();
+  f.update(10, 'course', 0);
+  f.update(20, 'course', 1_000);
+  let t = 1_000;
+  for (; t < 6_000 && !(f.step(16, t) === 20 && f.settled); t += 16);
+  assert.ok(!f.settled || t > 1_000 + HEADING_FILTER.predictMaxMs, 'keeps turning while the course is carried on');
+  for (; t < 8_000; t += 16) f.step(16, t);
+  assert.ok(f.settled);
+  // A late reading never turns it further than maxPredictDeg past the last one
+  const g = new HeadingFilter();
+  g.update(0, 'course', 0);
+  g.update(30, 'course', 1_000);
+  for (let u = 1_016; u < 5_000; u += 16) g.step(16, u);
+  assert.ok(angleDelta(30, g.value) <= HEADING_FILTER.maxPredictDeg + 0.01);
+});
+
+test('camera rotation: the camera is written from the same heading every frame; pan, Overview and Recenter unchanged', () => {
+  const drive = readNav('../app/(tabs)/(drive)/index.tsx');
+  // Heading-up follow: the camera's heading is the drawn heading of this frame
+  assert.match(drive, /heading: isHeadingUp \? drawnHeadingRef\.current : 0,/);
+  const loop = drive.slice(drive.indexOf('frameLoopRef.current = () => {'), drive.indexOf('useEffect(\n    () => () => {\n      if (frameIdRef.current != null)'));
+  assert.ok(loop.indexOf('headingFilter.step(dt, now)') < loop.indexOf('followCamera.frame('), 'heading first, then the camera, same frame');
+  assert.ok(/mapboxRef\.current\?\.setFollowCamera\(pose\);/.test(loop), 'written every frame, no native animation per fix');
+  assert.ok(/headingSettled &&/.test(loop), 'the loop keeps running while the heading turns');
+  assert.match(readNav('../lib/mapbox.ts'), /animationDuration: 0,\s*animationMode: "none",/);
+  // Gestures, Overview and Recenter: the follow controller as before
+  assert.ok(/if \(frame\.kind === "paused"\)/.test(loop) && /leaveFollowRef\.current\(\);/.test(loop));
+  // The zoom still glides in the same loop
+  assert.ok(/const glided = zoomGlide\.step\(dt\);/.test(loop));
 });

@@ -964,9 +964,11 @@ export default function MapScreen() {
       });
     }
     routeHeadingActiveRef.current = routeDir != null;
-    if (routeDir != null) headingFilter.update(routeDir, "route");
-    // ── Heading: ease the drawn heading toward its target ──
-    drawnHeadingRef.current = headingFilter.step(dt);
+    if (routeDir != null) headingFilter.update(routeDir, "route", now);
+    // ── Heading: turned toward its target every frame (the GPS course
+    // carried on at its turn rate between fixes), so bends are one
+    // continuous rotation of the arrow and the camera ──
+    drawnHeadingRef.current = headingFilter.step(dt, now);
     const headingSettled = headingFilter.settled;
 
     // ── Speed for look-ahead: smoothed slowly so it drifts, never nudges ──
