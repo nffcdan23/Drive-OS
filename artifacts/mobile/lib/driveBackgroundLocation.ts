@@ -28,7 +28,7 @@ import {
   BackgroundDriveRecorder, ensureBackgroundAccess, type LocationPermissions,
 } from '@/lib/backend/driveTracking';
 import { SharedLocationUpdates, type LocationUser, type NativeLocationUpdates } from '@/lib/backend/sharedLocationUpdates';
-import type { GpsFix } from '@/lib/backend/journeyRecorder';
+import { knownSpeedMs, type GpsFix } from '@/lib/backend/journeyRecorder';
 import { requestBackgroundLocation, requestForegroundLocation } from '@/lib/locationPermission';
 import { journal } from '@/lib/diagnostics';
 import { deviceStorage } from '@/lib/secureStorage';
@@ -159,7 +159,7 @@ function toFix(loc: Location.LocationObject): GpsFix {
   return {
     latitude: loc.coords.latitude,
     longitude: loc.coords.longitude,
-    speedMs: loc.coords.speed != null && loc.coords.speed >= 0 ? loc.coords.speed : null,
+    speedMs: knownSpeedMs(loc.coords.speed),
     headingDeg: loc.coords.heading,
     accuracyM: loc.coords.accuracy,
     altitudeM: loc.coords.altitude,

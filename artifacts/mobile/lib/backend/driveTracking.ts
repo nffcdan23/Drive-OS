@@ -27,6 +27,7 @@ import {
   JourneyStore, acceptDriveFix, lastRecordedFix, noteFixTime, recordFix,
   type FixRef, type GpsFix, type JourneyRecord,
 } from './journeyRecorder';
+import { observeLifecycleFix } from './driveLifecycle';
 import { noJournal, type Journal } from './journal';
 import { errorText, readJsonChecked, writeJson, type KeyValueStore } from './storage';
 
@@ -332,6 +333,8 @@ export class BackgroundDriveRecorder implements DriveTracker {
     this.held = [];
     for (const fix of all) {
       noteFixTime(h.rec, fix);
+      // Shadow mode: the same lifecycle as CloudSync.addFix, nothing else changes
+      observeLifecycleFix(h.rec, fix, { journal: this.journal, path: 'background' });
       h.dirty = true;
       if (!acceptDriveFix(h.rec, h.last, fix)) continue;
       h.last = fix;

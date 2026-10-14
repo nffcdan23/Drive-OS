@@ -12234,3 +12234,725 @@ test('camera zoom: guidance zoom changes glide over a few seconds — no snap, n
   assert.ok(/zoomGlide\.step\(dt\)/.test(following), 'inside the following branch: never while the user explores the map');
   assert.ok(/zoomGlide\.setTarget\(next\.zoom\);/.test(drive) && /\(!guidingRef\.current \|\| zoomGlide\.settled\) &&/.test(drive));
 });
+
+// ─── Drive lifecycle: Phase 2A shadow mode ──────────────────────────────────
+
+import {
+  LIFECYCLE, accuracyBucket, activeDurationMs, classifyMovement, displacementBucket, elapsedBucket, evaluateLifecycle,
+  graceDeadline, lifecyclePhase, noteLifecycleArrival, noteLifecyclePause, observeLifecycleFix, speedBucket, summariseLifecycle,
+} from '@/lib/backend/driveLifecycle';
+import {
+  acceptDriveFix as lcAccept, knownSpeedMs, noteFixTime as lcNoteFixTime, recordFix as lcRecordFix, setRecordPaused as lcSetPaused,
+} from '@/lib/backend/journeyRecorder';
+
+type LcEntry = Record<string, string | number | boolean | null>;
+
+/**
+ * A drive told as GPS fixes, fed to the lifecycle as either path would
+ * (observeLifecycleFix on the record). Positions are metres north/east of a
+ * point near Lincoln; every fix fed is kept, so the same trace can be played
+ * through CloudSync and the background recorder.
+ */
+class LcTrace {
+  t: number;
+  north = 0;
+  east = 0;
+  rec: JourneyRecord;
+  logs: LcEntry[] = [];
+  fixes: GpsFix[] = [];
+  journal = { log: (event: string, data: Record<string, unknown> = {}) => { if (event === 'drive_lifecycle') this.logs.push(data as LcEntry); } };
+  constructor(readonly path: 'app' | 'background' = 'app', start = Date.parse('2026-10-14T07:00:00Z')) {
+    this.t = start;
+    this.rec = newRecord({ clientRef: 'lc', startedAt: new Date(start), timezone: 'UTC', vehicleId: null, vehicleSnapshot: null });
+  }
+  get deps() { return { journal: this.journal, path: this.path }; }
+  fix(speedMs: number | null, accuracyM: number, dn = 0, de = 0): GpsFix {
+    return {
+      latitude: 53.23 + (this.north + dn) / 111_320, longitude: -0.54 + (this.east + de) / 66_640,
+      speedMs, headingDeg: null, accuracyM, altitudeM: null, timestamp: this.t,
+    };
+  }
+  feed(fix: GpsFix) { this.fixes.push(fix); observeLifecycleFix(this.rec, fix, this.deps); }
+  /** Driving north at speedMs, a fix every `every` s */
+  drive(seconds: number, speedMs = 15, o: { every?: number; reportSpeed?: boolean; accuracyM?: number } = {}) {
+    const every = o.every ?? 1;
+    for (let s = 0; s < seconds; s += every) {
+      this.t += every * 1000;
+      this.north += speedMs * every;
+      this.feed(this.fix(o.reportSpeed === false ? null : speedMs, o.accuracyM ?? 5));
+    }
+  }
+  /** Parked: a fix every `every` s, wandering within about jitterM, with the speed the phone reports */
+  park(seconds: number, o: { every?: number; jitterM?: number; accuracyM?: number; speedOf?: (i: number) => number | null } = {}) {
+    const every = o.every ?? 5;
+    const j = o.jitterM ?? 2;
+    for (let s = 0, i = 0; s < seconds; s += every, i++) {
+      this.t += every * 1000;
+      this.feed(this.fix(o.speedOf ? o.speedOf(i) : 0, o.accuracyM ?? 8, j * Math.sin(i * 1.7), j * Math.cos(i * 2.3)));
+    }
+  }
+  /** On foot (or a bike) eastwards at speedMs, reporting speedOf */
+  walk(seconds: number, speedMs: number, o: { every?: number; accuracyM?: number; speedOf?: (i: number) => number | null } = {}) {
+    const every = o.every ?? 1;
+    for (let s = 0, i = 0; s < seconds; s += every, i++) {
+      this.t += every * 1000;
+      this.east += speedMs * every;
+      this.feed(this.fix(o.speedOf ? o.speedOf(i) : speedMs, o.accuracyM ?? 5));
+    }
+  }
+  /** No fixes for a while (the car moving on at speedMs, or not) */
+  gap(seconds: number, speedMs = 0) { this.t += seconds * 1000; this.north += speedMs * seconds; }
+  evaluate() { return evaluateLifecycle(this.rec, this.t, this.deps); }
+  restart() { this.rec = JSON.parse(JSON.stringify(this.rec)) as JourneyRecord; }
+  steps() { return this.logs.map((l) => l.step); }
+  only(step: string) { return this.logs.filter((l) => l.step === step); }
+  get phase() { return lifecyclePhase(this.rec, this.t); }
+  get state() { return this.rec.lifecycle!; }
+  iso(ms: number) { return new Date(ms).toISOString(); }
+}
+
+test('lifecycle: unknown speed is never "stationary"; speeds are checked against the ground covered', () => {
+  const ref = { latitude: 53.23, longitude: -0.54, accuracyM: 5, t: 0 };
+  const at = (northM: number, t: number, speedMs: number | null, accuracyM: number | null = 5): GpsFix =>
+    ({ latitude: 53.23 + northM / 111_320, longitude: -0.54, speedMs, accuracyM, timestamp: t });
+  // 75 m in 5 s: a car at 15 m/s
+  assert.deepEqual(classifyMovement(at(75, 5000, 15), ref).reason, 'moving');
+  // The same with no speed from the phone: inferred, still moving
+  const inferred = classifyMovement(at(75, 5000, null), ref);
+  assert.equal(inferred.moving, true);
+  assert.ok(Math.abs(inferred.speedMs! - 15) < 0.1);
+  // What the old Drive screen sent for "unknown" (0) would have read as stationary
+  assert.equal(classifyMovement(at(75, 5000, 0), ref).reason, 'slow');
+  // Unknown with nothing to infer from: no evidence either way, never "slow"
+  assert.equal(classifyMovement(at(75, 5000, null), null).reason, 'no_reference');
+  assert.equal(classifyMovement(at(6, 5000, null), ref).reason, 'speed_unknown', 'within GPS noise: unknown, not stopped');
+  // A spurious speed with the car going nowhere; a GPS jump with a modest speed
+  assert.equal(classifyMovement(at(12, 5000, 6), ref).reason, 'inconsistent');
+  assert.equal(classifyMovement(at(400, 5000, 6), ref).reason, 'inconsistent');
+  // Vague fixes say nothing; walking pace is not a vehicle
+  assert.equal(classifyMovement(at(75, 5000, 15, 80), ref).reason, 'poor_accuracy');
+  assert.equal(classifyMovement(at(75, 5000, 15, null), ref).reason, 'poor_accuracy');
+  assert.equal(classifyMovement(at(7, 5000, 1.4), ref).reason, 'slow');
+  // Pairs too close or too far apart in time can't confirm anything
+  assert.equal(classifyMovement(at(15, 1000, 15), ref).reason, 'no_reference');
+  assert.equal(classifyMovement(at(300, 20_000, 15), ref).reason, 'no_reference');
+});
+
+test('lifecycle: the unknown-speed fix: one rule for every fix source, unknown stays null', () => {
+  assert.equal(knownSpeedMs(-1), null, 'iOS: invalid');
+  assert.equal(knownSpeedMs(null), null);
+  assert.equal(knownSpeedMs(undefined), null);
+  assert.equal(knownSpeedMs(Number.NaN), null);
+  assert.equal(knownSpeedMs(0), 0, 'a real 0 stays 0');
+  assert.equal(knownSpeedMs(12.5), 12.5);
+  // Foreground: the Drive screen passes the speed as it is; AppContext applies the rule
+  const drive = readNav('../app/(tabs)/(drive)/index.tsx');
+  assert.ok(!/speed: speedMs \?\? 0/.test(drive), 'unknown is never sent as 0');
+  assert.match(drive, /updateDriveCoordinate\(\{\s*latitude: lat,\s*longitude: lon,\s*speed: speedMs,/);
+  const ctx = readNav('../context/AppContext.tsx');
+  assert.match(ctx, /speedMs: knownSpeedMs\(p\.speed\)/);
+  assert.match(ctx, /updateDriveCoordinate: \(coord: Coordinate & \{ speed: number \| null;/);
+  // Background: the same rule
+  assert.match(readNav('../lib/driveBackgroundLocation.ts'), /speedMs: knownSpeedMs\(loc\.coords\.speed\),/);
+});
+
+test('lifecycle: missing speed on both paths: the car still moves, stops and drives on exactly as with speeds', async () => {
+  const run = (reportSpeed: boolean) => {
+    const tr = new LcTrace();
+    tr.drive(600, 15, { reportSpeed });
+    tr.park(10 * 60, { every: 5, jitterM: 4, speedOf: () => (reportSpeed ? 0 : null) });
+    tr.drive(120, 15, { reportSpeed });
+    return tr;
+  };
+  const withSpeed = run(true);
+  const without = run(false);
+  assert.deepEqual(without.steps(), withSpeed.steps());
+  assert.deepEqual(without.steps(), ['movement_detected', 'stop_candidate_started', 'would_temporarily_stop', 'would_resume']);
+  assert.equal(without.only('stop_candidate_started')[0]!.reason, 'speed_unknown');
+  assert.equal(without.state.closedStops!.length, 1);
+  // A fix with no speed reaches the drive as null through CloudSync (the screen's path) and the background recorder
+  const clock = { t: Date.parse('2026-10-14T07:00:00Z') };
+  const b = recoveryApp(new MemoryStore(), clock);
+  await b.app.start();
+  await b.app.startDrive(null);
+  await settle();
+  const seen: (number | null)[] = [];
+  b.app.onDriveFix((f) => seen.push(f.speedMs));
+  for (const fix of without.fixes.slice(0, 20)) { clock.t = fix.timestamp; b.app.addFix(fix); }
+  assert.ok(seen.length > 0 && seen.every((v) => v === null), 'live location and the live route see unknown, not 0');
+  // …and the lifecycle infers the movement from the positions
+  assert.equal(b.app.activeRecord!.lifecycle!.lastMovingAt, without.iso(without.fixes[19]!.timestamp));
+  assert.equal((await b.journal.read()).filter((e) => e.event === 'drive_lifecycle')[0]!.first, true);
+});
+
+test('lifecycle trace: 30 min drive, parked, End forgotten: would stop at once (backdated) and finish 60 min after parking', () => {
+  // No fixes while parked (background updates only come every 10 m): judged when the app next looks
+  const tr = new LcTrace();
+  tr.drive(30 * 60);
+  const parkedAt = tr.t;
+  tr.gap(2 * 3600);
+  assert.equal(tr.evaluate(), 'finished');
+  assert.deepEqual(tr.steps(), ['movement_detected', 'stop_candidate_started', 'would_temporarily_stop', 'would_auto_finish']);
+  assert.equal(tr.state.stopStartedAt, tr.iso(parkedAt), 'the stop began at the last movement');
+  assert.equal(tr.state.wouldEndAt, tr.iso(parkedAt), 'it would end where it stopped, not when noticed');
+  assert.equal(tr.state.autoEndReason, 'stop_grace');
+  assert.equal(activeDurationMs(tr.rec, tr.t), 30 * 60_000, 'the 2 h parked is not driving');
+  // With fixes while parked (phone wandering a little): the same story, as it happens
+  const live = new LcTrace();
+  live.drive(30 * 60);
+  const stop = live.t;
+  live.park(2 * 3600, { every: 30, jitterM: 3 });
+  assert.deepEqual(live.steps().filter((s) => s !== 'failsafe_would_fire'),
+    ['movement_detected', 'stop_candidate_started', 'would_temporarily_stop', 'would_auto_finish']);
+  assert.equal(live.only('would_temporarily_stop')[0]!.decidedAfter, '5-10m');
+  assert.deepEqual(live.only('failsafe_would_fire').map((l) => [l.failsafe, l.agrees]), [['low_displacement', true]]);
+  assert.equal(live.state.wouldEndAt, live.iso(stop));
+  const finish = live.fixes.find((f) => f.timestamp >= stop + LIFECYCLE.graceMs)!;
+  assert.equal(live.only('would_auto_finish').length, 1);
+  assert.equal(graceDeadline(live.state), stop + LIFECYCLE.graceMs);
+  assert.ok(finish, 'decided by the first fix past the grace period');
+});
+
+test('lifecycle trace: traffic lights and a stop-and-go jam are never a temporary stop', () => {
+  const lights = new LcTrace();
+  lights.drive(120);
+  lights.park(45, { every: 1 });
+  lights.drive(60);
+  assert.deepEqual(lights.steps(), ['movement_detected', 'stop_candidate_started', 'movement_detected']);
+  assert.equal(lights.logs[2]!.stopped, '30s-1m');
+  assert.deepEqual(lights.state.stopHist, { '30s-1m': 1 });
+  assert.equal(lights.phase, 'driving');
+  // Ten minutes of queueing: 40 s still, 20 s at walking-plus pace, over and over
+  const jam = new LcTrace();
+  jam.drive(300, 25);
+  for (let i = 0; i < 10; i++) { jam.park(40, { every: 1 }); jam.drive(20, 4); }
+  jam.drive(60, 25);
+  assert.ok(!jam.steps().includes('would_temporarily_stop'));
+  assert.equal(jam.only('movement_detected').filter((l) => !l.first).length, 10);
+  assert.equal(activeDurationMs(jam.rec, jam.t), jam.t - Date.parse(jam.rec.startedAt), 'all of it is driving');
+});
+
+test('lifecycle trace: motorway standstill, fuel stop, 30 and 40 min stops: would stop, then resume, and only the stops come off', () => {
+  const m = new LcTrace();
+  m.drive(600, 30);
+  m.park(20 * 60, { every: 1, jitterM: 1 });
+  m.drive(120, 25);
+  assert.deepEqual(m.steps().filter((s) => s !== 'failsafe_would_fire'), ['movement_detected', 'stop_candidate_started', 'would_temporarily_stop', 'would_resume']);
+  assert.deepEqual(m.only('failsafe_would_fire').map((l) => l.agrees), [true], 'the failsafe agrees, and does nothing');
+  assert.equal(m.only('would_resume')[0]!.stopped, '10-30m');
+  assert.equal(m.only('would_resume')[0]!.speed, '90+kmh');
+  // Fuel: 8 minutes on the forecourt, pulling out at 43 km/h
+  const fuel = new LcTrace();
+  fuel.drive(600);
+  fuel.park(8 * 60, { every: 2, jitterM: 3 });
+  fuel.drive(60, 12);
+  assert.equal(fuel.only('would_resume')[0]!.stopped, '5-10m');
+  assert.equal(fuel.phase, 'driving');
+  // 30 then 40 minutes stopped, driving on each time: never finished
+  const long = new LcTrace();
+  long.drive(900);
+  const s1 = long.t;
+  long.park(30 * 60, { every: 30 });
+  long.drive(900);
+  const s2 = long.t;
+  long.park(40 * 60, { every: 30 });
+  long.drive(300);
+  assert.deepEqual(long.only('would_resume').map((l) => l.stopped), ['30-60m', '30-60m']);
+  assert.ok(!long.steps().includes('would_auto_finish'));
+  assert.equal(long.state.closedStops!.length, 2);
+  assert.equal(long.state.closedStops![0]!.from, long.iso(s1));
+  assert.equal(long.state.closedStops![1]!.from, long.iso(s2));
+  const driven = (900 + 900 + 300) * 1000;
+  const active = activeDurationMs(long.rec, long.t);
+  assert.ok(active >= driven - 2000 && active <= driven + 20_000, `active ${active / 1000} s ≈ driven ${driven / 1000} s`);
+});
+
+test('lifecycle trace: a 60 min stop would finish at the stop point; driving on after that would have split the drive', () => {
+  const tr = new LcTrace();
+  tr.drive(1200);
+  const stop = tr.t;
+  tr.park(65 * 60, { every: 60 });
+  assert.equal(tr.phase, 'finished');
+  assert.equal(tr.state.wouldEndAt, tr.iso(stop));
+  assert.equal(tr.only('would_auto_finish')[0]!.reason, 'stop_grace');
+  assert.ok(tr.fixes.some((f) => f.timestamp === stop + LIFECYCLE.graceMs), 'decided by the fix at the deadline');
+  tr.drive(60, 20);
+  assert.equal(tr.only('would_have_split').length, 1);
+  assert.equal(tr.phase, 'driving');
+  // 59 minutes: still resumable (the grace runs from the stop point, not from when the stop was decided)
+  const just = new LcTrace();
+  just.drive(1200);
+  just.park(59 * 60, { every: 60 });
+  just.drive(60, 20);
+  assert.ok(!just.steps().includes('would_auto_finish'));
+  assert.equal(just.only('would_resume')[0]!.stopped, '30-60m');
+});
+
+test('lifecycle trace: walking or cycling away from the parked car never resumes the drive', () => {
+  const walk = new LcTrace();
+  walk.drive(600);
+  walk.park(60, { every: 1 });
+  // A brisk walk, with the odd GPS speed spike
+  walk.walk(15 * 60, 1.4, { speedOf: (i) => (i % 30 === 0 ? 3.5 : 1.4) });
+  // …and the same walk with no speed at all
+  walk.walk(5 * 60, 1.4, { speedOf: () => null });
+  assert.deepEqual(walk.steps(), ['movement_detected', 'stop_candidate_started', 'would_temporarily_stop']);
+  walk.gap(45 * 60);
+  assert.equal(walk.evaluate(), 'finished');
+  // Cycling at 18 km/h after the stop was confirmed: moving, but not like a car
+  const bike = new LcTrace();
+  bike.drive(600);
+  const stop = bike.t;
+  bike.park(6 * 60, { every: 10 });
+  bike.walk(20 * 60, 5);
+  assert.ok(!bike.steps().includes('would_resume'));
+  assert.equal(bike.state.lastMovingAt, bike.iso(stop), 'cycling never counts as the car moving');
+  bike.walk(40 * 60, 5);
+  assert.equal(bike.state.wouldEndAt, bike.iso(stop));
+});
+
+test('lifecycle trace: parked GPS noise is not movement; wander read as movement is caught by the low-displacement failsafe', () => {
+  const tr = new LcTrace();
+  tr.drive(600);
+  // Wandering within its accuracy, with junk speeds: 0.3, iOS's -1, and the odd 3.4
+  tr.park(30 * 60, { every: 1, jitterM: 6, accuracyM: 10, speedOf: (i) => (i % 7 === 0 ? 3.4 : i % 5 === 0 ? -1 : 0.3) });
+  assert.equal(tr.only('movement_detected').length, 1, 'only the drive itself');
+  assert.ok(tr.steps().includes('would_temporarily_stop'));
+  // Wander well beyond the accuracy the phone claims, with plausible speeds: the rules are fooled…
+  const fooled = new LcTrace();
+  fooled.drive(600);
+  const parked = fooled.t;
+  fooled.park(90 * 60, { every: 1, jitterM: 15, accuracyM: 3, speedOf: () => 4 });
+  const fs = fooled.only('failsafe_would_fire');
+  assert.deepEqual(fs.map((l) => [l.failsafe, l.agrees]), [['low_displacement', false]], 'the rules never saw a stop');
+  assert.ok(!fooled.steps().includes('stop_candidate_started'), 'the noise kept reading as movement');
+  // …the failsafe isn't: a stop from the start of its window, and the grace period as usual
+  assert.deepEqual(fooled.only('would_temporarily_stop').map((l) => l.by), ['failsafe']);
+  const from = Date.parse(fooled.state.wouldEndAt!);
+  assert.ok(from >= parked && from <= parked + 2 * 60_000, 'ends about where it parked');
+  assert.equal(fooled.state.autoEndReason, 'stop_grace');
+});
+
+test('lifecycle trace: a GPS gap while driving (a tunnel) is never taken for a stop', () => {
+  const tr = new LcTrace();
+  tr.drive(300);
+  tr.gap(6 * 60, 15);
+  tr.drive(60);
+  assert.deepEqual(tr.steps(), ['movement_detected']);
+  assert.equal(tr.phase, 'driving');
+  // No signal while parked: no movement across the gap, so it is a stop
+  const garage = new LcTrace();
+  garage.drive(300);
+  garage.gap(10 * 60);
+  garage.park(30, { every: 5 });
+  assert.equal(garage.phase, 'temporarily_stopped');
+});
+
+test('lifecycle trace: manual pause is authoritative: the classifier stands aside, however long', () => {
+  const tr = new LcTrace();
+  tr.drive(300);
+  tr.park(120, { every: 1 });
+  assert.equal(tr.phase, 'stop_candidate');
+  lcSetPaused(tr.rec, true, tr.t);
+  noteLifecyclePause(tr.rec, tr.t, tr.deps);
+  assert.equal(tr.phase, 'manual_paused');
+  tr.park(90 * 60, { every: 10 });
+  assert.equal(tr.evaluate(), 'manual_paused');
+  assert.ok(!tr.steps().includes('would_temporarily_stop') && !tr.steps().includes('would_auto_finish'));
+  assert.deepEqual(tr.only('manual_pause_override').map((l) => l.state), ['stop_candidate']);
+  lcSetPaused(tr.rec, false, tr.t);
+  noteLifecyclePause(tr.rec, tr.t, tr.deps);
+  assert.equal(tr.steps().at(-1), 'manual_pause_ended');
+  tr.drive(120);
+  assert.equal(tr.phase, 'driving');
+  assert.ok(!tr.steps().includes('would_temporarily_stop'), 'the stop is never measured across the pause');
+  // Paused and resumed with no fix between (the Drive screen sends none while paused): still seen
+  const quiet = new LcTrace();
+  quiet.drive(300);
+  lcSetPaused(quiet.rec, true, quiet.t);
+  quiet.gap(20 * 60);
+  lcSetPaused(quiet.rec, false, quiet.t);
+  quiet.drive(60);
+  assert.deepEqual(quiet.steps(), ['movement_detected', 'manual_pause_override', 'manual_pause_ended']);
+  assert.ok(activeDurationMs(quiet.rec, quiet.t) <= 361_000, 'the pause is not driving');
+});
+
+test('lifecycle trace: navigation arrival is noted; nothing ends', () => {
+  const tr = new LcTrace();
+  tr.drive(900);
+  noteLifecycleArrival(tr.rec, tr.t, tr.deps);
+  noteLifecycleArrival(tr.rec, tr.t + 2000, tr.deps); // the screen rendering the arrival again
+  assert.deepEqual(tr.only('navigation_arrival_seen').map((l) => l.phase), ['driving']);
+  tr.park(70 * 60, { every: 60 });
+  assert.equal(tr.only('would_temporarily_stop')[0]!.arrivedBefore, '<30s');
+  assert.ok(tr.steps().includes('would_auto_finish'));
+  summariseLifecycle(tr.rec, tr.t, tr.journal, 'app');
+  assert.equal(tr.logs.at(-1)!.arrived, true);
+  // The Drive screen: arrival is noted for every drive, and still ends only a drive navigation started
+  const drive = readNav('../app/(tabs)/(drive)/index.tsx');
+  assert.match(drive, /if \(st\.phase !== "arrived"\) return;\s*noteNavigationArrival\(\);\s*if \(st\.recording !== "navigation"\) return;\s*navSession\.end\("arrived"\);\s*endDriveRef\.current\(\);/);
+});
+
+test('lifecycle: restarts: the phase is worked out again from what was saved, backdated as before', () => {
+  // During the stop candidate
+  const a = new LcTrace();
+  a.drive(300);
+  const stopA = a.t;
+  a.park(60, { every: 1 });
+  a.restart();
+  assert.equal(a.evaluate(), 'stop_candidate');
+  a.gap(4 * 60);
+  a.restart();
+  assert.equal(a.evaluate(), 'temporarily_stopped');
+  assert.equal(a.state.stopStartedAt, a.iso(stopA));
+  // During the grace period: resumable, against the same deadline
+  const b = new LcTrace();
+  b.drive(300);
+  const stopB = b.t;
+  b.park(20 * 60, { every: 30 });
+  b.restart();
+  b.gap(10 * 60);
+  assert.equal(b.evaluate(), 'temporarily_stopped');
+  assert.equal(graceDeadline(b.state), stopB + LIFECYCLE.graceMs);
+  b.drive(60, 20);
+  assert.equal(b.only('would_resume').length, 1);
+  // After the grace period ran out
+  const c = new LcTrace();
+  c.drive(300);
+  const stopC = c.t;
+  c.park(10 * 60, { every: 30 });
+  c.restart();
+  c.gap(2 * 3600);
+  assert.equal(c.evaluate(), 'finished');
+  assert.equal(c.state.wouldEndAt, c.iso(stopC));
+  // Moments after moving
+  const d = new LcTrace();
+  d.drive(300);
+  d.restart();
+  d.gap(10);
+  const before = d.logs.length;
+  assert.equal(d.evaluate(), 'driving');
+  assert.equal(d.logs.length, before);
+  // During a manual pause, however long
+  const e = new LcTrace();
+  e.drive(300);
+  lcSetPaused(e.rec, true, e.t);
+  noteLifecyclePause(e.rec, e.t, e.deps);
+  e.restart();
+  e.gap(5 * 3600);
+  assert.equal(e.evaluate(), 'manual_paused');
+  assert.ok(!e.steps().includes('would_auto_finish'));
+});
+
+test('lifecycle: failsafes: long still, absolute age (shadow only)', () => {
+  const tr = new LcTrace();
+  tr.drive(300);
+  tr.state.keepOpenUntil = new Date(tr.t + 10 * 3600_000).toISOString(); // kept open: grace never ends it
+  tr.gap(3 * 3600 + 60);
+  assert.equal(tr.evaluate(), 'finished');
+  assert.equal(tr.state.autoEndReason, 'failsafe_long_still');
+  const old = new LcTrace();
+  for (let h = 0; h < 25; h++) old.drive(3600, 3.5, { every: 5 });
+  assert.equal(old.state.autoEndReason, 'failsafe_age');
+  assert.deepEqual(old.state.failsafes, ['age']);
+});
+
+test('lifecycle: the future duration model: wall clock less pauses and temporary stops (not wired in)', () => {
+  const start = Date.parse('2026-10-14T07:00:00Z');
+  const rec = newRecord({ clientRef: 'd', startedAt: new Date(start), timezone: 'UTC', vehicleId: null, vehicleSnapshot: null });
+  const m = 60_000;
+  rec.pausedMs = 5 * m;
+  rec.lifecycle = { closedStops: [{ from: new Date(start + 10 * m).toISOString(), to: new Date(start + 20 * m).toISOString() }] };
+  assert.equal(activeDurationMs(rec, start + 60 * m), 45 * m);
+  // An open stop counts from its backdated start; an open pause too
+  rec.lifecycle.stopConfirmed = true;
+  rec.lifecycle.stopStartedAt = new Date(start + 50 * m).toISOString();
+  assert.equal(activeDurationMs(rec, start + 60 * m), 35 * m);
+  rec.lifecycle.stopConfirmed = false;
+  rec.pausedAt = new Date(start + 55 * m).toISOString();
+  assert.equal(activeDurationMs(rec, start + 60 * m), 40 * m);
+  // Never below 0, never past the end of an ended drive
+  rec.endedAt = new Date(start + 30 * m).toISOString();
+  rec.pausedAt = null;
+  assert.equal(activeDurationMs(rec, start + 60 * m), 15 * m);
+  assert.equal(activeDurationMs({ ...rec, pausedMs: 99 * m }, start + 60 * m), 0);
+  // Not used for the saved drive: the server still gets the wall-clock end
+  assert.ok(!/activeDurationMs/.test(readNav('../lib/backend/cloudSync.ts')));
+  assert.ok(!/activeDurationMs/.test(readNav('../lib/backend/journeyRecorder.ts')));
+});
+
+test('lifecycle: diagnostics are buckets only, and capped per drive', () => {
+  assert.equal(elapsedBucket(29_000), '<30s');
+  assert.equal(elapsedBucket(4 * 3600_000), '>3h');
+  assert.equal(elapsedBucket(null), 'unknown');
+  assert.equal(speedBucket(null), 'unknown');
+  assert.equal(speedBucket(30), '90+kmh');
+  assert.equal(accuracyBucket(12), '10-30m');
+  assert.equal(displacementBucket(150), '100-500m');
+  // 200 sets of lights in one drive
+  const tr = new LcTrace();
+  tr.drive(60);
+  for (let i = 0; i < 200; i++) { tr.park(30, { every: 1 }); tr.drive(30); }
+  assert.equal(tr.logs.length, LIFECYCLE.maxLogs);
+  assert.equal(tr.state.stopHist!['30s-1m'], 200, 'the histogram still counts every stop');
+  summariseLifecycle(tr.rec, tr.t, tr.journal, 'app');
+  assert.equal(tr.logs.at(-1)!.step, 'summary', 'the summary is always written');
+  assert.equal(tr.logs.at(-1)!.stops, '30s-1m:200');
+  // State saved on the record stays small however long the drive
+  assert.ok(JSON.stringify(tr.state).length < 4000, `${JSON.stringify(tr.state).length} bytes`);
+});
+
+/** Plays a trace's fixes through CloudSync.addFix, as the Drive screen and the background task do with the app running */
+async function lcThroughApp(fixes: GpsFix[], clock: { t: number }, b: RecoveryApp) {
+  for (let i = 0; i < fixes.length; i++) {
+    clock.t = fixes[i]!.timestamp;
+    b.app.addFix(fixes[i]!);
+    if (i % 50 === 0) await settle();
+  }
+  await settle();
+}
+
+const lcStart = Date.parse('2026-10-14T07:00:00Z');
+function lcScenario(path: 'app' | 'background') {
+  const tr = new LcTrace(path, lcStart);
+  tr.drive(300);
+  tr.park(8 * 60, { every: 5 });
+  tr.drive(200, 20);
+  tr.park(70 * 60, { every: 60 });
+  tr.drive(120, 20);
+  return tr;
+}
+
+test('lifecycle: both paths reach the same state from the same fixes (CloudSync and the background recorder)', async () => {
+  const pure = lcScenario('app');
+  // The app running
+  const clock = { t: lcStart };
+  const a = recoveryApp(new MemoryStore(), clock);
+  await a.app.start();
+  await a.app.startDrive(null);
+  assert.equal(a.app.activeRecord!.startedAt, pure.rec.startedAt);
+  await lcThroughApp(pure.fixes, clock, a);
+  // The background recorder alone, the app not running
+  const clock2 = { t: lcStart };
+  const store = new MemoryStore();
+  const b = recoveryApp(store, clock2);
+  await b.app.start();
+  await b.app.startDrive(null);
+  await settle();
+  await b.app.saveActiveNow();
+  b.app.dispose();
+  const journal = new DiagnosticsJournal({ store: new MemoryStore(), now: () => clock2.t });
+  const headless = new BackgroundDriveRecorder({ store, updates: b.updates, now: () => clock2.t, journal });
+  for (let i = 0; i < pure.fixes.length; i += 5) {
+    const batch = pure.fixes.slice(i, i + 5);
+    clock2.t = batch.at(-1)!.timestamp;
+    await headless.deliver(batch);
+  }
+  await headless.attach('u1', () => {});
+  const json = (v: unknown) => JSON.parse(JSON.stringify(v));
+  const expected = json(pure.rec.lifecycle);
+  assert.deepEqual(json(a.app.activeRecord!.lifecycle), expected, 'app path');
+  assert.deepEqual(json((await savedActive(store)).lifecycle), expected, 'background path');
+  const steps = async (j: DiagnosticsJournal) => (await j.read()).filter((e) => e.event === 'drive_lifecycle');
+  const appSteps = await steps(a.journal);
+  const bgSteps = await steps(journal);
+  assert.deepEqual(appSteps.map((e) => e.step), pure.steps());
+  assert.deepEqual(bgSteps.map((e) => e.step), pure.steps());
+  assert.ok(appSteps.every((e) => e.path === 'app') && bgSteps.every((e) => e.path === 'background'));
+  assert.deepEqual(pure.steps(), [
+    'movement_detected', 'stop_candidate_started', 'would_temporarily_stop', 'would_resume',
+    'stop_candidate_started', 'would_temporarily_stop', 'failsafe_would_fire', 'would_auto_finish', 'would_have_split',
+  ]);
+});
+
+test('lifecycle shadow mode changes nothing: points, distance, live fixes, presence, the end of the drive', async () => {
+  const pure = lcScenario('app');
+  const clock = { t: lcStart };
+  const a = recoveryApp(new MemoryStore(), clock);
+  await a.app.start();
+  await a.app.startDrive(null);
+  let liveFixes = 0;
+  a.app.onDriveFix(() => liveFixes++);
+  await lcThroughApp(pure.fixes, clock, a);
+  // What the recorder did before the lifecycle existed, for the same fixes
+  const ref = newRecord({ clientRef: 'ref', startedAt: new Date(lcStart), timezone: 'UTC', vehicleId: null, vehicleSnapshot: null });
+  let last: GpsFix | null = null;
+  let accepted = 0;
+  for (const fix of pure.fixes) {
+    lcNoteFixTime(ref, fix);
+    if (!lcAccept(ref, last, fix)) continue;
+    last = fix;
+    accepted++;
+    lcRecordFix(ref, fix);
+  }
+  const rec = a.app.activeRecord!;
+  assert.deepEqual(rec.points, ref.points);
+  assert.equal(rec.clientDistanceKm, ref.clientDistanceKm);
+  assert.equal(rec.topSpeedKmh, ref.topSpeedKmh);
+  assert.equal(rec.lastFixAt, ref.lastFixAt);
+  assert.equal(liveFixes, accepted, 'every fix still reaches the live route and live location');
+  // It "would" have finished during the 70 min stop; it didn't: still driving, still present
+  assert.ok(pure.steps().includes('would_auto_finish'));
+  assert.equal(a.app.isDriving, true);
+  assert.equal(rec.endedAt, null);
+  assert.equal(rec.pausedMs, 0);
+  // Ended by the user: ends now, at wall clock, as before
+  clock.t += 30_000;
+  const endAt = clock.t;
+  await a.app.endDrive();
+  await settle();
+  await a.app.syncJourneys().catch(() => {});
+  await settle();
+  const j = a.server.journeys[0]!;
+  assert.equal(j.status, 'completed');
+  assert.equal(j.endedAt, new Date(endAt).toISOString());
+  assert.ok(!JSON.stringify(a.server.journeys).includes('lifecycle'), 'never uploaded');
+  const summary = (await a.journal.read()).filter((e) => e.event === 'drive_lifecycle' && e.step === 'summary');
+  assert.equal(summary.length, 1);
+  assert.equal(summary[0]!.wouldEnd, null, 'driven on after it: the would-be end was taken back');
+  assert.equal(summary[0]!.closedStops, 1);
+  assert.equal(summary[0]!.wall, '1-3h');
+  // Nothing in the app acts on the lifecycle: only cloudSync and driveTracking call into it, to observe
+  const callers = ['app', 'components', 'context', 'hooks', 'lib'].flatMap((dir) => lcSources(join(MOBILE, dir)))
+    .filter((f) => !f.endsWith('driveLifecycle.ts') && /from '\.\/driveLifecycle'|driveLifecycle'/.test(readFileSync(f, 'utf8')));
+  assert.deepEqual(callers.map((f) => f.slice(MOBILE.length)).sort(), ['lib/backend/cloudSync.ts', 'lib/backend/driveTracking.ts', 'lib/backend/journeyRecorder.ts']);
+  const imports = readNav('../lib/backend/cloudSync.ts').match(/import \{([^}]*)\} from '\.\/driveLifecycle'/)![1]!.split(',').map((s) => s.trim()).sort();
+  assert.deepEqual(imports, ['evaluateLifecycle', 'noteLifecycleArrival', 'noteLifecyclePause', 'observeLifecycleFix', 'summariseLifecycle']);
+  // No notifications, no new permissions
+  const pkg = readFileSync(join(MOBILE, 'package.json'), 'utf8');
+  assert.ok(!/expo-notifications/.test(pkg));
+});
+
+function lcSources(dir: string): string[] {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((d) => {
+    const p = join(dir, d.name);
+    if (d.isDirectory()) return d.name === 'node_modules' ? [] : lcSources(p);
+    return /\.(ts|tsx)$/.test(d.name) ? [p] : [];
+  });
+}
+
+test('lifecycle: recovery is unchanged; the shadow only says what it would have done', async () => {
+  const clock = { t: lcStart };
+  const store = new MemoryStore();
+  const updates = new FakeUpdates();
+  const first = recoveryApp(store, clock, updates);
+  await first.app.start();
+  await first.app.startDrive(null);
+  const tr = new LcTrace('app', lcStart);
+  tr.drive(600);
+  await lcThroughApp(tr.fixes, clock, first);
+  const lastFix = clock.t;
+  await first.app.saveActiveNow();
+  first.app.dispose();
+  // Relaunched 90 minutes later
+  clock.t += 90 * 60_000;
+  const second = recoveryApp(store, clock, updates);
+  await second.app.start();
+  await settle();
+  const entries = await second.journal.read();
+  const recovery = entries.find((e) => e.event === 'drive_lifecycle' && e.step === 'recovery')!;
+  assert.equal(recovery.phase, 'finished');
+  assert.equal(recovery.actual, 'finish');
+  const summary = entries.find((e) => e.event === 'drive_lifecycle' && e.step === 'summary')!;
+  assert.equal(summary.wouldEnd, 'stop_grace');
+  // Finished as before: at its last activity
+  const pending = JSON.parse((await store.getItem(userKey('u1', 'journey/pending')))!) as JourneyRecord[];
+  assert.equal(pending[0]!.endedAt, new Date(lastFix).toISOString());
+  // Relaunched moments after, still tracking: carried on, as before
+  const clock2 = { t: lcStart };
+  const store2 = new MemoryStore();
+  const updates2 = new FakeUpdates();
+  const one = recoveryApp(store2, clock2, updates2);
+  await one.app.start();
+  await one.app.startDrive(null);
+  await settle();
+  await lcThroughApp(tr.fixes, clock2, one);
+  await one.app.saveActiveNow();
+  one.app.dispose();
+  clock2.t += 20_000;
+  const two = recoveryApp(store2, clock2, updates2);
+  await two.app.start();
+  await settle();
+  const r2 = (await two.journal.read()).find((e) => e.event === 'drive_lifecycle' && e.step === 'recovery')!;
+  assert.equal(r2.phase, 'stop_candidate');
+  assert.equal(r2.actual, 'resume');
+  assert.equal(two.app.isDriving, true);
+  // A drive saved by an older build has no lifecycle: nothing is guessed for it
+  const clock3 = { t: lcStart };
+  const store3 = new MemoryStore();
+  const old = newRecord({ clientRef: 'old', startedAt: new Date(lcStart), timezone: 'UTC', vehicleId: null, vehicleSnapshot: null });
+  await store3.setItem(ACTIVE_KEY, JSON.stringify(old));
+  clock3.t += 5 * 3600_000;
+  const three = recoveryApp(store3, clock3);
+  await three.app.start();
+  await settle();
+  assert.ok(!(await three.journal.read()).some((e) => e.event === 'drive_lifecycle' && e.step === 'recovery'));
+});
+
+test('lifecycle diagnostics hold no place, route, identity or exact time', async () => {
+  const pure = lcScenario('app');
+  const clock = { t: lcStart };
+  const a = recoveryApp(new MemoryStore(), clock);
+  await a.app.start();
+  await a.app.startDrive(null);
+  await lcThroughApp(pure.fixes, clock, a);
+  a.app.noteNavigationArrival();
+  clock.t += 1000;
+  await a.app.endDrive();
+  await settle();
+  const entries = (await a.journal.read()).filter((e) => e.event === 'drive_lifecycle');
+  assert.ok(entries.length >= 10);
+  const clientRef = pure.rec.clientRef;
+  for (const e of entries) {
+    for (const [k, v] of Object.entries(e)) {
+      if (k === 't' || k === 'event') continue; // the journal's own
+      assert.ok(!/lat|lon|lng|coord|dest|road|street|route|name|user|ref|id$|At$|time/i.test(k), `field ${k}`);
+      assert.ok(v === null || typeof v === 'boolean' || typeof v === 'string' || Number.isInteger(v), `${k}: ${v}`);
+      if (typeof v === 'string') {
+        assert.ok(!/\d{4}-\d\d-\d\dT|\d+\.\d{3,}/.test(v), `${k}: ${v}`);
+        assert.notEqual(v, clientRef);
+      }
+    }
+  }
+});
+
+test('lifecycle: a drive that waits before it ever moves; and a lifecycle failure never stops recording', async () => {
+  // Started, then waiting 6 minutes before setting off: the stop is measured from the start
+  const tr = new LcTrace();
+  tr.park(6 * 60, { every: 5 });
+  assert.equal(tr.phase, 'temporarily_stopped');
+  assert.equal(tr.state.stopStartedAt, tr.rec.startedAt);
+  assert.equal(tr.only('stop_candidate_started')[0]!.neverMoved, true);
+  tr.drive(60, 20);
+  assert.equal(tr.only('would_resume').length, 1);
+  assert.equal(tr.only('would_resume')[0]!.fromStop, 'unknown');
+  // Whatever goes wrong in the lifecycle, the fix is still recorded
+  const clock = { t: lcStart };
+  const a = recoveryApp(new MemoryStore(), clock);
+  await a.app.start();
+  await a.app.startDrive(null);
+  await settle();
+  (a.app.activeRecord!.lifecycle as unknown) = { samples: {} }; // corrupt state
+  const trace = new LcTrace('app', lcStart);
+  trace.drive(120);
+  await lcThroughApp(trace.fixes, clock, a);
+  const ref = newRecord({ clientRef: 'ref', startedAt: new Date(lcStart), timezone: 'UTC', vehicleId: null, vehicleSnapshot: null });
+  let last: GpsFix | null = null;
+  for (const fix of trace.fixes) { if (lcAccept(ref, last, fix)) { last = fix; lcRecordFix(ref, fix); } }
+  assert.deepEqual(a.app.activeRecord!.points, ref.points);
+  const errors = (await a.journal.read()).filter((e) => e.event === 'drive_lifecycle' && e.step === 'error');
+  assert.deepEqual(errors.map((e) => e.error), ['TypeError'], 'once per drive, never a flood');
+  // The same shield on the background path
+  const store = new MemoryStore();
+  const b = recoveryApp(store, { t: lcStart });
+  await b.app.start();
+  await b.app.startDrive(null);
+  await settle();
+  (b.app.activeRecord!.lifecycle as unknown) = { samples: {} };
+  await b.app.saveActiveNow();
+  b.app.dispose();
+  const headless = new BackgroundDriveRecorder({ store, updates: b.updates, now: () => trace.t });
+  await headless.deliver(trace.fixes);
+  await headless.attach('u1', () => {});
+  assert.deepEqual((await savedActive(store)).points, ref.points);
+});

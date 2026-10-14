@@ -20,6 +20,7 @@ import {
   JourneyStore, MIN_DRIVE_MS, acceptDriveFix, activeDriveMs, dedupeDrives, isLongEnoughToSave, lastActivityMs, lastRecordedFix,
   newJourneyRecord, noteFixTime, recordFix, setRecordPaused, syncJourneyRecord, type FixRef, type GpsFix, type JourneyRecord,
 } from './journeyRecorder';
+import { evaluateLifecycle, noteLifecycleArrival, noteLifecyclePause, observeLifecycleFix, summariseLifecycle } from './driveLifecycle';
 import { noJournal, type Journal } from './journal';
 import type { BackgroundTracking, DriveTracker } from './driveTracking';
 import { decayPresence, type DriveState, type FriendPresenceStatus, type PresenceEvent } from './presence';
@@ -371,7 +372,13 @@ export class CloudSync {
     const tracking = session === 'unknown'
       || (!!session && session.userId === this.deps.userId && session.clientRef === rec.clientRef);
     const quietMs = this.now() - lastActivityMs(rec);
-    if (!alreadyPending && tracking && this.isRecent(rec)) {
+    const resume = !alreadyPending && tracking && this.isRecent(rec);
+    // Shadow mode: what the lifecycle makes of the drive now, beside what recovery actually does
+    if (rec.lifecycle) {
+      const phase = evaluateLifecycle(rec, this.now(), { journal: this.journal, path: 'app' });
+      this.journal.log('drive_lifecycle', { step: 'recovery', path: 'app', phase, actual: resume ? 'resume' : 'finish' });
+    }
+    if (resume) {
       // Still being recorded in the background (the system relaunched the
       // app, or it was reopened moments after closing): carry on with it.
       this.lastFix = lastRecordedFix(rec);
@@ -403,6 +410,7 @@ export class CloudSync {
    */
   private async finishInterrupted(rec: JourneyRecord, reason: string): Promise<void> {
     const ended: JourneyRecord = { ...rec, endedAt: rec.endedAt ?? new Date(lastActivityMs(rec)).toISOString() };
+    if (!rec.endedAt) summariseLifecycle(ended, this.now(), this.journal, 'app');
     const drivenMs = activeDriveMs(ended, this.now());
     const kept = isLongEnoughToSave(drivenMs);
     this.journal.log('recovery_finish', {
@@ -1109,11 +1117,22 @@ export class CloudSync {
     return this.active ? activeDriveMs(this.active, this.now()) : null;
   }
 
+  /**
+   * Navigation arrived at its destination during the drive (shadow mode):
+   * noted for the lifecycle diagnostics. Changes nothing about the drive.
+   */
+  noteNavigationArrival(): void {
+    const rec = this.active;
+    if (!rec || this.passenger) return;
+    noteLifecycleArrival(rec, this.now(), { journal: this.journal, path: 'app' });
+  }
+
   /** The drive was paused or resumed: noted on the record so it survives a restart */
   setDrivePaused(paused: boolean): void {
     const rec = this.active;
     if (!rec) return;
     setRecordPaused(rec, paused, this.now());
+    noteLifecyclePause(rec, this.now(), { journal: this.journal, path: 'app' });
     void this.persistActive(rec);
   }
 
@@ -1225,6 +1244,8 @@ export class CloudSync {
     if (!rec) return false;
     const now = this.now();
     noteFixTime(rec, fix);
+    // Shadow mode: classified and logged, every fix, nothing else changes
+    if (!this.passenger) observeLifecycleFix(rec, fix, { journal: this.journal, path: 'app' });
     for (const fn of this.activityListeners) fn();
     if (this.passenger || !acceptDriveFix(rec, this.lastFix, fix)) {
       if (now - this.lastPointPersist >= PERSIST_HEARTBEAT_EVERY_MS) {
@@ -1296,6 +1317,7 @@ export class CloudSync {
     rec.endedAt = new Date(this.now()).toISOString();
     this.active = null;
     this.notifyDrive();
+    summariseLifecycle(rec, this.now(), this.journal, 'app');
     this.journal.log('drive_end', {
       clientRef: rec.clientRef, serverId: rec.serverId, pointCount: rec.points.length,
       drivenS: Math.round(activeDriveMs(rec, this.now()) / 1000),

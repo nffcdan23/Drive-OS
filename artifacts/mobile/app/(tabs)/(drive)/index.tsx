@@ -564,6 +564,7 @@ export default function MapScreen() {
     isDrivePaused,
     activeDriveMs,
     latestDriveFix,
+    noteNavigationArrival,
     updateDriveCoordinate,
     noteForegroundFix,
     resolvedUnitSystem,
@@ -1272,7 +1273,7 @@ export default function MapScreen() {
         updateDriveCoordinate({
           latitude: lat,
           longitude: lon,
-          speed: speedMs ?? 0,
+          speed: speedMs,
           heading: gpsHeading,
           accuracy,
           altitude,
@@ -2015,10 +2016,13 @@ export default function MapScreen() {
   useEffect(() => {
     if (navPhase !== "arrived" || !isDriving) return;
     const st = navSession.state;
-    if (st.phase !== "arrived" || st.recording !== "navigation") return;
+    if (st.phase !== "arrived") return;
+    // Shadow mode (drive lifecycle): noted for diagnostics; changes nothing
+    noteNavigationArrival();
+    if (st.recording !== "navigation") return;
     navSession.end("arrived");
     endDriveRef.current();
-  }, [navPhase, isDriving, navSession]);
+  }, [navPhase, isDriving, navSession, noteNavigationArrival]);
   // The drive stopped (finished from the panel, or it couldn't start):
   // navigation carries on with no recording alongside
   const wasDrivingRef = useRef(isDriving);

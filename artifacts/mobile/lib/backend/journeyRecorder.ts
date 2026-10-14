@@ -16,6 +16,7 @@ import { msToKmh } from '../units';
 import { bearingDeg, distanceM, turnDeg } from './geo';
 import type { Endpoints, RoutePointInput, ServerJourney, Visibility } from './endpoints';
 import { ApiError } from './http';
+import type { DriveLifecycleState } from './driveLifecycle';
 import { readJson, readJsonChecked, userKey, writeJson, type CheckedRead, type KeyValueStore } from './storage';
 
 export const THINNING = {
@@ -41,6 +42,16 @@ export interface GpsFix {
   accuracyM?: number | null;
   altitudeM?: number | null;
   timestamp: number;
+}
+
+/**
+ * A speed from the location services as it belongs on a GpsFix: metres per
+ * second, or null when unknown (iOS reports -1, Android may give nothing).
+ * Unknown stays unknown: never 0, which would claim the car is standing
+ * still. The one rule for every fix source (Drive screen and background).
+ */
+export function knownSpeedMs(v: number | null | undefined): number | null {
+  return v != null && Number.isFinite(v) && v >= 0 ? v : null;
 }
 
 export interface RecordedPoint {
@@ -118,6 +129,12 @@ export interface JourneyRecord {
    * records.
    */
   lastFixAt?: string | null;
+  /**
+   * The drive lifecycle worked out from its fixes (lib/backend/driveLifecycle):
+   * in shadow mode only observed and logged, never acted on, and never
+   * uploaded.  Optional for older records.
+   */
+  lifecycle?: DriveLifecycleState;
 }
 
 /**

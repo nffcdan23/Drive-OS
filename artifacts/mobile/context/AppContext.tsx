@@ -15,7 +15,7 @@ import * as ImageManipulator from 'expo-image-manipulator';
 import { useLocales } from 'expo-localization';
 import { CloudSync, LocalSaveError, type SyncStatus } from '@/lib/backend/cloudSync';
 import { describeError } from '@/lib/backend/http';
-import type { GpsFix } from '@/lib/backend/journeyRecorder';
+import { knownSpeedMs, type GpsFix } from '@/lib/backend/journeyRecorder';
 import { LiveDriveFeed, liveDriveFromRecord, newLiveDrive } from '@/lib/backend/liveDrive';
 import type { DiagnosticsState } from '@/lib/backend/diagnosticsReport';
 import type { LocationKind, ServerLocationSharing, SpotCategory, Visibility } from '@/lib/backend/endpoints';
@@ -81,7 +81,7 @@ interface AppContextValue {
   deleteJourney: (id: string) => void;
 
   startDrive: () => void;
-  updateDriveCoordinate: (coord: Coordinate & { speed: number; accuracy?: number | null; heading?: number | null; altitude?: number | null; timestamp?: number }) => void;
+  updateDriveCoordinate: (coord: Coordinate & { speed: number | null; accuracy?: number | null; heading?: number | null; altitude?: number | null; timestamp?: number }) => void;
   endDrive: () => Promise<Journey | null>;
   /** Tries again to save a finished drive on the phone after endDrive threw LocalSaveError; true once saved */
   retryDriveSave: () => Promise<boolean>;
@@ -95,6 +95,8 @@ interface AppContextValue {
   activeDriveMs: () => number | null;
   /** The newest fix accepted for the drive in progress (from the screen or the background) */
   latestDriveFix: () => GpsFix | null;
+  /** Navigation arrived during the drive: noted for the drive lifecycle diagnostics only (shadow mode) */
+  noteNavigationArrival: () => void;
   /** Drive and orphan-check state for the diagnostics report (no locations) */
   diagnosticsState: () => DiagnosticsState;
   togglePassengerMode: () => void;
@@ -371,10 +373,11 @@ export function AppProvider({ userId, children }: { userId: string; children: Re
   useEffect(() => { cloud.setPassengerMode(isPassengerMode); }, [cloud, isPassengerMode]);
 
   // The screen's fixes; the route on screen is updated from onDriveFix above.
-  const updateDriveCoordinate = useCallback((p: Coordinate & { speed: number; accuracy?: number | null; heading?: number | null; altitude?: number | null; timestamp?: number }) => {
+  // An unknown speed stays unknown (null), as from the background task
+  const updateDriveCoordinate = useCallback((p: Coordinate & { speed: number | null; accuracy?: number | null; heading?: number | null; altitude?: number | null; timestamp?: number }) => {
     if (!cloud.isDriving) return;
     const fix: GpsFix = {
-      latitude: p.latitude, longitude: p.longitude, speedMs: p.speed, headingDeg: p.heading ?? null,
+      latitude: p.latitude, longitude: p.longitude, speedMs: knownSpeedMs(p.speed), headingDeg: p.heading ?? null,
       accuracyM: p.accuracy ?? null, altitudeM: p.altitude ?? null, timestamp: p.timestamp ?? Date.now(),
     };
     cloud.addFix(fix);
@@ -445,6 +448,7 @@ export function AppProvider({ userId, children }: { userId: string; children: Re
   const isDrivePaused = useCallback(() => cloud.isDrivePaused, [cloud]);
   const activeDriveMs = useCallback(() => cloud.activeDriveMs(), [cloud]);
   const latestDriveFix = useCallback(() => (cloud.isDriving ? latestFixRef.current : null), [cloud]);
+  const noteNavigationArrival = useCallback(() => cloud.noteNavigationArrival(), [cloud]);
   const diagnosticsState = useCallback((): DiagnosticsState => ({
     driveInProgress: cloud.activeRecord?.clientRef ?? null,
     pendingDrives: cloud.status.pendingJourneys,
@@ -628,7 +632,7 @@ export function AppProvider({ userId, children }: { userId: string; children: Re
     sync: status,
     unsyncedJourneyId: pendingJourney?.id ?? null,
     categories: data.categories,
-    startDrive, updateDriveCoordinate, endDrive, retryDriveSave, discardDrive, setDrivePaused, isDrivePaused, activeDriveMs, latestDriveFix, diagnosticsState,
+    startDrive, updateDriveCoordinate, endDrive, retryDriveSave, discardDrive, setDrivePaused, isDrivePaused, activeDriveMs, latestDriveFix, noteNavigationArrival, diagnosticsState,
     places: data.places,
     friends: data.friends,
     friendRequests: data.friendRequests,
