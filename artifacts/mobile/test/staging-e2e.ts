@@ -335,7 +335,13 @@ async function run() {
   }
   const endClock = Date.now();
   clock.t = endClock;
-  const journey = await app.endDrive();
+  // Local-first (27c274b): End Drive returns once the phone has the drive;
+  // the upload runs in the background and is waited for here
+  const savedLocally = await app.endDrive();
+  check('End Drive saves it on the phone at once (local-first)', !!savedLocally);
+  await app.sync();
+  const journey = app.data.journeys.find((j) => !j.id.startsWith('local:') && !!j.startedAtIso && !!savedLocally?.startedAtIso
+    && Date.parse(j.startedAtIso) === Date.parse(savedLocally.startedAtIso)) ?? null;
   check('GPS points thinned before upload', kept > 150 && kept < FIXES / 2, `${kept} of ${FIXES} fixes kept`);
   check('journey uploaded and completed on the server', !!journey && !journey.id.startsWith('local:') && journey.syncState === 'synced', journey?.id);
   check('distance computed by the server from the route', !!journey && journey.distance > 7.5 && journey.distance < 8.5, `${journey?.distance} km`);
