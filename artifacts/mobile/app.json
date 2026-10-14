@@ -8,7 +8,7 @@
     "scheme": "mobile",
     "userInterfaceStyle": "dark",
     "ios": {
-      "buildNumber": "30",
+      "buildNumber": "31",
       "icon": "./assets/app.icon",
       "supportsTablet": false,
       "infoPlist": {}
