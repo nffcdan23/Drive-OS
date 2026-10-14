@@ -43,7 +43,7 @@ import { Glyph } from "@/components/Glyph";
 import { SavePlaceSheet } from "@/components/places/SavePlaceSheet";
 import { ReportButton } from "@/components/hazards/ReportButton";
 import { useApp } from "@/context/AppContext";
-import { useEndNavigation, useNavigationSpeed, useNavigationState } from "@/context/NavigationContext";
+import { useEndNavigation, useNavigationSpeed, useNavigationSpeedLimit, useNavigationState } from "@/context/NavigationContext";
 import { arrivalTime, formatClock, formatDuration, formatGuidanceDistance } from "@/lib/navigation/format";
 import { saveability } from "@/lib/navigation/places";
 import type { NavigationState } from "@/lib/navigation/session";
@@ -222,8 +222,8 @@ function Summary({ state, unitSystem }: { state: NavigationState; unitSystem: Re
  * The car's current speed, small, from the newest real GPS fix navigation has
  * (lib/navigation/speedHud.ts). Subscribed to the fixes themselves: reading
  * the latest fix during render left it showing its first value (usually 0,
- * parked at the start), because nothing made it render again. No speed limit
- * is shown.
+ * parked at the start), because nothing made it render again. The road's
+ * speed limit, when known, is its own sign beside it (SpeedLimitSign).
  */
 function SpeedHud({ unitSystem }: { unitSystem: ResolvedUnitSystem }) {
   const value = useNavigationSpeed(unitSystem);
@@ -238,6 +238,27 @@ function SpeedHud({ unitSystem }: { unitSystem: ResolvedUnitSystem }) {
       <Text style={styles.speedValue}>{value ?? "--"}</Text>
       <Text style={styles.speedUnit}>{unit}</Text>
     </GlassSurface>
+  );
+}
+
+/**
+ * The road's posted speed limit, as a UK sign: a red ring round the number
+ * (lib/navigation/speedLimit.ts). Only when the route's data has the limit
+ * for where the car is; otherwise nothing at all (never a guess).
+ */
+function SpeedLimitSign({ unitSystem }: { unitSystem: ResolvedUnitSystem }) {
+  const limit = useNavigationSpeedLimit(unitSystem);
+  if (limit == null) return null;
+  return (
+    <View
+      style={styles.limit}
+      accessible
+      accessibilityLabel={`Speed limit ${limit} ${speedUnit(unitSystem)}`}
+    >
+      <Text style={[styles.limitValue, limit >= 100 && styles.limitValueSmall]} numberOfLines={1}>
+        {limit}
+      </Text>
+    </View>
   );
 }
 
@@ -271,6 +292,7 @@ export function GuidanceBar({
       {state.phase !== "arrived" ? (
         <View style={styles.hud} pointerEvents="box-none">
           <SpeedHud unitSystem={unitSystem} />
+          <SpeedLimitSign unitSystem={unitSystem} />
           {recordingActive ? (
             // One quiet mark: the drive is being saved, no second dashboard
             <View style={styles.recording} accessible accessibilityLabel="This drive is being recorded">
@@ -355,6 +377,20 @@ const styles = StyleSheet.create({
   },
   speedValue: { color: FG, fontSize: 26, fontWeight: "800", fontVariant: ["tabular-nums"], lineHeight: 28 },
   speedUnit: { color: MUTED, fontSize: 11, fontWeight: "600" },
+  // A UK limit sign: white disc, red ring, black number
+  limit: {
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    backgroundColor: "#FFFFFF",
+    borderWidth: 6,
+    borderColor: "#D7261E",
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 10,
+  },
+  limitValue: { color: "#111111", fontSize: 20, fontWeight: "800", fontVariant: ["tabular-nums"], letterSpacing: -0.5 },
+  limitValueSmall: { fontSize: 16 },
   recording: { flexDirection: "row", alignItems: "center", gap: 5, paddingBottom: 6 },
   recDotLive: { width: 7, height: 7, borderRadius: 3.5, backgroundColor: END_RED },
   recordingText: { color: MUTED, fontSize: 12, fontWeight: "600" },

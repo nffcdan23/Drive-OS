@@ -61,6 +61,7 @@ import { VoiceGuidance, type VoiceMode } from '@/lib/navigation/voice';
 import { VoicePreferences } from '@/lib/navigation/voicePrefs';
 import type { HazardSpeechOutput } from '@/lib/hazards/voice';
 import { hudSpeed, SPEED_HUD } from '@/lib/navigation/speedHud';
+import { limitAt, limitSign } from '@/lib/navigation/speedLimit';
 import type { ResolvedUnitSystem } from '@/lib/units';
 import { useApp } from '@/context/AppContext';
 import { journal } from '@/lib/diagnostics';
@@ -389,6 +390,26 @@ export function useNavigationSpeed(unitSystem: ResolvedUnitSystem): number | nul
       };
     }, [subscribeFix]),
     useCallback(() => hudSpeed(latestFix(), Date.now(), unitSystem), [latestFix, unitSystem]),
+  );
+}
+
+/**
+ * The posted speed limit where the car is, for the sign beside the speed HUD
+ * (lib/navigation/speedLimit.ts): from the route's own Mapbox data, in the
+ * user's units, or null (no sign) when unknown or not navigating on the
+ * route with good GPS. Re-renders the caller only when the number changes.
+ */
+export function useNavigationSpeedLimit(unitSystem: ResolvedUnitSystem): number | null {
+  const session = useNavigationSession();
+  return useOnScreenSnapshot(
+    useCallback((fn: () => void) => session.subscribe(fn), [session]),
+    useCallback(() => {
+      const s = session.state;
+      if (s.phase !== 'navigating' || s.gps !== 'ok' || !s.progress) return null;
+      const p = session.preparedRoute;
+      if (!p || p.route !== s.route) return null;
+      return limitSign(limitAt(p, s.progress.along), unitSystem);
+    }, [session, unitSystem]),
   );
 }
 
