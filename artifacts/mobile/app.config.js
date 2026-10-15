@@ -202,6 +202,13 @@ module.exports = ({ config }) => {
       ['expo-secure-store', { faceIDPermission: false }],
       // Mapbox Maps SDK for the Drive map (no download token needed)
       '@rnmapbox/maps',
+      // iOS scene lifecycle (Expo's official SDK 57 option; SDK 58 has it
+      // built in): the AppDelegate keeps creating the React Native factory,
+      // and Expo's scene delegate (EXExpoAppSceneDelegate) creates the window
+      // and starts React Native in it. CarPlay's scene needs this. Prebuild
+      // fails, rather than guessing, if the AppDelegate template changes.
+      // Checked after prebuild by scripts/check-ios-scene-lifecycle.js.
+      ['expo-build-properties', { ios: { enableSceneSupport: true } }],
     ],
     extra: {
       ...(config.extra || {}),

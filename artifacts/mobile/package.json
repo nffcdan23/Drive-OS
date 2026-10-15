@@ -68,6 +68,7 @@
     "@supabase/supabase-js": "2.117.0",
     "expo-apple-authentication": "57.0.2",
     "expo-audio": "~57.0.5",
+    "expo-build-properties": "~57.0.22",
     "expo-crypto": "~57.0.3",
     "expo-image-manipulator": "57.0.20",
     "expo-keep-awake": "57.0.2",

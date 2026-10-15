@@ -2568,6 +2568,22 @@ test('the app build includes Mapbox and refuses a Mapbox secret token', () => {
   }
 });
 
+test("iOS scene lifecycle: Expo's own SDK 57 option, on, and nothing else from expo-build-properties", () => {
+  const req = createRequire(import.meta.url);
+  const appConfig = req('../app.config.js') as (a: { config: object }) => { plugins: unknown[]; ios: { infoPlist: Record<string, unknown> } };
+  const cfg = appConfig({ config: { ios: { infoPlist: {} }, android: {}, plugins: [], extra: {} } });
+  const entries = cfg.plugins.filter((p) => p === 'expo-build-properties' || (Array.isArray(p) && p[0] === 'expo-build-properties'));
+  assert.deepEqual(entries, [['expo-build-properties', { ios: { enableSceneSupport: true } }]], 'once, with only the scene option');
+  // Expo's plugin owns the scene manifest: one set here would make it refuse to build
+  assert.ok(!('UIApplicationSceneManifest' in cfg.ios.infoPlist));
+  // The SDK 57 plugin, and an SDK 57 expo that has ExpoAppSceneDelegate (57.0.23+)
+  const pkg = JSON.parse(readFileSync(toPath(new URL('../package.json', import.meta.url)), 'utf8')) as { dependencies: Record<string, string>; devDependencies: Record<string, string> };
+  assert.match(pkg.dependencies['expo-build-properties'] ?? '', /^~57\./);
+  assert.match(pkg.devDependencies.expo ?? '', /^~57\./);
+  const [major, minor, patch] = (req('expo/package.json') as { version: string }).version.split('.').map(Number);
+  assert.ok(major === 57 && (minor! > 0 || patch! >= 23), 'installed expo has the scene delegate');
+});
+
 test('on the Mapbox map (zoom, no altitude) a tilt still keeps following and a pinch still leaves', () => {
   const mb = (pitch: number, zoom = 16.6, center = START, heading = 30) => ({ center, heading, pitch, zoom });
   assert.equal(classifyFollowGesture(mb(60), mb(48)), 'pitch');

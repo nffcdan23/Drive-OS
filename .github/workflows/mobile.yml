@@ -51,6 +51,22 @@ jobs:
       - name: Unit tests
         run: pnpm --filter @workspace/mobile run test
 
+      - name: iOS prebuild keeps the scene lifecycle
+        # Generates ios/ as the Mac does before an Xcode build (no CocoaPods
+        # here), then checks the AppDelegate, scene manifest, entitlements and
+        # pod settings (scripts/check-ios-scene-lifecycle.js). Placeholder
+        # backend values: only the native project is inspected.
+        working-directory: artifacts/mobile
+        env:
+          CI: '1'
+          EXPO_PUBLIC_APP_ENV: staging
+          EXPO_PUBLIC_SUPABASE_URL: https://placeholder.supabase.co
+          EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY: sb_publishable_placeholder
+          EXPO_PUBLIC_API_URL: https://api.example.invalid
+        run: |
+          pnpm exec expo prebuild -p ios --clean --no-install
+          node scripts/check-ios-scene-lifecycle.js
+
       - name: No server secrets in the app
         run: |
           # The app may only contain the Supabase URL and publishable key.
