@@ -2892,6 +2892,47 @@ test('the Mapbox Drive map draws the live head from the same position as its puc
   assert.ok(/lineColor: TRAIL_GLOW,\s*lineWidth: 12/.test(layers) && /lineColor: color,\s*lineWidth: 4/.test(layers));
 });
 
+test('Free Drive: the trail head is pinned beneath the recorded trail and the arrow by layer id, whenever it mounts', () => {
+  const strip = (t: string) => t.replace(/\/\/.*$/gm, '').replace(/\{\/\*[\s\S]*?\*\/\}/g, '');
+  const map = strip(readFileSync(toPath(new URL('../components/MapboxDriveMap.tsx', import.meta.url)), 'utf8'));
+  // The bug: the head mounts when Free Drive starts, after the arrow, and a
+  // layer added later goes on top of the stack, over the arrow's tail
+  const layers = map.slice(map.indexOf('const TrailHeadLayers'), map.indexOf('const MapboxDriveMap'));
+  assert.match(map, /const TRAIL_HEAD_BELOW = "derwent-drive-trail-glow";/);
+  assert.match(layers, /id="derwent-drive-trail-head-line"\s+belowLayerID=\{TRAIL_HEAD_BELOW\}/);
+  assert.match(layers, /id="derwent-drive-trail-head-glow"\s+belowLayerID="derwent-drive-trail-head-line"/);
+  // The layer it is pinned beneath exists from the map's first render: the
+  // recorded trail is never conditional, and mounts before the arrow
+  const body = map.slice(map.search(/<MapView\s+ref=/));
+  const trail = body.indexOf('<ShapeSource id="derwent-drive-trail" shape={trailShape}>');
+  assert.ok(trail > 0 && !/\&\&\s*$/.test(body.slice(0, trail).trimEnd()));
+  assert.ok(body.indexOf('id="derwent-drive-trail-glow"') > trail);
+  assert.ok(body.indexOf('<MarkerFeeder') > body.indexOf('id="derwent-drive-trail-line"'));
+  // The recorded trail and navigation's layers keep their mount order: only the head is pinned
+  assert.equal(map.match(/belowLayerID=/g)?.length, 2);
+  const nav = map.slice(map.indexOf('const NavigationRouteLayers = memo('), map.indexOf('const MapboxDriveMap = forwardRef'));
+  assert.ok(!/belowLayerID|aboveLayerID|layerIndex/.test(nav));
+});
+
+test('one arrow for Free Drive and navigation: a single size constant, no per-mode style', () => {
+  const strip = (t: string) => t.replace(/\/\/.*$/gm, '').replace(/\{\/\*[\s\S]*?\*\/\}/g, '');
+  const map = strip(readFileSync(toPath(new URL('../components/MapboxDriveMap.tsx', import.meta.url)), 'utf8'));
+  const screen = strip(readFileSync(toPath(new URL('../app/(tabs)/(drive)/index.tsx', import.meta.url)), 'utf8'));
+  const lib = strip(readFileSync(toPath(new URL('../lib/mapbox.ts', import.meta.url)), 'utf8'));
+  assert.match(lib, /iconSize: LOCATION_ARROW_SCALE,/);
+  // Both arrow layers spread the one style and set nothing but their image
+  assert.match(map, /id="derwent-location-arrow-shadow"\s+style=\{\{\s*\.\.\.LOCATION_ARROW_SYMBOL,\s*iconImage: "derwent-location-arrow-shadow",\s*\}\}/);
+  assert.match(map, /id="derwent-location-arrow"\s+style=\{\{ \.\.\.LOCATION_ARROW_SYMBOL, iconImage: "derwent-location-arrow" \}\}/);
+  // One MarkerFeeder, whatever the mode: the screen passes it no mode, size or style
+  assert.equal(map.match(/<MarkerFeeder\s/g)?.length, 1);
+  const feederProps = map.slice(map.search(/<MarkerFeeder\s/), map.indexOf('/>', map.search(/<MarkerFeeder\s/)));
+  assert.ok(!/navigation|freeDrive|size|scale/i.test(feederProps));
+  assert.ok(!/LOCATION_ARROW|arrowScale|markerSize/.test(screen));
+  // The arrow image is used by those two layers only
+  assert.equal(map.match(/iconImage: "derwent-location-arrow"/g)?.length, 1);
+  assert.equal(map.match(/iconImage: "derwent-location-arrow-shadow"/g)?.length, 1);
+});
+
 // ─── Leaving follow mode stays left ─────────────────────────────────────────
 // The Drive screen's follow wiring (index.tsx) on either map: the camera read
 // that judges a gesture, the frame loop's follow block, the compass and GPS
@@ -13466,6 +13507,138 @@ test('camera rotation: the camera is written from the same heading every frame; 
   assert.ok(/if \(frame\.kind === "paused"\)/.test(loop) && /leaveFollowRef\.current\(\);/.test(loop));
   // The zoom still glides in the same loop
   assert.ok(/const glided = zoomGlide\.step\(dt\);/.test(loop));
+});
+
+// ─── Free Drive camera rotation: fixes that arrive bunched or late ─────────
+
+/**
+ * Free Drive at 60 Hz: the GPS course taken once a second, through a bend at
+ * `rateDegS` from 2 s to 8 s, delivered `delay(i)` ms after it was taken.
+ * `timed` passes each fix's own time (the Drive screen does); untimed is the
+ * old arrival-time path.
+ */
+function freeDriveFrames(opts: { rateDegS: number; start?: number; noiseDeg?: number; delay: (i: number) => number; timed?: boolean; until?: number }) {
+  const end = opts.until ?? 12_000;
+  const truth = (t: number) => (opts.start ?? 0) + (t < 2000 ? 0 : t < 8000 ? ((t - 2000) / 1000) * opts.rateDegS : 6 * opts.rateDegS);
+  let seed = 9;
+  const noise = () => ((seed = (seed * 16807) % 2147483647) / 2147483647 - 0.5) * 2 * (opts.noiseDeg ?? 0);
+  const fixes: Array<{ taken: number; arrives: number; deg: number }> = [];
+  for (let i = 0, taken = 0; taken < end; i++, taken += 1000) {
+    fixes.push({ taken, arrives: taken + opts.delay(i), deg: (((truth(taken) + noise()) % 360) + 360) % 360 });
+  }
+  const f = new HeadingFilter();
+  const frames: Array<{ t: number; v: number; d: number }> = [];
+  let prev: number | null = null;
+  let next = 0;
+  for (let t = 0; t < end; t += 16) {
+    // Every fix that has arrived by this frame, in order (bunched ones together)
+    while (next < fixes.length && fixes[next].arrives <= t) {
+      const x = fixes[next++];
+      f.update(x.deg, 'course', t, opts.timed === false ? undefined : x.taken);
+    }
+    const v = f.step(16, t);
+    if (f.targetValue == null) continue; // nothing to draw before the first fix
+    frames.push({ t, v, d: prev == null ? 0 : angleDelta(prev, v) });
+    prev = v;
+  }
+  return { frames, truth, filter: f };
+}
+// Delivery as it is on a phone: 80–450 ms after the fix, and now and then a
+// fix held back until the next one (two arriving within a few ms)
+const realDelay = (i: number) => (i % 4 === 2 ? 1_005 : 80 + ((i * 137) % 370));
+
+test('Free Drive rotation: bunched and late GPS fixes still give one continuous turn through a bend', () => {
+  for (const rate of [4, 12, 25]) {
+    const r = freeDriveFrames({ rateDegS: rate, delay: realDelay });
+    const bend = r.frames.filter((f) => f.t > 4_000 && f.t < 8_000);
+    // Turning on every frame, never stalled, never backwards
+    assert.equal(bend.filter((f) => f.d < 0.05 * (rate / 12)).length, 0, `${rate}°/s: stalled frames`);
+    const slowest = Math.min(...bend.map((f) => f.d / 0.016));
+    const fastest = Math.max(...bend.map((f) => f.d / 0.016));
+    assert.ok(slowest > rate * 0.6, `${rate}°/s: slowest ${slowest.toFixed(1)}°/s`);
+    assert.ok(fastest < rate * 1.6, `${rate}°/s: fastest ${fastest.toFixed(1)}°/s`);
+    // Keeping up: within about half a second of the real heading
+    const lag = Math.max(...bend.map((f) => Math.abs(angleDelta(f.v, r.truth(f.t)))));
+    assert.ok(lag < rate * 0.6, `${rate}°/s: lag ${lag.toFixed(1)}°`);
+    // Comes to rest on the heading after the bend
+    assert.ok(Math.abs(angleDelta(r.frames.at(-1)!.v, 6 * rate)) < 0.1);
+  }
+  // Untimed (arrival-time) readings: the bunched fix used to measure no rate
+  // at all and stop the turn; skipping to the earlier fix keeps it going,
+  // but the timed path is the steadier of the two
+  const spread = (timed: boolean) => {
+    const bend = freeDriveFrames({ rateDegS: 12, delay: realDelay, timed }).frames.filter((f) => f.t > 4_000 && f.t < 8_000);
+    const rates = bend.map((f) => f.d / 0.016);
+    return Math.max(...rates) - Math.min(...rates);
+  };
+  assert.ok(spread(true) < spread(false), `timed ${spread(true).toFixed(1)} vs untimed ${spread(false).toFixed(1)}°/s`);
+});
+
+test('Free Drive rotation: a slow bend (under the per-fix noise gate) still turns smoothly; a straight road with GPS noise does not wobble', () => {
+  // 1.2°/s: under 1.5° between fixes, but the same way at every one
+  const slow = freeDriveFrames({ rateDegS: 1.2, delay: realDelay });
+  const bend = slow.frames.filter((f) => f.t > 5_000 && f.t < 8_000);
+  assert.equal(bend.filter((f) => f.d < 0.005).length, 0, 'never stalls in a slow bend');
+  assert.ok(Math.max(...bend.map((f) => f.d)) < 0.06, 'no pulse at each fix');
+  // Straight road, ±1° course noise, real delivery: bounded, no twitch
+  const straight = freeDriveFrames({ rateDegS: 0, start: 90, noiseDeg: 1, delay: realDelay });
+  const vals = straight.frames.filter((f) => f.t > 1_000).map((f) => f.v);
+  assert.ok(Math.max(...vals) - Math.min(...vals) < 2.4, `wobble ${(Math.max(...vals) - Math.min(...vals)).toFixed(2)}°`);
+  assert.ok(Math.max(...straight.frames.map((f) => Math.abs(f.d))) < 0.2, 'no visible per-frame twitch');
+  // Back and forth noise is never read as a slow bend
+  const g = new HeadingFilter();
+  [90, 90.8, 90.1, 90.9, 90.2, 91].forEach((deg, i) => g.update(deg, 'course', i * 1000 + 200, i * 1000));
+  for (let t = 5_200; t < 5_900; t += 16) g.step(16, t);
+  assert.ok(Math.abs(angleDelta(91, g.targetValue!)) < 1e-9, 'no turn rate from noise');
+});
+
+test('Free Drive rotation: the short way through north, a repeated or older fix ignored, and a gap starts afresh', () => {
+  const n = freeDriveFrames({ rateDegS: 10, start: 340, delay: realDelay });
+  assert.ok(n.frames.every((f) => f.v >= 335 || f.v <= 65), 'never the long way round');
+  assert.ok(n.frames.every((f) => Math.abs(f.d) < 1));
+  // The same fix twice (the stream, then the return from background), or an older one: no change
+  const f = new HeadingFilter();
+  assert.equal(f.update(10, 'course', 1_200, 1_000), true);
+  assert.equal(f.update(20, 'course', 2_200, 2_000), true);
+  const target = f.targetValue;
+  assert.equal(f.update(20, 'course', 2_300, 2_000), false);
+  assert.equal(f.update(15, 'course', 2_400, 1_500), false);
+  assert.equal(f.targetValue, target);
+  // A fix claiming to be from long before it arrived is timed as arriving late, not carried on for seconds
+  const late = new HeadingFilter();
+  late.update(0, 'course', 1_000, 1_000);
+  late.update(10, 'course', 2_000, 2_000);
+  late.update(20, 'course', 30_000, 3_000);
+  late.step(16, 30_000);
+  assert.ok(angleDelta(20, late.targetValue!) <= 10 + 1e-9);
+  // After a gap (no course for over 2.5 s) the turn rate starts again from nothing
+  const gap = new HeadingFilter();
+  gap.update(0, 'course', 100, 0);
+  gap.update(10, 'course', 1_100, 1_000);
+  gap.update(40, 'course', 5_100, 5_000);
+  gap.step(16, 5_600);
+  assert.equal(gap.targetValue, 40);
+  // Compass or route in between: the course history starts again
+  const sw = new HeadingFilter();
+  sw.update(0, 'course', 100, 0);
+  sw.update(5, 'compass', 600);
+  sw.update(10, 'course', 1_100, 1_000);
+  sw.step(16, 1_400);
+  assert.equal(sw.targetValue, 10);
+});
+
+test('Free Drive rotation: the Drive screen times the course by the fix; navigation zoom stays out of Free Drive', () => {
+  const drive = readNav('../app/(tabs)/(drive)/index.tsx');
+  assert.match(drive, /headingFilter\.update\(gpsHeading, "course", now, fixTime\);/);
+  assert.match(drive, /headingFilter\.update\(fix\.headingDeg, "course", now, fix\.timestamp\);/);
+  assert.equal(drive.match(/headingFilter\.update\(/g)?.length, 4);
+  // The route heading (navigation) and compass are as they were
+  assert.match(drive, /if \(routeDir != null\) headingFilter\.update\(routeDir, "route", now\);/);
+  assert.match(drive, /headingFilter\.update\(raw, "compass"\)/);
+  // Guidance's zoom glide only while guiding; Free Drive keeps the fixed follow zoom
+  const loop = drive.slice(drive.indexOf('frameLoopRef.current = () => {'));
+  assert.match(loop, /if \(guidingRef\.current\) \{\s*const glided = zoomGlide\.step\(dt\);/);
+  assert.match(drive, /zoom: guided \?\? FOLLOW_ZOOM,/);
 });
 
 // ─── Stationary area: parked GPS drift never resets a stop ─────────────────

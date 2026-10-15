@@ -340,12 +340,21 @@ const sameValues = (a: FollowCameraPose, b: FollowCameraPose) =>
   a.center.latitude === b.center.latitude && a.center.longitude === b.center.longitude &&
   a.heading === b.heading && a.pitch === b.pitch && a.zoom === b.zoom;
 
+// The recorded trail's lowest layer: the head's line goes beneath it, and
+// the head's glow beneath that line, whichever the map adds first
+const TRAIL_HEAD_BELOW = "derwent-drive-trail-glow";
+
 /**
  * The live trail head.  Its own small component with its own state, so a
  * redraw (many times a second while driving) re-renders only this source and
  * replaces its few points, never the recorded trail or the map.  Always
  * mounted, empty when there's no head, so its layers keep their place in the
  * stack.  Styled to match the recorded trail it continues.
+ *
+ * Pinned beneath the recorded trail (and so beneath the arrow) by layer id,
+ * not by mount order: it mounts when Free Drive starts, long after the arrow,
+ * and the map stacks a layer added later on top of everything.  The head ends
+ * at the arrow, so on top it would paint over the arrow's tail.
  */
 const TrailHeadLayers = memo(function TrailHeadLayers({
   subscribe,
@@ -361,6 +370,7 @@ const TrailHeadLayers = memo(function TrailHeadLayers({
     <ShapeSource id="derwent-drive-trail-head" shape={shape}>
       <LineLayer
         id="derwent-drive-trail-head-glow"
+        belowLayerID="derwent-drive-trail-head-line"
         style={{
           lineColor: TRAIL_GLOW,
           lineWidth: 12,
@@ -371,6 +381,7 @@ const TrailHeadLayers = memo(function TrailHeadLayers({
       />
       <LineLayer
         id="derwent-drive-trail-head-line"
+        belowLayerID={TRAIL_HEAD_BELOW}
         style={{
           lineColor: color,
           lineWidth: 4,
@@ -833,8 +844,8 @@ const MapboxDriveMap = forwardRef<MapboxDriveMapHandle, MapboxDriveMapProps>(
               the arrow */}
           {routePreview && <RouteLayers store={routePreview} />}
           {navigation && <NavigationRouteLayers ref={navRouteRef} session={navigation} />}
-          {/* Mounted before the trail: the head draws beneath it (and the
-              arrow, mounted last, draws above both) */}
+          {/* The head draws beneath the trail (pinned there by layer id),
+              and the arrow, mounted after both, above them */}
           {trailHead && (
             <TrailHeadLayers subscribe={trailHead} color={trailColor} />
           )}

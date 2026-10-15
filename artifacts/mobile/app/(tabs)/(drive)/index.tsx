@@ -1145,7 +1145,7 @@ export default function MapScreen() {
         lastSpeedMsRef.current = fix.speedMs;
         lastCourseRef.current = fix.headingDeg ?? null;
         if (fix.headingDeg != null && fix.headingDeg >= 0 && speedKmh >= MIN_SPEED_FOR_GPS_HEADING && !routeHeadingActiveRef.current) {
-          headingFilter.update(fix.headingDeg, "course");
+          headingFilter.update(fix.headingDeg, "course", now, fix.timestamp);
         }
       }
       // Following: the camera starts at the current target, no ease across
@@ -1312,7 +1312,8 @@ export default function MapScreen() {
         // On the route the frame loop gives the road's direction instead
         !routeHeadingActiveRef.current
       ) {
-        headingFilter.update(gpsHeading, "course");
+        // Timed by when the fix was taken: fixes can arrive bunched or late
+        headingFilter.update(gpsHeading, "course", now, fixTime);
       }
 
       // ── Route preview and guidance ── where a route would start from; an

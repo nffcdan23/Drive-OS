@@ -15,12 +15,24 @@
 //
 // What runs now, every frame:
 //  1. The target moves between readings. For the GPS course, the turn rate
-//     is measured from the last two readings and the course is carried on at
+//     is measured from the latest readings and the course is carried on at
 //     that rate (dead-reckoned, like the arrow's position) for up to
 //     predictMaxMs, at most maxPredictDeg: a steady bend is one continuous
-//     rotation. Small changes (under yawNoiseDeg between readings) are GPS
-//     noise on a straight road: no rate, nothing to drift. The route source
+//     rotation. Small changes are GPS noise on a straight road: a weak rate
+//     (under strongYawDegS) counts only when a fit through the last few
+//     fixes shows the same steady turn, so noise has nothing to drift on,
+//     while a slow bend still turns continuously. The route source
 //     moves every frame already; the compass is many readings a second.
+//
+//     Timed by when each fix was taken, not when it reached JavaScript. Fixes
+//     are taken about a second apart but can arrive bunched (two within a
+//     few ms after the JS thread was busy) or late; timing them by arrival
+//     measured no rate from a bunched pair, so the turn stopped until the
+//     next fix (the Free Drive stop-start), and placed each reading late by
+//     its delivery delay, so the target stepped back at every fix. Now the
+//     rate is measured against the newest earlier fix taken at least
+//     yawMinGapMs before (from a short history), and the reading is carried
+//     on from the time it was taken.
 //  2. The drawn heading follows the target with a critically damped spring
 //     (position and rate both continuous): when a new reading corrects the
 //     prediction, the rotation bends toward it instead of jumping or
@@ -42,17 +54,29 @@ export const HEADING_FILTER = {
   // Compass changes smaller than this are sensor noise, not the phone turning.
   // Far below what the eye can see, so it never makes the arrow step.
   compassNoiseDeg: 0.4,
-  // GPS course: a change smaller than this between readings is noise (no turn rate)
-  yawNoiseDeg: 1.5,
-  // Turn rates are measured from readings 0.3–2.5 s apart, and capped (°/s)
+  // GPS course: a turn rate measured from the last fix is taken as it is
+  // from this much up (°/s; course noise of a degree or so between fixes is
+  // under it)…
+  strongYawDegS: 3,
+  // …and below it, only once a straight-line fit through the last few fixes
+  // (at least slowYawFixes, spanning slowYawSpanMs) shows a steady turn of at
+  // least this much the same way: a slow bend, which noise isn't
+  slowYawMinDegS: 1,
+  slowYawFixes: 3,
+  slowYawSpanMs: 1_500,
+  // Turn rates are measured from readings taken 0.3–2.5 s apart, and capped (°/s)
   yawMinGapMs: 300,
   yawMaxGapMs: 2_500,
   maxYawRateDegS: 45,
   // The course is carried on at its turn rate for at most this long after a
-  // reading (a little over the usual gap, so a late reading doesn't stop it)…
-  predictMaxMs: 1_300,
-  // …and never further than this from the reading
-  maxPredictDeg: 30,
+  // reading was taken: the usual second's gap plus delivery delay, or one
+  // fix held back to arrive with the next, so neither stops the turn…
+  predictMaxMs: 2_200,
+  // …and never further than this from the reading (a second at the highest rate)
+  maxPredictDeg: 45,
+  // A fix said to be taken longer than this before it arrived is timed as if
+  // taken this long before (a clock that disagrees, or a fix replayed late)
+  maxFixDelayMs: 1_000,
   // Close enough, and slow enough, to call it caught up (lets the frame loop rest)
   settledDeg: 0.05,
   settledRateDegS: 0.3,
@@ -67,6 +91,8 @@ export class HeadingFilter {
   private baseAt = 0;
   /** Turn rate carried on from it (°/s; course only) */
   private yawRate = 0;
+  /** Recent GPS course readings: when taken, and the course unwrapped (no jump at north) */
+  private courses: Array<{ t: number; deg: number }> = [];
   private drawn = 0;
   /** The drawn heading's rate of turn (°/s), kept continuous */
   private rate = 0;
@@ -108,21 +134,34 @@ export class HeadingFilter {
   }
 
   /**
-   * A new reading (at `atMs`, the same clock as step's).  Returns whether the
-   * target moved (so the caller knows to wake its frame loop).  The first
-   * reading is drawn as-is.
+   * A new reading (arriving at `atMs`, the same clock as step's).  A GPS
+   * course should say when its fix was taken (`fixMs`, same clock): it is
+   * timed by that, and a fix no newer than the last is ignored.  Returns
+   * whether the target moved (so the caller knows to wake its frame loop).
+   * The first reading is drawn as-is.
    */
-  update(deg: number, source: HeadingSource, atMs: number = Date.now()): boolean {
+  update(
+    deg: number,
+    source: HeadingSource,
+    atMs: number = Date.now(),
+    fixMs?: number | null,
+  ): boolean {
     if (!Number.isFinite(deg) || deg < 0) return false;
     const next = norm(deg);
     const H = HEADING_FILTER;
+    const timed = source === "course" && fixMs != null && Number.isFinite(fixMs);
+    const at = timed ? clamp(fixMs, atMs - H.maxFixDelayMs, atMs) : atMs;
+    if (timed && this.source === "course" && this.courses.length > 0 && at <= this.baseAt) {
+      return false; // the same fix again, or an older one delivered late
+    }
     if (this.base == null) {
       this.base = next;
-      this.baseAt = atMs;
+      this.baseAt = at;
       this.drawn = next;
       this.rate = 0;
       this.yawRate = 0;
       this.source = source;
+      this.courses = source === "course" ? [{ t: at, deg: next }] : [];
       return true;
     }
     if (
@@ -133,18 +172,54 @@ export class HeadingFilter {
       return false;
     }
     let yaw = 0;
-    if (source === "course" && this.source === "course") {
-      const gap = atMs - this.baseAt;
-      const turned = angleDelta(this.base, next);
-      if (gap >= H.yawMinGapMs && gap <= H.yawMaxGapMs && Math.abs(turned) >= H.yawNoiseDeg) {
-        yaw = clamp((turned / gap) * 1000, -H.maxYawRateDegS, H.maxYawRateDegS);
-      }
+    if (source === "course") {
+      yaw = this.courseYaw(next, at);
+    } else {
+      this.courses = [];
     }
     this.base = next;
-    this.baseAt = atMs;
+    this.baseAt = at;
     this.yawRate = yaw;
     this.source = source;
     return true;
+  }
+
+  /** Records a GPS course reading taken at `at` and returns the turn rate it shows (°/s, 0 for none) */
+  private courseYaw(next: number, at: number): number {
+    const H = HEADING_FILTER;
+    // Only readings from this run of GPS course, taken within the last 2.5 s
+    const prior = this.source === "course" ? this.courses.filter((c) => at - c.t <= H.yawMaxGapMs) : [];
+    const last = prior.at(-1);
+    const deg = last ? last.deg + angleDelta(norm(last.deg), next) : next;
+    this.courses = [...prior, { t: at, deg }];
+    // The newest earlier reading taken far enough before this one: a fix
+    // taken moments before (or arriving bunched, untimed) is skipped over
+    let ref = -1;
+    for (let i = prior.length - 1; i >= 0; i--) {
+      if (at - prior[i].t >= H.yawMinGapMs) {
+        ref = i;
+        break;
+      }
+    }
+    if (ref < 0) return 0;
+    const clampYaw = (v: number) => clamp(v, -H.maxYawRateDegS, H.maxYawRateDegS);
+    const fromLast = ((deg - prior[ref].deg) / (at - prior[ref].t)) * 1000;
+    if (Math.abs(fromLast) >= H.strongYawDegS) return clampYaw(fromLast);
+    // Weak: a least-squares slope through the history, kept only if steady
+    const run = this.courses;
+    if (run.length < H.slowYawFixes || at - run[0].t < H.slowYawSpanMs) return 0;
+    const mt = run.reduce((a, c) => a + c.t, 0) / run.length;
+    const md = run.reduce((a, c) => a + c.deg, 0) / run.length;
+    let num = 0;
+    let den = 0;
+    for (const c of run) {
+      num += (c.t - mt) * (c.deg - md);
+      den += (c.t - mt) ** 2;
+    }
+    const slope = den > 0 ? (num / den) * 1000 : 0;
+    return Math.abs(slope) >= H.slowYawMinDegS && Math.sign(slope) === Math.sign(fromLast)
+      ? clampYaw(slope)
+      : 0;
   }
 
   /** Advances the drawn heading by one frame (`dtMs` long, ending at `nowMs`) and returns it */
