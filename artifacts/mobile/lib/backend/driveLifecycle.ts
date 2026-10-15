@@ -30,6 +30,11 @@
  * Vehicle movement needs a good fix, a vehicle speed (reported, or inferred
  * from two good fixes when the phone gives none) and displacement that
  * agrees with it: never speed alone, never a missing speed taken as 0.
+ * Once the car stops, where it last moved is the anchor of a stationary
+ * area (LIFECYCLE.stationaryRadiusM, wider for vague fixes): fixes inside it
+ * are the car still parked, however the GPS wanders or what speed it
+ * reports, so drift never resets the stop. Vague fixes far away count only
+ * when a second one agrees.
  * Resuming after a temporary stop needs more: several consecutive fast,
  * consistent fixes, clear of the stop point, so walking away from the car
  * never counts.
@@ -60,6 +65,23 @@ export const LIFECYCLE = {
    */
   bridgeMaxAccuracyM: 200,
   bridgeMarginM: 50,
+  /**
+   * The stationary area: once the car stops moving like a vehicle, where it
+   * last did is the anchor, and fixes within this radius of it (m) are the
+   * car still there, whatever speed the GPS reports (parked phones wander
+   * 10–40 m and report walking speeds)…
+   */
+  stationaryRadiusM: 50,
+  /** …widened for a vaguer fix or anchor to this many times its accuracy… */
+  stationaryAccuracyFactor: 1.5,
+  /** …but never beyond this (m) */
+  stationaryMaxRadiusM: 100,
+  /**
+   * A fix with no pair to judge (vague, or alone) counts as movement only
+   * when a second one, at least this long after (ms) and further on, agrees;
+   * straight after a real GPS gap (no fixes for pairMaxGapMs) one is enough
+   */
+  bridgeConfirmMs: 2_000,
   /** A speed is checked against a good fix at least this much older (ms)… */
   pairMinGapMs: 5_000,
   /** …and no more than this (ms) */
@@ -142,6 +164,13 @@ export interface DriveLifecycleState {
   pausedMsSeen?: number;
   /** Navigation arrival seen (ms) */
   arrivedAt?: number | null;
+  /**
+   * The stationary area's centre: where the car last moved like a vehicle,
+   * set as soon as it stops doing so, cleared when it genuinely leaves
+   */
+  anchor?: { latitude: number; longitude: number; accuracyM: number | null } | null;
+  /** A fix that would bridge (vague or alone, far away), waiting for a second to agree */
+  bridgeFrom?: { t: number; d: number } | null;
   /** Diagnostics written for this drive, and stop lengths by bucket */
   logs?: number;
   stopHist?: Record<string, number>;
@@ -201,7 +230,7 @@ export function displacementBucket(m: number | null): string {
 
 // ─── Movement ────────────────────────────────────────────────────────────────
 
-export type MovementReason = 'moving' | 'gap_bridged' | 'slow' | 'poor_accuracy' | 'speed_unknown' | 'inconsistent' | 'no_reference';
+export type MovementReason = 'moving' | 'gap_bridged' | 'slow' | 'poor_accuracy' | 'speed_unknown' | 'inconsistent' | 'no_reference' | 'stationary_area';
 
 export interface Movement {
   moving: boolean;
@@ -276,15 +305,34 @@ function remember(s: DriveLifecycleState, fix: GpsFix) {
  * speed on average, is movement all the same. So neither is ever taken for a
  * stop; a parked phone's wander (within its accuracy) never adds up to it.
  */
-function bridgeGap(s: DriveLifecycleState, fix: GpsFix, movement: Movement, sinceMs: number): Movement {
+function bridgeGap(s: DriveLifecycleState, fix: GpsFix, movement: Movement, sinceMs: number, afterGap: boolean): Movement {
   const L = LIFECYCLE;
   const from = s.lastMovingPoint;
   if (!from || !Number.isFinite(sinceMs) || !good(fix.accuracyM, L.bridgeMaxAccuracyM)) return movement;
   const dt = (fix.timestamp - sinceMs) / 1000;
   const d = distanceM(from, fix);
   const noise = fix.accuracyM! + (from.accuracyM ?? L.bridgeMaxAccuracyM) + L.bridgeMarginM;
-  if (!(dt > 0) || d < L.resumeMinFromStopM || d <= noise || d / dt > L.maxPlausibleMs) return movement;
-  return d / dt >= L.moveMinSpeedMs ? { moving: true, reason: 'gap_bridged', speedMs: d / dt, displacementM: d } : movement;
+  const far = dt > 0 && d >= Math.max(L.resumeMinFromStopM, stationaryRadius(fix, from)) && d > noise && d / dt <= L.maxPlausibleMs && d / dt >= L.moveMinSpeedMs;
+  if (!far) {
+    s.bridgeFrom = null;
+    return movement;
+  }
+  // One far fix could be noise (a vague fix jumping): a second, later and further on, must agree
+  const prev = s.bridgeFrom;
+  const agreed = afterGap || (!!prev && fix.timestamp - prev.t >= L.bridgeConfirmMs && fix.timestamp - prev.t <= L.pairMaxGapMs * 2 && d > prev.d);
+  if (!agreed) {
+    if (!prev || fix.timestamp - prev.t > L.pairMaxGapMs * 2) s.bridgeFrom = { t: fix.timestamp, d };
+    return movement;
+  }
+  s.bridgeFrom = null;
+  return { moving: true, reason: 'gap_bridged', speedMs: d / dt, displacementM: d };
+}
+
+/** How far around the anchor a fix still counts as the car standing there (m) */
+function stationaryRadius(fix: Pick<GpsFix, 'accuracyM'>, anchor: { accuracyM: number | null }): number {
+  const L = LIFECYCLE;
+  const acc = Math.max(fix.accuracyM ?? 0, anchor.accuracyM ?? 0);
+  return Math.min(Math.max(L.stationaryRadiusM, L.stationaryAccuracyFactor * acc), L.stationaryMaxRadiusM);
 }
 
 // ─── The lifecycle ───────────────────────────────────────────────────────────
@@ -375,6 +423,8 @@ function observe(rec: Rec, fix: GpsFix, deps: LifecycleDeps): void {
   if (!Number.isFinite(fix.timestamp) || !Number.isFinite(fix.latitude) || !Number.isFinite(fix.longitude)) return;
   const s = stateOf(rec);
   if (s.seenAt != null && fix.timestamp <= s.seenAt + LIFECYCLE.duplicateMs) return;
+  // No fix at all for a while before this one: a real GPS gap (a tunnel), not a wandering phone
+  const afterGap = s.seenAt != null && fix.timestamp - s.seenAt > LIFECYCLE.pairMaxGapMs;
   s.seenAt = fix.timestamp;
   const log = new Logger(s, deps);
   const now = fix.timestamp;
@@ -394,8 +444,14 @@ function observe(rec: Rec, fix: GpsFix, deps: LifecycleDeps): void {
   let movement = classifyMovement(fix, referenceFor(s, now));
   remember(s, fix);
   if (!movement.moving && (movement.reason === 'no_reference' || movement.reason === 'poor_accuracy') && !s.stopConfirmed && !s.wouldEndAt) {
-    movement = bridgeGap(s, fix, movement, ms(anchorOf(rec, s)));
+    movement = bridgeGap(s, fix, movement, ms(anchorOf(rec, s)), afterGap);
   }
+  // The stationary area: once stopped, the car is still there while fixes
+  // stay near where it last moved, whatever speed the GPS reports for them
+  if (movement.moving && s.anchor && distanceM(s.anchor, fix) <= stationaryRadius(fix, s.anchor)) {
+    movement = { ...movement, moving: false, reason: 'stationary_area' };
+  }
+  if (!movement.moving && !s.anchor && s.lastMovingPoint) s.anchor = { ...s.lastMovingPoint };
 
   // The safety nets look at every fix: a car "moving" for 24 hours, or GPS wander read as movement
   failsafes(rec, s, now, log);
@@ -412,6 +468,7 @@ function observe(rec: Rec, fix: GpsFix, deps: LifecycleDeps): void {
       s.samples = [];
       s.lastMovingAt = iso(now);
       s.lastMovingPoint = { latitude: fix.latitude, longitude: fix.longitude, accuracyM: fix.accuracyM ?? null };
+      s.anchor = null;
     }
     return;
   }
@@ -435,6 +492,7 @@ function observe(rec: Rec, fix: GpsFix, deps: LifecycleDeps): void {
       s.keepOpenUntil = null;
       s.lastMovingAt = iso(now);
       s.lastMovingPoint = { latitude: fix.latitude, longitude: fix.longitude, accuracyM: fix.accuracyM ?? null };
+      s.anchor = null;
       return;
     }
     evaluate(rec, now, log);
@@ -456,6 +514,7 @@ function observe(rec: Rec, fix: GpsFix, deps: LifecycleDeps): void {
     }
     s.lastMovingAt = iso(now);
     s.lastMovingPoint = { latitude: fix.latitude, longitude: fix.longitude, accuracyM: fix.accuracyM ?? null };
+    s.anchor = null;
     return;
   }
   evaluate(rec, now, log, movement.reason);
@@ -511,6 +570,7 @@ function syncPause(rec: Rec, s: DriveLifecycleState, now: number, log: Logger, f
   if (!s.wouldEndAt) {
     s.lastMovingAt = iso(now);
     if (fix) s.lastMovingPoint = { latitude: fix.latitude, longitude: fix.longitude, accuracyM: fix.accuracyM ?? null };
+    s.anchor = null;
   }
   log.log('manual_pause_ended');
 }

@@ -12532,11 +12532,21 @@ test('lifecycle trace: parked GPS noise is not movement; wander read as movement
   tr.park(30 * 60, { every: 1, jitterM: 6, accuracyM: 10, speedOf: (i) => (i % 7 === 0 ? 3.4 : i % 5 === 0 ? -1 : 0.3) });
   assert.equal(tr.only('movement_detected').length, 1, 'only the drive itself');
   assert.ok(tr.steps().includes('temporary_stop'));
-  // Wander well beyond the accuracy the phone claims, with plausible speeds: the rules are fooled…
+  // Wander beyond the accuracy the phone claims, with vehicle-like speeds, but within the stationary area: still parked
+  const area = new LcTrace();
+  area.drive(600);
+  const stopped = area.t;
+  area.park(5, { every: 1, jitterM: 1, accuracyM: 3 }); // coming to a halt
+  area.park(10 * 60, { every: 1, jitterM: 15, accuracyM: 3, speedOf: () => 4 });
+  assert.equal(area.only('movement_detected').length, 1, 'the wander never counted as the car moving');
+  assert.deepEqual(area.only('temporary_stop').map((l) => l.by), ['rules']);
+  const areaStop = Date.parse(area.state.stopStartedAt!);
+  assert.equal(areaStop, stopped, 'the stop point is where it parked');
+  // Wander wider than the stationary area (±60 m, claiming 3 m accuracy): the rules are fooled…
   const fooled = new LcTrace();
   fooled.drive(600);
   const parked = fooled.t;
-  fooled.park(90 * 60, { every: 1, jitterM: 15, accuracyM: 3, speedOf: () => 4 });
+  fooled.park(90 * 60, { every: 1, jitterM: 60, accuracyM: 3, speedOf: () => 4 });
   const fs = fooled.only('failsafe');
   assert.deepEqual(fs.map((l) => [l.failsafe, l.agrees]), [['low_displacement', false]], 'the rules never saw a stop');
   assert.ok(!fooled.steps().includes('stop_candidate_started'), 'the noise kept reading as movement');
@@ -13456,4 +13466,121 @@ test('camera rotation: the camera is written from the same heading every frame; 
   assert.ok(/if \(frame\.kind === "paused"\)/.test(loop) && /leaveFollowRef\.current\(\);/.test(loop));
   // The zoom still glides in the same loop
   assert.ok(/const glided = zoomGlide\.step\(dt\);/.test(loop));
+});
+
+// ─── Stationary area: parked GPS drift never resets a stop ─────────────────
+
+/** Parked at the trace's position: one fix every `every` s, placed and reported as `fix(i)` says */
+function lcParkWith(tr: LcTrace, seconds: number, fix: (i: number) => { dn: number; de: number; speedMs: number | null; accuracyM: number }, every = 1) {
+  for (let s = 0, i = 0; s < seconds; s += every, i++) {
+    tr.t += every * 1000;
+    const f = fix(i);
+    tr.feed(tr.fix(f.speedMs, f.accuracyM, f.dn, f.de));
+  }
+}
+let lcSeed = 3;
+const lcRand = () => ((lcSeed = (lcSeed * 16807) % 2147483647) / 2147483647);
+
+test('stationary area: a parked car wandering 10–40 m, with mixed or missing speeds, stops on time and stays stopped', () => {
+  const tr = new LcTrace();
+  tr.drive(900);
+  const stop = tr.t;
+  lcParkWith(tr, 10, () => ({ dn: 0, de: 0, speedMs: 0, accuracyM: 5 })); // coming to a halt
+  // GPS wander up to 40 m (claiming 5–10 m accuracy), speeds 0, unknown (-1) or none at all
+  lcParkWith(tr, 12 * 60, (i) => {
+    const r = 10 + 30 * lcRand();
+    const a = lcRand() * 2 * Math.PI;
+    return { dn: r * Math.cos(a), de: r * Math.sin(a), speedMs: i % 3 === 0 ? null : i % 3 === 1 ? -1 : 0, accuracyM: 5 + 5 * lcRand() };
+  });
+  assert.equal(tr.only('movement_detected').length, 1, 'only the drive itself: the wander never reset the stop');
+  assert.equal(tr.state.stopStartedAt, tr.iso(stop), 'the stop point is where it parked');
+  const t = tr.only('temporary_stop')[0]!;
+  assert.equal(t.decidedAfter, '5-10m', 'about 5 minutes after it stopped');
+  assert.equal(tr.phase, 'temporarily_stopped');
+});
+
+test('stationary area: bogus 1–5 mph speeds while parked never count as moving', () => {
+  const tr = new LcTrace();
+  tr.drive(600);
+  const stop = tr.t;
+  lcParkWith(tr, 8, () => ({ dn: 0, de: 0, speedMs: 0, accuracyM: 5 }));
+  lcParkWith(tr, 10 * 60, () => {
+    const r = 25 * lcRand();
+    const a = lcRand() * 2 * Math.PI;
+    return { dn: r * Math.cos(a), de: r * Math.sin(a), speedMs: 0.45 + 1.8 * lcRand(), accuracyM: 6 };
+  });
+  assert.equal(tr.only('movement_detected').length, 1);
+  assert.equal(tr.state.stopStartedAt, tr.iso(stop));
+  assert.ok(tr.steps().includes('temporary_stop'));
+  // Even speeds that look like a car (4–7 m/s) don't, while the fixes stay in the area
+  const fast = new LcTrace();
+  fast.drive(600);
+  lcParkWith(fast, 8, () => ({ dn: 0, de: 0, speedMs: 0, accuracyM: 5 }));
+  lcParkWith(fast, 10 * 60, (i) => ({ dn: 35 * Math.sin(i * 0.9), de: 35 * Math.cos(i * 1.3), speedMs: 4 + 3 * lcRand(), accuracyM: 4 }));
+  assert.equal(fast.only('movement_detected').length, 1);
+  assert.ok(fast.steps().includes('temporary_stop'));
+});
+
+test('stationary area: walking about near the car with the phone never resumes or resets the drive', () => {
+  for (const speedOf of [() => 1.4, () => null, (i: number) => (i % 20 === 7 ? 3.6 : 1.5)] as Array<(i: number) => number | null>) {
+    const tr = new LcTrace();
+    tr.drive(600);
+    const stop = tr.t;
+    lcParkWith(tr, 8, () => ({ dn: 0, de: 0, speedMs: 0, accuracyM: 5 }));
+    // A loop of about 150 m round the car park and back, twice, then waiting by the car
+    for (let lap = 0; lap < 2; lap++) {
+      tr.walk(110, 1.4, { speedOf });
+      tr.walk(110, -1.4, { speedOf });
+    }
+    lcParkWith(tr, 60 * 60, () => ({ dn: 0, de: 0, speedMs: 0, accuracyM: 8 }), 30);
+    assert.equal(tr.only('movement_detected').length, 1, 'never moving like a vehicle');
+    assert.ok(!tr.steps().includes('resumed'));
+    assert.equal(tr.state.wouldEndAt, tr.iso(stop), 'saved ending where it parked');
+  }
+});
+
+test('stationary area: a genuine departure is seen — after lights, and after a temporary stop (strict resume)', () => {
+  // Lights: 40 s with GPS wander, then away
+  const lights = new LcTrace();
+  lights.drive(300);
+  lcParkWith(lights, 5, () => ({ dn: 0, de: 0, speedMs: 0, accuracyM: 5 }));
+  lcParkWith(lights, 40, (i) => ({ dn: 15 * Math.sin(i), de: 15 * Math.cos(i * 1.7), speedMs: i % 2 ? 1.2 : null, accuracyM: 6 }));
+  // Pulling away at 12 m/s: seen within 12 s (out of the 50 m area with consistent fixes)
+  lights.drive(12, 12);
+  const moved = lights.only('movement_detected');
+  assert.equal(moved.length, 2, 'seen within seconds of leaving the area');
+  assert.equal(moved[1]!.stopped, '30s-1m');
+  lights.drive(60, 12);
+  assert.equal(lights.phase, 'driving');
+  // A 7 minute stop, then driven away: resumed by the strict rule, the same drive
+  const long = new LcTrace();
+  long.drive(300);
+  lcParkWith(long, 5, () => ({ dn: 0, de: 0, speedMs: 0, accuracyM: 5 }));
+  lcParkWith(long, 7 * 60, (i) => ({ dn: 20 * Math.sin(i), de: 20 * Math.cos(i * 1.3), speedMs: 1, accuracyM: 6 }));
+  long.drive(60, 14);
+  assert.equal(long.only('resumed').length, 1);
+  assert.equal(long.phase, 'driving');
+});
+
+test('stationary area: poor GPS (urban canyon) never resets a stop; driving through one is never a stop', () => {
+  // Parked among tall buildings: vague fixes (60–150 m) jumping up to 150 m about
+  const tr = new LcTrace();
+  tr.drive(600);
+  const stop = tr.t;
+  lcParkWith(tr, 8, () => ({ dn: 0, de: 0, speedMs: 0, accuracyM: 8 }));
+  lcParkWith(tr, 10 * 60, () => {
+    const r = 150 * lcRand();
+    const a = lcRand() * 2 * Math.PI;
+    return { dn: r * Math.cos(a), de: r * Math.sin(a), speedMs: lcRand() < 0.3 ? 5 * lcRand() : null, accuracyM: 60 + 90 * lcRand() };
+  });
+  assert.equal(tr.only('movement_detected').length, 1, 'no vague fix reset the stop');
+  assert.equal(tr.state.stopStartedAt, tr.iso(stop));
+  assert.equal(tr.only('temporary_stop')[0]!.decidedAfter, '5-10m');
+  // Driving 10 minutes through the canyon: every fix vague (150 m), the car really moving
+  const canyon = new LcTrace();
+  canyon.drive(300);
+  canyon.drive(600, 13, { accuracyM: 150, reportSpeed: false });
+  canyon.drive(120);
+  assert.ok(!canyon.steps().includes('temporary_stop'), 'never a temporary stop while driving');
+  assert.equal(canyon.phase, 'driving');
 });
