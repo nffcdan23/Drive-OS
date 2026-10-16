@@ -2613,6 +2613,38 @@ test("CarPlay scene: added beside Expo's iPhone scene, which is kept exactly; re
   assert.throws(() => withCarPlayScene({ ...expo, UISceneConfigurations: { ...expo.UISceneConfigurations, UIWindowSceneSessionRoleExternalDisplayNonInteractive: [] } }), /unexpected scene roles/);
 });
 
+test('scene manifest check: exactly the iPhone and CarPlay scenes in any key order (pod install sorts Info.plist), nothing more or less', () => {
+  const req = createRequire(import.meta.url);
+  type Manifest = Record<string, unknown>;
+  const { SCENE_MANIFEST, sceneManifestMatches } = req('../scripts/check-ios-scene-lifecycle.js') as {
+    SCENE_MANIFEST: { UIApplicationSupportsMultipleScenes: boolean; UISceneConfigurations: Record<string, Array<Record<string, string>>> };
+    sceneManifestMatches(m: unknown): boolean;
+  };
+  const { withCarPlayScene } = req('../plugins/withCarPlay.js') as { withCarPlayScene(m: unknown): Manifest };
+  // What prebuild writes: Expo's manifest, then the CarPlay scene added
+  const generated = withCarPlayScene({
+    UIApplicationSupportsMultipleScenes: false,
+    UISceneConfigurations: { UIWindowSceneSessionRoleApplication: [{ UISceneConfigurationName: 'Default Configuration', UISceneDelegateClassName: 'EXExpoAppSceneDelegate' }] },
+  });
+  assert.ok(sceneManifestMatches(generated));
+  // The same after `pod install` rewrites Info.plist with every dictionary's keys sorted (on the Mac)
+  const sortKeys = (v: unknown): unknown => Array.isArray(v) ? v.map(sortKeys)
+    : v && typeof v === 'object' ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, sortKeys((v as Manifest)[k])])) : v;
+  const sorted = sortKeys(generated) as Manifest;
+  assert.deepEqual(Object.keys(sorted.UISceneConfigurations as Manifest), ['CPTemplateApplicationSceneSessionRoleApplication', 'UIWindowSceneSessionRoleApplication']);
+  assert.ok(sceneManifestMatches(sorted), 'key order is not a difference');
+  // Still exact about the content
+  const edit = (f: (m: typeof SCENE_MANIFEST) => void) => { const m = structuredClone(SCENE_MANIFEST); f(m); return m; };
+  assert.equal(sceneManifestMatches(undefined), false);
+  assert.equal(sceneManifestMatches(edit((m) => { m.UIApplicationSupportsMultipleScenes = false; })), false);
+  assert.equal(sceneManifestMatches(edit((m) => { delete m.UISceneConfigurations.CPTemplateApplicationSceneSessionRoleApplication; })), false, 'no CarPlay scene');
+  assert.equal(sceneManifestMatches(edit((m) => { m.UISceneConfigurations.UIWindowSceneSessionRoleApplication![0]!.UISceneDelegateClassName = 'SceneDelegate'; })), false, "someone else's iPhone scene");
+  assert.equal(sceneManifestMatches(edit((m) => { m.UISceneConfigurations.CPTemplateApplicationSceneSessionRoleApplication![0]!.UISceneDelegateClassName = 'Other'; })), false, 'another CarPlay delegate');
+  assert.equal(sceneManifestMatches(edit((m) => { m.UISceneConfigurations.CPTemplateApplicationSceneDelegateExtra = []; })), false, 'an extra role');
+  assert.equal(sceneManifestMatches(edit((m) => { m.UISceneConfigurations.CPTemplateApplicationSceneSessionRoleApplication![0]!.UISceneStoryboardFile = 'Main'; })), false, 'an extra key');
+  assert.equal(sceneManifestMatches(edit((m) => { m.UISceneConfigurations.UIWindowSceneSessionRoleApplication!.push({ UISceneConfigurationName: 'Second' }); })), false, 'a second iPhone scene');
+});
+
 test('CarPlay plugin: listed once before expo-build-properties, so the real Info.plist steps add CarPlay after Expo; entitlement added to the others', async () => {
   const req = createRequire(import.meta.url);
   const appConfig = req('../app.config.js') as (a: { config: object }) => { plugins: unknown[] };

@@ -14,8 +14,9 @@
  *    and no longer creates the window or starts React Native itself; the
  *    deep-link handlers (custom scheme, universal links) are still there.
  *  - Info.plist: Expo's iPhone scene exactly as Expo writes it, plus the
- *    CarPlay scene (DerwentCarPlaySceneDelegate), and nothing else; background
- *    modes location and audio still present.
+ *    CarPlay scene (DerwentCarPlaySceneDelegate), and nothing else (in any
+ *    key order: `pod install` sorts the keys); background modes location and
+ *    audio still present.
  *  - Entitlements: Sign in with Apple, and CarPlay navigation.
  *  - CarPlay module: autolinked (pod DerwentCarPlay from modules/derwent-carplay),
  *    its scene delegate has the class name Info.plist uses, and it stays
@@ -27,6 +28,7 @@
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
+const { isDeepStrictEqual } = require('util');
 
 const projectRoot = path.resolve(__dirname, '..');
 const iosDir = path.join(projectRoot, 'ios');
@@ -53,6 +55,21 @@ const SCENE_MANIFEST = {
     ],
   },
 };
+
+/**
+ * Whether the parsed scene manifest is exactly SCENE_MANIFEST: the same keys
+ * and values, with nothing missing or added and arrays in the same order.
+ * Key order is ignored, because plist dictionaries are unordered and
+ * `pod install` rewrites Info.plist with its keys sorted (React Native's
+ * RCTNewArchEnabled step): CPTemplate... then comes before UIWindow....
+ */
+function sceneManifestMatches(manifest) {
+  const plain = (value) => (value === undefined ? undefined : JSON.parse(JSON.stringify(value)));
+  return isDeepStrictEqual(plain(manifest), SCENE_MANIFEST);
+}
+
+module.exports = { SCENE_MANIFEST, sceneManifestMatches };
+if (require.main !== module) return;
 
 const problems = [];
 const passed = [];
@@ -92,7 +109,7 @@ check(appDelegate.includes('RCTLinkingManager.application(app, open: url, option
 check(appDelegate.includes('RCTLinkingManager.application(application, continue: userActivity'), 'AppDelegate still hands universal links to React Native');
 
 const info = plist.parse(read(path.join(appDir, 'Info.plist')) ?? '');
-check(JSON.stringify(info.UIApplicationSceneManifest) === JSON.stringify(SCENE_MANIFEST), "Info.plist scene manifest: Expo's iPhone scene unchanged, plus the CarPlay scene (DerwentCarPlaySceneDelegate), nothing else");
+check(sceneManifestMatches(info.UIApplicationSceneManifest), "Info.plist scene manifest: Expo's iPhone scene unchanged, plus the CarPlay scene (DerwentCarPlaySceneDelegate), nothing else");
 const modes = Array.isArray(info.UIBackgroundModes) ? info.UIBackgroundModes : [];
 check(modes.includes('location') && modes.includes('audio'), `Info.plist background modes still include location and audio (${modes.join(', ')})`);
 
