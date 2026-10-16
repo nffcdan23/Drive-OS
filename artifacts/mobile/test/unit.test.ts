@@ -10438,6 +10438,80 @@ test('the iOS build number comes from app.json, is a whole number, and reaches X
   assert.ok(/settings\.MARKETING_VERSION = cfg\.version;/.test(src));
 });
 
+// ─── Build-number management (docs/BUILD_NUMBERS.md) ───────────────────────
+// Claude prepares each TestFlight build number with scripts/ios-build-number.js;
+// ios-build-numbers.json records the prepared build and the highest upload.
+
+import { mkdtempSync, copyFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+
+type BuildNumbers = {
+  nextBuild(prepared: number, highestUploaded: number | null): number;
+  xcodeCheck(a: { appBuild: number; highestUploaded: number | null; currentProjectVersion?: string; infoPlistBuild?: string | null; configuration?: string }): { errors: string[]; warnings: string[] };
+  prepare(root: string, o?: { uploaded?: number; contents?: string; today?: string }): number;
+  recordUpload(root: string, build: number, today?: string): number;
+};
+
+test('build numbers: the ledger records the build app.json prepares, for the same version, never below an upload', () => {
+  const read = (f: string) => JSON.parse(readFileSync(toPath(new URL(`../${f}`, import.meta.url)), 'utf8'));
+  const app = read('app.json') as { expo: { version: string; ios: { buildNumber: string } } };
+  const ledger = read('ios-build-numbers.json') as { version: string; prepared: { build: number }; highestUploaded: { build: number | null } };
+  assert.equal(ledger.prepared.build, Number(app.expo.ios.buildNumber), 'prepared.build is app.json ios.buildNumber');
+  assert.equal(ledger.version, app.expo.version);
+  const uploaded = ledger.highestUploaded.build;
+  assert.ok(uploaded === null || (Number.isInteger(uploaded) && ledger.prepared.build >= uploaded), 'never below a recorded upload');
+});
+
+test('build numbers: prepare keeps an unuploaded build, takes the next after an upload, refuses an unconfirmed upload, and is idempotent', () => {
+  const req = createRequire(import.meta.url);
+  const bn = req('../scripts/ios-build-number.js') as BuildNumbers;
+  assert.throws(() => bn.nextBuild(32, null), /not confirmed/);
+  assert.equal(bn.nextBuild(32, 31), 32, 'prepared but not uploaded: reused');
+  assert.equal(bn.nextBuild(32, 32), 33);
+  assert.equal(bn.nextBuild(32, 40), 41, 'App Store Connect is ahead: past it');
+  // On a copy of the real files
+  const root = mkdtempSync(join(tmpdir(), 'derwent-build-'));
+  for (const f of ['app.json', 'ios-build-numbers.json']) copyFileSync(join(MOBILE, f), join(root, f));
+  const appBuild = () => (JSON.parse(readFileSync(join(root, 'app.json'), 'utf8')) as { expo: { ios: { buildNumber: string } } }).expo.ios.buildNumber;
+  const before = readFileSync(join(root, 'app.json'), 'utf8');
+  const current = Number(appBuild());
+  assert.equal(bn.prepare(root, { uploaded: current, today: '2026-10-16' }), current + 1);
+  assert.equal(appBuild(), String(current + 1), 'app.json updated (a string, as Expo wants)');
+  assert.equal(bn.prepare(root, { today: '2026-10-16' }), current + 1, 'again: the same build');
+  assert.equal(readFileSync(join(root, 'app.json'), 'utf8'), before.replace(`"buildNumber": "${current}"`, `"buildNumber": "${current + 1}"`), 'only the build number changes');
+  assert.equal(bn.recordUpload(root, current + 1, '2026-10-17'), current + 1);
+  assert.equal(bn.prepare(root), current + 2);
+  assert.throws(() => bn.prepare(root, { uploaded: current }), /lower than the recorded highest upload/);
+  const ledger = JSON.parse(readFileSync(join(root, 'ios-build-numbers.json'), 'utf8')) as { prepared: { build: number }; highestUploaded: { build: number } };
+  assert.equal(ledger.prepared.build, current + 2);
+  assert.equal(ledger.highestUploaded.build, current + 1);
+});
+
+test('build numbers: an Archive stops on an out-of-date Xcode project or an uploaded build; Debug only warns', () => {
+  const req = createRequire(import.meta.url);
+  const bn = req('../scripts/ios-build-number.js') as BuildNumbers;
+  const ok = bn.xcodeCheck({ appBuild: 33, highestUploaded: 32, currentProjectVersion: '33', infoPlistBuild: '33', configuration: 'Release' });
+  assert.deepEqual(ok, { errors: [], warnings: [] });
+  const stale = bn.xcodeCheck({ appBuild: 33, highestUploaded: 32, currentProjectVersion: '32', infoPlistBuild: '32', configuration: 'Release' });
+  assert.equal(stale.errors.length, 1);
+  assert.match(stale.errors[0]!, /out of date: app\.json has build 33, but CURRENT_PROJECT_VERSION is 32 and Info\.plist CFBundleVersion is 32\. Run `npx expo prebuild -p ios --clean`/);
+  const uploaded = bn.xcodeCheck({ appBuild: 32, highestUploaded: 32, currentProjectVersion: '32', infoPlistBuild: '32', configuration: 'Release' });
+  assert.match(uploaded.errors[0]!, /Build 32 is already in App Store Connect/);
+  const debug = bn.xcodeCheck({ appBuild: 33, highestUploaded: 33, currentProjectVersion: '32', infoPlistBuild: '32', configuration: 'Debug' });
+  assert.deepEqual([debug.errors.length, debug.warnings.length], [0, 2], 'Debug builds only warn');
+  const unverified = bn.xcodeCheck({ appBuild: 32, highestUploaded: null, currentProjectVersion: '32', infoPlistBuild: '32', configuration: 'Release' });
+  assert.deepEqual(unverified.errors, []);
+  assert.match(unverified.warnings[0]!, /isn't verified as unused/);
+  // The Xcode build phase that runs it: added by a plugin (never by hand), plain sh, Expo's Node
+  const plugin = req('../plugins/withBuildNumberCheck.js') as { PHASE_NAME: string; SHELL_SCRIPT: string };
+  const script = plugin.SHELL_SCRIPT.replace(/\\n/g, '\n');
+  assert.ok(script.includes('"$PROJECT_DIR/../scripts/ios-build-number.js" xcode-check'));
+  assert.ok(script.includes('. "$PODS_ROOT/../.xcode.env"') && !/\[\[|\bsource\b/.test(script), 'POSIX sh, sourcing Expo\'s .xcode.env');
+  const appConfig = req('../app.config.js') as (a: { config: object }) => { plugins: unknown[] };
+  const plugins = appConfig({ config: { ios: { infoPlist: {} }, android: {}, plugins: [], extra: {} } }).plugins;
+  assert.equal(plugins.filter((p) => p === './plugins/withBuildNumberCheck').length, 1);
+});
+
 // ─── Live road hazards (migration 0020) ────────────────────────────────────
 // Report → a type, at the accepted GPS fix; nearby hazards on the map, live,
 // anonymous, gone at expiry; Still there / Not there. The server owns every

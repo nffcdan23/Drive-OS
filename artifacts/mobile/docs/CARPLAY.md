@@ -155,7 +155,7 @@ If Xcode reports a Swift error in `modules/derwent-carplay`, send the error text
 ## Rollback
 
 - **Milestone 3 only:** run `git revert <Milestone 3 commit>`, then `npx expo prebuild -p ios --clean`. CarPlay is back to the Milestone 2 placeholder; the scene, entitlement and iPhone app are unchanged.
-- **CarPlay entirely:** revert the Milestone 2 commit as well (`docs/SCENE_LIFECYCLE.md` describes the order). Then raise `ios.buildNumber` and archive as usual.
+- **CarPlay entirely:** revert the Milestone 2 commit as well (`docs/SCENE_LIFECYCLE.md` describes the order). Claude prepares the next build number (`docs/BUILD_NUMBERS.md`); archive as usual.
 
 ## Next milestone (Milestone 4, not started)
 

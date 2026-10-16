@@ -9,8 +9,9 @@ const { withInfoPlist, withXcodeProject } = require('expo/config-plugins');
 const { identity } = require('./app.identity');
 
 /**
- * The iOS build number has one source: `ios.buildNumber` in app.json. Raise
- * it there (by one) before each TestFlight build made in Xcode.
+ * The iOS build number has one source: `ios.buildNumber` in app.json. Claude
+ * prepares it for each TestFlight build (scripts/ios-build-number.js prepare,
+ * docs/BUILD_NUMBERS.md); nobody edits it in Xcode or by hand.
  *
  * `expo prebuild` writes it into Info.plist as CFBundleVersion (the value
  * App Store Connect reads); without it, prebuild writes "1". This plugin also
@@ -219,6 +220,10 @@ module.exports = ({ config }) => {
       // fails, rather than guessing, if the AppDelegate template changes.
       // Checked after prebuild by scripts/check-ios-scene-lifecycle.js.
       ['expo-build-properties', { ios: { enableSceneSupport: true } }],
+      // Xcode build phase: an Archive stops if the project is out of date
+      // (pulled without prebuild) or the build number is already uploaded
+      // (docs/BUILD_NUMBERS.md)
+      './plugins/withBuildNumberCheck',
     ],
     extra: {
       ...(config.extra || {}),

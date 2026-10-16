@@ -1,0 +1,13 @@
+{
+  "about": "iOS build numbers of the TestFlight app (uk.co.starscale.drive.staging). Claude manages them with scripts/ios-build-number.js; see docs/BUILD_NUMBERS.md. prepared.build is always app.json ios.buildNumber. Never edit the build number in Xcode or by hand.",
+  "version": "1.0.0",
+  "prepared": {
+    "build": 32,
+    "contents": "CarPlay Milestones 1-2: iOS scene lifecycle and the minimal native CarPlay interface"
+  },
+  "highestUploaded": {
+    "build": null,
+    "confirmed": null,
+    "source": "Not yet confirmed from App Store Connect (TestFlight > iOS builds for version 1.0.0)"
+  }
+}

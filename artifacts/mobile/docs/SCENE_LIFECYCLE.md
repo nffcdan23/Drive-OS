@@ -49,4 +49,4 @@ Roll back CarPlay first (`docs/CARPLAY.md`): its plugin stops prebuild without t
 
 1. Revert the commit that added this: `git revert <commit>`. That removes the option, its unit test, the CI check and this script together. For a quick local experiment without committing, `enableSceneSupport: false` in `app.config.js` also restores the old AppDelegate and Info.plist. The unit test and the check script then fail, as they should.
 2. Run `npx expo prebuild -p ios --clean`.
-3. Raise `ios.buildNumber` in `app.json` and archive as usual. Earlier TestFlight builds stay installable while you do.
+3. Claude prepares the next build number (`docs/BUILD_NUMBERS.md`); archive as usual. Earlier TestFlight builds stay installable while you do.

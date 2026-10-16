@@ -25,6 +25,11 @@
  *    brings (v11, no second copy); Info.plist has either both the public
  *    token (MBXAccessToken, pk.) and the Derwent style, or neither (then
  *    CarPlay shows its placeholder), and never a secret (sk.) token.
+ *  - Build number (docs/BUILD_NUMBERS.md): app.json's ios.buildNumber and
+ *    version reach Info.plist (CFBundleVersion, CFBundleShortVersionString)
+ *    and Xcode (CURRENT_PROJECT_VERSION, MARKETING_VERSION); it is the build
+ *    ios-build-numbers.json records as prepared; the "[Derwent] Check build
+ *    number" phase runs first in the app target.
  *  - Podfile.properties.json: the keys expo-build-properties writes hold the
  *    Podfile's own defaults, so pods are linked exactly as before.
  *  - The installed expo package has the scene delegate (57.0.23 or newer, SDK 57).
@@ -154,6 +159,19 @@ check(mapConfigured || (mapToken === undefined && mapStyle === undefined), mapCo
   ? 'Info.plist has the public Mapbox token (pk.) and the Derwent style: CarPlay shows the map'
   : 'Info.plist has no Mapbox token or style (EXPO_PUBLIC_MAPBOX_TOKEN / _STYLE_URL unset): CarPlay shows its placeholder');
 check(!/\bsk\.eyJ/.test(read(path.join(appDir, 'Info.plist')) ?? ''), 'Info.plist holds no secret Mapbox token (sk.)');
+
+// The build number: one source (app.json), the same everywhere Xcode and App Store Connect read it
+const appJson = JSON.parse(read(path.join(projectRoot, 'app.json')) ?? '{}').expo ?? {};
+const buildNumber = String(appJson.ios?.buildNumber ?? '');
+const ledger = JSON.parse(read(path.join(projectRoot, 'ios-build-numbers.json')) ?? '{}');
+check(/^[1-9]\d*$/.test(buildNumber) && Number(buildNumber) === ledger.prepared?.build && appJson.version === ledger.version, `Build ${buildNumber} (version ${appJson.version}) is the build ios-build-numbers.json records as prepared`);
+check(info.CFBundleVersion === buildNumber && info.CFBundleShortVersionString === appJson.version, `Info.plist CFBundleVersion ${info.CFBundleVersion} and CFBundleShortVersionString ${info.CFBundleShortVersionString} come from app.json`);
+const pbxproj = read(path.join(iosDir, `${path.basename(appDir)}.xcodeproj`, 'project.pbxproj')) ?? '';
+const projectVersions = [...pbxproj.matchAll(/CURRENT_PROJECT_VERSION = ([^;]+);/g)].map((m) => m[1]);
+const marketingVersions = [...pbxproj.matchAll(/MARKETING_VERSION = ([^;]+);/g)].map((m) => m[1]);
+check(projectVersions.length >= 2 && projectVersions.every((v) => v === buildNumber) && marketingVersions.length >= 2 && marketingVersions.every((v) => v === appJson.version), `Xcode CURRENT_PROJECT_VERSION (${projectVersions.join(', ')}) and MARKETING_VERSION (${marketingVersions.join(', ')}) come from app.json, Debug and Release`);
+const firstPhase = (pbxproj.match(/buildPhases = \(\s*\w+ \/\* ([^*]+) \*\//) || [])[1];
+check(firstPhase === '[Derwent] Check build number' && (pbxproj.match(/name = "\[Derwent\] Check build number";/g) || []).length === 1, 'The "[Derwent] Check build number" build phase is in the app target once, first');
 
 const podProps = JSON.parse(read(path.join(iosDir, 'Podfile.properties.json')) ?? '{}');
 const defaults = { 'EXPO_USE_PRECOMPILED_MODULES': 'true', 'apple.privacyManifestAggregationEnabled': 'true', 'ios.forceStaticLinking': '[]' };
