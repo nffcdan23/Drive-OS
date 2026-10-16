@@ -10512,6 +10512,37 @@ test('build numbers: an Archive stops on an out-of-date Xcode project or an uplo
   assert.equal(plugins.filter((p) => p === './plugins/withBuildNumberCheck').length, 1);
 });
 
+test('build numbers: the check phase runs before compiling, also after pod install moves CocoaPods\' manifest check first', () => {
+  const req = createRequire(import.meta.url);
+  const plugin = req('../plugins/withBuildNumberCheck.js') as { PHASE_NAME: string; PODS_MANIFEST_PHASE: string; orderBuildPhases(p: Array<{ comment: string }>): Array<{ comment: string }> };
+  const { appTargetPhases, buildNumberPhaseOrderOk } = req('../scripts/check-ios-scene-lifecycle.js') as {
+    appTargetPhases(pbxproj: string): string[]; buildNumberPhaseOrderOk(phases: string[]): boolean;
+  };
+  const CHECK = plugin.PHASE_NAME;
+  const PODS = plugin.PODS_MANIFEST_PHASE;
+  const order = (...names: string[]) => plugin.orderBuildPhases(names.map((comment) => ({ comment }))).map((p) => p.comment);
+  // Prebuild: directly after CocoaPods' manifest check (where pod install keeps it), else first
+  assert.deepEqual(order(PODS, 'Sources', 'Frameworks', 'Resources', CHECK), [PODS, CHECK, 'Sources', 'Frameworks', 'Resources']);
+  assert.deepEqual(order(CHECK, PODS, 'Sources'), [PODS, CHECK, 'Sources']);
+  assert.deepEqual(order('Sources', CHECK), [CHECK, 'Sources']);
+  assert.deepEqual(order(PODS, CHECK, 'Sources'), [PODS, CHECK, 'Sources'], 'already in place: unchanged');
+  // What `pod install` does (CocoaPods TargetIntegrator: its manifest check to the front) leaves that order alone
+  const podInstall = (phases: string[]) => (phases[0] === PODS ? phases : [PODS, ...phases.filter((p) => p !== PODS)]);
+  const generated = order(PODS, 'Sources', 'Resources', CHECK);
+  assert.deepEqual(podInstall(generated), generated);
+  // The validation: once, nothing but CocoaPods' manifest check before it, before Sources
+  assert.ok(buildNumberPhaseOrderOk([PODS, CHECK, 'Sources', 'Resources']), 'after pod install (the Mac)');
+  assert.ok(buildNumberPhaseOrderOk([CHECK, PODS, 'Sources']), 'before pod install');
+  assert.equal(buildNumberPhaseOrderOk([PODS, 'Sources', CHECK]), false, 'after compiling');
+  assert.equal(buildNumberPhaseOrderOk(['Bundle React Native code and images', CHECK, 'Sources']), false, 'anything else before it');
+  assert.equal(buildNumberPhaseOrderOk([CHECK, PODS, CHECK, 'Sources']), false, 'twice');
+  assert.equal(buildNumberPhaseOrderOk([PODS, 'Sources']), false, 'missing');
+  assert.equal(buildNumberPhaseOrderOk([PODS, CHECK]), false, 'no Sources phase to come before');
+  // Reads the app target's list from a project file, as Xcode/CocoaPods write it
+  const pbxproj = 'buildPhases = (\n\t\t\t\t08A4 /* [CP] Check Pods Manifest.lock */,\n\t\t\t\t3FEE /* [Derwent] Check build number */,\n\t\t\t\t13B0 /* Sources */,\n\t\t\t);';
+  assert.deepEqual(appTargetPhases(pbxproj), [PODS, CHECK, 'Sources']);
+});
+
 // ─── Live road hazards (migration 0020) ────────────────────────────────────
 // Report → a type, at the accepted GPS fix; nearby hazards on the map, live,
 // anonymous, gone at expiry; Still there / Not there. The server owns every

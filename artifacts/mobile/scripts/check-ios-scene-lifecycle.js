@@ -29,7 +29,9 @@
  *    version reach Info.plist (CFBundleVersion, CFBundleShortVersionString)
  *    and Xcode (CURRENT_PROJECT_VERSION, MARKETING_VERSION); it is the build
  *    ios-build-numbers.json records as prepared; the "[Derwent] Check build
- *    number" phase runs first in the app target.
+ *    number" phase is in the app target once, before compiling: nothing
+ *    before it but CocoaPods' "[CP] Check Pods Manifest.lock" (which
+ *    `pod install` always puts first), and before Sources.
  *  - Podfile.properties.json: the keys expo-build-properties writes hold the
  *    Podfile's own defaults, so pods are linked exactly as before.
  *  - The installed expo package has the scene delegate (57.0.23 or newer, SDK 57).
@@ -77,7 +79,26 @@ function sceneManifestMatches(manifest) {
   return isDeepStrictEqual(plain(manifest), SCENE_MANIFEST);
 }
 
-module.exports = { SCENE_MANIFEST, sceneManifestMatches };
+/** The app target's build phases, in order (the app project has one native target) */
+function appTargetPhases(pbxproj) {
+  const list = (pbxproj.match(/buildPhases = \(([^)]*)\);/) || [])[1] || '';
+  return [...list.matchAll(/\/\* (.+?) \*\//g)].map((m) => m[1]);
+}
+
+/**
+ * The build-number check runs before anything is built: it appears once, the
+ * only phase allowed before it is CocoaPods' manifest check (`pod install`
+ * always moves that one to the front), and compiling (Sources) comes after it.
+ */
+function buildNumberPhaseOrderOk(phases) {
+  const at = phases.indexOf('[Derwent] Check build number');
+  return at !== -1
+    && phases.lastIndexOf('[Derwent] Check build number') === at
+    && phases.slice(0, at).every((p) => p === '[CP] Check Pods Manifest.lock')
+    && phases.indexOf('Sources') > at;
+}
+
+module.exports = { SCENE_MANIFEST, sceneManifestMatches, appTargetPhases, buildNumberPhaseOrderOk };
 if (require.main !== module) return;
 
 const problems = [];
@@ -170,8 +191,8 @@ const pbxproj = read(path.join(iosDir, `${path.basename(appDir)}.xcodeproj`, 'pr
 const projectVersions = [...pbxproj.matchAll(/CURRENT_PROJECT_VERSION = ([^;]+);/g)].map((m) => m[1]);
 const marketingVersions = [...pbxproj.matchAll(/MARKETING_VERSION = ([^;]+);/g)].map((m) => m[1]);
 check(projectVersions.length >= 2 && projectVersions.every((v) => v === buildNumber) && marketingVersions.length >= 2 && marketingVersions.every((v) => v === appJson.version), `Xcode CURRENT_PROJECT_VERSION (${projectVersions.join(', ')}) and MARKETING_VERSION (${marketingVersions.join(', ')}) come from app.json, Debug and Release`);
-const firstPhase = (pbxproj.match(/buildPhases = \(\s*\w+ \/\* ([^*]+) \*\//) || [])[1];
-check(firstPhase === '[Derwent] Check build number' && (pbxproj.match(/name = "\[Derwent\] Check build number";/g) || []).length === 1, 'The "[Derwent] Check build number" build phase is in the app target once, first');
+check(buildNumberPhaseOrderOk(appTargetPhases(pbxproj)) && (pbxproj.match(/name = "\[Derwent\] Check build number";/g) || []).length === 1,
+  `The "[Derwent] Check build number" build phase is in the app target once, before compiling (${appTargetPhases(pbxproj).join(' → ')})`);
 
 const podProps = JSON.parse(read(path.join(iosDir, 'Podfile.properties.json')) ?? '{}');
 const defaults = { 'EXPO_USE_PRECOMPILED_MODULES': 'true', 'apple.privacyManifestAggregationEnabled': 'true', 'ios.forceStaticLinking': '[]' };
