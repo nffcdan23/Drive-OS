@@ -163,51 +163,96 @@ export function displayTrail(coordinates: readonly LatLng[] | null | undefined):
  */
 export const LOCATION_ARROW_SCALE = 1.2;
 
+/** The arrow artwork's size in points at scale 1 (puck-arrow.png / puck-shadow.png, 44 × 48 pt) */
+export const LOCATION_ARROW_ARTWORK_PT = { width: 44, height: 48 } as const;
+
 /**
- * The location arrow's look on the Mapbox map: the Derwent arrow artwork
- * (assets/images/map/puck-arrow.png, over its soft shadow) drawn as a symbol
- * lying flat on the map, the way the first Mapbox build drew it.  Pitch and
- * rotation are both aligned to the map, so the arrow is foreshortened with the
- * road at any tilt and turned by its heading from north, as part of the map
- * (never a screen-upright view).  Overlap and placement are ignored, so labels
- * never hide it.
+ * How the location arrow is drawn on the Mapbox map: the Derwent arrow
+ * artwork (assets/images/map/puck-arrow.png, over its soft shadow) as an
+ * image draped flat on the map (an ImageSource under a RasterLayer), its four
+ * corners placed from the car's position, heading and the map's zoom.  So it
+ * lies on the road at any tilt and turns with the map, at the same on-screen
+ * size the symbol had.
+ *
+ * Not a symbol layer: a symbol on a GeoJSON source replaced every frame is
+ * re-tiled on each update, and symbols in freshly built tiles stay hidden
+ * until the map's next placement pass, so the arrow blinked off and on while
+ * driving.  An image source's corners are one property update in place: no
+ * tiles, no placement, no fade.
  */
-export const LOCATION_ARROW_SYMBOL = {
-  iconSize: LOCATION_ARROW_SCALE,
-  iconPitchAlignment: "map",
-  iconRotationAlignment: "map",
-  iconRotate: ["get", "heading"],
-  iconAnchor: "center",
-  iconAllowOverlap: true,
-  iconIgnorePlacement: true,
-  iconEmissiveStrength: 1,
+export const LOCATION_ARROW_RASTER = {
+  rasterOpacity: 1,
+  rasterFadeDuration: 0,
+  rasterResampling: "linear",
+  rasterEmissiveStrength: 1,
 } as const;
 
-export interface LocationArrowFeature {
-  type: "FeatureCollection";
-  features: Array<{
-    type: "Feature";
-    properties: { heading: number };
-    geometry: { type: "Point"; coordinates: [number, number] };
-  }>;
+/** The arrow's pose as last drawn: where, which way, and at what map zoom */
+export interface ArrowPose {
+  position: LatLng;
+  /** Degrees clockwise from north */
+  heading: number;
+  zoom: number;
 }
 
-/** The arrow at a position, turned to a heading (degrees clockwise from north) */
-export function locationArrowFeature(position: LatLng | null, heading: number): LocationArrowFeature {
-  if (!position || !Number.isFinite(position.latitude) || !Number.isFinite(position.longitude)) {
-    return { type: "FeatureCollection", features: [] };
-  }
-  const h = Number.isFinite(heading) ? ((heading % 360) + 360) % 360 : 0;
-  return {
-    type: "FeatureCollection",
-    features: [
-      {
-        type: "Feature",
-        properties: { heading: h },
-        geometry: { type: "Point", coordinates: [position.longitude, position.latitude] },
-      },
-    ],
-  };
+const validPosition = (p: LatLng | null | undefined): p is LatLng =>
+  !!p && Number.isFinite(p.latitude) && Number.isFinite(p.longitude)
+  && Math.abs(p.latitude) <= 85 && Math.abs(p.longitude) <= 180;
+
+/**
+ * The arrow's next pose.  Once it has a valid position it never goes away:
+ * an invalid position keeps the last valid one, a missing heading keeps the
+ * last heading, a missing zoom keeps the last zoom.  Null only before the
+ * first valid position.  Returns `prev` itself when nothing changed.
+ */
+export function nextArrowPose(
+  prev: ArrowPose | null,
+  position: LatLng | null | undefined,
+  heading: number | null | undefined,
+  zoom: number | null | undefined,
+): ArrowPose | null {
+  const pos = validPosition(position) ? position : prev?.position;
+  if (!pos) return null;
+  const h = typeof heading === "number" && Number.isFinite(heading)
+    ? ((heading % 360) + 360) % 360
+    : prev?.heading ?? 0;
+  const z = typeof zoom === "number" && Number.isFinite(zoom) ? zoom : prev?.zoom ?? 15;
+  if (prev && prev.position.latitude === pos.latitude && prev.position.longitude === pos.longitude
+    && prev.heading === h && prev.zoom === z) return prev;
+  return { position: { latitude: pos.latitude, longitude: pos.longitude }, heading: h, zoom: z };
+}
+
+const EARTH_CIRCUMFERENCE_M = 40_075_016.686;
+
+/** Metres per point at a latitude and Mapbox zoom (512-point tiles) */
+export function metresPerPoint(latitude: number, zoom: number): number {
+  return (EARTH_CIRCUMFERENCE_M * Math.cos((latitude * Math.PI) / 180)) / (512 * 2 ** zoom);
+}
+
+export type ImageCorners = [[number, number], [number, number], [number, number], [number, number]];
+
+/**
+ * The arrow image's corners on the map ([lng, lat]; top left, top right,
+ * bottom right, bottom left, as ImageSource takes them): centred on the
+ * position (the anchor), the artwork's top turned to the heading, sized so
+ * it shows at LOCATION_ARROW_SCALE × its artwork at the given zoom.
+ */
+export function locationArrowCorners(pose: ArrowPose, scale = LOCATION_ARROW_SCALE): ImageCorners {
+  const { latitude, longitude } = pose.position;
+  const mpp = metresPerPoint(latitude, pose.zoom);
+  const halfW = (LOCATION_ARROW_ARTWORK_PT.width * scale * mpp) / 2;
+  const halfH = (LOCATION_ARROW_ARTWORK_PT.height * scale * mpp) / 2;
+  const rad = (pose.heading * Math.PI) / 180;
+  // Unit vectors in metres (east, north): forward along the heading, and to its right
+  const fwd = [Math.sin(rad), Math.cos(rad)] as const;
+  const right = [Math.cos(rad), -Math.sin(rad)] as const;
+  const mPerDegLat = EARTH_CIRCUMFERENCE_M / 360;
+  const mPerDegLng = mPerDegLat * Math.cos((latitude * Math.PI) / 180);
+  const at = (r: number, f: number): [number, number] => [
+    longitude + (right[0] * r + fwd[0] * f) / mPerDegLng,
+    latitude + (right[1] * r + fwd[1] * f) / mPerDegLat,
+  ];
+  return [at(-halfW, halfH), at(halfW, halfH), at(halfW, -halfH), at(-halfW, -halfH)];
 }
 
 /**

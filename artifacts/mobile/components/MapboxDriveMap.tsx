@@ -4,11 +4,14 @@
 // layers, continued to the arrow by the live trail head (lib/liveTrail.ts)
 // drawn from the same smoothed position.
 //
-// The arrow is a symbol layer lying flat on the map (LOCATION_ARROW_SYMBOL in
-// lib/mapbox.ts): the Derwent arrow artwork, pitched and turned with the map,
-// so it sits on the road at any tilt.  It is not a view annotation: those are
-// screen-upright views, which is why the arrow used to look stood up on the
-// tilted map.  Nor is it Mapbox's location puck, for two reasons:
+// The arrow is the Derwent arrow artwork draped flat on the map (an
+// ImageSource under a RasterLayer, corners from lib/mapbox.ts:
+// locationArrowCorners), pitched and turned with the map, so it sits on the
+// road at any tilt.  Not a symbol layer: a symbol on a GeoJSON source
+// replaced every frame is re-tiled each time, and symbols in new tiles stay
+// hidden until the next placement pass, so the arrow blinked off and on while
+// driving.  Not a view annotation either (screen-upright, so it looked stood
+// up on the tilted map).  Nor Mapbox's location puck, for two reasons:
 //  - the puck re-animates every update it's given, heading over 0.3 s and
 //    position over 1.1 s (LocationManager's ValueInterpolators in the Mapbox
 //    iOS SDK); fed a new value every frame, that made it a lag filter on top
@@ -49,9 +52,11 @@ import { StyleSheet, View, type StyleProp, type ViewStyle } from "react-native";
 import Mapbox, {
   Camera,
   CircleLayer,
+  ImageSource,
   Images,
   LineLayer,
   MapView,
+  RasterLayer,
   ShapeSource,
   SymbolLayer,
   type MapState,
@@ -64,8 +69,10 @@ import type {
 import {
   clampMapboxZoom,
   displayTrail,
-  LOCATION_ARROW_SYMBOL,
-  locationArrowFeature,
+  LOCATION_ARROW_RASTER,
+  locationArrowCorners,
+  nextArrowPose,
+  type ArrowPose,
   mapboxFollowCamera,
   reportedPoseFromMapbox,
   trailFeatureCollection,
@@ -167,9 +174,10 @@ export interface MapboxDriveMapProps {
 const TRAIL_GLOW = "rgba(0,207,232,0.28)";
 
 // The arrow's artwork, the same images the first Mapbox build's arrow used
-const ARROW_IMAGES = {
-  "derwent-location-arrow": require("@/assets/images/map/puck-arrow.png"),
-  "derwent-location-arrow-shadow": require("@/assets/images/map/puck-shadow.png"),
+// (draped on the map by ImageSource; see ArrowLayers)
+const ARROW_IMAGE = require("@/assets/images/map/puck-arrow.png");
+const ARROW_SHADOW_IMAGE = require("@/assets/images/map/puck-shadow.png");
+const ROUTE_IMAGES = {
   // The head of the white manoeuvre arrow on the route (scripts/generate-maneuver-head.mjs)
   "derwent-maneuver-head": require("@/assets/images/map/maneuver-head.png"),
 };
@@ -240,12 +248,14 @@ function useAccessToken(token: string) {
 }
 
 /**
- * The location arrow, flat on the map.  Its own small component with its own
- * state, so moving or turning it every frame re-renders only this source and
- * replaces its one point, never the map or its other layers.  The shadow is
- * drawn first, beneath the arrow.
+ * The location arrow, flat on the map: the arrow artwork over its shadow,
+ * each an image draped on the map by its four corners (lib/mapbox:
+ * locationArrowCorners).  Its own small component with its own state, so
+ * moving or turning it every frame re-renders only this; the sources and
+ * layers are mounted once and only their corners change, in place.  Once it
+ * has a position it always draws: an invalid position or missing heading
+ * keeps the last one (nextArrowPose).
  */
-type ArrowPose = { position: LatLng; heading: number };
 interface MarkerFeederHandle {
   set(pose: ArrowPose): void;
 }
@@ -255,40 +265,26 @@ const MarkerFeeder = memo(
     { latest: React.RefObject<ArrowPose | null>; fallback: LatLng }
   >(function MarkerFeeder({ latest, fallback }, ref) {
     const [pose, setPose] = useState<ArrowPose>(
-      () => latest.current ?? { position: fallback, heading: 0 },
+      () => latest.current ?? { position: fallback, heading: 0, zoom: 15 },
     );
     const set = useCallback((next: ArrowPose) => {
-      setPose((prev) =>
-        prev.position.latitude === next.position.latitude &&
-        prev.position.longitude === next.position.longitude &&
-        prev.heading === next.heading
-          ? prev
-          : next,
-      );
+      setPose((prev) => nextArrowPose(prev, next.position, next.heading, next.zoom) ?? prev);
     }, []);
     useImperativeHandle(ref, () => ({ set }), [set]);
     // A pose pushed between this render and mounting is picked up here
     useEffect(() => {
       if (latest.current) set(latest.current);
     }, [latest, set]);
-    const shape = useMemo(
-      () => locationArrowFeature(pose.position, pose.heading),
-      [pose],
-    );
+    const corners = useMemo(() => locationArrowCorners(pose), [pose]);
     return (
-      <ShapeSource id="derwent-location-arrow" shape={shape}>
-        <SymbolLayer
-          id="derwent-location-arrow-shadow"
-          style={{
-            ...LOCATION_ARROW_SYMBOL,
-            iconImage: "derwent-location-arrow-shadow",
-          }}
-        />
-        <SymbolLayer
-          id="derwent-location-arrow"
-          style={{ ...LOCATION_ARROW_SYMBOL, iconImage: "derwent-location-arrow" }}
-        />
-      </ShapeSource>
+      <>
+        <ImageSource id="derwent-location-arrow-shadow-image" url={ARROW_SHADOW_IMAGE} coordinates={corners}>
+          <RasterLayer id="derwent-location-arrow-shadow" style={LOCATION_ARROW_RASTER} />
+        </ImageSource>
+        <ImageSource id="derwent-location-arrow-image" url={ARROW_IMAGE} coordinates={corners}>
+          <RasterLayer id="derwent-location-arrow" style={LOCATION_ARROW_RASTER} />
+        </ImageSource>
+      </>
     );
   }),
 );
@@ -697,6 +693,8 @@ const MapboxDriveMap = forwardRef<MapboxDriveMapHandle, MapboxDriveMapProps>(
     const navRouteRef = useRef<NavigationRouteHandle>(null);
     const lastCameraRef = useRef<ReportedPose | null>(null);
     const lastMarkerRef = useRef<ArrowPose | null>(null);
+    // The map's zoom, for drawing the arrow at a constant on-screen size
+    const zoomRef = useRef<number | null>(null);
     const liveRef = useRef(true);
     // One camera write in flight at most, only the newest pose waiting
     const [cameraWriter] = useState(
@@ -719,6 +717,7 @@ const MapboxDriveMap = forwardRef<MapboxDriveMapHandle, MapboxDriveMapProps>(
       () => ({
         setFollowCamera(pose) {
           cameraWriter.submit(pose);
+          if (zoomRef.current == null) zoomRef.current = pose.zoom;
         },
         getCamera() {
           const cam = lastCameraRef.current;
@@ -737,7 +736,8 @@ const MapboxDriveMap = forwardRef<MapboxDriveMapHandle, MapboxDriveMapProps>(
           });
         },
         setMarker(position, heading) {
-          const pose = { position, heading };
+          const pose = nextArrowPose(lastMarkerRef.current, position, heading, zoomRef.current);
+          if (!pose) return;
           lastMarkerRef.current = pose;
           if (liveRef.current) markerRef.current?.set(pose);
         },
@@ -759,7 +759,21 @@ const MapboxDriveMap = forwardRef<MapboxDriveMapHandle, MapboxDriveMapProps>(
     // when follow mode is next entered; it is never fed back while following.
     const handleCameraChanged = useCallback(
       (state: MapState) => {
-        lastCameraRef.current = reportedPoseFromMapbox(state.properties);
+        const reported = reportedPoseFromMapbox(state.properties);
+        lastCameraRef.current = reported;
+        // The arrow keeps its on-screen size as the zoom changes (followed or pinched)
+        if (typeof reported.zoom === "number" && Number.isFinite(reported.zoom)) {
+          const zoom = reported.zoom;
+          if (zoomRef.current == null || Math.abs(zoom - zoomRef.current) > 0.01) {
+            zoomRef.current = zoom;
+            const last = lastMarkerRef.current;
+            const pose = last ? nextArrowPose(last, last.position, last.heading, zoom) : null;
+            if (pose && pose !== last) {
+              lastMarkerRef.current = pose;
+              if (liveRef.current) markerRef.current?.set(pose);
+            }
+          }
+        }
         if (state.gestures?.isGestureActive) {
           // The map is no longer where the last pose put it: the next pose is
           // written even if it's the same one
@@ -827,7 +841,7 @@ const MapboxDriveMap = forwardRef<MapboxDriveMapHandle, MapboxDriveMapProps>(
             cameraRef={cameraRef}
             defaultSettings={initialCamera}
           />
-          <Images images={ARROW_IMAGES} />
+          <Images images={ROUTE_IMAGES} />
           <Images images={HAZARD_IMAGES} />
           {/* Mounted first: the route preview draws beneath the trail and
               the arrow */}

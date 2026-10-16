@@ -6506,63 +6506,135 @@ test('friend map: 20 sharers build quickly and stay one marker each', () => {
 
 // ─── Mapbox location arrow: flat on the map; never the native puck ─────────
 //
-// On Mapbox the Derwent arrow is a symbol layer pitched and turned with the
-// map (the first Mapbox build's flat look, with its artwork), not a
-// screen-upright view annotation (which looked stood up on the tilted map).
-// Mapbox's location component is never switched on: its puck shows the
-// default blue puck until a custom image has loaded.
-import { LOCATION_ARROW_SYMBOL, locationArrowFeature } from '@/lib/mapbox';
+// On Mapbox the Derwent arrow is its artwork draped flat on the map (an
+// ImageSource under a RasterLayer), pitched and turned with the map, not a
+// screen-upright view annotation (which looked stood up on the tilted map),
+// and not a symbol (re-tiled on every per-frame update, and hidden until the
+// next placement pass: it blinked).  Mapbox's location component is never
+// switched on: its puck shows the default blue puck until a custom image has
+// loaded.
+import {
+  LOCATION_ARROW_RASTER, LOCATION_ARROW_ARTWORK_PT, locationArrowCorners, metresPerPoint, nextArrowPose,
+} from '@/lib/mapbox';
 
-test('the Mapbox arrow lies flat on the map and turns with it', () => {
-  assert.equal(LOCATION_ARROW_SYMBOL.iconPitchAlignment, 'map');
-  assert.equal(LOCATION_ARROW_SYMBOL.iconRotationAlignment, 'map');
-  assert.deepEqual(LOCATION_ARROW_SYMBOL.iconRotate, ['get', 'heading']);
-  assert.equal(LOCATION_ARROW_SYMBOL.iconAllowOverlap, true);
-  assert.equal(LOCATION_ARROW_SYMBOL.iconIgnorePlacement, true);
-  // Heading from north, as the feature's own property; position as [lng, lat]
-  const f = locationArrowFeature({ latitude: 53.2, longitude: -0.54 }, 87.5);
-  assert.deepEqual(f.features[0]!.geometry.coordinates, [-0.54, 53.2]);
-  assert.equal(f.features[0]!.properties.heading, 87.5);
-  assert.equal(locationArrowFeature({ latitude: 1, longitude: 2 }, -90).features[0]!.properties.heading, 270);
-  assert.equal(locationArrowFeature({ latitude: 1, longitude: 2 }, 725).features[0]!.properties.heading, 5);
-  assert.equal(locationArrowFeature({ latitude: 1, longitude: 2 }, NaN).features[0]!.properties.heading, 0);
-  // No position: nothing drawn (never a placeholder spot)
-  assert.equal(locationArrowFeature(null, 10).features.length, 0);
-  assert.equal(locationArrowFeature({ latitude: NaN, longitude: 2 }, 10).features.length, 0);
+/** Distance in metres between two [lng, lat] points (small distances) */
+function metresBetween(a: [number, number], b: [number, number]) {
+  const mLat = 40_075_016.686 / 360;
+  const mLng = mLat * Math.cos((a[1] * Math.PI) / 180);
+  return Math.hypot((a[0] - b[0]) * mLng, (a[1] - b[1]) * mLat);
+}
+
+test('the Mapbox arrow lies flat on the map, turned by its heading from north, at a constant on-screen size', () => {
+  assert.equal(LOCATION_ARROW_RASTER.rasterFadeDuration, 0, 'no fade on updates');
+  assert.equal(LOCATION_ARROW_RASTER.rasterOpacity, 1);
+  const pos = { latitude: 53.2, longitude: -0.54 };
+  const zoom = 17;
+  const mpp = metresPerPoint(pos.latitude, zoom);
+  const [tl, tr, br, bl] = locationArrowCorners({ position: pos, heading: 0, zoom });
+  // Centred on the car (the anchor)
+  const cx = (tl[0] + tr[0] + br[0] + bl[0]) / 4, cy = (tl[1] + tr[1] + br[1] + bl[1]) / 4;
+  assert.ok(Math.abs(cx - pos.longitude) < 1e-9 && Math.abs(cy - pos.latitude) < 1e-9);
+  // Heading 0: the artwork's top edge is to the north, its left edge to the west
+  assert.ok(tl[1] > bl[1] && tr[1] > br[1] && tr[0] > tl[0]);
+  // Size: 1.2 × the 44 × 48 pt artwork in metres at this zoom
+  assert.ok(Math.abs(metresBetween(tl, tr) - LOCATION_ARROW_ARTWORK_PT.width * LOCATION_ARROW_SCALE * mpp) < 0.01);
+  assert.ok(Math.abs(metresBetween(tl, bl) - LOCATION_ARROW_ARTWORK_PT.height * LOCATION_ARROW_SCALE * mpp) < 0.01);
+  // Heading 90: the top edge faces east
+  const [tl90, tr90, br90, bl90] = locationArrowCorners({ position: pos, heading: 90, zoom });
+  assert.ok(tl90[0] > bl90[0] && tr90[0] > br90[0] && tl90[1] > tr90[1]);
+  // One zoom level in, half the metres: the same on-screen size
+  const [a, b] = locationArrowCorners({ position: pos, heading: 0, zoom: zoom + 1 });
+  assert.ok(Math.abs(metresBetween(a, b) * 2 - metresBetween(tl, tr)) < 0.01);
 });
 
-test('the Mapbox Drive map draws the arrow as flat symbol layers from the drawn heading', () => {
+test('the Mapbox arrow never disappears once placed: invalid fixes, missing headings and zooms keep the last values', () => {
+  assert.equal(nextArrowPose(null, null, 10, 15), null, 'nothing to draw before the first fix');
+  assert.equal(nextArrowPose(null, { latitude: NaN, longitude: 1 }, 10, 15), null);
+  const first = nextArrowPose(null, { latitude: 53.2, longitude: -0.54 }, 87.5, 16)!;
+  assert.deepEqual(first, { position: { latitude: 53.2, longitude: -0.54 }, heading: 87.5, zoom: 16 });
+  // A temporarily invalid fix keeps the last valid position
+  for (const bad of [null, undefined, { latitude: NaN, longitude: -0.54 }, { latitude: 53.2, longitude: Infinity }, { latitude: 120, longitude: 0 }]) {
+    const p = nextArrowPose(first, bad as never, 90, 16)!;
+    assert.deepEqual(p.position, first.position, 'kept the last valid position');
+    assert.equal(p.heading, 90);
+  }
+  // A missing heading keeps the last heading (never snaps to north or hides)
+  for (const h of [null, undefined, NaN, Infinity]) {
+    const p = nextArrowPose(first, { latitude: 53.21, longitude: -0.54 }, h as never, 16)!;
+    assert.equal(p.heading, 87.5);
+    assert.equal(p.position.latitude, 53.21);
+  }
+  // A missing zoom keeps the last zoom; headings are normalised
+  assert.equal(nextArrowPose(first, first.position, 87.5, null)!.zoom, 16);
+  assert.equal(nextArrowPose(first, first.position, -90, 16)!.heading, 270);
+  assert.equal(nextArrowPose(first, first.position, 725, 16)!.heading, 5);
+  // Nothing changed: the same object (no re-render)
+  assert.equal(nextArrowPose(first, { latitude: 53.2, longitude: -0.54 }, 87.5, 16), first);
+});
+
+test('the Mapbox Drive map draws the arrow from sources mounted once and updated in place', () => {
   const read = (rel: string) => readFileSync(toPath(new URL(rel, import.meta.url)), 'utf8');
   const strip = (t: string) => t.replace(/\/\/.*$/gm, '').replace(/\{\/\*[\s\S]*?\*\/\}/g, '');
   const map = strip(read('../components/MapboxDriveMap.tsx'));
   const screen = strip(read('../app/(tabs)/(drive)/index.tsx'));
-  // The first Mapbox build's artwork, registered with the map
-  assert.match(map, /<Images images=\{ARROW_IMAGES\} \/>/);
-  assert.match(map, /"derwent-location-arrow": require\("@\/assets\/images\/map\/puck-arrow\.png"\)/);
-  assert.match(map, /"derwent-location-arrow-shadow": require\("@\/assets\/images\/map\/puck-shadow\.png"\)/);
-  // Shadow then arrow, both with the flat style, from the arrow's own source
+  // The first Mapbox build's artwork
+  assert.match(map, /const ARROW_IMAGE = require\("@\/assets\/images\/map\/puck-arrow\.png"\);/);
+  assert.match(map, /const ARROW_SHADOW_IMAGE = require\("@\/assets\/images\/map\/puck-shadow\.png"\);/);
+  // Shadow then arrow: image sources (no symbol placement), same corners, no conditional inside
   const feeder = map.slice(map.indexOf('const MarkerFeeder'), map.indexOf('const FollowCamera'));
-  assert.match(feeder, /locationArrowFeature\(pose\.position, pose\.heading\)/);
-  const source = feeder.search(/<ShapeSource id="derwent-location-arrow"/);
-  const shadow = feeder.search(/<SymbolLayer\s+id="derwent-location-arrow-shadow"/);
-  const arrow = feeder.search(/<SymbolLayer\s+id="derwent-location-arrow"\s/);
-  assert.ok(source >= 0 && shadow > source);
+  assert.match(feeder, /const corners = useMemo\(\(\) => locationArrowCorners\(pose\), \[pose\]\);/);
+  const shadow = feeder.search(/<ImageSource id="derwent-location-arrow-shadow-image" url=\{ARROW_SHADOW_IMAGE\} coordinates=\{corners\}>/);
+  const arrow = feeder.search(/<ImageSource id="derwent-location-arrow-image" url=\{ARROW_IMAGE\} coordinates=\{corners\}>/);
   assert.ok(shadow > 0 && arrow > shadow);
-  assert.equal(feeder.match(/\.\.\.LOCATION_ARROW_SYMBOL/g)?.length, 2);
-  // Mounted after the trail and its head, so it draws above both
+  assert.equal(feeder.match(/<RasterLayer id="derwent-location-arrow(-shadow)?" style=\{LOCATION_ARROW_RASTER\} \/>/g)?.length, 2);
+  assert.ok(!/SymbolLayer|ShapeSource|key=|&&|\? </.test(feeder.slice(feeder.indexOf('return ('))), 'no symbol, key or conditional in the arrow');
+  // Every update goes through nextArrowPose (never an invalid or missing pose)
+  assert.match(feeder, /setPose\(\(prev\) => nextArrowPose\(prev, next\.position, next\.heading, next\.zoom\) \?\? prev\)/);
+  assert.match(map, /const pose = nextArrowPose\(lastMarkerRef\.current, position, heading, zoomRef\.current\);\s*if \(!pose\) return;/);
+  // Mounted after the trail and its head, so it draws above both; mounted
+  // once (its only condition is having had a fix, which never goes back)
   const body = map.slice(map.search(/<MapView\s+ref=/));
   assert.ok(body.indexOf('<MarkerFeeder') > body.indexOf('id="derwent-drive-trail"'));
   assert.ok(body.indexOf('<MarkerFeeder') > body.indexOf('<TrailHeadLayers'));
-  // Turned by the heading the frame loop draws (from north), not against the
-  // camera: re-sent when either the position or the heading moves
+  assert.match(body, /\{showMarker && \(\s*<MarkerFeeder\s+ref=\{markerRef\}/);
+  assert.match(screen, /showMarker=\{userLocation != null\}/);
+  assert.ok(!/setUserLocation\(null\)/.test(screen), 'the arrow\'s condition never turns off');
+  // Turned by the heading the frame loop draws (from north): re-sent when either moves
   assert.match(screen, /moved \|\| mapboxArrowHeadingRef\.current !== drawnHeadingRef\.current/);
   assert.match(screen, /mapboxRef\.current\?\.setMarker\(position, drawnHeadingRef\.current\)/);
   assert.match(screen, /mapboxRef\.current\?\.setMarker\(coord, drawnHeadingRef\.current\)/);
+  // Zoom changes keep its on-screen size
+  assert.match(map, /zoomRef\.current = zoom;/);
   // No screen-space perspective faking on Mapbox: the tilted LocationArrow is
   // only inside the Apple Maps marker
   assert.equal(screen.match(/<LocationArrow\b/g)?.length, 1);
   assert.ok(screen.indexOf('<LocationArrow') > screen.indexOf('const UserMarker'));
   assert.ok(screen.indexOf('<LocationArrow') < screen.indexOf('const LiveTrailHeadLines'));
+});
+
+test('the Mapbox arrow stays through background/foreground and style or map re-renders', () => {
+  const read = (rel: string) => readFileSync(toPath(new URL(rel, import.meta.url)), 'utf8');
+  const strip = (t: string) => t.replace(/\/\/.*$/gm, '').replace(/\{\/\*[\s\S]*?\*\/\}/g, '');
+  const map = strip(read('../components/MapboxDriveMap.tsx'));
+  const screen = strip(read('../app/(tabs)/(drive)/index.tsx'));
+  // Going off screen only stops writes: nothing removes or empties the arrow
+  const live = map.slice(map.indexOf('setVisualsLive(live) {'), map.indexOf('}),', map.indexOf('setVisualsLive(live) {')));
+  assert.ok(!/markerRef|lastMarkerRef|showMarker/.test(live));
+  assert.ok(!/visuals|live/i.test(map.slice(map.search(/\{showMarker && \(/), map.indexOf('/>', map.search(/\{showMarker && \(/)))), 'not gated on being on screen');
+  // Coming back places it at the newest position on the next frame (in place, not remounted)
+  const back = screen.slice(screen.indexOf('if (!prev.live && next.live) {'), screen.indexOf('const startFollowing = useCallback'));
+  assert.match(back, /markerDrawnAtRef\.current = null;/);
+  assert.ok(!/setUserLocation|showMarker/.test(back));
+  // The map is created once the app has been on screen and is never torn down for the arrow
+  assert.match(screen, /!visuals\.mounted \?/);
+  // A style change (standard ↔ satellite) re-adds sources and layers with the map;
+  // the arrow depends on no registered style image and is never keyed on the style
+  const feeder = map.slice(map.indexOf('const MarkerFeeder'), map.indexOf('const FollowCamera'));
+  assert.ok(!/iconImage|styleURL|key=/.test(feeder));
+  assert.ok(!/<MarkerFeeder[^>]*key=/.test(map));
+  // Re-rendering the map passes the same, memoised arrow component (its pose is its own state)
+  assert.match(map, /const MarkerFeeder = memo\(/);
+  assert.match(map, /<MarkerFeeder\s+ref=\{markerRef\}\s+latest=\{lastMarkerRef\}\s+fallback=\{initialCenter\}\s*\/>/);
 });
 
 test('nothing on the Drive screen can show a native location puck', () => {
@@ -11798,15 +11870,13 @@ test('route line: drawn from the frame loop only — nothing off screen, nothing
 test('vehicle arrow: 20% larger, the same artwork, anchor and heading; still above the hazard markers', () => {
   assert.equal(LOCATION_ARROW_SCALE, 1.2);
   assert.ok(LOCATION_ARROW_SCALE >= 1.15 && LOCATION_ARROW_SCALE <= 1.25, 'modest: 15–25%');
-  assert.equal(LOCATION_ARROW_SYMBOL.iconSize, LOCATION_ARROW_SCALE);
-  assert.equal(LOCATION_ARROW_SYMBOL.iconAnchor, 'center', 'the car is still at its centre');
-  assert.deepEqual(LOCATION_ARROW_SYMBOL.iconRotate, ['get', 'heading']);
-  assert.equal(LOCATION_ARROW_SYMBOL.iconRotationAlignment, 'map');
-  assert.equal(LOCATION_ARROW_SYMBOL.iconPitchAlignment, 'map');
-  // Same images, arrow and shadow scaled together (both spread the symbol)
+  // Drawn at that scale, centred on the car and turned by its heading (corners from lib/mapbox)
+  const corners = locationArrowCorners({ position: { latitude: 53.2, longitude: -0.54 }, heading: 0, zoom: 17 });
+  assert.ok(Math.abs(metresBetween(corners[0], corners[1]) - 44 * LOCATION_ARROW_SCALE * metresPerPoint(53.2, 17)) < 0.01);
+  // Same images, arrow and shadow placed together
   const map = readNav('../components/MapboxDriveMap.tsx');
-  assert.match(map, /"derwent-location-arrow": require\("@\/assets\/images\/map\/puck-arrow\.png"\)/);
-  assert.equal((map.match(/\.\.\.LOCATION_ARROW_SYMBOL,/g) ?? []).length, 2);
+  assert.match(map, /const ARROW_IMAGE = require\("@\/assets\/images\/map\/puck-arrow\.png"\);/);
+  assert.equal((map.match(/coordinates=\{corners\}/g) ?? []).length, 2);
   // 44 × 48 pt artwork → ~53 × 58 pt; hazard markers top out at 30 pt
   const png = (f: string) => { const b = readFileSync(toPath(new URL(`../assets/images/map/${f}`, import.meta.url))); return { w: b.readUInt32BE(16), h: b.readUInt32BE(20) }; };
   const arrow = png('puck-arrow.png');
