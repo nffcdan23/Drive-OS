@@ -202,6 +202,11 @@ module.exports = ({ config }) => {
       ['expo-secure-store', { faceIDPermission: false }],
       // Mapbox Maps SDK for the Drive map (no download token needed)
       '@rnmapbox/maps',
+      // CarPlay (docs/CARPLAY.md): the CarPlay scene, run by the local module
+      // modules/derwent-carplay, and the CarPlay navigation entitlement. Must
+      // stay BEFORE expo-build-properties: it adds to the scene manifest that
+      // plugin creates, and plugins' Info.plist steps run in reverse order.
+      './plugins/withCarPlay',
       // iOS scene lifecycle (Expo's official SDK 57 option; SDK 58 has it
       // built in): the AppDelegate keeps creating the React Native factory,
       // and Expo's scene delegate (EXExpoAppSceneDelegate) creates the window

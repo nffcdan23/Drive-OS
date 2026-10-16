@@ -51,11 +51,13 @@ jobs:
       - name: Unit tests
         run: pnpm --filter @workspace/mobile run test
 
-      - name: iOS prebuild keeps the scene lifecycle
+      - name: iOS prebuild keeps the scene lifecycle and the CarPlay scene
         # Generates ios/ as the Mac does before an Xcode build (no CocoaPods
-        # here), then checks the AppDelegate, scene manifest, entitlements and
-        # pod settings (scripts/check-ios-scene-lifecycle.js). Placeholder
-        # backend values: only the native project is inspected.
+        # here), then checks the AppDelegate, scene manifest (iPhone and
+        # CarPlay), entitlements, the CarPlay module's autolinking and pod
+        # settings (scripts/check-ios-scene-lifecycle.js). A second prebuild
+        # must generate the same files. Placeholder backend values: only the
+        # native project is inspected.
         working-directory: artifacts/mobile
         env:
           CI: '1'
@@ -66,6 +68,13 @@ jobs:
         run: |
           pnpm exec expo prebuild -p ios --clean --no-install
           node scripts/check-ios-scene-lifecycle.js
+          first="$RUNNER_TEMP/ios-first"
+          cp -R ios "$first"
+          pnpm exec expo prebuild -p ios --clean --no-install
+          for f in Derwent/Info.plist Derwent/Derwent.entitlements Derwent/AppDelegate.swift Podfile.properties.json; do
+            cmp "$first/$f" "ios/$f" || { echo "::error::A second prebuild generated a different $f"; exit 1; }
+          done
+          echo "Two prebuilds generated the same native configuration."
 
       - name: No server secrets in the app
         run: |

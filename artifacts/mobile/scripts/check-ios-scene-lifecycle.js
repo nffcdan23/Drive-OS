@@ -2,8 +2,9 @@
 /**
  * Checks the generated iOS project after `npx expo prebuild -p ios --clean`:
  * the app uses the UIKit scene lifecycle (Expo's SDK 57 option,
- * expo-build-properties `ios.enableSceneSupport`; see app.config.js), and
- * nothing else that change could touch has moved.
+ * expo-build-properties `ios.enableSceneSupport`; see app.config.js) with
+ * the CarPlay scene beside the iPhone's (plugins/withCarPlay.js,
+ * docs/CARPLAY.md), and nothing else those changes could touch has moved.
  *
  * Run from artifacts/mobile, after prebuild:  node scripts/check-ios-scene-lifecycle.js
  * Exits 1, naming every problem, if a check fails. CI runs it on Linux; on
@@ -12,27 +13,43 @@
  *  - AppDelegate: provides the React Native factory to Expo's scene delegate
  *    and no longer creates the window or starts React Native itself; the
  *    deep-link handlers (custom scheme, universal links) are still there.
- *  - Info.plist: exactly Expo's one-window scene manifest (no CarPlay scene
- *    yet); background modes location and audio still present.
- *  - Entitlements: Sign in with Apple only (no CarPlay entitlement yet).
+ *  - Info.plist: Expo's iPhone scene exactly as Expo writes it, plus the
+ *    CarPlay scene (DerwentCarPlaySceneDelegate), and nothing else; background
+ *    modes location and audio still present.
+ *  - Entitlements: Sign in with Apple, and CarPlay navigation.
+ *  - CarPlay module: autolinked (pod DerwentCarPlay from modules/derwent-carplay),
+ *    its scene delegate has the class name Info.plist uses, and it stays
+ *    native-only (no React Native, Expo or map SDK imports).
  *  - Podfile.properties.json: the keys expo-build-properties writes hold the
  *    Podfile's own defaults, so pods are linked exactly as before.
  *  - The installed expo package has the scene delegate (57.0.23 or newer, SDK 57).
  */
 const fs = require('fs');
 const path = require('path');
+const { spawnSync } = require('child_process');
 
 const projectRoot = path.resolve(__dirname, '..');
 const iosDir = path.join(projectRoot, 'ios');
 const expoPackage = require.resolve('expo/package.json', { paths: [projectRoot] });
 const configPlugins = require.resolve('@expo/config-plugins', { paths: [expoPackage] });
 const plist = require(require.resolve('@expo/plist', { paths: [configPlugins] })).default;
+const autolinkingPackage = require.resolve('expo-modules-autolinking/package.json', { paths: [expoPackage] });
+
+const CARPLAY_MODULE = path.join(projectRoot, 'modules', 'derwent-carplay');
+const CARPLAY_SCENE_DELEGATE = 'DerwentCarPlaySceneDelegate';
 
 const SCENE_MANIFEST = {
-  UIApplicationSupportsMultipleScenes: false,
+  UIApplicationSupportsMultipleScenes: true,
   UISceneConfigurations: {
     UIWindowSceneSessionRoleApplication: [
       { UISceneConfigurationName: 'Default Configuration', UISceneDelegateClassName: 'EXExpoAppSceneDelegate' },
+    ],
+    CPTemplateApplicationSceneSessionRoleApplication: [
+      {
+        UISceneClassName: 'CPTemplateApplicationScene',
+        UISceneConfigurationName: 'CarPlay',
+        UISceneDelegateClassName: CARPLAY_SCENE_DELEGATE,
+      },
     ],
   },
 };
@@ -75,14 +92,29 @@ check(appDelegate.includes('RCTLinkingManager.application(app, open: url, option
 check(appDelegate.includes('RCTLinkingManager.application(application, continue: userActivity'), 'AppDelegate still hands universal links to React Native');
 
 const info = plist.parse(read(path.join(appDir, 'Info.plist')) ?? '');
-check(JSON.stringify(info.UIApplicationSceneManifest) === JSON.stringify(SCENE_MANIFEST), "Info.plist has exactly Expo's scene manifest (one window scene, EXExpoAppSceneDelegate; no CarPlay scene)");
+check(JSON.stringify(info.UIApplicationSceneManifest) === JSON.stringify(SCENE_MANIFEST), "Info.plist scene manifest: Expo's iPhone scene unchanged, plus the CarPlay scene (DerwentCarPlaySceneDelegate), nothing else");
 const modes = Array.isArray(info.UIBackgroundModes) ? info.UIBackgroundModes : [];
 check(modes.includes('location') && modes.includes('audio'), `Info.plist background modes still include location and audio (${modes.join(', ')})`);
 
 const entitlementsFile = fs.readdirSync(appDir).find((f) => f.endsWith('.entitlements'));
 const entitlements = entitlementsFile ? plist.parse(read(path.join(appDir, entitlementsFile)) ?? '') : {};
 check(Array.isArray(entitlements['com.apple.developer.applesignin']), 'Entitlements still include Sign in with Apple');
-check(!('com.apple.developer.carplay-maps' in entitlements), 'Entitlements have no CarPlay key yet');
+check(entitlements['com.apple.developer.carplay-maps'] === true, 'Entitlements include CarPlay navigation (com.apple.developer.carplay-maps = true)');
+
+// The CarPlay module: linked, and the class Info.plist names is the one it defines
+const resolved = spawnSync(process.execPath, [path.join(path.dirname(autolinkingPackage), 'bin', 'expo-modules-autolinking.js'), 'resolve', '--platform', 'apple', '--json'], { cwd: projectRoot, encoding: 'utf8' });
+let carPlayPods = [];
+try {
+  const mod = JSON.parse(resolved.stdout).modules.find((m) => m.packageName === 'derwent-carplay');
+  carPlayPods = mod ? mod.pods : [];
+} catch {
+  // Reported below
+}
+check(carPlayPods.length === 1 && carPlayPods[0].podName === 'DerwentCarPlay' && path.resolve(carPlayPods[0].podspecDir) === path.join(CARPLAY_MODULE, 'ios'), 'Autolinking adds the DerwentCarPlay pod from modules/derwent-carplay');
+const swift = fs.readdirSync(path.join(CARPLAY_MODULE, 'ios')).filter((f) => f.endsWith('.swift')).map((f) => read(path.join(CARPLAY_MODULE, 'ios', f)) ?? '').join('\n');
+check(swift.includes(`@objc(${CARPLAY_SCENE_DELEGATE})`) && /:\s*UIResponder,\s*CPTemplateApplicationSceneDelegate/.test(swift), `The CarPlay module defines ${CARPLAY_SCENE_DELEGATE} (a CPTemplateApplicationSceneDelegate)`);
+check(/didConnect interfaceController: CPInterfaceController,\s*to window: CPWindow/.test(swift) && /didDisconnect interfaceController: CPInterfaceController,\s*from window: CPWindow/.test(swift), 'It handles the navigation app connect (with window) and disconnect');
+check(!/^\s*(@_implementationOnly\s+|internal\s+)?import\s+(React|Expo|ExpoModulesCore|MapboxMaps|RNMBX)/m.test(swift), 'It stays native-only: no React Native, Expo or map SDK imports');
 
 const podProps = JSON.parse(read(path.join(iosDir, 'Podfile.properties.json')) ?? '{}');
 const defaults = { 'EXPO_USE_PRECOMPILED_MODULES': 'true', 'apple.privacyManifestAggregationEnabled': 'true', 'ios.forceStaticLinking': '[]' };
@@ -93,7 +125,7 @@ for (const [key, value] of Object.entries(defaults)) {
 for (const p of passed) console.log(`✓ ${p}`);
 for (const p of problems) console.error(`✗ ${p}`);
 if (problems.length) {
-  console.error(`\n${problems.length} iOS scene lifecycle check(s) failed.`);
+  console.error(`\n${problems.length} iOS scene check(s) failed.`);
   process.exit(1);
 }
-console.log('\niOS scene lifecycle: all checks passed.');
+console.log('\niOS scene lifecycle and CarPlay scene: all checks passed.');

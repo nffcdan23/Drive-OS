@@ -11,7 +11,9 @@ On `npx expo prebuild -p ios --clean` it:
 - makes `AppDelegate` conform to `ExpoReactNativeFactoryProvider`, and removes the two lines that created the window and started React Native at launch;
 - adds a scene manifest to `Info.plist` with one window scene, run by Expo's `EXExpoAppSceneDelegate` (in the `expo` package, 57.0.23 and newer). That delegate creates the window, starts React Native in it, and forwards links, universal links and lifecycle events to the `AppDelegate` as before.
 
-Nothing else changes: bundle id, signing, entitlements, build number, background modes and pods are the same. `expo-build-properties` writes three keys to `Podfile.properties.json`, all with the Podfile's own default values. No CarPlay code yet.
+Nothing else changes: bundle id, signing, entitlements, build number, background modes and pods are the same. `expo-build-properties` writes three keys to `Podfile.properties.json`, all with the Podfile's own default values.
+
+Milestone 2 adds the CarPlay scene to this manifest, and the CarPlay entitlement: see `docs/CARPLAY.md`. Expo's iPhone scene stays exactly as above.
 
 `node scripts/check-ios-scene-lifecycle.js` checks the generated project. CI runs it after a Linux prebuild; run it on the Mac after prebuild.
 
@@ -42,6 +44,8 @@ To test:
 If no background launch shows up, report it before the TestFlight build. The fix is a small addition that starts React Native at launch when iOS relaunches the app in the background.
 
 ## Rollback
+
+Roll back CarPlay first (`docs/CARPLAY.md`): its plugin stops prebuild without the scene lifecycle.
 
 1. Revert the commit that added this: `git revert <commit>`. That removes the option, its unit test, the CI check and this script together. For a quick local experiment without committing, `enableSceneSupport: false` in `app.config.js` also restores the old AppDelegate and Info.plist. The unit test and the check script then fail, as they should.
 2. Run `npx expo prebuild -p ios --clean`.
