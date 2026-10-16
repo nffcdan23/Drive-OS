@@ -13,7 +13,7 @@ On `npx expo prebuild -p ios --clean` it:
 
 Nothing else changes: bundle id, signing, entitlements, build number, background modes and pods are the same. `expo-build-properties` writes three keys to `Podfile.properties.json`, all with the Podfile's own default values.
 
-Milestone 2 adds the CarPlay scene to this manifest, and the CarPlay entitlement: see `docs/CARPLAY.md`. Expo's iPhone scene stays exactly as above.
+Milestone 2 adds the CarPlay scene to this manifest, and the CarPlay entitlement; Milestone 3 adds the CarPlay map's public Mapbox settings: see `docs/CARPLAY.md`. Expo's iPhone scene stays exactly as above.
 
 `node scripts/check-ios-scene-lifecycle.js` checks the generated project. CI runs it after a Linux prebuild; run it on the Mac after prebuild.
 

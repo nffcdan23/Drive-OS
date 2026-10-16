@@ -206,7 +206,12 @@ module.exports = ({ config }) => {
       // modules/derwent-carplay, and the CarPlay navigation entitlement. Must
       // stay BEFORE expo-build-properties: it adds to the scene manifest that
       // plugin creates, and plugins' Info.plist steps run in reverse order.
-      './plugins/withCarPlay',
+      // The CarPlay map gets the same public Mapbox token and Derwent style as
+      // the Drive map (checked above: never a secret token).
+      ['./plugins/withCarPlay', {
+        mapboxToken: process.env.EXPO_PUBLIC_MAPBOX_TOKEN,
+        mapboxStyleUrl: process.env.EXPO_PUBLIC_MAPBOX_STYLE_URL,
+      }],
       // iOS scene lifecycle (Expo's official SDK 57 option; SDK 58 has it
       // built in): the AppDelegate keeps creating the React Native factory,
       // and Expo's scene delegate (EXExpoAppSceneDelegate) creates the window

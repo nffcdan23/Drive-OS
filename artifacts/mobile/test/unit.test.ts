@@ -2645,6 +2645,59 @@ test('scene manifest check: exactly the iPhone and CarPlay scenes in any key ord
   assert.equal(sceneManifestMatches(edit((m) => { m.UISceneConfigurations.UIWindowSceneSessionRoleApplication!.push({ UISceneConfigurationName: 'Second' }); })), false, 'a second iPhone scene');
 });
 
+test('CarPlay map settings: the public token and Derwent style only (as the Drive map), never a secret token; read natively from the same keys', async () => {
+  const req = createRequire(import.meta.url);
+  type Settings = { token: string; styleUrl: string } | null;
+  const plugin = req('../plugins/withCarPlay.js') as ((c: object, p?: object) => { mods: { ios: Record<string, (c: object) => Promise<{ modResults: Record<string, unknown> }>> } }) & {
+    carPlayMapSettings(p: { mapboxToken?: string | null; mapboxStyleUrl?: string | null }): Settings;
+    MAPBOX_TOKEN_KEY: string; MAPBOX_STYLE_KEY: string;
+  };
+  const pk = 'pk.' + 'eyJ1' + 'x'.repeat(8) + '.sig';
+  const style = 'mapbox://styles/derwent/abc123';
+  // The same rules as the iPhone's Drive map (lib/mapbox.ts mapboxSettings)
+  const cases: Array<[string | null, string | null]> = [
+    [pk, style], [` ${pk} `, ` ${style} `], [pk, `${style}/draft`], [pk, 'https://example.com/style.json'],
+    [pk, null], [pk, 'mapbox://styles/derwent'], [null, style], ['', style], ['tk.abc', style],
+  ];
+  for (const [token, styleUrl] of cases) {
+    assert.deepEqual(plugin.carPlayMapSettings({ mapboxToken: token, mapboxStyleUrl: styleUrl }), mapboxSettings(token, styleUrl), `${token} ${styleUrl}`);
+  }
+  assert.throws(() => plugin.carPlayMapSettings({ mapboxToken: 'sk.' + 'eyJ1' + 'x'.repeat(8), mapboxStyleUrl: style }), /secret \(sk\.\) token/);
+  // Info.plist: both keys, or neither (a stale pair from an earlier prebuild is removed)
+  const run = async (props?: object) => {
+    const config = plugin({ name: 'Derwent', slug: 'derwent' }, props);
+    const phone = [{ UISceneConfigurationName: 'Default Configuration', UISceneDelegateClassName: 'EXExpoAppSceneDelegate' }];
+    return (await config.mods.ios.infoPlist!({
+      ...config,
+      modResults: { [plugin.MAPBOX_TOKEN_KEY]: 'pk.stale', [plugin.MAPBOX_STYLE_KEY]: 'mapbox://styles/a/stale', UIApplicationSceneManifest: { UIApplicationSupportsMultipleScenes: false, UISceneConfigurations: { UIWindowSceneSessionRoleApplication: phone } } },
+      modRequest: { platform: 'ios', modName: 'infoPlist', projectRoot: MOBILE, platformProjectRoot: join(MOBILE, 'ios'), introspect: true },
+    })).modResults;
+  };
+  const withMap = await run({ mapboxToken: pk, mapboxStyleUrl: style });
+  assert.equal(withMap.MBXAccessToken, pk);
+  assert.equal(withMap.DerwentCarPlayMapStyleURL, style);
+  const without = await run();
+  assert.ok(!('MBXAccessToken' in without) && !('DerwentCarPlayMapStyleURL' in without), 'no map settings: placeholder');
+  // app.config.js hands the plugin the app's public values
+  const appConfig = req('../app.config.js') as (a: { config: object }) => { plugins: unknown[] };
+  const saved = { ...process.env };
+  try {
+    Object.assign(process.env, { EXPO_PUBLIC_MAPBOX_TOKEN: pk, EXPO_PUBLIC_MAPBOX_STYLE_URL: style });
+    const entry = appConfig({ config: { ios: { infoPlist: {} }, android: {}, plugins: [], extra: {} } }).plugins
+      .find((p) => Array.isArray(p) && p[0] === './plugins/withCarPlay') as [string, object];
+    assert.deepEqual(entry[1], { mapboxToken: pk, mapboxStyleUrl: style });
+  } finally {
+    for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];
+    Object.assign(process.env, saved);
+  }
+  // The Swift module reads exactly these keys, and falls back to the placeholder without them
+  const swift = (f: string) => readFileSync(toPath(new URL(`../modules/derwent-carplay/ios/${f}`, import.meta.url)), 'utf8');
+  const settings = swift('CarPlayMapSettings.swift');
+  assert.ok(settings.includes(`"${plugin.MAPBOX_TOKEN_KEY}"`) && settings.includes(`"${plugin.MAPBOX_STYLE_KEY}"`));
+  assert.ok(settings.includes('token.hasPrefix("pk.")'), 'never uses a non-public token');
+  assert.match(swift('CarPlaySceneDelegate.swift'), /if let settings = CarPlayMapSettings\.fromInfoPlist\(\)[\s\S]*CarPlayMapViewController\(settings: settings\)[\s\S]*else[\s\S]*CarPlayPlaceholderViewController\(\)/);
+});
+
 test('CarPlay plugin: listed once before expo-build-properties, so the real Info.plist steps add CarPlay after Expo; entitlement added to the others', async () => {
   const req = createRequire(import.meta.url);
   const appConfig = req('../app.config.js') as (a: { config: object }) => { plugins: unknown[] };
