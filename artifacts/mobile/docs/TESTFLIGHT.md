@@ -106,6 +106,7 @@ TestFlight builds are made in Xcode on the Intel Mac (EAS above is the fallback)
 - **Before each build, raise it by one** and commit. It must be higher than the last build uploaded to App Store Connect. (Build 23 was uploaded by hand; the repo starts at `24`.)
 - `expo prebuild` writes it into `ios/Derwent/Info.plist` (`CFBundleVersion`) and into the Xcode project (`CURRENT_PROJECT_VERSION`), so Xcode shows the same number and nothing needs editing by hand. The version (`CFBundleShortVersionString` / `MARKETING_VERSION`) comes from `version` in `app.json`.
 - `ios/` is generated and never committed. Prebuild also adds `expo`, `react` and `react-native` to `package.json`: put it back with `git restore artifacts/mobile/package.json`.
+- The app uses the iOS **scene lifecycle** (needed for CarPlay): `expo-build-properties` `ios.enableSceneSupport` in `app.config.js` makes prebuild write it, and `node scripts/check-ios-scene-lifecycle.js` checks the result (see `docs/SCENE_LIFECYCLE.md`). The CarPlay scene and entitlement come from `plugins/withCarPlay.js` (see `docs/CARPLAY.md`). Never edit `AppDelegate.swift`, `Info.plist` or the entitlements in Xcode: prebuild replaces them.
 
 ```sh
 cd ~/path/to/Drive-OS
@@ -115,6 +116,7 @@ cd artifacts/mobile
 cat .env                              # unchanged from Build 23: Supabase URL + publishable key, API URL, Mapbox pk. token + style URL
 npx expo prebuild -p ios --clean
 git restore package.json
+node scripts/check-ios-scene-lifecycle.js        # every line ✓ (scene lifecycle and CarPlay scene in place)
 grep -A1 CFBundleVersion ios/Derwent/Info.plist   # the number from app.json
 open ios/Derwent.xcworkspace
 ```

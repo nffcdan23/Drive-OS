@@ -2568,6 +2568,114 @@ test('the app build includes Mapbox and refuses a Mapbox secret token', () => {
   }
 });
 
+test("iOS scene lifecycle: Expo's own SDK 57 option, on, and nothing else from expo-build-properties", () => {
+  const req = createRequire(import.meta.url);
+  const appConfig = req('../app.config.js') as (a: { config: object }) => { plugins: unknown[]; ios: { infoPlist: Record<string, unknown> } };
+  const cfg = appConfig({ config: { ios: { infoPlist: {} }, android: {}, plugins: [], extra: {} } });
+  const entries = cfg.plugins.filter((p) => p === 'expo-build-properties' || (Array.isArray(p) && p[0] === 'expo-build-properties'));
+  assert.deepEqual(entries, [['expo-build-properties', { ios: { enableSceneSupport: true } }]], 'once, with only the scene option');
+  // Expo's plugin owns the scene manifest: one set here would make it refuse to build
+  assert.ok(!('UIApplicationSceneManifest' in cfg.ios.infoPlist));
+  // The SDK 57 plugin, and an SDK 57 expo that has ExpoAppSceneDelegate (57.0.23+)
+  const pkg = JSON.parse(readFileSync(toPath(new URL('../package.json', import.meta.url)), 'utf8')) as { dependencies: Record<string, string>; devDependencies: Record<string, string> };
+  assert.match(pkg.dependencies['expo-build-properties'] ?? '', /^~57\./);
+  assert.match(pkg.devDependencies.expo ?? '', /^~57\./);
+  const [major, minor, patch] = (req('expo/package.json') as { version: string }).version.split('.').map(Number);
+  assert.ok(major === 57 && (minor! > 0 || patch! >= 23), 'installed expo has the scene delegate');
+});
+
+test("CarPlay scene: added beside Expo's iPhone scene, which is kept exactly; refused without the scene lifecycle", () => {
+  const req = createRequire(import.meta.url);
+  const { withCarPlayScene, CARPLAY_SCENE } = req('../plugins/withCarPlay.js') as {
+    withCarPlayScene(m: unknown): Record<string, unknown>; CARPLAY_SCENE: Record<string, string>;
+  };
+  const phone = [{ UISceneConfigurationName: 'Default Configuration', UISceneDelegateClassName: 'EXExpoAppSceneDelegate' }];
+  const expo = { UIApplicationSupportsMultipleScenes: false, UISceneConfigurations: { UIWindowSceneSessionRoleApplication: phone } };
+  const expected = {
+    UIApplicationSupportsMultipleScenes: true,
+    UISceneConfigurations: {
+      UIWindowSceneSessionRoleApplication: phone,
+      CPTemplateApplicationSceneSessionRoleApplication: [{
+        UISceneClassName: 'CPTemplateApplicationScene', UISceneConfigurationName: 'CarPlay', UISceneDelegateClassName: 'DerwentCarPlaySceneDelegate',
+      }],
+    },
+  };
+  const once = withCarPlayScene(structuredClone(expo));
+  assert.deepEqual(once, expected);
+  assert.deepEqual(withCarPlayScene(once), expected, 'the same on a second run');
+  assert.deepEqual(expo.UISceneConfigurations.UIWindowSceneSessionRoleApplication, phone, "the iPhone's scene is not modified");
+  // The delegate class name is the one the Swift module defines
+  const swift = readFileSync(toPath(new URL('../modules/derwent-carplay/ios/CarPlaySceneDelegate.swift', import.meta.url)), 'utf8');
+  assert.ok(swift.includes(`@objc(${CARPLAY_SCENE.UISceneDelegateClassName})`));
+  // Never guesses: no scene lifecycle, someone else's iPhone scene, or an unknown role
+  assert.throws(() => withCarPlayScene(undefined), /CarPlay needs the iOS scene lifecycle/);
+  assert.throws(() => withCarPlayScene({ UISceneConfigurations: { UIWindowSceneSessionRoleApplication: [{ UISceneDelegateClassName: 'SceneDelegate' }] } }), /scene lifecycle/);
+  assert.throws(() => withCarPlayScene({ ...expo, UISceneConfigurations: { ...expo.UISceneConfigurations, UIWindowSceneSessionRoleExternalDisplayNonInteractive: [] } }), /unexpected scene roles/);
+});
+
+test('scene manifest check: exactly the iPhone and CarPlay scenes in any key order (pod install sorts Info.plist), nothing more or less', () => {
+  const req = createRequire(import.meta.url);
+  type Manifest = Record<string, unknown>;
+  const { SCENE_MANIFEST, sceneManifestMatches } = req('../scripts/check-ios-scene-lifecycle.js') as {
+    SCENE_MANIFEST: { UIApplicationSupportsMultipleScenes: boolean; UISceneConfigurations: Record<string, Array<Record<string, string>>> };
+    sceneManifestMatches(m: unknown): boolean;
+  };
+  const { withCarPlayScene } = req('../plugins/withCarPlay.js') as { withCarPlayScene(m: unknown): Manifest };
+  // What prebuild writes: Expo's manifest, then the CarPlay scene added
+  const generated = withCarPlayScene({
+    UIApplicationSupportsMultipleScenes: false,
+    UISceneConfigurations: { UIWindowSceneSessionRoleApplication: [{ UISceneConfigurationName: 'Default Configuration', UISceneDelegateClassName: 'EXExpoAppSceneDelegate' }] },
+  });
+  assert.ok(sceneManifestMatches(generated));
+  // The same after `pod install` rewrites Info.plist with every dictionary's keys sorted (on the Mac)
+  const sortKeys = (v: unknown): unknown => Array.isArray(v) ? v.map(sortKeys)
+    : v && typeof v === 'object' ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, sortKeys((v as Manifest)[k])])) : v;
+  const sorted = sortKeys(generated) as Manifest;
+  assert.deepEqual(Object.keys(sorted.UISceneConfigurations as Manifest), ['CPTemplateApplicationSceneSessionRoleApplication', 'UIWindowSceneSessionRoleApplication']);
+  assert.ok(sceneManifestMatches(sorted), 'key order is not a difference');
+  // Still exact about the content
+  const edit = (f: (m: typeof SCENE_MANIFEST) => void) => { const m = structuredClone(SCENE_MANIFEST); f(m); return m; };
+  assert.equal(sceneManifestMatches(undefined), false);
+  assert.equal(sceneManifestMatches(edit((m) => { m.UIApplicationSupportsMultipleScenes = false; })), false);
+  assert.equal(sceneManifestMatches(edit((m) => { delete m.UISceneConfigurations.CPTemplateApplicationSceneSessionRoleApplication; })), false, 'no CarPlay scene');
+  assert.equal(sceneManifestMatches(edit((m) => { m.UISceneConfigurations.UIWindowSceneSessionRoleApplication![0]!.UISceneDelegateClassName = 'SceneDelegate'; })), false, "someone else's iPhone scene");
+  assert.equal(sceneManifestMatches(edit((m) => { m.UISceneConfigurations.CPTemplateApplicationSceneSessionRoleApplication![0]!.UISceneDelegateClassName = 'Other'; })), false, 'another CarPlay delegate');
+  assert.equal(sceneManifestMatches(edit((m) => { m.UISceneConfigurations.CPTemplateApplicationSceneDelegateExtra = []; })), false, 'an extra role');
+  assert.equal(sceneManifestMatches(edit((m) => { m.UISceneConfigurations.CPTemplateApplicationSceneSessionRoleApplication![0]!.UISceneStoryboardFile = 'Main'; })), false, 'an extra key');
+  assert.equal(sceneManifestMatches(edit((m) => { m.UISceneConfigurations.UIWindowSceneSessionRoleApplication!.push({ UISceneConfigurationName: 'Second' }); })), false, 'a second iPhone scene');
+});
+
+test('CarPlay plugin: listed once before expo-build-properties, so the real Info.plist steps add CarPlay after Expo; entitlement added to the others', async () => {
+  const req = createRequire(import.meta.url);
+  const appConfig = req('../app.config.js') as (a: { config: object }) => { plugins: unknown[] };
+  const names = appConfig({ config: { ios: { infoPlist: {} }, android: {}, plugins: [], extra: {} } }).plugins.map((p) => (Array.isArray(p) ? p[0] : p));
+  assert.equal(names.filter((n) => n === './plugins/withCarPlay').length, 1);
+  assert.ok(names.indexOf('./plugins/withCarPlay') < names.indexOf('expo-build-properties'), 'before expo-build-properties');
+  // The real mod chain, as prebuild runs it (the last plugin's step runs first)
+  type ModConfig = { mods: { ios: Record<string, (c: object) => Promise<{ modResults: Record<string, unknown> }>> } };
+  const withCarPlay = req('../plugins/withCarPlay.js') as (c: object) => ModConfig;
+  const withBuildProperties = (req('expo-build-properties') as { default: (c: object, p: object) => ModConfig }).default;
+  const scene = { ios: { enableSceneSupport: true } };
+  const base = () => ({ name: 'Derwent', slug: 'derwent', _internal: { projectRoot: MOBILE } });
+  const run = (config: ModConfig, mod: string, modResults: object) => config.mods.ios[mod]!({
+    ...config, modResults, modRequest: { platform: 'ios', modName: mod, projectRoot: MOBILE, platformProjectRoot: join(MOBILE, 'ios'), introspect: true },
+  });
+  const inOrder = withBuildProperties(withCarPlay(base()), scene);
+  const info = await run(inOrder, 'infoPlist', { UIBackgroundModes: ['fetch', 'location', 'audio'], CFBundleURLTypes: [{ CFBundleURLSchemes: ['starscale-drive-staging'] }] });
+  const manifest = info.modResults.UIApplicationSceneManifest as { UIApplicationSupportsMultipleScenes: boolean; UISceneConfigurations: Record<string, Array<Record<string, string>>> };
+  assert.equal(manifest.UIApplicationSupportsMultipleScenes, true);
+  assert.equal(manifest.UISceneConfigurations.UIWindowSceneSessionRoleApplication![0]!.UISceneDelegateClassName, 'EXExpoAppSceneDelegate');
+  assert.equal(manifest.UISceneConfigurations.CPTemplateApplicationSceneSessionRoleApplication![0]!.UISceneDelegateClassName, 'DerwentCarPlaySceneDelegate');
+  assert.deepEqual(info.modResults.UIBackgroundModes, ['fetch', 'location', 'audio'], 'background modes kept');
+  assert.deepEqual(info.modResults.CFBundleURLTypes, [{ CFBundleURLSchemes: ['starscale-drive-staging'] }], 'deep-link scheme kept');
+  // Listed the other way round, prebuild stops with the explanation
+  const reversed = withCarPlay(withBuildProperties(base(), scene));
+  await assert.rejects(run(reversed, 'infoPlist', {}), /listed AFTER '\.\/plugins\/withCarPlay'/);
+  // Entitlements: CarPlay navigation added, Sign in with Apple kept
+  const ent = await run(inOrder, 'entitlements', { 'com.apple.developer.applesignin': ['Default'] });
+  assert.deepEqual(ent.modResults, { 'com.apple.developer.applesignin': ['Default'], 'com.apple.developer.carplay-maps': true });
+});
+
 test('on the Mapbox map (zoom, no altitude) a tilt still keeps following and a pinch still leaves', () => {
   const mb = (pitch: number, zoom = 16.6, center = START, heading = 30) => ({ center, heading, pitch, zoom });
   assert.equal(classifyFollowGesture(mb(60), mb(48)), 'pitch');
