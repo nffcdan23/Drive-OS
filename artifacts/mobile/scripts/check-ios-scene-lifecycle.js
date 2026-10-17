@@ -17,7 +17,9 @@
  *    CarPlay scene (DerwentCarPlaySceneDelegate), and nothing else (in any
  *    key order: `pod install` sorts the keys); background modes location and
  *    audio still present.
- *  - Entitlements: Sign in with Apple, and CarPlay navigation.
+ *  - Entitlements: Sign in with Apple, CarPlay navigation, and WeatherKit.
+ *  - Weather module: autolinked (pod DerwentWeather from modules/derwent-weather),
+ *    linking WeatherKit, with no key or secret (docs/WEATHERKIT.md).
  *  - CarPlay module: autolinked (pod DerwentCarPlay from modules/derwent-carplay),
  *    its scene delegate has the class name Info.plist uses, and it stays
  *    native-only (no React Native or Expo imports).
@@ -147,16 +149,27 @@ const entitlementsFile = fs.readdirSync(appDir).find((f) => f.endsWith('.entitle
 const entitlements = entitlementsFile ? plist.parse(read(path.join(appDir, entitlementsFile)) ?? '') : {};
 check(Array.isArray(entitlements['com.apple.developer.applesignin']), 'Entitlements still include Sign in with Apple');
 check(entitlements['com.apple.developer.carplay-maps'] === true, 'Entitlements include CarPlay navigation (com.apple.developer.carplay-maps = true)');
+check(entitlements['com.apple.developer.weatherkit'] === true, 'Entitlements include WeatherKit (com.apple.developer.weatherkit = true; enable it on the App ID, docs/WEATHERKIT.md)');
 
 // The CarPlay module: linked, and the class Info.plist names is the one it defines
 const resolved = spawnSync(process.execPath, [path.join(path.dirname(autolinkingPackage), 'bin', 'expo-modules-autolinking.js'), 'resolve', '--platform', 'apple', '--json'], { cwd: projectRoot, encoding: 'utf8' });
 let carPlayPods = [];
+let weatherPods = [];
 try {
-  const mod = JSON.parse(resolved.stdout).modules.find((m) => m.packageName === 'derwent-carplay');
+  const modules = JSON.parse(resolved.stdout).modules;
+  const mod = modules.find((m) => m.packageName === 'derwent-carplay');
   carPlayPods = mod ? mod.pods : [];
+  const weather = modules.find((m) => m.packageName === 'derwent-weather');
+  weatherPods = weather ? weather.pods : [];
 } catch {
   // Reported below
 }
+const WEATHER_MODULE = path.join(projectRoot, 'modules', 'derwent-weather');
+check(weatherPods.length === 1 && weatherPods[0].podName === 'DerwentWeather' && path.resolve(weatherPods[0].podspecDir) === path.join(WEATHER_MODULE, 'ios'), 'Autolinking adds the DerwentWeather pod from modules/derwent-weather');
+const weatherPodspec = read(path.join(WEATHER_MODULE, 'ios', 'DerwentWeather.podspec')) ?? '';
+const weatherSwift = read(path.join(WEATHER_MODULE, 'ios', 'DerwentWeatherModule.swift')) ?? '';
+check(/'WeatherKit'/.test(weatherPodspec) && /^\s*import\s+WeatherKit\s*$/m.test(weatherSwift) && /WeatherService\.shared/.test(weatherSwift), 'The weather module links WeatherKit and asks WeatherService.shared (signed by the system: no keys)');
+check(!/PRIVATE KEY|AuthKey_|\.p8\b/.test(weatherPodspec + weatherSwift + JSON.stringify(info) + JSON.stringify(entitlements)), 'No WeatherKit key or private credential in the module, Info.plist or entitlements');
 check(carPlayPods.length === 1 && carPlayPods[0].podName === 'DerwentCarPlay' && path.resolve(carPlayPods[0].podspecDir) === path.join(CARPLAY_MODULE, 'ios'), 'Autolinking adds the DerwentCarPlay pod from modules/derwent-carplay');
 const swift = fs.readdirSync(path.join(CARPLAY_MODULE, 'ios')).filter((f) => f.endsWith('.swift')).map((f) => read(path.join(CARPLAY_MODULE, 'ios', f)) ?? '').join('\n');
 check(swift.includes(`@objc(${CARPLAY_SCENE_DELEGATE})`) && /:\s*UIResponder,\s*CPTemplateApplicationSceneDelegate/.test(swift), `The CarPlay module defines ${CARPLAY_SCENE_DELEGATE} (a CPTemplateApplicationSceneDelegate)`);

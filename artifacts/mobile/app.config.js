@@ -213,6 +213,10 @@ module.exports = ({ config }) => {
         mapboxToken: process.env.EXPO_PUBLIC_MAPBOX_TOKEN,
         mapboxStyleUrl: process.env.EXPO_PUBLIC_MAPBOX_STYLE_URL,
       }],
+      // Apple WeatherKit (the drive screen's weather card,
+      // modules/derwent-weather): the WeatherKit entitlement only, no keys.
+      // WeatherKit must be enabled on the App ID (docs/WEATHERKIT.md).
+      './plugins/withWeatherKit',
       // iOS scene lifecycle (Expo's official SDK 57 option; SDK 58 has it
       // built in): the AppDelegate keeps creating the React Native factory,
       // and Expo's scene delegate (EXExpoAppSceneDelegate) creates the window

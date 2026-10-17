@@ -34,9 +34,7 @@ import MapView, {
   MapType,
   Polyline,
 } from "react-native-maps";
-import ActiveDriveOverlay, {
-  ActiveDriveMode,
-} from "@/components/ActiveDriveOverlay";
+import ActiveDriveOverlay from "@/components/ActiveDriveOverlay";
 import type { MapboxDriveMapHandle } from "@/components/MapboxDriveMap";
 import { FriendMarkersNative } from "@/components/friendMap/FriendMarkersNative";
 import { FriendLiveCard } from "@/components/friendMap/FriendLiveCard";
@@ -90,6 +88,7 @@ import { HazardWarningPill } from "@/components/hazards/HazardWarningPill";
 import { ReportHazardSheet } from "@/components/hazards/ReportHazardSheet";
 import { useHazardActions, useHazardStore } from "@/context/HazardsContext";
 import type { ReportFix } from "@/lib/hazards/report";
+import { savePointName, savePointProblem } from "@/lib/savePoint";
 import { GuidanceKeepAwake } from "@/components/navigation/GuidanceKeepAwake";
 import { guidanceZoom, type GuidanceZoom } from "@/lib/navigation/guidanceCamera";
 import { RouteHeading } from "@/lib/navigation/routeHeading";
@@ -572,6 +571,7 @@ export default function MapScreen() {
     noteForegroundFix,
     resolvedUnitSystem,
     togglePassengerMode,
+    addPlace,
   } = useApp();
 
   // ── Route preview (Navigation Phase 2A) ──
@@ -693,9 +693,7 @@ export default function MapScreen() {
   const driveSecondsRef = useRef(0);
   driveSecondsRef.current = driveSeconds;
   const [isPaused, setIsPaused] = useState(false);
-  const [gpsAccuracy, setGpsAccuracy] = useState<number | null>(null);
   const isPausedRef = useRef(false);
-  const lastAccuracyRef = useRef<number | null>(null);
 
   // ── Refs (avoid stale closures in callbacks) ──
   const mapRef = useRef<MapView>(null);
@@ -1212,12 +1210,6 @@ export default function MapScreen() {
       // ── Accuracy filter ──
       if (accuracy != null && accuracy > ACCURACY_REJECT_M) return;
       setAccuracyWarning(accuracy != null && accuracy > ACCURACY_WARNING_M);
-      // Only the drive overlay shows the figure; outside a drive, setting it on
-      // every fix re-rendered the screen each second for nothing
-      if (accuracy != null) {
-        lastAccuracyRef.current = accuracy;
-        if (isDrivingRef.current) setGpsAccuracy(accuracy);
-      }
 
       // ── Plausibility filter ──
       const prev = lastPositionRef.current;
@@ -1497,7 +1489,6 @@ export default function MapScreen() {
   // drive, so ending one leaves it as it is.
   useEffect(() => {
     if (isDriving) {
-      setGpsAccuracy(lastAccuracyRef.current);
       startFollowing(true);
     }
   }, [isDriving, startFollowing]);
@@ -2064,9 +2055,19 @@ export default function MapScreen() {
     setDrivePaused(false);
   }
 
-  function handleSavePoint() {
-    // Store current location as a named marker — no-op if no location yet
-    // Haptic feedback is handled inside the overlay
+  /** Save Point: the newest accepted fix as a private saved place (null: saved, else why not) */
+  async function handleSavePoint(): Promise<string | null> {
+    const now = Date.now();
+    const fix = lastAcceptedFixRef.current;
+    const problem = savePointProblem(fix, now);
+    if (problem || !fix) return problem;
+    await addPlace({
+      kind: "poi",
+      name: savePointName(now),
+      coordinate: { latitude: fix.latitude, longitude: fix.longitude },
+      visibility: "private",
+    });
+    return null;
   }
 
   // Mapbox zoom buttons.  While following, the held zoom target itself moves
@@ -2442,8 +2443,8 @@ export default function MapScreen() {
               ? Math.max(screenHeight - driveMapAreaHeight, 0)
               : idleBottomHeight) + ORNAMENT_GAP
           }
-          // While driving, clear of the locate and zoom buttons on the left
-          ornamentLeft={freeDrive ? 66 : ORNAMENT_GAP}
+          // While driving, in line with the dashboard's left edge (Report sits above it)
+          ornamentLeft={freeDrive ? 12 : ORNAMENT_GAP}
           onUserGesture={handleMapPanDrag}
           onCameraChange={handleRegionChange}
           onLongPress={handleMapLongPress}
@@ -2563,8 +2564,8 @@ export default function MapScreen() {
         </View>
       )}
 
-      {/* ── GPS accuracy warning ── (navigating, the banner reports GPS) */}
-      {accuracyWarning && !navigating && (
+      {/* ── GPS accuracy warning ── (navigating, the banner reports GPS; recording, the GPS chip) */}
+      {accuracyWarning && !navigating && !freeDrive && (
         <View
           style={[
             styles.accuracyWarning,
@@ -2903,14 +2904,14 @@ export default function MapScreen() {
           currentDrive={currentDrive}
           driveSeconds={driveSeconds}
           isPaused={isPaused}
-          driveMode={"tracking" as ActiveDriveMode}
           locationMode={locationMode}
-          gpsAccuracy={gpsAccuracy}
-          accuracyWarning={accuracyWarning}
           followMode={followMode}
           resolvedUnitSystem={resolvedUnitSystem}
           isPassengerMode={isPassengerMode}
           insets={insets}
+          mapType={mapType}
+          mapLayers={mapLayers}
+          onSelectMapType={setMapType}
           onPause={handlePause}
           onResume={handleResume}
           onEndDrive={handlePanelEndDrive}

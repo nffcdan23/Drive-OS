@@ -5378,11 +5378,13 @@ test('speeds change unit in one place, and the app passes the phone region to "A
     const code = readFileSync(join(MOBILE, file), 'utf8').replace(/\/\/.*$/gm, '');
     assert.ok(!/\b3\.6\b|0\.62137|1\.6093|2\.2369|1609\.3/.test(code), `${file} converts a speed or distance itself`);
   }
-  // The speedometer's number and its label use the same unit system
-  const overlay = readFileSync(join(MOBILE, 'components/ActiveDriveOverlay.tsx'), 'utf8');
-  assert.ok(/const displaySpd = convertSpeed\(Math\.max\(0, speedKmh\), resolvedUnitSystem\);\s*const unit = speedUnit\(resolvedUnitSystem\);/.test(overlay));
-  assert.ok(/<Text style=\{styles\.speedoValue\}>\{Math\.round\(displaySpd\)\}<\/Text>\s*<Text style=\{styles\.speedoUnit\}>\{unit\}<\/Text>/.test(overlay));
-  assert.ok(!/function convertSpeed/.test(overlay), 'the overlay has its own speed conversion');
+  // The recording screen's speed and top speed, and their labels, use the same unit system
+  const speedCard = readFileSync(join(MOBILE, 'components/drive/recording/SpeedCard.tsx'), 'utf8');
+  assert.ok(/const value = useNavigationSpeed\(unitSystem\);\s*const unit = speedUnit\(unitSystem\);/.test(speedCard));
+  const statsPanel = readFileSync(join(MOBILE, 'components/drive/recording/DriveStatsPanel.tsx'), 'utf8');
+  assert.ok(/const topSpeed = String\(Math\.round\(convertSpeed\(Math\.max\(0, topSpeedKmh \|\| 0\), unitSystem\)\)\);/.test(statsPanel));
+  assert.ok(/units=\{speedUnit\(unitSystem\)\.toUpperCase\(\)\}/.test(statsPanel));
+  for (const code of [speedCard, statsPanel]) assert.ok(!/function convertSpeed/.test(code), 'the recording screen has its own speed conversion');
   const ctx = readFileSync(join(MOBILE, 'context/AppContext.tsx'), 'utf8');
   assert.ok(/const deviceRegion = useLocales\(\)\[0\]\?\.regionCode \?\? null;/.test(ctx));
   assert.ok(/resolvedUnitSystem: resolveUnitSystem\(data\.unitSystem, deviceRegion\)/.test(ctx));
@@ -10281,18 +10283,17 @@ test('presentation: free drive shows the recording dashboard; navigation (with o
   const drive = read('../app/(tabs)/(drive)/index.tsx');
   assert.ok(/const presentation = drivePresentation\(\{ isDriving, navigating \}\);/.test(drive));
   assert.ok(/const freeDrive = presentation === "freeDrive";/.test(drive));
-  // The recording dashboard (speedometer, statistics, Pause, End Drive, Save Point, GPS status) only for a free drive
+  // The recording dashboard (speed, statistics, Pause, Stop Drive, Save Point, GPS status) only for a free drive
   assert.ok(/\{freeDrive && \(\s*<ActiveDriveOverlay/.test(drive), 'the dashboard is gated on the presentation, not on recording');
   assert.equal((drive.match(/<ActiveDriveOverlay/g) ?? []).length, 1);
   assert.ok(!/isDriving && \(\s*<ActiveDriveOverlay/.test(drive), 'never on "a drive is recording" alone');
   const overlayJsx = drive.slice(drive.indexOf('<ActiveDriveOverlay'), drive.indexOf('/>', drive.indexOf('<ActiveDriveOverlay')));
   assert.ok(!/GuidanceStrip|navigationStrip|guidanceBannerHeight/.test(overlayJsx), 'no navigation squeezed into the dashboard');
-  for (const control of ['onPause={handlePause}', 'onEndDrive={handlePanelEndDrive}', 'onSavePoint={handleSavePoint}', 'gpsAccuracy={gpsAccuracy}', 'driveSeconds={driveSeconds}']) {
+  for (const control of ['onPause={handlePause}', 'onEndDrive={handlePanelEndDrive}', 'onSavePoint={handleSavePoint}', 'locationMode={locationMode}', 'driveSeconds={driveSeconds}']) {
     assert.ok(overlayJsx.includes(control), `free drive keeps ${control}`);
   }
-  // The dashboard itself is unchanged: speedometer, Pause, End Drive, Save Point
-  const overlay = readFileSync(toPath(new URL('../components/ActiveDriveOverlay.tsx', import.meta.url)), 'utf8');
-  for (const part of ['<Speedometer speedKmh={currentSpeedKmh}', 'onPause();', 'text: "End Drive"', '{/* Save Point */}']) assert.ok(overlay.includes(part), part);
+  // The dashboard itself: live speed, GPS, Pause, Stop Drive, Save Point
+  for (const part of RECORDING_PARTS) assert.ok(recordingScreen().includes(part), part);
   // Navigation: its own bar whenever guiding, recording underneath or not
   assert.ok(/\{presentation === "navigation" && !previewing && \(\s*<AboveTabBar/.test(drive));
   assert.ok(!/navigating && !previewing && !isDriving/.test(drive), 'no longer hidden by a recording');
@@ -10483,7 +10484,7 @@ test('navigation layout: right controls are real ones only; recording is one qui
   assert.equal(drivePresentation({ isDriving: true, navigating: false }), 'freeDrive');
   const overlay = readFileSync(toPath(new URL('../components/ActiveDriveOverlay.tsx', import.meta.url)), 'utf8');
   assert.ok(!/navigation\//.test(overlay), 'the dashboard imports nothing from navigation');
-  for (const part of ['<Speedometer speedKmh={currentSpeedKmh}', 'onPause();', 'text: "End Drive"', '{/* Save Point */}']) assert.ok(overlay.includes(part), part);
+  for (const part of RECORDING_PARTS) assert.ok(recordingScreen().includes(part), part);
 });
 
 // ─── iOS build number: one source of truth (app.json ios.buildNumber) ───────
@@ -10952,7 +10953,7 @@ test('hazards: the report sheet is two taps — Report, then a type; nothing to 
   assert.ok(/accessibilityLabel="Report a hazard"/.test(button) && />Report<\/Text>/.test(button));
 });
 
-test('hazards: Report in navigation (lower right, by the speed HUD) and in Free Drive (dashboard map area, lower right)', () => {
+test('hazards: Report in navigation (lower right, by the speed HUD) and in Free Drive (dashboard map area, lower left)', () => {
   const drive = readNav('../app/(tabs)/(drive)/index.tsx');
   const bar = readNav('../components/navigation/GuidanceBar.tsx');
   // Navigation: in the HUD row, opposite the speed, as in the reference design
@@ -10964,7 +10965,7 @@ test('hazards: Report in navigation (lower right, by the speed HUD) and in Free 
   // Free Drive: one optional button on the dashboard, its own controls untouched
   const overlay = readNav('../components/ActiveDriveOverlay.tsx');
   assert.ok(/\{onReport \? \([\s\S]*?<ReportButton onPress=\{onReport\} \/>/.test(overlay));
-  assert.ok(/reportWrap: \{\s*position: "absolute",\s*right: 12,/.test(overlay));
+  assert.ok(/reportWrap: \{\s*position: "absolute",\s*left: 12,/.test(overlay));
   const overlayJsx = drive.slice(drive.indexOf('<ActiveDriveOverlay'), drive.indexOf('/>', drive.indexOf('<ActiveDriveOverlay')));
   assert.ok(/onReport=\{openReport\}/.test(overlayJsx));
   for (const control of ['onPause={handlePause}', 'onEndDrive={handlePanelEndDrive}', 'onSavePoint={handleSavePoint}', 'onLocateButton={handleLocateButton}']) {
@@ -13992,4 +13993,162 @@ test('CarPlay scene: native only (its own map), never touches the iPhone map or 
   for (const f of ['components/MapboxDriveMap.tsx', 'app/(tabs)/(drive)/index.tsx', 'hooks/useVisualGate.ts', 'lib/visualGate.ts']) {
     assert.ok(!/carplay|CarPlay|scene/i.test(readFileSync(join(MOBILE, f), 'utf8').replace(/\/\/.*$/gm, '')), f);
   }
+});
+
+// ─── Drive recording screen (Build 34) ───────────────────────────────────────
+// GPS quality from the accepted fixes, WeatherKit weather, the figures as
+// shown, a real Save Point, and the screen's parts in their own files.
+
+import { GPS_QUALITY, gpsQuality } from '@/lib/gpsQuality';
+import { WEATHER, formatTemperatureC, shownWeather, weatherRefreshDue, type WeatherCache } from '@/lib/weather/driveWeather';
+import { distanceParts, driveTimeParts } from '@/lib/driveDisplay';
+import { SAVE_POINT_MESSAGE, savePointName, savePointProblem } from '@/lib/savePoint';
+
+/** The recording screen: the overlay and its parts */
+function recordingScreen(): string {
+  const dir = join(MOBILE, 'components/drive/recording');
+  return [join(MOBILE, 'components/ActiveDriveOverlay.tsx'), ...readdirSync(dir).map((f) => join(dir, f))]
+    .map((f) => readFileSync(f, 'utf8')).join('\n');
+}
+const RECORDING_PARTS = [
+  '<SpeedCard unitSystem={resolvedUnitSystem} />',
+  '<GpsStatusChip locationMode={locationMode} />',
+  'onPause();',
+  'text: "End Drive"',
+  '{/* Save Point */}',
+  '{/* Stop Drive */}',
+];
+
+test('recording screen: GPS quality from the newest accepted fix (accuracy, age, location on)', () => {
+  const now = 1_000_000;
+  const at = (accuracyM: number | null, ageMs = 0) => gpsQuality({ locationMode: 'live', fix: { accuracyM, timestamp: now - ageMs }, now });
+  assert.equal(at(5).level, 'excellent');
+  assert.equal(at(GPS_QUALITY.excellentM).level, 'excellent');
+  assert.equal(at(12).level, 'strong');
+  assert.equal(at(GPS_QUALITY.strongM).level, 'strong');
+  assert.equal(at(35).level, 'fair');
+  assert.equal(at(80).level, 'weak');
+  assert.equal(at(null).level, 'fair', 'a fresh fix of unknown accuracy');
+  assert.equal(at(5, GPS_QUALITY.staleMs + 1).level, 'weak', 'updates stopped coming');
+  assert.equal(at(5, GPS_QUALITY.lostMs + 1).level, 'lost');
+  assert.equal(gpsQuality({ locationMode: 'live', fix: null, now }).level, 'lost', 'no fix yet');
+  assert.equal(gpsQuality({ locationMode: 'simulated', fix: { accuracyM: 5, timestamp: now }, now }).level, 'lost', 'location off or not allowed');
+  assert.deepEqual([at(5), at(12), at(35), at(80), at(5, 60_000)].map((q) => [q.bars, q.label]),
+    [[4, 'Excellent'], [3, 'Strong'], [2, 'Fair'], [1, 'Weak'], [0, 'Lost']]);
+  // The chip reads the fix feed navigation already has: no GPS listener of its own
+  const chip = readFileSync(join(MOBILE, 'components/drive/recording/GpsStatusChip.tsx'), 'utf8');
+  assert.ok(/useLatestNavigationFix\(\)/.test(chip));
+  assert.ok(!/expo-location|watchPosition|getCurrentPosition/.test(recordingScreen()), 'no second location listener');
+  // Its poor-signal banner is the chip now
+  const drive = readFileSync(join(MOBILE, 'app/(tabs)/(drive)/index.tsx'), 'utf8');
+  assert.ok(/\{accuracyWarning && !navigating && !freeDrive && \(/.test(drive));
+});
+
+test('recording screen: weather is asked for at the start, every 15 min or 10 km, never retried at once', () => {
+  const t0 = 5_000_000;
+  const here = { latitude: 53.0, longitude: -1.5 };
+  const cache: WeatherCache = { weather: { temperatureC: 12.4, symbolName: 'cloud', condition: 'Cloudy' }, fetchedAt: t0, at: here };
+  assert.equal(weatherRefreshDue({ cache: null, lastFailureAt: null, position: here, now: t0 }), true, 'first request');
+  assert.equal(weatherRefreshDue({ cache: null, lastFailureAt: null, position: null, now: t0 }), false, 'waits for a position');
+  assert.equal(weatherRefreshDue({ cache, lastFailureAt: null, position: here, now: t0 + 60_000 }), false);
+  assert.equal(weatherRefreshDue({ cache, lastFailureAt: null, position: here, now: t0 + WEATHER.refreshMs }), true, 'every 15 minutes');
+  assert.equal(weatherRefreshDue({ cache, lastFailureAt: null, position: { latitude: 53.1, longitude: -1.5 }, now: t0 + 60_000 }), true, '~11 km on');
+  assert.equal(weatherRefreshDue({ cache, lastFailureAt: null, position: { latitude: 53.01, longitude: -1.5 }, now: t0 + 60_000 }), false, '~1 km on');
+  assert.equal(weatherRefreshDue({ cache: null, lastFailureAt: t0, position: here, now: t0 + 30_000 }), false, 'a failure waits');
+  assert.equal(weatherRefreshDue({ cache: null, lastFailureAt: t0, position: here, now: t0 + WEATHER.retryMs }), true, 'then retries');
+  assert.equal(WEATHER.refreshMs, 15 * 60_000);
+  // Shown until an hour old, then hidden; none: hidden
+  assert.equal(shownWeather(cache, t0 + 30 * 60_000)?.condition, 'Cloudy');
+  assert.equal(shownWeather(cache, t0 + WEATHER.maxShowMs + 1), null);
+  assert.equal(shownWeather(null, t0), null);
+  assert.equal(formatTemperatureC(12.4), '12°C');
+  assert.equal(formatTemperatureC(-0.3), '0°C');
+  assert.equal(formatTemperatureC(-4.6), '-5°C');
+  // A failure never reaches the recording: caught in the hook, and the chip is hidden without weather
+  const hook = readFileSync(join(MOBILE, 'hooks/useDriveWeather.ts'), 'utf8');
+  assert.ok(/catch \{[\s\S]*?lastFailureAt = Date\.now\(\);/.test(hook));
+  assert.ok(/if \(!active \|\| !weatherKitAvailable\) return;/.test(hook));
+  const chip = readFileSync(join(MOBILE, 'components/drive/recording/WeatherChip.tsx'), 'utf8');
+  assert.ok(/if \(!weather\) return null;/.test(chip));
+  assert.ok(/Other data sources/.test(chip) && /legalPageURL/.test(chip), 'Apple attribution and the legal link');
+});
+
+test('recording screen: WeatherKit on iOS only, through the entitlement, with no key anywhere', async () => {
+  const mod = readFileSync(join(MOBILE, 'modules/derwent-weather/index.ts'), 'utf8');
+  assert.ok(/Platform\.OS === 'ios' \? requireOptionalNativeModule<NativeWeather>\('DerwentWeather'\) : null/.test(mod), 'Android and the web: no weather');
+  const swift = readFileSync(join(MOBILE, 'modules/derwent-weather/ios/DerwentWeatherModule.swift'), 'utf8');
+  assert.ok(/WeatherService\.shared\.weather\(for: location, including: \.current\)/.test(swift));
+  assert.ok(/converted\(to: \.celsius\)/.test(swift));
+  assert.ok(/WeatherService\.shared\.attribution/.test(swift));
+  const podspec = readFileSync(join(MOBILE, 'modules/derwent-weather/ios/DerwentWeather.podspec'), 'utf8');
+  assert.ok(/'WeatherKit'/.test(podspec));
+  // The plugin, listed once, adds the entitlement and keeps the others
+  const req = createRequire(import.meta.url);
+  const appConfig = req('../app.config.js') as (a: { config: object }) => { plugins: unknown[] };
+  const names = appConfig({ config: { ios: { infoPlist: {} }, android: {}, plugins: [], extra: {} } }).plugins.map((p) => (Array.isArray(p) ? p[0] : p));
+  assert.equal(names.filter((n) => n === './plugins/withWeatherKit').length, 1);
+  type ModConfig = { mods: { ios: Record<string, (c: object) => Promise<{ modResults: Record<string, unknown> }>> } };
+  const withWeatherKit = req('../plugins/withWeatherKit.js') as ((c: object) => ModConfig) & { WEATHERKIT_ENTITLEMENT: string };
+  const config = withWeatherKit({ name: 'Derwent', slug: 'derwent', _internal: { projectRoot: MOBILE } });
+  const ent = await config.mods.ios.entitlements!({
+    ...config, modResults: { 'com.apple.developer.applesignin': ['Default'] },
+    modRequest: { platform: 'ios', modName: 'entitlements', projectRoot: MOBILE, platformProjectRoot: join(MOBILE, 'ios'), introspect: true },
+  });
+  assert.deepEqual(ent.modResults, { 'com.apple.developer.applesignin': ['Default'], 'com.apple.developer.weatherkit': true });
+  assert.equal(withWeatherKit.WEATHERKIT_ENTITLEMENT, 'com.apple.developer.weatherkit');
+  // No WeatherKit key, team key ID or private key in the app or repo
+  const files = [
+    'plugins/withWeatherKit.js', 'modules/derwent-weather/index.ts', 'modules/derwent-weather/ios/DerwentWeatherModule.swift',
+    'modules/derwent-weather/ios/DerwentWeather.podspec', 'hooks/useDriveWeather.ts', 'lib/weather/driveWeather.ts', 'app.config.js',
+  ];
+  for (const f of files) {
+    const code = readFileSync(join(MOBILE, f), 'utf8');
+    assert.ok(!/BEGIN (EC )?PRIVATE KEY|\.p8\b|AuthKey_|WEATHERKIT_(KEY|SECRET|TOKEN)|weatherkit\.apple\.com\/api/i.test(code), f);
+  }
+  const all = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
+    e.name === 'node_modules' || e.name.startsWith('.') ? [] : e.isDirectory() ? all(join(dir, e.name)) : [e.name]);
+  assert.ok(!all(MOBILE).some((n) => /\.p8$/.test(n)), 'no .p8 key file');
+});
+
+test('recording screen: drive time, distance (miles in the UK) and top speed as shown', () => {
+  assert.deepEqual(driveTimeParts(9), { value: '0:09', units: 'm : s' });
+  assert.deepEqual(driveTimeParts(754), { value: '12:34', units: 'm : s' });
+  assert.deepEqual(driveTimeParts(3729), { value: '1:02:09', units: 'h : m : s' });
+  assert.deepEqual(driveTimeParts(-5), { value: '0:00', units: 'm : s' });
+  assert.deepEqual(distanceParts(0, 'imperial'), { value: '0.00', units: 'mi' });
+  assert.deepEqual(distanceParts(20, 'imperial'), { value: '12.4', units: 'mi' });
+  assert.deepEqual(distanceParts(8, 'imperial'), { value: '4.97', units: 'mi' });
+  assert.deepEqual(distanceParts(3.2, 'metric'), { value: '3.20', units: 'km' });
+  assert.deepEqual(distanceParts(Number.NaN, 'metric'), { value: '0.00', units: 'km' });
+  // The figures are the recording's own
+  const overlay = readFileSync(join(MOBILE, 'components/ActiveDriveOverlay.tsx'), 'utf8');
+  assert.ok(/distanceKm=\{currentDrive\?\.estimatedDistance \?\? 0\}/.test(overlay));
+  assert.ok(/topSpeedKmh=\{currentDrive\?\.topSpeed \?\? 0\}/.test(overlay));
+  assert.ok(/driveSeconds=\{driveSeconds\}/.test(overlay));
+  // The speedometer ring and the separate "Drive in progress" card are gone
+  assert.ok(!/Speedometer|Drive in progress|react-native-svg/.test(recordingScreen()));
+});
+
+test('recording screen: Save Point saves a private place at a good fix; Stop Drive confirms once, into Drive Complete', () => {
+  const now = 10_000_000;
+  const fix = { latitude: 53.2, longitude: -1.4, accuracyM: 10, timestamp: now - 2_000 };
+  assert.equal(savePointProblem(fix, now), null);
+  assert.equal(savePointProblem(null, now), SAVE_POINT_MESSAGE.no_fix);
+  assert.equal(savePointProblem({ ...fix, timestamp: now - 10 * 60_000 }, now), SAVE_POINT_MESSAGE.stale_fix);
+  assert.equal(savePointProblem({ ...fix, accuracyM: 500 }, now), SAVE_POINT_MESSAGE.inaccurate_fix);
+  assert.match(savePointName(now), /^Saved point \d\d:\d\d$/);
+  const drive = readFileSync(join(MOBILE, 'app/(tabs)/(drive)/index.tsx'), 'utf8');
+  const save = drive.slice(drive.indexOf('async function handleSavePoint()'), drive.indexOf('// Mapbox zoom buttons.'));
+  assert.ok(/const fix = lastAcceptedFixRef\.current;/.test(save));
+  assert.ok(/await addPlace\(\{\s*kind: "poi",\s*name: savePointName\(now\),\s*coordinate: \{ latitude: fix\.latitude, longitude: fix\.longitude \},\s*visibility: "private",/.test(save));
+  const panel = readFileSync(join(MOBILE, 'components/drive/recording/DriveStatsPanel.tsx'), 'utf8');
+  assert.ok(/if \(saveState === "saving"\) return;/.test(panel), 'one save at a time');
+  assert.ok(/Alert\.alert\("Point not saved", problem\)/.test(panel), 'a failure says why');
+  // Stop Drive: one confirmation, then the usual end of a drive (handlePanelEndDrive → Drive Complete)
+  assert.ok(/if \(confirming\.current \|\| Date\.now\(\) < stopLockedUntil\.current\) return;/.test(panel));
+  assert.ok(/stopLockedUntil\.current = Date\.now\(\) \+ STOP_LOCK_MS;\s*Haptics\.notificationAsync\(Haptics\.NotificationFeedbackType\.Success\);\s*onEndDrive\(\);/.test(panel));
+  assert.ok(/function handlePanelEndDrive\(\) \{\s*if \(navOwnsDrive\(\)\) navSession\.end\("user"\);\s*handleEndDrive\(\);/.test(drive));
+  // Map style, recenter and zoom are the screen's real ones
+  const jsx = drive.slice(drive.indexOf('<ActiveDriveOverlay'), drive.indexOf('/>', drive.indexOf('<ActiveDriveOverlay')));
+  for (const p of ['mapType={mapType}', 'mapLayers={mapLayers}', 'onSelectMapType={setMapType}', 'onZoomIn={handleZoomIn}', 'onZoomOut={handleZoomOut}', 'onResume={handleResume}']) assert.ok(jsx.includes(p), p);
 });
