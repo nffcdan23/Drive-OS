@@ -75,6 +75,11 @@ jobs:
             cmp "$first/$f" "ios/$f" || { echo "::error::A second prebuild generated a different $f"; exit 1; }
           done
           echo "Two prebuilds generated the same native configuration."
+          # With a (placeholder) public Mapbox token and style, as the Mac's
+          # .env has: the CarPlay map settings are written too
+          EXPO_PUBLIC_MAPBOX_TOKEN=pk.ci-placeholder EXPO_PUBLIC_MAPBOX_STYLE_URL=mapbox://styles/derwent/ci-placeholder \
+            pnpm exec expo prebuild -p ios --clean --no-install
+          node scripts/check-ios-scene-lifecycle.js | grep -F 'CarPlay shows the map'
 
       - name: No server secrets in the app
         run: |

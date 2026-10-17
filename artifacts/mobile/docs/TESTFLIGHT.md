@@ -103,7 +103,8 @@ npx eas-cli@latest build --platform ios --profile testflight --auto-submit
 
 TestFlight builds are made in Xcode on the Intel Mac (EAS above is the fallback). The build number has **one** source: `ios.buildNumber` in `artifacts/mobile/app.json`.
 
-- **Before each build, raise it by one** and commit. It must be higher than the last build uploaded to App Store Connect. (Build 23 was uploaded by hand; the repo starts at `24`.)
+- **Nobody edits it.** Claude prepares the number for each TestFlight build and commits it with the changes (`scripts/ios-build-number.js`, `docs/BUILD_NUMBERS.md`). It must be higher than the last build uploaded to App Store Connect; `ios-build-numbers.json` records both. `node scripts/ios-build-number.js status` says whether the prepared build is ready to upload.
+- **An out-of-date Xcode project can't be archived.** The "[Derwent] Check build number" build phase stops an Archive when you pulled without re-running prebuild, or when the build is already uploaded. Debug builds only warn.
 - `expo prebuild` writes it into `ios/Derwent/Info.plist` (`CFBundleVersion`) and into the Xcode project (`CURRENT_PROJECT_VERSION`), so Xcode shows the same number and nothing needs editing by hand. The version (`CFBundleShortVersionString` / `MARKETING_VERSION`) comes from `version` in `app.json`.
 - `ios/` is generated and never committed. Prebuild also adds `expo`, `react` and `react-native` to `package.json`: put it back with `git restore artifacts/mobile/package.json`.
 - The app uses the iOS **scene lifecycle** (needed for CarPlay): `expo-build-properties` `ios.enableSceneSupport` in `app.config.js` makes prebuild write it, and `node scripts/check-ios-scene-lifecycle.js` checks the result (see `docs/SCENE_LIFECYCLE.md`). The CarPlay scene and entitlement come from `plugins/withCarPlay.js` (see `docs/CARPLAY.md`). Never edit `AppDelegate.swift`, `Info.plist` or the entitlements in Xcode: prebuild replaces them.
@@ -116,7 +117,8 @@ cd artifacts/mobile
 cat .env                              # unchanged from Build 23: Supabase URL + publishable key, API URL, Mapbox pk. token + style URL
 npx expo prebuild -p ios --clean
 git restore package.json
-node scripts/check-ios-scene-lifecycle.js        # every line ✓ (scene lifecycle and CarPlay scene in place)
+node scripts/check-ios-scene-lifecycle.js        # every line ✓ (scene lifecycle, CarPlay scene, build number)
+node scripts/ios-build-number.js status          # the prepared build, and whether it can be uploaded
 grep -A1 CFBundleVersion ios/Derwent/Info.plist   # the number from app.json
 open ios/Derwent.xcworkspace
 ```

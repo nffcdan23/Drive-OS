@@ -13,7 +13,7 @@ On `npx expo prebuild -p ios --clean` it:
 
 Nothing else changes: bundle id, signing, entitlements, build number, background modes and pods are the same. `expo-build-properties` writes three keys to `Podfile.properties.json`, all with the Podfile's own default values.
 
-Milestone 2 adds the CarPlay scene to this manifest, and the CarPlay entitlement: see `docs/CARPLAY.md`. Expo's iPhone scene stays exactly as above.
+Milestone 2 adds the CarPlay scene to this manifest, and the CarPlay entitlement; Milestone 3 adds the CarPlay map's public Mapbox settings: see `docs/CARPLAY.md`. Expo's iPhone scene stays exactly as above.
 
 `node scripts/check-ios-scene-lifecycle.js` checks the generated project. CI runs it after a Linux prebuild; run it on the Mac after prebuild.
 
@@ -49,4 +49,4 @@ Roll back CarPlay first (`docs/CARPLAY.md`): its plugin stops prebuild without t
 
 1. Revert the commit that added this: `git revert <commit>`. That removes the option, its unit test, the CI check and this script together. For a quick local experiment without committing, `enableSceneSupport: false` in `app.config.js` also restores the old AppDelegate and Info.plist. The unit test and the check script then fail, as they should.
 2. Run `npx expo prebuild -p ios --clean`.
-3. Raise `ios.buildNumber` in `app.json` and archive as usual. Earlier TestFlight builds stay installable while you do.
+3. Claude prepares the next build number (`docs/BUILD_NUMBERS.md`); archive as usual. Earlier TestFlight builds stay installable while you do.

@@ -9,8 +9,9 @@ const { withInfoPlist, withXcodeProject } = require('expo/config-plugins');
 const { identity } = require('./app.identity');
 
 /**
- * The iOS build number has one source: `ios.buildNumber` in app.json. Raise
- * it there (by one) before each TestFlight build made in Xcode.
+ * The iOS build number has one source: `ios.buildNumber` in app.json. Claude
+ * prepares it for each TestFlight build (scripts/ios-build-number.js prepare,
+ * docs/BUILD_NUMBERS.md); nobody edits it in Xcode or by hand.
  *
  * `expo prebuild` writes it into Info.plist as CFBundleVersion (the value
  * App Store Connect reads); without it, prebuild writes "1". This plugin also
@@ -206,7 +207,12 @@ module.exports = ({ config }) => {
       // modules/derwent-carplay, and the CarPlay navigation entitlement. Must
       // stay BEFORE expo-build-properties: it adds to the scene manifest that
       // plugin creates, and plugins' Info.plist steps run in reverse order.
-      './plugins/withCarPlay',
+      // The CarPlay map gets the same public Mapbox token and Derwent style as
+      // the Drive map (checked above: never a secret token).
+      ['./plugins/withCarPlay', {
+        mapboxToken: process.env.EXPO_PUBLIC_MAPBOX_TOKEN,
+        mapboxStyleUrl: process.env.EXPO_PUBLIC_MAPBOX_STYLE_URL,
+      }],
       // iOS scene lifecycle (Expo's official SDK 57 option; SDK 58 has it
       // built in): the AppDelegate keeps creating the React Native factory,
       // and Expo's scene delegate (EXExpoAppSceneDelegate) creates the window
@@ -214,6 +220,10 @@ module.exports = ({ config }) => {
       // fails, rather than guessing, if the AppDelegate template changes.
       // Checked after prebuild by scripts/check-ios-scene-lifecycle.js.
       ['expo-build-properties', { ios: { enableSceneSupport: true } }],
+      // Xcode build phase: an Archive stops if the project is out of date
+      // (pulled without prebuild) or the build number is already uploaded
+      // (docs/BUILD_NUMBERS.md)
+      './plugins/withBuildNumberCheck',
     ],
     extra: {
       ...(config.extra || {}),

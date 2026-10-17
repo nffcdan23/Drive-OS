@@ -20,7 +20,16 @@
  *  - Entitlements: Sign in with Apple, and CarPlay navigation.
  *  - CarPlay module: autolinked (pod DerwentCarPlay from modules/derwent-carplay),
  *    its scene delegate has the class name Info.plist uses, and it stays
- *    native-only (no React Native, Expo or map SDK imports).
+ *    native-only (no React Native or Expo imports).
+ *  - CarPlay map: the module uses the Mapbox Maps SDK @rnmapbox/maps already
+ *    brings (v11, no second copy); Info.plist has either both the public
+ *    token (MBXAccessToken, pk.) and the Derwent style, or neither (then
+ *    CarPlay shows its placeholder), and never a secret (sk.) token.
+ *  - Build number (docs/BUILD_NUMBERS.md): app.json's ios.buildNumber and
+ *    version reach Info.plist (CFBundleVersion, CFBundleShortVersionString)
+ *    and Xcode (CURRENT_PROJECT_VERSION, MARKETING_VERSION); it is the build
+ *    ios-build-numbers.json records as prepared; the "[Derwent] Check build
+ *    number" phase runs first in the app target.
  *  - Podfile.properties.json: the keys expo-build-properties writes hold the
  *    Podfile's own defaults, so pods are linked exactly as before.
  *  - The installed expo package has the scene delegate (57.0.23 or newer, SDK 57).
@@ -131,7 +140,38 @@ check(carPlayPods.length === 1 && carPlayPods[0].podName === 'DerwentCarPlay' &&
 const swift = fs.readdirSync(path.join(CARPLAY_MODULE, 'ios')).filter((f) => f.endsWith('.swift')).map((f) => read(path.join(CARPLAY_MODULE, 'ios', f)) ?? '').join('\n');
 check(swift.includes(`@objc(${CARPLAY_SCENE_DELEGATE})`) && /:\s*UIResponder,\s*CPTemplateApplicationSceneDelegate/.test(swift), `The CarPlay module defines ${CARPLAY_SCENE_DELEGATE} (a CPTemplateApplicationSceneDelegate)`);
 check(/didConnect interfaceController: CPInterfaceController,\s*to window: CPWindow/.test(swift) && /didDisconnect interfaceController: CPInterfaceController,\s*from window: CPWindow/.test(swift), 'It handles the navigation app connect (with window) and disconnect');
-check(!/^\s*(@_implementationOnly\s+|internal\s+)?import\s+(React|Expo|ExpoModulesCore|MapboxMaps|RNMBX)/m.test(swift), 'It stays native-only: no React Native, Expo or map SDK imports');
+check(!/^\s*(@_implementationOnly\s+|internal\s+)?import\s+(React|Expo|ExpoModulesCore|RNMBX)/m.test(swift), 'It stays native-only: no React Native or Expo imports');
+
+// The CarPlay map: the Mapbox SDK @rnmapbox/maps already links, and the public token and style
+const podspec = read(path.join(CARPLAY_MODULE, 'ios', 'DerwentCarPlay.podspec')) ?? '';
+let rnmapboxMapbox = null;
+try {
+  rnmapboxMapbox = require(require.resolve('@rnmapbox/maps/package.json', { paths: [projectRoot] })).mapbox.ios;
+} catch {
+  // Reported below
+}
+check(/^\s*s\.dependency\s+'MapboxMaps'\s*$/m.test(podspec) && /\b11\./.test(String(rnmapboxMapbox)), `The CarPlay pod depends on MapboxMaps, the Mapbox SDK @rnmapbox/maps links (${rnmapboxMapbox ?? 'not found'}), with no version of its own`);
+check(/^\s*import\s+MapboxMaps\s*$/m.test(swift), 'The CarPlay map is drawn with the Mapbox Maps SDK');
+const mapToken = info.MBXAccessToken;
+const mapStyle = info.DerwentCarPlayMapStyleURL;
+const mapConfigured = typeof mapToken === 'string' && mapToken.startsWith('pk.') && typeof mapStyle === 'string' && /^(mapbox:\/\/styles\/|https:\/\/)/.test(mapStyle);
+check(mapConfigured || (mapToken === undefined && mapStyle === undefined), mapConfigured
+  ? 'Info.plist has the public Mapbox token (pk.) and the Derwent style: CarPlay shows the map'
+  : 'Info.plist has no Mapbox token or style (EXPO_PUBLIC_MAPBOX_TOKEN / _STYLE_URL unset): CarPlay shows its placeholder');
+check(!/\bsk\.eyJ/.test(read(path.join(appDir, 'Info.plist')) ?? ''), 'Info.plist holds no secret Mapbox token (sk.)');
+
+// The build number: one source (app.json), the same everywhere Xcode and App Store Connect read it
+const appJson = JSON.parse(read(path.join(projectRoot, 'app.json')) ?? '{}').expo ?? {};
+const buildNumber = String(appJson.ios?.buildNumber ?? '');
+const ledger = JSON.parse(read(path.join(projectRoot, 'ios-build-numbers.json')) ?? '{}');
+check(/^[1-9]\d*$/.test(buildNumber) && Number(buildNumber) === ledger.prepared?.build && appJson.version === ledger.version, `Build ${buildNumber} (version ${appJson.version}) is the build ios-build-numbers.json records as prepared`);
+check(info.CFBundleVersion === buildNumber && info.CFBundleShortVersionString === appJson.version, `Info.plist CFBundleVersion ${info.CFBundleVersion} and CFBundleShortVersionString ${info.CFBundleShortVersionString} come from app.json`);
+const pbxproj = read(path.join(iosDir, `${path.basename(appDir)}.xcodeproj`, 'project.pbxproj')) ?? '';
+const projectVersions = [...pbxproj.matchAll(/CURRENT_PROJECT_VERSION = ([^;]+);/g)].map((m) => m[1]);
+const marketingVersions = [...pbxproj.matchAll(/MARKETING_VERSION = ([^;]+);/g)].map((m) => m[1]);
+check(projectVersions.length >= 2 && projectVersions.every((v) => v === buildNumber) && marketingVersions.length >= 2 && marketingVersions.every((v) => v === appJson.version), `Xcode CURRENT_PROJECT_VERSION (${projectVersions.join(', ')}) and MARKETING_VERSION (${marketingVersions.join(', ')}) come from app.json, Debug and Release`);
+const firstPhase = (pbxproj.match(/buildPhases = \(\s*\w+ \/\* ([^*]+) \*\//) || [])[1];
+check(firstPhase === '[Derwent] Check build number' && (pbxproj.match(/name = "\[Derwent\] Check build number";/g) || []).length === 1, 'The "[Derwent] Check build number" build phase is in the app target once, first');
 
 const podProps = JSON.parse(read(path.join(iosDir, 'Podfile.properties.json')) ?? '{}');
 const defaults = { 'EXPO_USE_PRECOMPILED_MODULES': 'true', 'apple.privacyManifestAggregationEnabled': 'true', 'ios.forceStaticLinking': '[]' };

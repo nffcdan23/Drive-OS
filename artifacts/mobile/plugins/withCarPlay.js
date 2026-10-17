@@ -10,6 +10,14 @@
  *   once).
  * - Entitlements: com.apple.developer.carplay-maps (Apple granted it for the
  *   App ID), added to the existing ones.
+ * - The CarPlay map (Milestone 3): the app's PUBLIC Mapbox token and the
+ *   Derwent style URL (EXPO_PUBLIC_MAPBOX_TOKEN / EXPO_PUBLIC_MAPBOX_STYLE_URL,
+ *   the same values the iPhone's Drive map uses, already in the app's
+ *   JavaScript) go into Info.plist as MBXAccessToken (Mapbox's own key) and
+ *   DerwentCarPlayMapStyleURL, so the CarPlay map loads without React Native.
+ *   Only a public pk. token is ever written; a secret sk. token stops
+ *   prebuild. Without both values neither key is written, and CarPlay shows
+ *   its placeholder instead of the map.
  *
  * ORDER: config plugins' Info.plist steps run in reverse order of the
  * plugins list, and the scene manifest only exists once expo-build-properties
@@ -26,6 +34,10 @@ const CARPLAY_ROLE = 'CPTemplateApplicationSceneSessionRoleApplication';
 const EXPO_SCENE_DELEGATE = 'EXExpoAppSceneDelegate';
 /** The class name in modules/derwent-carplay/ios/CarPlaySceneDelegate.swift (@objc) */
 const CARPLAY_SCENE_DELEGATE = 'DerwentCarPlaySceneDelegate';
+
+/** Info.plist keys read by modules/derwent-carplay/ios/CarPlayMapSettings.swift */
+const MAPBOX_TOKEN_KEY = 'MBXAccessToken';
+const MAPBOX_STYLE_KEY = 'DerwentCarPlayMapStyleURL';
 
 const CARPLAY_SCENE = {
   UISceneClassName: 'CPTemplateApplicationScene',
@@ -61,9 +73,32 @@ function withCarPlayScene(manifest) {
   };
 }
 
-function withCarPlay(config) {
+/**
+ * The map settings to write, or null without a usable public token and style
+ * (the same rules as lib/mapbox.ts mapboxSettings). A secret token throws.
+ */
+function carPlayMapSettings({ mapboxToken, mapboxStyleUrl } = {}) {
+  const token = String(mapboxToken ?? '').trim();
+  const styleUrl = String(mapboxStyleUrl ?? '').trim();
+  if (token.startsWith('sk.')) {
+    throw new Error('withCarPlay: the Mapbox token is a secret (sk.) token. Only the public pk. token may be in the app.');
+  }
+  if (!token.startsWith('pk.')) return null;
+  if (!/^mapbox:\/\/styles\/[^/\s]+\/[^/\s]+(\/draft)?$/.test(styleUrl) && !/^https:\/\/\S+$/.test(styleUrl)) return null;
+  return { token, styleUrl };
+}
+
+function withCarPlay(config, props = {}) {
+  const map = carPlayMapSettings(props);
   config = withInfoPlist(config, (cfg) => {
     cfg.modResults.UIApplicationSceneManifest = withCarPlayScene(cfg.modResults.UIApplicationSceneManifest);
+    if (map) {
+      cfg.modResults[MAPBOX_TOKEN_KEY] = map.token;
+      cfg.modResults[MAPBOX_STYLE_KEY] = map.styleUrl;
+    } else {
+      delete cfg.modResults[MAPBOX_TOKEN_KEY];
+      delete cfg.modResults[MAPBOX_STYLE_KEY];
+    }
     return cfg;
   });
   return withEntitlementsPlist(config, (cfg) => {
@@ -74,5 +109,8 @@ function withCarPlay(config) {
 
 module.exports = withCarPlay;
 module.exports.withCarPlayScene = withCarPlayScene;
+module.exports.carPlayMapSettings = carPlayMapSettings;
+module.exports.MAPBOX_TOKEN_KEY = MAPBOX_TOKEN_KEY;
+module.exports.MAPBOX_STYLE_KEY = MAPBOX_STYLE_KEY;
 module.exports.CARPLAY_ENTITLEMENT = CARPLAY_ENTITLEMENT;
 module.exports.CARPLAY_SCENE = CARPLAY_SCENE;

@@ -1,8 +1,9 @@
 import UIKit
 
 /**
- The CarPlay window's content until the real map arrives (Milestone 3): the
- Derwent dark background with a faint grid, so it reads as an empty map.
+ The CarPlay window's content when the map can't be shown (no public Mapbox
+ token and style in Info.plist; see CarPlayMapSettings): the Derwent dark
+ background with a faint grid, so it reads as an empty map.
  Map content only: no text, buttons or alerts (Apple: a navigation app's
  window draws only its map; controls come from templates). No location,
  no map SDK, no network.

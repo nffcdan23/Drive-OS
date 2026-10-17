@@ -2645,6 +2645,59 @@ test('scene manifest check: exactly the iPhone and CarPlay scenes in any key ord
   assert.equal(sceneManifestMatches(edit((m) => { m.UISceneConfigurations.UIWindowSceneSessionRoleApplication!.push({ UISceneConfigurationName: 'Second' }); })), false, 'a second iPhone scene');
 });
 
+test('CarPlay map settings: the public token and Derwent style only (as the Drive map), never a secret token; read natively from the same keys', async () => {
+  const req = createRequire(import.meta.url);
+  type Settings = { token: string; styleUrl: string } | null;
+  const plugin = req('../plugins/withCarPlay.js') as ((c: object, p?: object) => { mods: { ios: Record<string, (c: object) => Promise<{ modResults: Record<string, unknown> }>> } }) & {
+    carPlayMapSettings(p: { mapboxToken?: string | null; mapboxStyleUrl?: string | null }): Settings;
+    MAPBOX_TOKEN_KEY: string; MAPBOX_STYLE_KEY: string;
+  };
+  const pk = 'pk.' + 'eyJ1' + 'x'.repeat(8) + '.sig';
+  const style = 'mapbox://styles/derwent/abc123';
+  // The same rules as the iPhone's Drive map (lib/mapbox.ts mapboxSettings)
+  const cases: Array<[string | null, string | null]> = [
+    [pk, style], [` ${pk} `, ` ${style} `], [pk, `${style}/draft`], [pk, 'https://example.com/style.json'],
+    [pk, null], [pk, 'mapbox://styles/derwent'], [null, style], ['', style], ['tk.abc', style],
+  ];
+  for (const [token, styleUrl] of cases) {
+    assert.deepEqual(plugin.carPlayMapSettings({ mapboxToken: token, mapboxStyleUrl: styleUrl }), mapboxSettings(token, styleUrl), `${token} ${styleUrl}`);
+  }
+  assert.throws(() => plugin.carPlayMapSettings({ mapboxToken: 'sk.' + 'eyJ1' + 'x'.repeat(8), mapboxStyleUrl: style }), /secret \(sk\.\) token/);
+  // Info.plist: both keys, or neither (a stale pair from an earlier prebuild is removed)
+  const run = async (props?: object) => {
+    const config = plugin({ name: 'Derwent', slug: 'derwent' }, props);
+    const phone = [{ UISceneConfigurationName: 'Default Configuration', UISceneDelegateClassName: 'EXExpoAppSceneDelegate' }];
+    return (await config.mods.ios.infoPlist!({
+      ...config,
+      modResults: { [plugin.MAPBOX_TOKEN_KEY]: 'pk.stale', [plugin.MAPBOX_STYLE_KEY]: 'mapbox://styles/a/stale', UIApplicationSceneManifest: { UIApplicationSupportsMultipleScenes: false, UISceneConfigurations: { UIWindowSceneSessionRoleApplication: phone } } },
+      modRequest: { platform: 'ios', modName: 'infoPlist', projectRoot: MOBILE, platformProjectRoot: join(MOBILE, 'ios'), introspect: true },
+    })).modResults;
+  };
+  const withMap = await run({ mapboxToken: pk, mapboxStyleUrl: style });
+  assert.equal(withMap.MBXAccessToken, pk);
+  assert.equal(withMap.DerwentCarPlayMapStyleURL, style);
+  const without = await run();
+  assert.ok(!('MBXAccessToken' in without) && !('DerwentCarPlayMapStyleURL' in without), 'no map settings: placeholder');
+  // app.config.js hands the plugin the app's public values
+  const appConfig = req('../app.config.js') as (a: { config: object }) => { plugins: unknown[] };
+  const saved = { ...process.env };
+  try {
+    Object.assign(process.env, { EXPO_PUBLIC_MAPBOX_TOKEN: pk, EXPO_PUBLIC_MAPBOX_STYLE_URL: style });
+    const entry = appConfig({ config: { ios: { infoPlist: {} }, android: {}, plugins: [], extra: {} } }).plugins
+      .find((p) => Array.isArray(p) && p[0] === './plugins/withCarPlay') as [string, object];
+    assert.deepEqual(entry[1], { mapboxToken: pk, mapboxStyleUrl: style });
+  } finally {
+    for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];
+    Object.assign(process.env, saved);
+  }
+  // The Swift module reads exactly these keys, and falls back to the placeholder without them
+  const swift = (f: string) => readFileSync(toPath(new URL(`../modules/derwent-carplay/ios/${f}`, import.meta.url)), 'utf8');
+  const settings = swift('CarPlayMapSettings.swift');
+  assert.ok(settings.includes(`"${plugin.MAPBOX_TOKEN_KEY}"`) && settings.includes(`"${plugin.MAPBOX_STYLE_KEY}"`));
+  assert.ok(settings.includes('token.hasPrefix("pk.")'), 'never uses a non-public token');
+  assert.match(swift('CarPlaySceneDelegate.swift'), /if let settings = CarPlayMapSettings\.fromInfoPlist\(\)[\s\S]*CarPlayMapViewController\(settings: settings\)[\s\S]*else[\s\S]*CarPlayPlaceholderViewController\(\)/);
+});
+
 test('CarPlay plugin: listed once before expo-build-properties, so the real Info.plist steps add CarPlay after Expo; entitlement added to the others', async () => {
   const req = createRequire(import.meta.url);
   const appConfig = req('../app.config.js') as (a: { config: object }) => { plugins: unknown[] };
@@ -10383,6 +10436,80 @@ test('the iOS build number comes from app.json, is a whole number, and reaches X
   const src = readFileSync(toPath(new URL('../app.config.js', import.meta.url)), 'utf8');
   assert.ok(/settings\.CURRENT_PROJECT_VERSION = cfg\.ios\?\.buildNumber \?\? '1';/.test(src));
   assert.ok(/settings\.MARKETING_VERSION = cfg\.version;/.test(src));
+});
+
+// ─── Build-number management (docs/BUILD_NUMBERS.md) ───────────────────────
+// Claude prepares each TestFlight build number with scripts/ios-build-number.js;
+// ios-build-numbers.json records the prepared build and the highest upload.
+
+import { mkdtempSync, copyFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+
+type BuildNumbers = {
+  nextBuild(prepared: number, highestUploaded: number | null): number;
+  xcodeCheck(a: { appBuild: number; highestUploaded: number | null; currentProjectVersion?: string; infoPlistBuild?: string | null; configuration?: string }): { errors: string[]; warnings: string[] };
+  prepare(root: string, o?: { uploaded?: number; contents?: string; today?: string }): number;
+  recordUpload(root: string, build: number, today?: string): number;
+};
+
+test('build numbers: the ledger records the build app.json prepares, for the same version, never below an upload', () => {
+  const read = (f: string) => JSON.parse(readFileSync(toPath(new URL(`../${f}`, import.meta.url)), 'utf8'));
+  const app = read('app.json') as { expo: { version: string; ios: { buildNumber: string } } };
+  const ledger = read('ios-build-numbers.json') as { version: string; prepared: { build: number }; highestUploaded: { build: number | null } };
+  assert.equal(ledger.prepared.build, Number(app.expo.ios.buildNumber), 'prepared.build is app.json ios.buildNumber');
+  assert.equal(ledger.version, app.expo.version);
+  const uploaded = ledger.highestUploaded.build;
+  assert.ok(uploaded === null || (Number.isInteger(uploaded) && ledger.prepared.build >= uploaded), 'never below a recorded upload');
+});
+
+test('build numbers: prepare keeps an unuploaded build, takes the next after an upload, refuses an unconfirmed upload, and is idempotent', () => {
+  const req = createRequire(import.meta.url);
+  const bn = req('../scripts/ios-build-number.js') as BuildNumbers;
+  assert.throws(() => bn.nextBuild(32, null), /not confirmed/);
+  assert.equal(bn.nextBuild(32, 31), 32, 'prepared but not uploaded: reused');
+  assert.equal(bn.nextBuild(32, 32), 33);
+  assert.equal(bn.nextBuild(32, 40), 41, 'App Store Connect is ahead: past it');
+  // On a copy of the real files
+  const root = mkdtempSync(join(tmpdir(), 'derwent-build-'));
+  for (const f of ['app.json', 'ios-build-numbers.json']) copyFileSync(join(MOBILE, f), join(root, f));
+  const appBuild = () => (JSON.parse(readFileSync(join(root, 'app.json'), 'utf8')) as { expo: { ios: { buildNumber: string } } }).expo.ios.buildNumber;
+  const before = readFileSync(join(root, 'app.json'), 'utf8');
+  const current = Number(appBuild());
+  assert.equal(bn.prepare(root, { uploaded: current, today: '2026-10-16' }), current + 1);
+  assert.equal(appBuild(), String(current + 1), 'app.json updated (a string, as Expo wants)');
+  assert.equal(bn.prepare(root, { today: '2026-10-16' }), current + 1, 'again: the same build');
+  assert.equal(readFileSync(join(root, 'app.json'), 'utf8'), before.replace(`"buildNumber": "${current}"`, `"buildNumber": "${current + 1}"`), 'only the build number changes');
+  assert.equal(bn.recordUpload(root, current + 1, '2026-10-17'), current + 1);
+  assert.equal(bn.prepare(root), current + 2);
+  assert.throws(() => bn.prepare(root, { uploaded: current }), /lower than the recorded highest upload/);
+  const ledger = JSON.parse(readFileSync(join(root, 'ios-build-numbers.json'), 'utf8')) as { prepared: { build: number }; highestUploaded: { build: number } };
+  assert.equal(ledger.prepared.build, current + 2);
+  assert.equal(ledger.highestUploaded.build, current + 1);
+});
+
+test('build numbers: an Archive stops on an out-of-date Xcode project or an uploaded build; Debug only warns', () => {
+  const req = createRequire(import.meta.url);
+  const bn = req('../scripts/ios-build-number.js') as BuildNumbers;
+  const ok = bn.xcodeCheck({ appBuild: 33, highestUploaded: 32, currentProjectVersion: '33', infoPlistBuild: '33', configuration: 'Release' });
+  assert.deepEqual(ok, { errors: [], warnings: [] });
+  const stale = bn.xcodeCheck({ appBuild: 33, highestUploaded: 32, currentProjectVersion: '32', infoPlistBuild: '32', configuration: 'Release' });
+  assert.equal(stale.errors.length, 1);
+  assert.match(stale.errors[0]!, /out of date: app\.json has build 33, but CURRENT_PROJECT_VERSION is 32 and Info\.plist CFBundleVersion is 32\. Run `npx expo prebuild -p ios --clean`/);
+  const uploaded = bn.xcodeCheck({ appBuild: 32, highestUploaded: 32, currentProjectVersion: '32', infoPlistBuild: '32', configuration: 'Release' });
+  assert.match(uploaded.errors[0]!, /Build 32 is already in App Store Connect/);
+  const debug = bn.xcodeCheck({ appBuild: 33, highestUploaded: 33, currentProjectVersion: '32', infoPlistBuild: '32', configuration: 'Debug' });
+  assert.deepEqual([debug.errors.length, debug.warnings.length], [0, 2], 'Debug builds only warn');
+  const unverified = bn.xcodeCheck({ appBuild: 32, highestUploaded: null, currentProjectVersion: '32', infoPlistBuild: '32', configuration: 'Release' });
+  assert.deepEqual(unverified.errors, []);
+  assert.match(unverified.warnings[0]!, /isn't verified as unused/);
+  // The Xcode build phase that runs it: added by a plugin (never by hand), plain sh, Expo's Node
+  const plugin = req('../plugins/withBuildNumberCheck.js') as { PHASE_NAME: string; SHELL_SCRIPT: string };
+  const script = plugin.SHELL_SCRIPT.replace(/\\n/g, '\n');
+  assert.ok(script.includes('"$PROJECT_DIR/../scripts/ios-build-number.js" xcode-check'));
+  assert.ok(script.includes('. "$PODS_ROOT/../.xcode.env"') && !/\[\[|\bsource\b/.test(script), 'POSIX sh, sourcing Expo\'s .xcode.env');
+  const appConfig = req('../app.config.js') as (a: { config: object }) => { plugins: unknown[] };
+  const plugins = appConfig({ config: { ios: { infoPlist: {} }, android: {}, plugins: [], extra: {} } }).plugins;
+  assert.equal(plugins.filter((p) => p === './plugins/withBuildNumberCheck').length, 1);
 });
 
 // ─── Live road hazards (migration 0020) ────────────────────────────────────
