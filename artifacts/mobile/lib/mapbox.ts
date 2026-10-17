@@ -163,7 +163,13 @@ export function displayTrail(coordinates: readonly LatLng[] | null | undefined):
  */
 export const LOCATION_ARROW_SCALE = 1.2;
 
-/** The arrow artwork's size in points at scale 1 (puck-arrow.png / puck-shadow.png, 44 × 48 pt) */
+/**
+ * The arrow artwork's size in points at scale 1 (puck-arrow.png /
+ * puck-shadow.png, 44 × 48 pt).  The image turns about its own centre, so
+ * the drawn arrow (and its shadow) must be centred in it, tip to tail and
+ * side to side: off centre, turning swings it round the car (it was 1 pt
+ * high, a few pixels of wobble).  A unit test checks every scale.
+ */
 export const LOCATION_ARROW_ARTWORK_PT = { width: 44, height: 48 } as const;
 
 /**

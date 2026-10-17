@@ -13635,3 +13635,132 @@ test('camera rotation: the camera is written from the same heading every frame; 
   // The zoom still glides in the same loop
   assert.ok(/const glided = zoomGlide\.step\(dt\);/.test(loop));
 });
+
+// ─── Derwent arrow: rotates in place, centred on the car ────────────────────
+//
+// The arrow image rotates about its own centre (its four corners are placed
+// symmetrically round the car).  The visible arrow must therefore be centred
+// in its PNG: it was 1 pt high (tip-to-tail centre at y = 23 of 48 pt), so
+// turning it swung the arrow round a 1.2 pt circle, a few pixels of wobble.
+// The artwork was moved down 1 pt (1/2/3 px) to centre it.
+import { inflateSync } from 'node:zlib';
+
+/** Decodes an 8-bit RGBA, non-interlaced PNG into rows of RGBA bytes */
+function decodePng(file: string): { w: number; h: number; rows: Uint8Array[] } {
+  const d = readFileSync(file);
+  let i = 8; let w = 0; let h = 0; const idat: Buffer[] = [];
+  while (i < d.length) {
+    const n = d.readUInt32BE(i); const t = d.toString('latin1', i + 4, i + 8); const c = d.subarray(i + 8, i + 8 + n);
+    if (t === 'IHDR') { w = c.readUInt32BE(0); h = c.readUInt32BE(4); assert.deepEqual([c[8], c[9], c[12]], [8, 6, 0], `${file}: RGBA 8-bit`); }
+    if (t === 'IDAT') idat.push(c);
+    i += 12 + n;
+  }
+  const raw = inflateSync(Buffer.concat(idat)); const stride = w * 4; const rows: Uint8Array[] = [];
+  let prev = new Uint8Array(stride); let o = 0;
+  for (let y = 0; y < h; y++) {
+    const f = raw[o++]!; const line = Uint8Array.from(raw.subarray(o, o + stride)); o += stride;
+    for (let x = 0; x < stride; x++) {
+      const a = x >= 4 ? line[x - 4]! : 0; const b = prev[x]!; const c = x >= 4 ? prev[x - 4]! : 0;
+      if (f === 1) line[x] = (line[x]! + a) & 255;
+      else if (f === 2) line[x] = (line[x]! + b) & 255;
+      else if (f === 3) line[x] = (line[x]! + ((a + b) >> 1)) & 255;
+      else if (f === 4) { const p = a + b - c; const pa = Math.abs(p - a), pb = Math.abs(p - b), pc = Math.abs(p - c); line[x] = (line[x]! + (pa <= pb && pa <= pc ? a : pb <= pc ? b : c)) & 255; }
+    }
+    rows.push(line); prev = line;
+  }
+  return { w, h, rows };
+}
+
+test('arrow artwork: the visible arrow and its shadow are centred in their images, at every scale', () => {
+  for (const name of ['puck-arrow', 'puck-shadow']) {
+    for (const suffix of ['', '@2x', '@3x']) {
+      const file = join(MOBILE, `assets/images/map/${name}${suffix}.png`);
+      const { w, h, rows } = decodePng(file);
+      const s = w / LOCATION_ARROW_ARTWORK_PT.width;
+      assert.deepEqual([w, h], [44 * s, 48 * s], `${name}${suffix}: 44 × 48 pt`);
+      let x0 = w, x1 = -1, y0 = h, y1 = -1;
+      rows.forEach((r, y) => { for (let x = 0; x < w; x++) if (r[x * 4 + 3]! > 8) { x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); } });
+      // The tip-to-tail and side-to-side centre of what's drawn is the image's
+      // centre (its rotation centre), to the pixel
+      assert.equal((x0 + x1 + 1) / 2, w / 2, `${name}${suffix}: centred left-right`);
+      assert.equal((y0 + y1 + 1) / 2, h / 2, `${name}${suffix}: centred top-bottom`);
+    }
+  }
+});
+
+/** Where a point of the artwork (in points, from its top left) lands on the map, from the image's corners */
+function artworkOnMap(c: ReturnType<typeof locationArrowCorners>, xPt: number, yPt: number): [number, number] {
+  const u = xPt / LOCATION_ARROW_ARTWORK_PT.width, v = yPt / LOCATION_ARROW_ARTWORK_PT.height;
+  const [tl, tr, , bl] = c;
+  // A rotated rectangle: affine from the top-left corner along its two edges
+  return [tl[0] + (tr[0] - tl[0]) * u + (bl[0] - tl[0]) * v, tl[1] + (tr[1] - tl[1]) * u + (bl[1] - tl[1]) * v];
+}
+
+/** Local distance in metres, east-west scaled at the two points' mid latitude */
+function metresAcross(a: [number, number], b: [number, number]) {
+  const mLat = 40_075_016.686 / 360;
+  const mLng = mLat * Math.cos((((a[1] + b[1]) / 2) * Math.PI) / 180);
+  return Math.hypot((a[0] - b[0]) * mLng, (a[1] - b[1]) * mLat);
+}
+
+test('arrow: for a fixed car position, turning it never moves its centre (every heading, latitude and zoom)', () => {
+  const headings = [0, 45, 90, 135, 180, 225, 270, 315, 359, 0.5, 123.456];
+  for (const position of [{ latitude: 53.23, longitude: -0.54 }, { latitude: 0.1, longitude: 100 }, { latitude: 70.5, longitude: 25 }, { latitude: -33.9, longitude: 151.2 }]) {
+    for (const zoom of [12, 15.5, 17, 19.3]) {
+      const scale = metresPerPoint(position.latitude, zoom);
+      for (const heading of headings) {
+        const c = locationArrowCorners({ position, heading, zoom });
+        // The four corners' average is the car, exactly
+        const lng = (c[0][0] + c[1][0] + c[2][0] + c[3][0]) / 4, lat = (c[0][1] + c[1][1] + c[2][1] + c[3][1]) / 4;
+        assert.ok(Math.abs(lng - position.longitude) < 1e-10 && Math.abs(lat - position.latitude) < 1e-10, `corners centred at ${heading}°`);
+        // ...and so is the visible arrow's own centre (22, 24 pt of the artwork)
+        const mid = artworkOnMap(c, 22, 24);
+        assert.ok(metresAcross(mid, [position.longitude, position.latitude]) < 1e-6, `arrow centred at ${heading}°`);
+        // A rigid rotation: the same edge lengths at every heading (to well under a millimetre per metre)
+        const w = 44 * LOCATION_ARROW_SCALE * scale, h = 48 * LOCATION_ARROW_SCALE * scale;
+        assert.ok(Math.abs(metresAcross(c[0], c[1]) - w) < 1e-4 * w, `width at ${heading}°`);
+        assert.ok(Math.abs(metresAcross(c[0], c[3]) - h) < 1e-4 * h, `height at ${heading}°`);
+        // The tip points along the heading
+        const tip = artworkOnMap(c, 22, 0);
+        const bearing = (Math.atan2((tip[0] - position.longitude) * Math.cos((position.latitude * Math.PI) / 180), tip[1] - position.latitude) * 180) / Math.PI;
+        assert.ok(Math.abs(((bearing - heading + 540) % 360) - 180) < 1e-6, `tip along ${heading}°`);
+      }
+    }
+  }
+});
+
+test('arrow: turning in place or rotating the map never remounts or moves it', () => {
+  const map = readFileSync(join(MOBILE, 'components/MapboxDriveMap.tsx'), 'utf8').replace(/\/\/.*$/gm, '');
+  // The corners depend only on position, heading and zoom: never the map's bearing or pitch
+  const mapbox = readFileSync(join(MOBILE, 'lib/mapbox.ts'), 'utf8');
+  const fn = mapbox.slice(mapbox.indexOf('export function locationArrowCorners'), mapbox.indexOf('export function routeBounds'));
+  assert.ok(!/bearing|pitch|camera/i.test(fn.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '')));
+  // A camera change re-places it only when the zoom moved (its size), never for bearing alone
+  const cam = map.slice(map.indexOf('const handleCameraChanged'), map.indexOf('const handleLongPress'));
+  assert.match(cam, /Math\.abs\(zoom - zoomRef\.current\) > 0\.01/);
+  assert.match(cam, /nextArrowPose\(last, last\.position, last\.heading, zoom\)/, 'the arrow keeps its own position and heading');
+  assert.ok(!/reported\.heading|bearing/.test(cam.slice(0, cam.indexOf('isGestureActive'))), 'the camera bearing never re-places the arrow');
+  // Heading changes go through setPose on the one mounted feeder; the image sources have fixed ids
+  const feeder = map.slice(map.indexOf('const MarkerFeeder'), map.indexOf('const FollowCamera'));
+  assert.equal(feeder.match(/<ImageSource id="derwent-location-arrow(-shadow)?-image"/g)?.length, 2);
+  assert.ok(!/key=|\buseEffect\(\(\) => \{[^}]*setPose\(null/.test(feeder));
+  // Same-pose updates don't even re-render
+  const p = nextArrowPose(null, { latitude: 53.2, longitude: -0.54 }, 10, 16)!;
+  assert.equal(nextArrowPose(p, { latitude: 53.2, longitude: -0.54 }, 10, 16), p);
+  const turned = nextArrowPose(p, { latitude: 53.2, longitude: -0.54 }, 200, 16)!;
+  assert.deepEqual(turned.position, p.position, 'turning keeps the position');
+});
+
+test('CarPlay scene: native only, never touches the iPhone map or its arrow', () => {
+  const dir = join(MOBILE, 'modules/derwent-carplay/ios');
+  for (const f of readdirSync(dir).filter((n) => n.endsWith('.swift'))) {
+    const src = readFileSync(join(dir, f), 'utf8').replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    assert.ok(!/React|RCT|Expo|bridge|NotificationCenter|UIApplication\.shared|MapboxMaps|CLLocation/.test(src), `${f} reaches into the app`);
+  }
+  // Nothing on the JavaScript side listens to CarPlay or scenes: the map and
+  // its arrow only follow AppState through the visual gate, which pauses but
+  // never clears or remounts the arrow
+  for (const f of ['components/MapboxDriveMap.tsx', 'app/(tabs)/(drive)/index.tsx', 'hooks/useVisualGate.ts', 'lib/visualGate.ts']) {
+    assert.ok(!/carplay|CarPlay|scene/i.test(readFileSync(join(MOBILE, f), 'utf8').replace(/\/\/.*$/gm, '')), f);
+  }
+});
