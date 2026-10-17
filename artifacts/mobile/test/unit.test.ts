@@ -2698,6 +2698,75 @@ test('CarPlay map settings: the public token and Derwent style only (as the Driv
   assert.match(swift('CarPlaySceneDelegate.swift'), /if let settings = CarPlayMapSettings\.fromInfoPlist\(\)[\s\S]*CarPlayMapViewController\(settings: settings\)[\s\S]*else[\s\S]*CarPlayPlaceholderViewController\(\)/);
 });
 
+test('CarPlay panning: the pan button is one of the three map buttons CarPlay shows; panning mode, drags and recentre reach the map', () => {
+  // Swift can't be compiled here: these check the code's shape against Apple's rules
+  const swift = (f: string) => readFileSync(toPath(new URL(`../modules/derwent-carplay/ios/${f}`, import.meta.url)), 'utf8');
+  const controller = swift('CarPlayMapTemplateController.swift');
+  const map = swift('CarPlayMapViewController.swift');
+  const body = (src: string, signature: string) => {
+    const start = src.indexOf(signature);
+    assert.ok(start >= 0, `missing: ${signature}`);
+    let depth = 0;
+    for (let i = src.indexOf('{', start); i < src.length; i++) {
+      if (src[i] === '{') depth++;
+      else if (src[i] === '}' && --depth === 0) return src.slice(start, i + 1);
+    }
+    throw new Error(`unterminated: ${signature}`);
+  };
+
+  // Apple: "When the array contains more than three buttons, the map template
+  // displays only the first three". Build 33's pan button was the fourth.
+  const buttons = /template\.mapButtons = \[([\s\S]*?)\n {6}\]/.exec(controller)?.[1] ?? '';
+  const symbols = [...buttons.matchAll(/Self\.mapButton\("([^"]+)"\)/g)].map((m) => m[1]);
+  assert.deepEqual(symbols, ['arrow.up.and.down.and.arrow.left.and.right', 'plus.magnifyingglass', 'minus.magnifyingglass']);
+  assert.match(buttons, /arrow\.up\.and\.down\.and\.arrow\.left\.and\.right"\) \{ \[weak self\] in\s+self\?\.template\.showPanningInterface\(animated: true\)/);
+  assert.equal((controller.match(/mapButtons =/g) ?? []).length, 1, 'map buttons set once (CarPlay hides them while panning)');
+
+  // Recentre is in the navigation bar (two trailing buttons at most), with
+  // "Done" while panning: the system provides no way out of panning mode
+  assert.match(controller, /private func recenterButton\(\) -> CPBarButton \{\s+CPBarButton\(image: [^\n]*\{ \[weak self\] _ in self\?\.map\?\.recenter\(\) \}/);
+  assert.match(body(controller, 'init(map: CarPlayMapViewController?)'), /template\.trailingNavigationBarButtons = \[recenterButton\(\)\]/);
+  const shown = body(controller, 'func mapTemplateDidShowPanningInterface(_ mapTemplate: CPMapTemplate)');
+  assert.match(shown, /trailingNavigationBarButtons = \[\s+CPBarButton\(title: "Done"\) \{ \[weak mapTemplate\] _ in mapTemplate\?\.dismissPanningInterface\(animated: true\) \},\s+recenterButton\(\),\s+\]/);
+  const dismissed = body(controller, 'func mapTemplateDidDismissPanningInterface(_ mapTemplate: CPMapTemplate)');
+  assert.match(dismissed, /trailingNavigationBarButtons = \[recenterButton\(\)\]/);
+  assert.doesNotMatch(dismissed, /map\??\.(recenter|move)/, 'leaving panning mode leaves the map where it is');
+
+  // Apple's delegate methods, exactly (a misspelt optional method is never called)
+  for (const signature of [
+    'func mapTemplate(_ mapTemplate: CPMapTemplate, panBeganWith direction: CPMapTemplate.PanDirection)',
+    'func mapTemplate(_ mapTemplate: CPMapTemplate, panWith direction: CPMapTemplate.PanDirection)',
+    'func mapTemplate(_ mapTemplate: CPMapTemplate, panEndedWith direction: CPMapTemplate.PanDirection)',
+    'func mapTemplateDidBeginPanGesture(_ mapTemplate: CPMapTemplate)',
+    'func mapTemplate(_ mapTemplate: CPMapTemplate, didUpdatePanGestureWithTranslation translation: CGPoint, velocity: CGPoint)',
+    'func mapTemplate(_ mapTemplate: CPMapTemplate, didEndPanGestureWithVelocity velocity: CGPoint)',
+  ]) assert.ok(controller.includes(signature), signature);
+
+  // Arrows / knob: a step while held, a bigger one on release (so a tap always
+  // moves the map); the content moves opposite to where the driver looks
+  assert.match(body(controller, 'panWith direction'), /pan\(direction, step: Pan\.heldStep\)/);
+  assert.match(body(controller, 'panEndedWith direction'), /pan\(direction, step: Pan\.releaseStep\)/);
+  const offset = body(controller, 'static func panOffset(');
+  for (const line of ['.left) { x += 1 }', '.right) { x -= 1 }', '.up) { y += 1 }', '.down) { y -= 1 }']) assert.ok(offset.includes(`direction.contains(${line}`), line);
+  assert.match(offset, /CGPoint\(x: x \* step \* size\.width, y: y \* step \* size\.height\)/);
+  const steps = Object.fromEntries([...controller.matchAll(/static let (heldStep|releaseStep): CGFloat = ([\d.]+)/g)].map((m) => [m[1], Number(m[2])]));
+  assert.ok(steps.heldStep! > 0 && steps.heldStep! < steps.releaseStep! && steps.releaseStep! <= 0.5, JSON.stringify(steps));
+
+  // Drags: each update's translation goes to the map as it comes. Build 33
+  // subtracted the previous one, which cancelled the movement out.
+  const update = body(controller, 'didUpdatePanGestureWithTranslation translation: CGPoint');
+  assert.match(update, /map\?\.move\(by: translation\)/);
+  assert.doesNotMatch(controller, /translation\.[xy] -|lastDragTranslation/);
+
+  // The map: an immediate camera move with Mapbox's drag maths, any running
+  // zoom/recentre animation stopped first; nothing makes the camera follow
+  const move = body(map, 'func move(by offset: CGPoint)');
+  assert.match(move, /camera\.cancelAnimations\(\)[\s\S]*mapboxMap\.setCamera\(to: mapView\.mapboxMap\.dragCameraOptions\(from: from, to: to\)\)/);
+  assert.doesNotMatch(move, /ease|fly/);
+  assert.doesNotMatch(map, /viewport\.|followPuck|onLocationChange|onPuckLocation/);
+  assert.match(body(map, 'func recenter()'), /latestLocation\?\.coordinate/);
+});
+
 test('CarPlay plugin: listed once before expo-build-properties, so the real Info.plist steps add CarPlay after Expo; entitlement added to the others', async () => {
   const req = createRequire(import.meta.url);
   const appConfig = req('../app.config.js') as (a: { config: object }) => { plugins: unknown[] };
@@ -10510,6 +10579,37 @@ test('build numbers: an Archive stops on an out-of-date Xcode project or an uplo
   const appConfig = req('../app.config.js') as (a: { config: object }) => { plugins: unknown[] };
   const plugins = appConfig({ config: { ios: { infoPlist: {} }, android: {}, plugins: [], extra: {} } }).plugins;
   assert.equal(plugins.filter((p) => p === './plugins/withBuildNumberCheck').length, 1);
+});
+
+test('build numbers: the check phase runs before compiling, also after pod install moves CocoaPods\' manifest check first', () => {
+  const req = createRequire(import.meta.url);
+  const plugin = req('../plugins/withBuildNumberCheck.js') as { PHASE_NAME: string; PODS_MANIFEST_PHASE: string; orderBuildPhases(p: Array<{ comment: string }>): Array<{ comment: string }> };
+  const { appTargetPhases, buildNumberPhaseOrderOk } = req('../scripts/check-ios-scene-lifecycle.js') as {
+    appTargetPhases(pbxproj: string): string[]; buildNumberPhaseOrderOk(phases: string[]): boolean;
+  };
+  const CHECK = plugin.PHASE_NAME;
+  const PODS = plugin.PODS_MANIFEST_PHASE;
+  const order = (...names: string[]) => plugin.orderBuildPhases(names.map((comment) => ({ comment }))).map((p) => p.comment);
+  // Prebuild: directly after CocoaPods' manifest check (where pod install keeps it), else first
+  assert.deepEqual(order(PODS, 'Sources', 'Frameworks', 'Resources', CHECK), [PODS, CHECK, 'Sources', 'Frameworks', 'Resources']);
+  assert.deepEqual(order(CHECK, PODS, 'Sources'), [PODS, CHECK, 'Sources']);
+  assert.deepEqual(order('Sources', CHECK), [CHECK, 'Sources']);
+  assert.deepEqual(order(PODS, CHECK, 'Sources'), [PODS, CHECK, 'Sources'], 'already in place: unchanged');
+  // What `pod install` does (CocoaPods TargetIntegrator: its manifest check to the front) leaves that order alone
+  const podInstall = (phases: string[]) => (phases[0] === PODS ? phases : [PODS, ...phases.filter((p) => p !== PODS)]);
+  const generated = order(PODS, 'Sources', 'Resources', CHECK);
+  assert.deepEqual(podInstall(generated), generated);
+  // The validation: once, nothing but CocoaPods' manifest check before it, before Sources
+  assert.ok(buildNumberPhaseOrderOk([PODS, CHECK, 'Sources', 'Resources']), 'after pod install (the Mac)');
+  assert.ok(buildNumberPhaseOrderOk([CHECK, PODS, 'Sources']), 'before pod install');
+  assert.equal(buildNumberPhaseOrderOk([PODS, 'Sources', CHECK]), false, 'after compiling');
+  assert.equal(buildNumberPhaseOrderOk(['Bundle React Native code and images', CHECK, 'Sources']), false, 'anything else before it');
+  assert.equal(buildNumberPhaseOrderOk([CHECK, PODS, CHECK, 'Sources']), false, 'twice');
+  assert.equal(buildNumberPhaseOrderOk([PODS, 'Sources']), false, 'missing');
+  assert.equal(buildNumberPhaseOrderOk([PODS, CHECK]), false, 'no Sources phase to come before');
+  // Reads the app target's list from a project file, as Xcode/CocoaPods write it
+  const pbxproj = 'buildPhases = (\n\t\t\t\t08A4 /* [CP] Check Pods Manifest.lock */,\n\t\t\t\t3FEE /* [Derwent] Check build number */,\n\t\t\t\t13B0 /* Sources */,\n\t\t\t);';
+  assert.deepEqual(appTargetPhases(pbxproj), [PODS, CHECK, 'Sources']);
 });
 
 // ─── Live road hazards (migration 0020) ────────────────────────────────────

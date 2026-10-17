@@ -80,6 +80,12 @@ jobs:
           EXPO_PUBLIC_MAPBOX_TOKEN=pk.ci-placeholder EXPO_PUBLIC_MAPBOX_STYLE_URL=mapbox://styles/derwent/ci-placeholder \
             pnpm exec expo prebuild -p ios --clean --no-install
           node scripts/check-ios-scene-lifecycle.js | grep -F 'CarPlay shows the map'
+          # As after `pod install` on the Mac: CocoaPods' own integration step
+          # (it moves "[CP] Check Pods Manifest.lock" to the front of the app
+          # target) and Xcodeproj's save, then the same checks
+          gem install --user-install --no-document cocoapods -v 1.17.0 > /dev/null
+          ruby test/cocoapods-integrate.rb ios/Derwent.xcodeproj Derwent
+          node scripts/check-ios-scene-lifecycle.js
 
       - name: No server secrets in the app
         run: |

@@ -39,7 +39,7 @@ When the developer reports an upload, run `node scripts/ios-build-number.js reco
 
 ## Safety net in Xcode
 
-Prebuild adds a **"[Derwent] Check build number"** build phase (`plugins/withBuildNumberCheck.js`). It runs first in the app target and calls `node scripts/ios-build-number.js xcode-check` with Expo's Node.
+Prebuild adds a **"[Derwent] Check build number"** build phase (`plugins/withBuildNumberCheck.js`). It calls `node scripts/ios-build-number.js xcode-check` with Expo's Node, before anything is compiled: directly after CocoaPods' "[CP] Check Pods Manifest.lock" (which `pod install` always moves to the front of the target), and before Sources.
 
 | Situation | Archive (Release) | Debug run |
 |---|---|---|
@@ -59,7 +59,7 @@ So Xcode can't archive a stale project or a number that's already been uploaded.
 - **Native checks** (`scripts/check-ios-scene-lifecycle.js`, run after prebuild in CI and on the Mac):
   - Info.plist `CFBundleVersion` / `CFBundleShortVersionString` and Xcode's `CURRENT_PROJECT_VERSION` / `MARKETING_VERSION` (Debug and Release) all come from `app.json`;
   - that number is the one the ledger records as prepared;
-  - the build phase is present once, first.
+  - the build phase is present once, with nothing but CocoaPods' manifest check before it and Sources after it. CI checks this both straight after prebuild and after CocoaPods' own integration step (`test/cocoapods-integrate.rb`, as `pod install` does on the Mac).
 
 ## On the Mac (unchanged, nothing to edit)
 
