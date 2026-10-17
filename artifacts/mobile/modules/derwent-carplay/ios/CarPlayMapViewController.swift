@@ -15,6 +15,7 @@ private let mapLog = Logger(subsystem: Bundle.main.bundleIdentifier ?? "Derwent"
  - The camera starts on the phone's last known position when the app already
    has location access, else on Great Britain. Zoom, panning and recentring
    come from the map template's buttons and gestures (CarPlayMapTemplateController).
+   The camera never follows the position by itself.
  - The current position is shown only if location access was already granted
    (this never asks for it). Display only: it doesn't feed navigation, drive
    recording or location sharing.
@@ -95,19 +96,27 @@ final class CarPlayMapViewController: UIViewController {
     mapView.camera.ease(to: CameraOptions(zoom: zoom), duration: 0.3)
   }
 
-  /// Arrow buttons and knob nudges while panning: a third of the screen per step
-  func pan(_ dx: CGFloat, _ dy: CGFloat) {
-    guard let mapView else { return }
-    let step = CGPoint(x: dx * mapView.bounds.width / 3, y: dy * mapView.bounds.height / 3)
-    let center = mapView.mapboxMap.coordinate(for: CGPoint(x: mapView.bounds.midX + step.x, y: mapView.bounds.midY + step.y))
-    mapView.camera.ease(to: CameraOptions(center: center), duration: 0.3)
+  /// The part of the map CarPlay's own controls don't cover
+  private func visibleFrame(_ mapView: MapView) -> CGRect {
+    mapView.bounds.inset(by: mapView.safeAreaInsets)
   }
 
-  /// A drag on the CarPlay screen: the map follows the finger
-  func drag(by delta: CGPoint) {
-    guard let mapView, delta != .zero else { return }
-    let center = mapView.mapboxMap.coordinate(for: CGPoint(x: mapView.bounds.midX - delta.x, y: mapView.bounds.midY - delta.y))
-    mapView.mapboxMap.setCamera(to: CameraOptions(center: center))
+  var visibleSize: CGSize {
+    guard let mapView else { return .zero }
+    return visibleFrame(mapView).size
+  }
+
+  /// Panning (a drag, or a step of the panning arrows): the map's content
+  /// moves by `offset` screen points, at once. A zoom or recentre still
+  /// animating is stopped first, so it can't move the camera back. Nothing
+  /// else moves the camera: the map stays where it's put until recentred.
+  func move(by offset: CGPoint) {
+    guard let mapView, offset != .zero else { return }
+    mapView.camera.cancelAnimations()
+    let frame = visibleFrame(mapView)
+    let from = CGPoint(x: frame.midX, y: frame.midY)
+    let to = CGPoint(x: from.x + offset.x, y: from.y + offset.y)
+    mapView.mapboxMap.setCamera(to: mapView.mapboxMap.dragCameraOptions(from: from, to: to))
   }
 
   /// Back to the car's position (when shown), else the overview

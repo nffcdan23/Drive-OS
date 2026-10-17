@@ -6,7 +6,7 @@ Derwent is a CarPlay **navigation** app. Apple granted StarScale Ltd the CarPlay
 |---|---|---|
 | 1 | iOS scene lifecycle (`docs/SCENE_LIFECYCLE.md`) | On a phone: works. Background relaunch not yet verified. |
 | 2 | Derwent on the CarPlay home screen; minimal native interface | Verified in a car (Ford SYNC): launches and shows the placeholder. Cold launch and disconnect/reconnect not yet verified. |
-| 3 | Native Mapbox map in the CarPlay window; map controls | **Implemented, not yet tested.** Swift isn't compiled in CI (Linux has no iOS SDK). Needs Xcode, the Simulator and a car. |
+| 3 | Native Mapbox map in the CarPlay window; map controls | Build 33, in a car (Ford Focus): launches, the map draws at the right position, zoom works. **Panning didn't work.** Build 34 fixes panning (see [Panning](#panning)); **not yet tested in a car.** Swift isn't compiled in CI (Linux has no iOS SDK). |
 
 There's still no navigation on CarPlay: no search, routes, guidance, trip estimates, hazards, voice or drive recording. Those come in later milestones. The iPhone app is unchanged.
 
@@ -31,7 +31,7 @@ The local Expo module is `modules/derwent-carplay/`. Expo autolinking finds it; 
 | `ios/CarPlaySceneDelegate.swift` | `@objc(DerwentCarPlaySceneDelegate)`: the CarPlay scene. |
 | `ios/CarPlayMapSettings.swift` | Reads the public token and style from Info.plist. Returns nothing without both, or if the token isn't `pk.`. |
 | `ios/CarPlayMapViewController.swift` | The Mapbox `MapView` in the CarPlay window: camera, position marker, logo and attribution. |
-| `ios/CarPlayMapTemplateController.swift` | The `CPMapTemplate`: navigation bar, map buttons, panning and drag gestures. |
+| `ios/CarPlayMapTemplateController.swift` | The `CPMapTemplate`: navigation bar, map buttons, panning mode and drag gestures. |
 | `ios/CarPlayPlaceholderViewController.swift` | The dark grid, shown when the map isn't configured. |
 
 The CarPlay screen works without React Native: a CarPlay-first launch, with the iPhone app not running, shows the map without waiting for JavaScript. The module imports no React Native or Expo code (`scripts/check-ios-scene-lifecycle.js` checks this).
@@ -75,11 +75,53 @@ The `CPMapTemplate` controls, kept to what works before navigation is connected:
 
 | Control | Behaviour |
 |---|---|
-| Navigation bar: **Derwent** | The name (the map template has no title). Kept visible. Tapping it only logs. |
-| Map button: **zoom in / zoom out** | One zoom level per tap, within zoom 3–20. |
-| Map button: **recentre** | Goes to the car's position if it's shown, otherwise to the Great Britain overview. |
-| Map button: **pan** | Opens CarPlay's panning mode: arrow buttons, or the car's knob. A **Done** button appears in the navigation bar; Apple requires the app to provide it. |
-| Dragging (touch screens) | The map follows the finger. |
+| Map button 1: **pan** (four arrows) | Opens CarPlay's panning mode (see [Panning](#panning)). |
+| Map buttons 2–3: **zoom in / zoom out** | One zoom level per tap, within zoom 3–20. |
+| Navigation bar, leading: **Derwent** | The name (the map template has no title). Kept visible. Tapping it only logs. |
+| Navigation bar, trailing: **recentre** (location arrow) | Goes to the car's position if it's shown, otherwise to the Great Britain overview. Also there in panning mode. |
+| Navigation bar, trailing, in panning mode: **Done** | Leaves panning mode. The map stays where it was moved to. |
+| Dragging (touch screens) | The map follows the finger, in or out of panning mode, on cars whose CarPlay reports drags. |
+
+CarPlay shows **at most three map buttons**. Apple: "When the array contains more than three buttons, the map template displays only the first three, ignoring the remaining buttons." So recentre is in the navigation bar (up to two buttons on each side).
+
+## Panning
+
+### What was wrong in Build 33
+
+1. **The pan button was never shown.** It was the fourth of four map buttons, and CarPlay ignores every map button after the third. Without it there was no way into CarPlay's panning mode, which is the only way to pan on cars without drag support, and the way the arrow buttons and knob work.
+2. **Drags were cancelled out.** For each drag update, the code moved the map by the difference between this update's `translation` and the previous one's. CarPlay's shipping map apps apply each update's `translation` directly, as the movement since the previous update: the Mapbox Navigation SDK's CarPlay map (v2 and v3), and Organic Maps. Apple doesn't document which it is. If it is the movement since the previous update, Build 33 moved the map by almost nothing.
+3. **Animations could undo a pan.** Arrow steps used a 0.3 s camera animation, and a zoom or recentre still animating would overwrite a drag.
+
+Nothing makes the camera follow the position, so nothing snaps the map back. The position marker is display-only.
+
+### How it works now (Build 34)
+
+| Input | Delegate callback (CPMapTemplateDelegate) | What the map does |
+|---|---|---|
+| Pan button | `showPanningInterface(animated:)` → `mapTemplateDidShowPanningInterface` | CarPlay hides the map buttons and shows its arrow buttons. **Done** and recentre go in the navigation bar. |
+| Arrow button / knob, held | `mapTemplate(_:panWith:)`, repeated | Moves 10% of the visible map per call, at once. |
+| Arrow button / knob, released | `mapTemplate(_:panEndedWith:)` | Moves another 25%, so a single tap always moves the map visibly. |
+| Done | `dismissPanningInterface(animated:)` → `mapTemplateDidDismissPanningInterface` | The map buttons return. The map stays where it is. |
+| Drag (touch screens) | `mapTemplateDidBeginPanGesture`, `mapTemplate(_:didUpdatePanGestureWithTranslation:velocity:)`, `mapTemplate(_:didEndPanGestureWithVelocity:)` | The map follows the finger: each update moves it by that update's `translation`. |
+| Recentre | (bar button) | Animates back to the car's position, at zoom 14 and north up. |
+
+Every pan is an immediate camera move with Mapbox's own drag maths (`dragCameraOptions(from:to:)`, as `@rnmapbox/maps` and the Mapbox Navigation SDK use it), from the centre of the part of the map CarPlay's controls don't cover. Any zoom or recentre animation still running is stopped first. Looking right moves the map's content left; looking up moves it down.
+
+Apple's limits, which Derwent follows:
+
+- **Drags only reach the app on some cars.** Apple: "CarPlay doesn't call this method when connected to some CarPlay systems." That's why the pan button and panning mode exist; they work on every car.
+- **No custom gestures or overlays.** The CarPlay window gets no touches. Panning only comes through the template's callbacks above.
+- **No pinch, rotate or tilt.** iOS 26 adds those callbacks for some cars; Derwent doesn't use them yet.
+
+### Diagnosing panning in a car
+
+The Xcode console (filter `CarPlay`), or Console.app on the Mac with the iPhone selected, shows:
+
+- `CarPlay panning mode shown` / `CarPlay panning mode dismissed`;
+- `CarPlay pan began: <n>` / `CarPlay pan ended: <n>` for the arrows or knob (n: 1 left, 2 right, 4 up, 8 down);
+- `CarPlay drag began`, then `CarPlay drag ended: <updates> updates, moved <x>, <y> points`.
+
+If a drag moves the map much further than the finger (it races away), CarPlay is reporting `translation` from the start of the drag on that car. Send the `drag ended` lines. If no `drag began` line appears when dragging, that car's CarPlay doesn't report drags, and panning mode is the way to pan.
 
 How the map behaves:
 
@@ -119,13 +161,14 @@ If Xcode reports a Swift error in `modules/derwent-carplay`, send the error text
 
 1. Run on an iPhone simulator. Allow location when the iPhone app asks, and set a location with Features → Location → e.g. Apple or Freeway Drive.
 2. In the Simulator, choose **I/O → External Displays → CarPlay**, then open Derwent.
-3. Expected: the Derwent Mapbox map, with the Mapbox logo and "i" at the bottom left and four map buttons at the bottom right.
+3. Expected: the Derwent Mapbox map, with the Mapbox logo and "i" at the bottom left, three map buttons at the bottom right (pan, zoom in, zoom out), and "Derwent" and the recentre arrow in the navigation bar.
    - Xcode console (filter `CarPlay`): "CarPlay map created", "CarPlay map style loaded", "root template shown: true".
 4. Try the controls:
    - Zoom in and out.
    - Recentre: goes to the simulated position, with the blue marker.
-   - Pan: arrow buttons appear; tap **Done** to leave.
-   - Drag the map.
+   - Pan: the arrow buttons appear, with **Done** and recentre in the navigation bar. Tap each arrow once: the map moves that way and stays. Hold one: it keeps moving. Tap **Done**: the map stays where it is and the map buttons return.
+   - Drag the map (the Simulator's CarPlay window reports drags): it follows the pointer, in and out of panning mode, and stays where it's left.
+   - Recentre after panning: back to the position.
 5. Disconnect (External Displays → Disabled), reconnect, and open Derwent again.
 6. Swipe the app away on the iPhone, then open it from CarPlay (CarPlay-first launch).
 7. Check the iPhone app throughout: the Drive map, navigation and sign-in.
@@ -137,7 +180,11 @@ If Xcode reports a Swift error in `modules/derwent-carplay`, send the error text
 3. Check:
    - The map draws and is sharp at the car's screen size.
    - The logo and attribution aren't covered.
-   - The buttons and panning work, including the car's knob or touch screen.
+   - The three map buttons show: pan, zoom in, zoom out. Recentre is in the navigation bar.
+   - **Panning mode:** tap pan. Each arrow moves the map that way (tap and hold), and the map stays there. Recentre returns to the car. **Done** leaves panning mode without moving the map.
+   - **Dragging on the screen** (if the car's CarPlay reports drags): the map follows the finger at the finger's speed, and stays where it's left.
+   - The car's knob or touchpad, if it has one, in panning mode.
+   - If panning misbehaves, the console lines in [Diagnosing panning in a car](#diagnosing-panning-in-a-car).
    - The position marker appears.
    - Disconnect and reconnect work.
    - A CarPlay-first launch (iPhone app swiped away) works.
@@ -145,7 +192,8 @@ If Xcode reports a Swift error in `modules/derwent-carplay`, send the error text
 
 ## Known limitations and risks
 
-- **Not compiled yet:** the Swift hasn't been compiled. The Mapbox calls follow the SDK v11 API that `@rnmapbox/maps` itself uses, but Xcode is the first real compile.
+- **Not compiled yet:** the Build 34 Swift changes haven't been compiled. The Mapbox calls follow the SDK v11 API that `@rnmapbox/maps` itself uses, but Xcode is the first real compile.
+- **Panning [not verified in a car]:** Build 34's panning is untested on a real CarPlay system. Whether a car reports drags, and how its CarPlay reports `translation`, are up to that car (see [Panning](#panning)).
 - **Locked phone [not verified]:** whether the position marker updates with the phone locked and only CarPlay showing. It uses "When In Use" or "Always" access, whichever was already granted.
 - **Always dark:** the map uses the Derwent style regardless of CarPlay's light/dark setting. Day/night appearance is a later milestone ("map appearance").
 - **Attribution position:** the 100 pt offset beside the logo needs checking on real screens.

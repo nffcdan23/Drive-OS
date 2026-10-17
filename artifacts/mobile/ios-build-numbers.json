@@ -2,12 +2,12 @@
   "about": "iOS build numbers of the TestFlight app (uk.co.starscale.drive.staging). Claude manages them with scripts/ios-build-number.js; see docs/BUILD_NUMBERS.md. prepared.build is always app.json ios.buildNumber. Never edit the build number in Xcode or by hand.",
   "version": "1.0.0",
   "prepared": {
-    "build": 33,
-    "contents": "CarPlay Milestone 3: native Mapbox map in the CarPlay window, and automated build-number management"
+    "build": 34,
+    "contents": "CarPlay Milestone 3 fix: map panning (pan button shown, panning mode arrows, touchscreen drags), recentre in the navigation bar"
   },
   "highestUploaded": {
-    "build": 32,
-    "confirmed": "2026-10-16",
+    "build": 33,
+    "confirmed": "2026-10-17",
     "source": "Confirmed by the developer from App Store Connect"
   }
 }
