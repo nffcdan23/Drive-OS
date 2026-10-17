@@ -39,6 +39,10 @@
  * progress, rerouting and arrival carry on. The guidance UI and the map's
  * route line hold still in the background and catch up in one update on
  * return (hooks/useOnScreenSnapshot); the camera is never touched.
+ *
+ * CarPlay (lib/navigation/carPlay.ts): the CarPlay screen shows this same
+ * session, handed to it one way on every change, on screen and off. There
+ * is no second session, route request, location stream or recording.
  */
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { AppState } from 'react-native';
@@ -53,6 +57,8 @@ import { DestinationSearch, type SearchState } from '@/lib/navigation/search';
 import { NavigationSession, type EndReason, type NavigationState, type NavPhase } from '@/lib/navigation/session';
 import { startFromPreview, type NavigationRecorder } from '@/lib/navigation/startNavigation';
 import { BackgroundNavigation, type BackgroundFix } from '@/lib/navigation/background';
+import { CarPlayFeed } from '@/lib/navigation/carPlay';
+import { createCarPlaySink } from '@/modules/derwent-carplay-feed';
 import { sharedLocation } from '@/lib/driveBackgroundLocation';
 import { useOnScreenSnapshot } from '@/hooks/useOnScreenSnapshot';
 import { msToKmh } from '@/lib/units';
@@ -218,6 +224,26 @@ export function NavigationProvider({ userId, children }: { userId: string; child
       detach();
     };
   }, [session, noteFix]);
+
+  // CarPlay: this session's copy for the CarPlay screen, one way, on and off
+  // screen (lib/navigation/carPlay.ts). CarPlay connecting or disconnecting
+  // never reaches the session.
+  const { resolvedUnitSystem } = useApp();
+  const unitsRef = useRef(resolvedUnitSystem);
+  unitsRef.current = resolvedUnitSystem;
+  useEffect(() => {
+    let reported = false;
+    const onError = () => {
+      if (reported) return;
+      reported = true;
+      journal.log('carplay_feed', { error: true });
+    };
+    const sink = createCarPlaySink(onError);
+    if (!sink) return;
+    const feed = new CarPlayFeed(session, sink, () => unitsRef.current, onError);
+    feed.start();
+    return () => feed.stop();
+  }, [session]);
 
   const latestFix = useCallback(() => lastFix.current?.fix ?? null, []);
 

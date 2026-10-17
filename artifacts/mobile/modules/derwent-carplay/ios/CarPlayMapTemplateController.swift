@@ -19,6 +19,10 @@ private let templateLog = Logger(subsystem: Bundle.main.bundleIdentifier ?? "Der
  - Panning: the arrow buttons / knob in panning mode (every vehicle), and
    drags on the screen (only vehicles whose CarPlay reports them).
 
+ While the iPhone navigates (Milestone 4), the same controls stay: the
+ template also carries CarPlay's guidance (CarPlayGuidanceController), and
+ recentre goes back to following the car.
+
  Without a map (no Mapbox settings) the template keeps only the name.
  */
 final class CarPlayMapTemplateController: NSObject, CPMapTemplateDelegate {

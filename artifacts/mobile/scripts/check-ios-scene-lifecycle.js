@@ -154,11 +154,14 @@ check(entitlements['com.apple.developer.weatherkit'] === true, 'Entitlements inc
 // The CarPlay module: linked, and the class Info.plist names is the one it defines
 const resolved = spawnSync(process.execPath, [path.join(path.dirname(autolinkingPackage), 'bin', 'expo-modules-autolinking.js'), 'resolve', '--platform', 'apple', '--json'], { cwd: projectRoot, encoding: 'utf8' });
 let carPlayPods = [];
+let carPlayFeedPods = [];
 let weatherPods = [];
 try {
   const modules = JSON.parse(resolved.stdout).modules;
   const mod = modules.find((m) => m.packageName === 'derwent-carplay');
   carPlayPods = mod ? mod.pods : [];
+  const feed = modules.find((m) => m.packageName === 'derwent-carplay-feed');
+  carPlayFeedPods = feed ? feed.pods : [];
   const weather = modules.find((m) => m.packageName === 'derwent-weather');
   weatherPods = weather ? weather.pods : [];
 } catch {
@@ -175,6 +178,15 @@ const swift = fs.readdirSync(path.join(CARPLAY_MODULE, 'ios')).filter((f) => f.e
 check(swift.includes(`@objc(${CARPLAY_SCENE_DELEGATE})`) && /:\s*UIResponder,\s*CPTemplateApplicationSceneDelegate/.test(swift), `The CarPlay module defines ${CARPLAY_SCENE_DELEGATE} (a CPTemplateApplicationSceneDelegate)`);
 check(/didConnect interfaceController: CPInterfaceController,\s*to window: CPWindow/.test(swift) && /didDisconnect interfaceController: CPInterfaceController,\s*from window: CPWindow/.test(swift), 'It handles the navigation app connect (with window) and disconnect');
 check(!/^\s*(@_implementationOnly\s+|internal\s+)?import\s+(React|Expo|ExpoModulesCore|RNMBX)/m.test(swift), 'It stays native-only: no React Native or Expo imports');
+
+// CarPlay guidance (Milestone 4): the iPhone's navigation session reaches the CarPlay pod one way, through the feed module
+const CARPLAY_FEED_MODULE = path.join(projectRoot, 'modules', 'derwent-carplay-feed');
+const feedPodspec = read(path.join(CARPLAY_FEED_MODULE, 'ios', 'DerwentCarPlayFeed.podspec')) ?? '';
+const feedSwift = read(path.join(CARPLAY_FEED_MODULE, 'ios', 'DerwentCarPlayFeedModule.swift')) ?? '';
+check(carPlayFeedPods.length === 1 && carPlayFeedPods[0].podName === 'DerwentCarPlayFeed' && path.resolve(carPlayFeedPods[0].podspecDir) === path.join(CARPLAY_FEED_MODULE, 'ios'), 'Autolinking adds the DerwentCarPlayFeed pod from modules/derwent-carplay-feed');
+check(/^\s*s\.dependency\s+'DerwentCarPlay'\s*$/m.test(feedPodspec) && /^\s*import\s+DerwentCarPlay\s*$/m.test(feedSwift) && /CarPlayNavigationStore\.shared/.test(feedSwift) && /public final class CarPlayNavigationStore/.test(swift),
+  "The feed module hands the iPhone's navigation to the CarPlay pod's store (CarPlay guidance)");
+check(/startNavigationSession\(for:/.test(swift) && /'MapKit'/.test(read(path.join(CARPLAY_MODULE, 'ios', 'DerwentCarPlay.podspec')) ?? ''), 'CarPlay guidance uses CPNavigationSession, with MapKit linked for its trip');
 
 // The CarPlay map: the Mapbox SDK @rnmapbox/maps already links, and the public token and style
 const podspec = read(path.join(CARPLAY_MODULE, 'ios', 'DerwentCarPlay.podspec')) ?? '';

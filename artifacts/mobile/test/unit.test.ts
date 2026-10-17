@@ -2758,12 +2758,16 @@ test('CarPlay panning: the pan button is one of the three map buttons CarPlay sh
   assert.match(update, /map\?\.move\(by: translation\)/);
   assert.doesNotMatch(controller, /translation\.[xy] -|lastDragTranslation/);
 
-  // The map: an immediate camera move with Mapbox's drag maths, any running
-  // zoom/recentre animation stopped first; nothing makes the camera follow
+  // The map: an immediate camera move with Mapbox's drag maths, following
+  // (Milestone 4 guidance) and any running zoom/recentre animation stopped
+  // first; the camera follows only while the iPhone navigates
   const move = body(map, 'func move(by offset: CGPoint)');
-  assert.match(move, /camera\.cancelAnimations\(\)[\s\S]*mapboxMap\.setCamera\(to: mapView\.mapboxMap\.dragCameraOptions\(from: from, to: to\)\)/);
+  assert.match(move, /stopFollowing\(\)\s+mapView\.camera\.cancelAnimations\(\)[\s\S]*mapboxMap\.setCamera\(to: mapView\.mapboxMap\.dragCameraOptions\(from: from, to: to\)\)/);
   assert.doesNotMatch(move, /ease|fly/);
-  assert.doesNotMatch(map, /viewport\.|followPuck|onLocationChange|onPuckLocation/);
+  assert.doesNotMatch(map, /onLocationChange|onPuckLocation/);
+  const withoutGuidance = map.replace(body(map, 'private func follow()'), '').replace(body(map, 'private func stopFollowing()'), '');
+  assert.doesNotMatch(withoutGuidance, /viewport\.|followPuck/, 'following only in follow() / stopFollowing()');
+  assert.match(body(map, 'private func follow()'), /guard let mapView, guiding else \{ return \}/, 'and only while guiding');
   assert.match(body(map, 'func recenter()'), /latestLocation\?\.coordinate/);
 });
 
@@ -14151,4 +14155,276 @@ test('recording screen: Save Point saves a private place at a good fix; Stop Dri
   // Map style, recenter and zoom are the screen's real ones
   const jsx = drive.slice(drive.indexOf('<ActiveDriveOverlay'), drive.indexOf('/>', drive.indexOf('<ActiveDriveOverlay')));
   for (const p of ['mapType={mapType}', 'mapLayers={mapLayers}', 'onSelectMapType={setMapType}', 'onZoomIn={handleZoomIn}', 'onZoomOut={handleZoomOut}', 'onResume={handleResume}']) assert.ok(jsx.includes(p), p);
+});
+
+// ─── CarPlay navigation (Milestone 4) ───────────────────────────────────────
+// The iPhone's one navigation session, handed to the CarPlay screen one way
+// (lib/navigation/carPlay.ts → modules/derwent-carplay-feed → the CarPlay
+// pod's store → CPNavigationSession). Driven here with real sessions, routes
+// and fixes; the Swift side is checked by its source (no iOS SDK here).
+
+import {
+  CarPlayFeed, carPlayDistance, carPlayGuidance, maneuverSymbol,
+  type CarPlayGuidance, type CarPlayRouteLine, type CarPlaySink,
+} from '@/lib/navigation/carPlay';
+import { ROUTE_COLORS } from '@/lib/navigation/routeLayers';
+import type { Maneuver } from '@/lib/navigation/maneuver';
+
+/** A sink that keeps what CarPlay would have, like the native store: the latest of each */
+function carPlayStore() {
+  const guidance: Array<CarPlayGuidance | null> = [];
+  const lines: Array<CarPlayRouteLine | null> = [];
+  const sink: CarPlaySink = {
+    guidance: (g) => { guidance.push(g == null ? null : structuredClone(g)); },
+    routeLine: (l) => { lines.push(l == null ? null : structuredClone(l)); },
+  };
+  return {
+    sink, guidance, lines,
+    get latest() { return guidance.length ? guidance[guidance.length - 1]! : undefined; },
+    get line() { return lines.length ? lines[lines.length - 1]! : undefined; },
+  };
+}
+const carPlaySwift = (f: string) =>
+  readFileSync(join(MOBILE, 'modules/derwent-carplay/ios', f), 'utf8').replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+
+test('CarPlay distances: rounded exactly as the iPhone shows them, in its units', () => {
+  for (const system of ['imperial', 'metric'] as const) {
+    for (let m = 0; m <= 40_000; m += m < 2_000 ? 7 : 97) {
+      // The same number and unit ("1.0 mi" on the iPhone is 1 mi: CarPlay writes it out itself)
+      const d = carPlayDistance(m, system);
+      const [value, unit] = formatGuidanceDistance(m, system).split(' ');
+      assert.deepEqual([d.value, d.unit], [Number(value), unit], `${m} m, ${system}`);
+    }
+  }
+  assert.deepEqual(carPlayDistance(5, 'imperial'), { value: 10, unit: 'yd' });
+  assert.deepEqual(carPlayDistance(483, 'imperial'), { value: 0.3, unit: 'mi' });
+  assert.deepEqual(carPlayDistance(4_200, 'metric'), { value: 4.2, unit: 'km' });
+  assert.deepEqual(carPlayDistance(Number.NaN, 'metric'), { value: 10, unit: 'm' });
+});
+
+test('CarPlay manoeuvre arrows: the turn, U-turns and roundabouts as driven (clockwise in the UK), a pin on arrival', () => {
+  const m = (kind: Maneuver['kind'], direction: Maneuver['direction'], drivingSide: 'left' | 'right' = 'left') => maneuverSymbol({ kind, direction, drivingSide });
+  assert.equal(m('turn', 'left'), 'arrow.turn.up.left');
+  assert.equal(m('turn', 'sharpRight'), 'arrow.turn.up.right');
+  assert.equal(m('turn', 'slightLeft'), 'arrow.up.left');
+  assert.equal(m('continue', 'straight'), 'arrow.up');
+  assert.equal(m('depart', null), 'arrow.up');
+  assert.equal(m('roundabout', 'right'), 'arrow.clockwise.circle');
+  assert.equal(m('miniRoundabout', 'straight', 'right'), 'arrow.counterclockwise.circle');
+  assert.equal(m('uturn', 'uturn'), 'arrow.uturn.right', 'a UK U-turn swings right');
+  assert.equal(m('uturn', 'uturn', 'right'), 'arrow.uturn.left');
+  assert.equal(m('arrive', null), 'mappin.circle.fill');
+  assert.equal(m('merge', 'slightLeft'), 'arrow.triangle.merge');
+  assert.equal(m('fork', 'right'), 'arrow.triangle.branch');
+});
+
+test('CarPlay: navigation started on the iPhone reaches CarPlay: destination, route line, the real next manoeuvre, distance and time left', () => {
+  const h = nav3Session();
+  const cp = carPlayStore();
+  const feed = new CarPlayFeed(h.s, cp.sink, () => 'imperial');
+  feed.start();
+  assert.equal(cp.latest, null, 'no navigation: nothing on CarPlay (and anything stale is cleared)');
+  assert.deepEqual(cp.lines, [null]);
+  void h.s.start({ route: L_ROUTE(), destination: N3_DEST });
+  // Before the car is placed on the route: no manoeuvre, the iPhone's words
+  let g = cp.latest!;
+  assert.equal(g.phase, 'starting');
+  assert.deepEqual(g.destination, { name: 'Brow Top', latitude: N3_DEST.coordinate.latitude, longitude: N3_DEST.coordinate.longitude });
+  assert.deepEqual(g.pause, { reason: 'locating', text: 'Starting navigation…' });
+  assert.deepEqual(g.maneuvers, []);
+  assert.equal(g.remaining, null);
+  assert.equal(cp.line!.routeId, active3(h.s.state)!.route.routeId);
+  assert.equal(cp.line!.coordinates.length, L_ROUTE().geometry.length * 2, 'the whole route, as [lng, lat, …]');
+  assert.deepEqual(cp.line!.coordinates.slice(0, 2), [L_ROUTE().geometry[0]!.longitude, L_ROUTE().geometry[0]!.latitude]);
+  // Driving: the engine's own manoeuvre, distances and time
+  h.feed(drive3(L_PTS, { noise: 4, to: 50 }));
+  g = cp.latest!;
+  const progress = active3(h.s.state)!.progress!;
+  assert.equal(g.phase, 'navigating');
+  assert.equal(g.pause, null);
+  assert.equal(g.maneuvers[0]!.instructions[0], 'Turn left onto Chestnut Hill', "Mapbox's instruction, as on the iPhone");
+  assert.equal(g.maneuvers[0]!.symbol, 'arrow.turn.up.left');
+  assert.equal(g.maneuvers[0]!.id, `${active3(h.s.state)!.route.routeId}#${progress.next.stepIndex}`);
+  assert.deepEqual(g.maneuvers[0]!.distance, carPlayDistance(progress.distanceToNextM, 'imperial'));
+  assert.deepEqual(g.remaining, { distance: carPlayDistance(progress.distanceRemainingM, 'imperial'), timeS: Math.round(progress.durationRemainingS) });
+  assert.equal(g.maneuvers.length, progress.then ? 2 : 1, 'a "then" only when the engine has one');
+  // The drawn line follows the iPhone's remaining line (trimmed as progress moves on)
+  assert.equal(cp.line!.coordinates.length, (h.s.map.remaining?.length ?? L_ROUTE().geometry.length) * 2);
+  // Only changes are handed over: never the same guidance twice in a row
+  for (let i = 1; i < cp.guidance.length; i++) assert.notDeepEqual(cp.guidance[i], cp.guidance[i - 1], `update ${i}`);
+  assert.ok(cp.guidance.length <= h.states.length + 1);
+  // Nothing on CarPlay asks for a route: the iPhone's one request only
+  assert.equal(h.s.requests, 0);
+  feed.stop();
+});
+
+test('CarPlay: off route and rerouting pause the trip with the iPhone words; the new route and its manoeuvres follow', async () => {
+  const srv = routeServer3();
+  const h = nav3Session({ fetch: srv.fetch });
+  const cp = carPlayStore();
+  new CarPlayFeed(h.s, cp.sink, () => 'metric').start();
+  void h.s.start({ route: L_ROUTE(), destination: N3_DEST });
+  h.feed(drive3(L_PTS, { to: 700 }));
+  const oldRouteId = active3(h.s.state)!.route.routeId;
+  assert.equal(cp.latest!.routeId, oldRouteId);
+  feedWatching3(h, offNorth3(h.clock.t + 1000));
+  const pauses = cp.guidance.map((g) => g?.pause?.text).filter(Boolean);
+  assert.ok(pauses.includes("You're off route") && pauses.includes('Updating route…'), JSON.stringify(pauses));
+  assert.ok(pauses.indexOf("You're off route") < pauses.indexOf('Updating route…'));
+  assert.equal(cp.latest!.phase, 'rerouting');
+  assert.deepEqual(cp.latest!.maneuvers, [], 'no stale manoeuvre while the route is updated');
+  assert.equal(cp.latest!.pause!.reason, 'rerouting');
+  srv.answer(serverRoutes3(FRESH3()));
+  await settle3();
+  const st = active3(h.s.state)!;
+  assert.notEqual(st.route.routeId, oldRouteId);
+  assert.equal(cp.latest!.routeId, st.route.routeId, 'the new route');
+  assert.equal(cp.line!.routeId, st.route.routeId, 'and its line');
+  assert.equal(cp.latest!.sessionId, cp.guidance.find((g) => g)!.sessionId, 'the same journey: one session');
+  assert.ok(st.progress, 'the car is on the new route');
+  assert.equal(cp.latest!.pause, null, 'guidance resumes');
+  assert.ok(cp.latest!.maneuvers[0]!.id.startsWith(`${st.route.routeId}#`), 'with the new route\'s manoeuvres');
+  // A failed update: "Route update unavailable", the old route kept
+  const g = carPlayGuidance({ ...st, phase: 'offRoute', updateFailed: true } as NavigationState, 'metric')!;
+  assert.deepEqual(g.pause, { reason: 'rerouting', text: 'Route update unavailable' });
+});
+
+test('CarPlay: arriving finishes the trip; Done or End on the iPhone ends CarPlay navigation; an unfollowable route never reaches it', () => {
+  const h = nav3Session();
+  const cp = carPlayStore();
+  new CarPlayFeed(h.s, cp.sink, () => 'imperial').start();
+  void h.s.start({ route: L_ROUTE(), destination: N3_DEST });
+  h.feed(drive3(L_PTS, { noise: 4, to: 50 }));
+  h.feed(drive3(L_PTS, { noise: 4, from: 60, t0: 1_100_000 }));
+  assert.equal(h.s.phase, 'arrived');
+  assert.equal(cp.latest!.phase, 'arrived');
+  assert.equal(cp.latest!.routeId, null);
+  assert.deepEqual(cp.latest!.maneuvers, []);
+  assert.equal(cp.line, null, 'no line left to draw');
+  h.s.end('arrived');
+  assert.equal(cp.latest, null, 'Done: CarPlay navigation ends');
+  // End part way
+  const e = nav3Session();
+  const ecp = carPlayStore();
+  new CarPlayFeed(e.s, ecp.sink, () => 'imperial').start();
+  void e.s.start({ route: L_ROUTE(), destination: N3_DEST });
+  e.feed(drive3(L_PTS, { to: 300 }));
+  assert.equal(ecp.latest!.phase, 'navigating');
+  e.s.end('user');
+  assert.equal(ecp.latest, null);
+  assert.equal(ecp.line, null);
+  // Errors aren't navigation
+  assert.equal(carPlayGuidance({ phase: 'error', sessionId: 9, destination: N3_DEST, startedAt: 0, recording: 'none', message: 'x' }, 'metric'), null);
+});
+
+test('CarPlay: one feed per session (a second start adds nothing), a new start replaces the journey, and a failing CarPlay never reaches navigation', () => {
+  const h = nav3Session();
+  const cp = carPlayStore();
+  const feed = new CarPlayFeed(h.s, cp.sink, () => 'imperial');
+  feed.start();
+  feed.start();
+  void h.s.start({ route: L_ROUTE(), destination: N3_DEST });
+  h.feed(drive3(L_PTS, { noise: 4, to: 30 }));
+  const once = cp.guidance.length;
+  // Twice subscribed would hand over every change twice in a row
+  for (let i = 1; i < cp.guidance.length; i++) assert.notDeepEqual(cp.guidance[i], cp.guidance[i - 1]);
+  assert.ok(once > 1);
+  const first = cp.latest!.sessionId;
+  // Navigating somewhere else replaces the journey: a new session, never two
+  void h.s.start({ route: L_ROUTE(), destination: { ...N3_DEST, id: 'place:p2', name: 'Elsewhere' } });
+  assert.notEqual(cp.latest!.sessionId, first);
+  assert.equal(cp.latest!.destination.name, 'Elsewhere');
+  feed.stop();
+  assert.equal(feed.running, false);
+  assert.equal(cp.latest, null, 'stopping clears CarPlay');
+  // A sink that throws: the session and its other listeners carry on
+  const s2 = nav3Session();
+  const errors: unknown[] = [];
+  let heard = 0;
+  s2.s.subscribe(() => { heard++; });
+  new CarPlayFeed(s2.s, { guidance: () => { throw new Error('native gone'); }, routeLine: () => { throw new Error('native gone'); } }, () => 'metric', (e) => errors.push(e)).start();
+  void s2.s.start({ route: L_ROUTE(), destination: N3_DEST });
+  s2.feed(drive3(L_PTS, { noise: 4, to: 50 }));
+  assert.equal(s2.s.phase, 'navigating');
+  assert.ok(heard > 1 && errors.length > 0);
+});
+
+test('CarPlay: navigation started before CarPlay connects, or CarPlay reconnecting mid-journey, shows the journey under way', () => {
+  const h = nav3Session();
+  void h.s.start({ route: L_ROUTE(), destination: N3_DEST });
+  h.feed(drive3(L_PTS, { noise: 4, to: 50 }));
+  // The feed starts with the app; the native store always holds the latest,
+  // whatever CarPlay is doing (a CarPlay screen reads it when it connects)
+  const cp = carPlayStore();
+  new CarPlayFeed(h.s, cp.sink, () => 'imperial').start();
+  assert.equal(cp.guidance.length, 1, 'the current state straight away');
+  assert.equal(cp.lines.length, 1);
+  assert.equal(cp.latest!.phase, 'navigating');
+  assert.equal(cp.latest!.maneuvers[0]!.instructions[0], 'Turn left onto Chestnut Hill');
+  assert.ok(cp.line && cp.line.routeId === active3(h.s.state)!.route.routeId);
+  // CarPlay's side: on connect it shows the store's copy and follows changes;
+  // on disconnect it only stops listening (the iPhone's session isn't touched)
+  const guidance = carPlaySwift('CarPlayGuidanceController.swift');
+  const attach = /func attach\(\) \{[\s\S]*?\n {2}\}/.exec(guidance)![0];
+  assert.match(attach, /store\.observe/);
+  assert.match(attach, /map\?\.setRouteLine\(store\.routeLine\)\s+apply\(store\.guidance\)/, 'what is under way, straight away');
+  const detach = /func detach\(\) \{[\s\S]*?\n {2}\}/.exec(guidance)![0];
+  assert.match(detach, /store\.removeObserver/);
+  assert.doesNotMatch(detach, /cancelTrip|finishTrip|setGuidance/, 'disconnecting never ends or changes navigation');
+  const scene = carPlaySwift('CarPlaySceneDelegate.swift');
+  assert.match(scene, /setRootTemplate\(templateController\.template[\s\S]*guard success, let guidance, self\?\.guidance === guidance else \{ return \}\s+guidance\.attach\(\)/, 'attached once the map template is on screen');
+  assert.match(scene, /didDisconnect[\s\S]*guidance\?\.detach\(\)\s+guidance = nil/);
+  // Nothing native sends anything back to the iPhone
+  const feedSwift = readFileSync(join(MOBILE, 'modules/derwent-carplay-feed/ios/DerwentCarPlayFeedModule.swift'), 'utf8');
+  assert.doesNotMatch(feedSwift, /Events\(|sendEvent/);
+  assert.equal([...feedSwift.matchAll(/AsyncFunction\("(\w+)"\)/g)].map((m) => m[1]).join(','), 'setGuidance,setRouteLine');
+});
+
+test('CarPlay native guidance: one CPNavigationSession for the iPhone session; finished on arrival, cancelled on End, paused without a manoeuvre', () => {
+  const guidance = carPlaySwift('CarPlayGuidanceController.swift');
+  const apply = /private func apply\(_ guidance: CarPlayGuidance\?\) \{[\s\S]*?\n {2}\}/.exec(guidance)![0];
+  // No copy: navigation ended on the iPhone
+  assert.match(apply, /guard let g = guidance else \{\s+end\(\)\s+return\s+\}/);
+  // A new iPhone session: the earlier CarPlay trip ends before the new one starts
+  assert.match(apply, /if g\.sessionId != sessionId \{\s+end\(\)\s+sessionId = g\.sessionId/);
+  assert.equal((guidance.match(/startNavigationSession\(for:/g) ?? []).length, 1, 'started in one place');
+  assert.match(guidance, /private func begin[\s\S]*session = template\.startNavigationSession\(for: trip\)/);
+  assert.match(apply, /if g\.arrived \{[\s\S]*session\.finishTrip\(\)/);
+  assert.match(/private func end\(\) \{[\s\S]*?\n {2}\}/.exec(guidance)![0], /if let session, !finished \{[\s\S]*session\.cancelTrip\(\)/);
+  assert.match(apply, /if let pause = g\.pause \{[\s\S]*session\.pauseTrip\(for: Self\.reason\(pause\.reason\), description: pause\.text\)/);
+  assert.match(apply, /template\.updateEstimates\(CPTravelEstimates\(distanceRemaining: distance\.measurement, timeRemaining: time\), for: trip\)/);
+  assert.match(apply, /session\.upcomingManeuvers = shownManeuvers/);
+  assert.match(apply, /session\.updateEstimates\(Self\.estimates\(m\.distance\), for: cp\)/, 'the same manoeuvres: estimates only');
+  // The map draws the route and follows the car only while guiding
+  assert.match(guidance, /map\?\.beginGuidance\(\)/);
+  assert.match(guidance, /map\?\.endGuidance\(\)/);
+  // The store reads every field the feed sends, with the same names
+  const store = carPlaySwift('CarPlayNavigationStore.swift');
+  for (const key of ['sessionId', 'phase', 'destination', 'name', 'latitude', 'longitude', 'via', 'routeId', 'pause', 'reason', 'text', 'maneuvers', 'id', 'instructions', 'symbol', 'distance', 'value', 'unit', 'remaining', 'timeS']) {
+    assert.ok(store.includes(`["${key}"]`), key);
+  }
+  for (const phase of ['starting', 'navigating', 'offRoute', 'rerouting', 'arrived']) assert.ok(store.includes(`"${phase}"`), phase);
+  for (const unit of ['mi', 'yd', 'km', 'm']) assert.ok(store.includes(`case "${unit}"`) || store.includes(`"${unit}"]`), unit);
+  // CarPlay pod: still native only; the feed pod is the only JavaScript-facing side
+  for (const f of readdirSync(join(MOBILE, 'modules/derwent-carplay/ios')).filter((n) => n.endsWith('.swift'))) {
+    assert.doesNotMatch(carPlaySwift(f), /^\s*import\s+(React|Expo|ExpoModulesCore|RNMBX)/m, f);
+  }
+  const feedPod = readFileSync(join(MOBILE, 'modules/derwent-carplay-feed/ios/DerwentCarPlayFeed.podspec'), 'utf8');
+  assert.match(feedPod, /s\.dependency 'ExpoModulesCore'\s+s\.dependency 'DerwentCarPlay'/);
+  assert.match(readFileSync(join(MOBILE, 'modules/derwent-carplay/ios/DerwentCarPlay.podspec'), 'utf8'), /s\.frameworks\s+= 'CarPlay', 'CoreLocation', 'MapKit'/);
+  // The route colours are the iPhone's
+  const map = carPlaySwift('CarPlayMapViewController.swift');
+  const hex = (c: string) => `UIColor(red: 0x${c.slice(1, 3)} / 255, green: 0x${c.slice(3, 5)} / 255, blue: 0x${c.slice(5, 7)} / 255, alpha: 1)`;
+  assert.ok(map.includes(`static let color = ${hex(ROUTE_COLORS.selected)}`) && map.includes(`static let casingColor = ${hex(ROUTE_COLORS.selectedCasing)}`));
+});
+
+test('CarPlay feed in the app: one per navigation session, in the navigation provider; no route requests, GPS or recording of its own', () => {
+  const ctx = readFileSync(join(MOBILE, 'context/NavigationContext.tsx'), 'utf8');
+  assert.equal((ctx.match(/new CarPlayFeed\(/g) ?? []).length, 1);
+  assert.match(ctx, /const feed = new CarPlayFeed\(session, sink, \(\) => unitsRef\.current, onError\);\s+feed\.start\(\);\s+return \(\) => feed\.stop\(\);\s+\}, \[session\]\);/);
+  const lib = readFileSync(join(MOBILE, 'lib/navigation/carPlay.ts'), 'utf8');
+  assert.doesNotMatch(lib, /fetchRoutes|getRoutes|expo-location|Location\.|startDrive|journeyRecorder|noteFix|react-native/);
+  const mod = readFileSync(join(MOBILE, 'modules/derwent-carplay-feed/index.ts'), 'utf8');
+  assert.match(mod, /requireOptionalNativeModule<NativeCarPlayFeed>\('DerwentCarPlayFeed'\)/, 'optional: no native module, no CarPlay, nothing else changes');
+  assert.match(mod, /\.catch\(onError\)[\s\S]*\.catch\(onError\)/);
 });

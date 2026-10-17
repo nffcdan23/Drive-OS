@@ -18,16 +18,22 @@ private let carPlayLog = Logger(subsystem: Bundle.main.bundleIdentifier ?? "Derw
    when Info.plist has the public Mapbox token and Derwent style
    (CarPlayMapSettings), else the placeholder; the root template is a
    CPMapTemplate with the controls in CarPlayMapTemplateController.
- - Disconnect: the map, template and interface controller are released.
+ - Once the template is shown: turn-by-turn guidance for the navigation
+   session running on the iPhone, including one already under way
+   (CarPlayGuidanceController).
+ - Disconnect: the map, template, guidance and interface controller are
+   released. The iPhone's navigation carries on.
 
- Nothing here starts React Native or touches the iPhone app's navigation,
- recording or account.
+ Nothing here starts React Native or changes the iPhone app's navigation,
+ recording or account: guidance only shows the copy of the iPhone's
+ navigation session it's handed (CarPlayNavigationStore).
  */
 @objc(DerwentCarPlaySceneDelegate)
 final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate {
   private var interfaceController: CPInterfaceController?
   private var carWindow: CPWindow?
   private var templateController: CarPlayMapTemplateController?
+  private var guidance: CarPlayGuidanceController?
 
   func templateApplicationScene(
     _ templateApplicationScene: CPTemplateApplicationScene,
@@ -51,11 +57,18 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
 
     let templateController = CarPlayMapTemplateController(map: map)
     self.templateController = templateController
-    interfaceController.setRootTemplate(templateController.template, animated: false) { success, error in
+    let guidance = CarPlayGuidanceController(template: templateController.template, map: map)
+    self.guidance = guidance
+    interfaceController.setRootTemplate(templateController.template, animated: false) { [weak self, weak guidance] success, error in
       if let error {
         carPlayLog.error("CarPlay root template failed: \(error.localizedDescription, privacy: .public)")
       } else {
         carPlayLog.notice("CarPlay root template shown: \(success, privacy: .public)")
+      }
+      // Guidance needs the map template on screen; not if CarPlay has gone meanwhile
+      DispatchQueue.main.async {
+        guard success, let guidance, self?.guidance === guidance else { return }
+        guidance.attach()
       }
     }
   }
@@ -66,6 +79,8 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
     from window: CPWindow
   ) {
     carPlayLog.notice("CarPlay disconnected")
+    guidance?.detach()
+    guidance = nil
     window.rootViewController = nil
     templateController = nil
     self.interfaceController = nil
