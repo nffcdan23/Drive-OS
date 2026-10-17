@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "prepared": {
     "build": 34,
-    "contents": "CarPlay Milestone 3 fix: map panning (pan button shown, panning mode arrows, touchscreen drags), recentre in the navigation bar"
+    "contents": "CarPlay Milestone 3 fix: map panning (pan button shown, panning mode arrows, touchscreen drags), recentre in the navigation bar; new Drive Recording screen (live GPS quality, WeatherKit weather, map controls, Save Point, Stop Drive)"
   },
   "highestUploaded": {
     "build": 33,
