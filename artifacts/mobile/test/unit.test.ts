@@ -13878,11 +13878,13 @@ test('arrow: turning in place or rotating the map never remounts or moves it', (
   assert.deepEqual(turned.position, p.position, 'turning keeps the position');
 });
 
-test('CarPlay scene: native only, never touches the iPhone map or its arrow', () => {
+test('CarPlay scene: native only (its own map), never touches the iPhone map or its arrow', () => {
   const dir = join(MOBILE, 'modules/derwent-carplay/ios');
   for (const f of readdirSync(dir).filter((n) => n.endsWith('.swift'))) {
     const src = readFileSync(join(dir, f), 'utf8').replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
-    assert.ok(!/React|RCT|Expo|bridge|NotificationCenter|UIApplication\.shared|MapboxMaps|CLLocation/.test(src), `${f} reaches into the app`);
+    // Its own native map (CarPlay Milestone 3) is allowed; React Native, the
+    // bridge, app-wide notifications and the iPhone map's arrow are not
+    assert.ok(!/React|RCT|Expo|bridge|NotificationCenter|UIApplication\.shared|derwent-location-arrow/.test(src), `${f} reaches into the app`);
   }
   // Nothing on the JavaScript side listens to CarPlay or scenes: the map and
   // its arrow only follow AppState through the visual gate, which pauses but
